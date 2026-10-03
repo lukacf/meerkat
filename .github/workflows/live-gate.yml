@@ -58,15 +58,20 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          # Gate outputs live outside the workspace: the turbo-s targets take
+          # workspace files as inputs, and a file growing while Bazel hashes
+          # it fails the upload (Exit 34, digest mismatch).
+          out="${RUNNER_TEMP}/live-gate"
+          mkdir -p "$out"
           set +e
-          scripts/live-gate-changed "$BASE_SHA" "$HEAD_SHA" > live-gate-paths.txt
+          scripts/live-gate-changed "$BASE_SHA" "$HEAD_SHA" > "$out/paths.txt"
           status=$?
           set -e
           case "$status" in
             0)
               echo "live=true" >> "$GITHUB_OUTPUT"
               echo "Live-relevant paths:"
-              cat live-gate-paths.txt
+              cat "$out/paths.txt"
               ;;
             1)
               echo "live=false" >> "$GITHUB_OUTPUT"
@@ -110,17 +115,30 @@ jobs:
           for scenario in 97 98 99 100 101 102 103 104 105 106 107; do
             targets+=("//:e2e_smoke_turbo_s_s${scenario}")
           done
+          out="${RUNNER_TEMP}/live-gate"
           set +e
+          # The log is uploaded as an artifact, which GitHub does not mask:
+          # drop any line that could carry a credential before it is written.
           MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES="${provider_overrides}" \
-            scripts/buildbuddy-dev e2e-smoke-turbo-s "${targets[@]}" 2>&1 | tee live-gate.log
+            scripts/buildbuddy-dev e2e-smoke-turbo-s "${targets[@]}" 2>&1 \
+            | grep -v -E 'API_KEY|sk-|Bearer|secret-env' | tee "$out/live-gate.log"
           bazel_exit=${PIPESTATUS[0]}
           set -e
-          scripts/live-gate-verdict live-gate.log "$bazel_exit" | tee live-gate-verdict.txt
+          scripts/live-gate-verdict "$out/live-gate.log" "$bazel_exit" | tee "$out/verdict.txt"
           verdict_exit=${PIPESTATUS[0]}
           {
             echo "## Live gate"
             echo '```'
-            cat live-gate-verdict.txt
+            cat "$out/verdict.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$verdict_exit"
+
+      - name: Upload the live gate log
+        if: always() && steps.classify.outputs.live == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-gate-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/live-gate/
+          if-no-files-found: ignore
+          retention-days: 14

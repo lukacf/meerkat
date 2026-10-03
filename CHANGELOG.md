@@ -37,6 +37,10 @@ them.
 
 ### Breaking
 
+- MobMachine state records that member run starts are held (#1500):
+  `MobMachineState` (meerkat-machine-schema) and the kernel `State`
+  (meerkat-machine-kernels) gain the field `member_run_starts_held`, so code
+  that builds either struct literally must set it.
 - A Stopped or Completed mob keeps its phase on flow bookkeeping. The kernel
   `TransitionId` enum gains a Stopped and a Completed variant for each of the
   48 flow, frame and loop authorization, RecordLoop* and AdmitDestroyCleanup
@@ -1166,7 +1170,15 @@ them.
   still restarts the mob, and now emits `ReleaseMemberRunStarts` so a Stop's
   holds are released. A schema contract test refuses any new multi-source
   transition that moves its other source phases to its target without an
-  allowlisted reason.
+  allowlisted reason. The Completed to Stopped cleanup arms
+  (`BeginCleanupCompleted`, `FinishCleanupCompleted`) now hold member run
+  starts too. MobMachine records the hold in `member_run_starts_held`, the
+  Stop commit requires it, and the invariant
+  `stopped_mob_holds_member_run_starts` (checked by TLC) says a Stopped mob
+  always holds member run starts. Contract tests check, over every arm, that
+  the field follows the hold and release effects, that every arm entering
+  Stopped holds or requires the hold, and that every Shutdown holds, Completed
+  included.
 - A mob Stop no longer lets input that was admitted to a member before the
   stop start a run while the mob is Stopped (#1500). The stop's cancel had no
   run to reach, the stop saw the member idle and completed, and the queued

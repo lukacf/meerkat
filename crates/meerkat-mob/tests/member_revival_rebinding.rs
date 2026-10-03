@@ -404,7 +404,11 @@ fn recreated_member_completion_refuses_obsolete_authority_without_effects() {
     let baseline = recreated_member_authority().state().clone();
     type AuthorityMutation = fn(&mut MobMachineState);
     let cases: &[(&str, AuthorityMutation)] = &[
-        ("stopped", |state| state.lifecycle_phase = MobPhase::Stopped),
+        ("stopped", |state| {
+            state.lifecycle_phase = MobPhase::Stopped;
+            // A Stopped mob holds member run starts (machine invariant).
+            state.member_run_starts_held = true;
+        }),
         ("quiescing", |state| {
             state.placed_completion_lifecycle_quiescing = true;
             state.placed_completion_lifecycle_intent =

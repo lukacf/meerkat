@@ -363,3 +363,215 @@ fn a_merged_bookkeeping_arm_is_refused() {
         .collect::<Vec<_>>();
     assert_eq!(refused, ["AuthorizeFlowRunReducerCommandStartRun"]);
 }
+
+// ---------------------------------------------------------------------------
+// A Stopped mob holds member run starts (#1500)
+// ---------------------------------------------------------------------------
+//
+// The property is on state: MobMachine's `member_run_starts_held` records
+// that a Stop, Shutdown or Completed cleanup held member run starts and no
+// Resume or Reset has released them, and the invariant
+// `stopped_mob_holds_member_run_starts` (checked by TLC) says a Stopped mob
+// has it set. These checks run over every arm, not a list of names:
+// - the field is written exactly by the arms that emit the hold (true) or
+//   the release (false), so it cannot drift from the effects;
+// - every arm entering Stopped from another phase either emits the hold or
+//   is guarded on `member_run_starts_held == true`;
+// - every arm triggered by the Shutdown input emits the hold, whichever
+//   phase it leaves the mob in.
+
+use meerkat_machine_schema::{Expr, TransitionSchema, TriggerMatch, Update};
+
+const HOLD: &str = "HoldMemberRunStarts";
+const RELEASE: &str = "ReleaseMemberRunStarts";
+const HELD_FIELD: &str = "member_run_starts_held";
+const STOPPED_HOLD_INVARIANT: &str = "stopped_mob_holds_member_run_starts";
+
+fn mob_machine() -> meerkat_machine_schema::MachineSchema {
+    canonical_machine_schemas()
+        .into_iter()
+        .find(|machine| machine.machine.as_str() == "MobMachine")
+        .expect("MobMachine")
+}
+
+fn emits(transition: &TransitionSchema, effect: &str) -> bool {
+    transition
+        .emit
+        .iter()
+        .any(|emit| emit.variant.as_str() == effect)
+}
+
+fn is_held_field(expr: &Expr) -> bool {
+    matches!(expr, Expr::Field(field) if field.as_str() == HELD_FIELD)
+}
+
+/// `member_run_starts_held == true`, either way round.
+fn is_held_fact(expr: &Expr) -> bool {
+    match expr {
+        Expr::Eq(left, right) => {
+            (is_held_field(left) && matches!(**right, Expr::Bool(true)))
+                || (is_held_field(right) && matches!(**left, Expr::Bool(true)))
+        }
+        _ => false,
+    }
+}
+
+fn guarded_held(transition: &TransitionSchema) -> bool {
+    transition
+        .guards
+        .iter()
+        .any(|guard| is_held_fact(&guard.expr))
+}
+
+/// What an arm writes to the held field.
+#[derive(Debug, PartialEq, Eq)]
+enum HeldWrite {
+    Untouched,
+    Set(bool),
+    Computed,
+}
+
+fn held_write(transition: &TransitionSchema) -> HeldWrite {
+    transition
+        .updates
+        .iter()
+        .find_map(|update| match update {
+            Update::Assign { field, expr } if field.as_str() == HELD_FIELD => Some(match expr {
+                Expr::Bool(value) => HeldWrite::Set(*value),
+                _ => HeldWrite::Computed,
+            }),
+            _ => None,
+        })
+        .unwrap_or(HeldWrite::Untouched)
+}
+
+fn enters_stopped(transition: &TransitionSchema) -> bool {
+    transition.to.as_str() == "Stopped"
+        && transition
+            .from
+            .iter()
+            .any(|from| from.as_str() != "Stopped")
+}
+
+/// Arms whose write of the held field disagrees with their hold/release
+/// effects.
+fn held_field_drift(mob: &meerkat_machine_schema::MachineSchema) -> Vec<String> {
+    mob.transitions
+        .iter()
+        .filter(|transition| {
+            let expected = match (emits(transition, HOLD), emits(transition, RELEASE)) {
+                (true, false) => HeldWrite::Set(true),
+                (false, true) => HeldWrite::Set(false),
+                (false, false) => HeldWrite::Untouched,
+                (true, true) => return true,
+            };
+            held_write(transition) != expected
+        })
+        .map(|transition| transition.name.as_str().to_owned())
+        .collect()
+}
+
+/// Arms that enter Stopped without holding or proving the hold.
+fn unheld_stopped_entries(mob: &meerkat_machine_schema::MachineSchema) -> Vec<String> {
+    mob.transitions
+        .iter()
+        .filter(|transition| enters_stopped(transition))
+        .filter(|transition| !emits(transition, HOLD) && !guarded_held(transition))
+        .map(|transition| transition.name.as_str().to_owned())
+        .collect()
+}
+
+/// Shutdown arms that do not hold.
+fn unheld_shutdowns(mob: &meerkat_machine_schema::MachineSchema) -> Vec<String> {
+    mob.transitions
+        .iter()
+        .filter(|transition| {
+            matches!(&transition.on, TriggerMatch::Input { variant, .. } if variant.as_str() == "Shutdown")
+        })
+        .filter(|transition| !emits(transition, HOLD))
+        .map(|transition| transition.name.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_held_field_is_written_exactly_by_the_hold_and_release_arms() {
+    let mob = mob_machine();
+    assert!(
+        mob.transitions.iter().any(|t| emits(t, HOLD))
+            && mob.transitions.iter().any(|t| emits(t, RELEASE)),
+        "MobMachine no longer holds or releases member run starts"
+    );
+    assert_eq!(held_field_drift(&mob), Vec::<String>::new());
+}
+
+#[test]
+fn every_entry_into_stopped_holds_member_run_starts() {
+    let mob = mob_machine();
+    assert!(
+        mob.transitions.iter().any(enters_stopped),
+        "MobMachine has no arm entering Stopped"
+    );
+    assert_eq!(unheld_stopped_entries(&mob), Vec::<String>::new());
+    assert!(
+        mob.invariants
+            .iter()
+            .any(|invariant| invariant.name == STOPPED_HOLD_INVARIANT),
+        "MobMachine lost the {STOPPED_HOLD_INVARIANT} invariant TLC checks"
+    );
+}
+
+#[test]
+fn every_shutdown_holds_member_run_starts() {
+    let mob = mob_machine();
+    let shutdowns = mob
+        .transitions
+        .iter()
+        .filter(|t| matches!(&t.on, TriggerMatch::Input { variant, .. } if variant.as_str() == "Shutdown"))
+        .count();
+    assert!(shutdowns > 0, "MobMachine has no Shutdown arm");
+    assert_eq!(unheld_shutdowns(&mob), Vec::<String>::new());
+}
+
+fn arm<'a>(
+    mob: &'a mut meerkat_machine_schema::MachineSchema,
+    name: &str,
+) -> &'a mut TransitionSchema {
+    mob.transitions
+        .iter_mut()
+        .find(|transition| transition.name.as_str() == name)
+        .unwrap_or_else(|| panic!("{name}"))
+}
+
+/// Mutant: a Shutdown of a Completed mob that does not hold is refused.
+#[test]
+fn a_shutdown_without_the_hold_is_refused() {
+    let mut mob = mob_machine();
+    arm(&mut mob, "ShutdownCompleted")
+        .emit
+        .retain(|emit| emit.variant.as_str() != HOLD);
+    assert_eq!(unheld_shutdowns(&mob), ["ShutdownCompleted"]);
+    assert_eq!(held_field_drift(&mob), ["ShutdownCompleted"]);
+}
+
+/// Mutant: the Stop commit without its proven-held guard is refused.
+#[test]
+fn a_stop_commit_without_the_held_guard_is_refused() {
+    let mut mob = mob_machine();
+    arm(&mut mob, "StopRunning")
+        .guards
+        .retain(|guard| !is_held_fact(&guard.expr));
+    assert_eq!(unheld_stopped_entries(&mob), ["StopRunning"]);
+}
+
+/// Mutant: a Completed cleanup into Stopped that neither holds nor sets the
+/// field is refused.
+#[test]
+fn a_cleanup_into_stopped_without_the_hold_is_refused() {
+    let mut mob = mob_machine();
+    let cleanup = arm(&mut mob, "BeginCleanupCompleted");
+    cleanup.emit.retain(|emit| emit.variant.as_str() != HOLD);
+    cleanup.updates.retain(
+        |update| !matches!(update, Update::Assign { field, .. } if field.as_str() == HELD_FIELD),
+    );
+    assert_eq!(unheld_stopped_entries(&mob), ["BeginCleanupCompleted"]);
+}

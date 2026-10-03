@@ -78264,6 +78264,11 @@ fn mob_runtime_parity_field_value(
         )),
         "placed_completion_dispatch_sequence" => Some(MobRuntimeParityExprValue::U64(0)),
         "placed_completion_lifecycle_quiescing" => Some(MobRuntimeParityExprValue::Bool(false)),
+        // A Stopped mob holds member run starts (invariant
+        // stopped_mob_holds_member_run_starts); the snapshot carries the phase.
+        "member_run_starts_held" => {
+            Some(MobRuntimeParityExprValue::Bool(snapshot.phase == "Stopped"))
+        }
         "placed_completion_lifecycle_intent" => Some(MobRuntimeParityExprValue::None),
         "pending_placed_completion_outcomes"
         | "cancel_requested_placed_completion_outcomes"

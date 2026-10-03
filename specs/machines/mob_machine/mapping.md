@@ -4729,6 +4729,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 
 ### Invariants
+- `stopped_mob_holds_member_run_starts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `bindings_require_known_identity`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

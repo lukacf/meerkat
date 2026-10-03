@@ -7,6 +7,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## State
 - Phase enum: `Running | Stopped | Completed | Destroyed`
+- `member_run_starts_held`: `Bool`
 - `definition_epoch`: `u64`
 - `destroy_admitted`: `Bool`
 - `live_runtime_ids`: `Set<AgentRuntimeId>`
@@ -841,6 +842,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `EmitMemberLifecycleNotice` via `FailSpawn` (LocalSpawnFailure) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
 
 ## Invariants
+- `stopped_mob_holds_member_run_starts`
 - `bindings_require_known_identity`
 - `placed_spawn_pending_attempt_is_complete`
 - `pending_autonomous_placed_spawn_is_an_exact_pending_attempt`
@@ -8094,6 +8096,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_active_runs`
   - `placed_completion_quiesce_started`
   - `placed_completion_stop_intent`
+  - `member_run_starts_held`
   - `placed_completion_pending_drained`
   - `placed_completion_cancel_requested_drained`
   - `placed_completion_resolved_drained`
@@ -12009,7 +12012,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `BeginCleanupCompleted`
 - From: `Completed`
 - On: `BeginCleanup`()
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `EmitRunLifecycleNotice`, `HoldMemberRunStarts`
 - To: `Stopped`
 
 ### `FinishCleanupStopped`
@@ -12021,7 +12024,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `FinishCleanupCompleted`
 - From: `Completed`
 - On: `FinishCleanup`()
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `EmitRunLifecycleNotice`, `HoldMemberRunStarts`
 - To: `Stopped`
 
 ### `RunFlowRunning`

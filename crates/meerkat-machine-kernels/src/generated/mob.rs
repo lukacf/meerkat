@@ -6527,6 +6527,7 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub phase: Phase,
+    pub member_run_starts_held: bool,
     pub definition_epoch: u64,
     pub destroy_admitted: bool,
     pub live_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
@@ -12467,6 +12468,7 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Running,
+        member_run_starts_held: false,
         definition_epoch: 1,
         destroy_admitted: false,
         live_runtime_ids: Default::default(),

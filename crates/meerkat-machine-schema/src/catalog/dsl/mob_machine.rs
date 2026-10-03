@@ -12,6 +12,11 @@ macro_rules! mob_catalog_machine_dsl {
 
         state {
             lifecycle_phase: MobPhase,
+            // A Stop, Shutdown or Completed cleanup has held member run starts
+            // and no Resume or Reset has released them (#1500). Every path into
+            // Stopped either sets it or is guarded on it (invariant
+            // stopped_mob_holds_member_run_starts).
+            member_run_starts_held: bool,
             definition_epoch: u64,
             destroy_admitted: bool,
             live_runtime_ids: Set<AgentRuntimeId>,
@@ -508,6 +513,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         init(Running) {
             definition_epoch = 1,
+            member_run_starts_held = false,
             destroy_admitted = false,
             live_runtime_ids = EmptySet,
             externally_addressable_runtime_ids = EmptySet,
@@ -2812,6 +2818,12 @@ macro_rules! mob_catalog_machine_dsl {
         // cannot reference identities the machine has never admitted. Paired
         // with the Retire transition's `member_session_bindings.remove` and
         // Spawn's guard/state consistency: keys(bindings) ⊆ keys(identity_to_runtime).
+        // A Stopped mob starts no member runs until Resume or Reset releases
+        // them (#1500).
+        invariant stopped_mob_holds_member_run_starts {
+            self.lifecycle_phase != Phase::Stopped || self.member_run_starts_held == true
+        }
+
         invariant bindings_require_known_identity {
             for_all(id in self.member_session_bindings.keys(), self.identity_to_runtime.contains_key(id))
         }
@@ -12836,6 +12848,9 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_active_runs" { self.active_run_count == 0 }
             guard "placed_completion_quiesce_started" { self.placed_completion_lifecycle_quiescing == true }
             guard "placed_completion_stop_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Stop) }
+            // The Stop's quiesce held member run starts when it began; the
+            // commit into Stopped requires that hold to still be in effect.
+            guard "member_run_starts_held" { self.member_run_starts_held == true }
             guard "placed_completion_pending_drained" { self.pending_placed_completion_outcomes == EmptySet }
             guard "placed_completion_cancel_requested_drained" { self.cancel_requested_placed_completion_outcomes == EmptySet }
             guard "placed_completion_resolved_drained" { self.resolved_placed_completion_outcomes == EmptySet }
@@ -12865,6 +12880,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "placed_completion_stop_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Stop) }
             update {
+                self.member_run_starts_held = false;
                 self.coordinator_bound = true;
                 self.placed_completion_lifecycle_quiescing = false;
                 self.placed_completion_lifecycle_intent = None;
@@ -12941,6 +12957,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placed_kickoff_pending_drained" { self.pending_placed_kickoff_outcomes == EmptySet }
             guard "placed_kickoff_resolved_drained" { self.resolved_placed_kickoff_outcomes == EmptySet }
             update {
+                self.member_run_starts_held = false;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.pending_spawn_sessions = EmptyMap;
@@ -12967,10 +12984,11 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit EmitRunLifecycleNotice
             emit WiringGraphChanged { epoch: self.topology_epoch }
-            // Reset restarts the mob: from Stopped it must release the run
-            // starts the Stop held (#1500). Reset retires every member before
-            // this commit, so the release usually has no targets; from Running
-            // or Completed it is an idempotent no-op.
+            // Reset restarts the mob: from Stopped, or from a Completed mob
+            // that a Shutdown held, it must release the held run starts
+            // (#1500). Reset retires every member before this commit, so the
+            // release usually has no targets; from Running it is an
+            // idempotent no-op.
             emit ReleaseMemberRunStarts
         }
 
@@ -14963,6 +14981,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "not_quiescing" { self.placed_completion_lifecycle_quiescing == false }
             update {
+                self.member_run_starts_held = true;
                 self.placed_completion_lifecycle_quiescing = true;
                 self.placed_completion_lifecycle_intent = Some(intent);
             }
@@ -15042,7 +15061,10 @@ macro_rules! mob_catalog_machine_dsl {
                 || (self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Complete)
                     && intent == PlacedCompletionLifecycleIntentKind::Destroy)
             }
-            update { self.placed_completion_lifecycle_intent = Some(intent); }
+            update {
+                self.placed_completion_lifecycle_intent = Some(intent);
+                self.member_run_starts_held = true;
+            }
             to Running
             emit PersistPlacedCompletionLifecycleIntent { intent: intent, active: true }
             // A Stop pauses every member (#1500): RetireAll, Reset, Complete and
@@ -16803,6 +16825,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.adaptive_layer_disposition)
             }
             update {
+                self.member_run_starts_held = true;
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
             }
@@ -16828,6 +16851,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.adaptive_layer_disposition)
             }
             update {
+                self.member_run_starts_held = true;
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
             }
@@ -16853,6 +16877,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.adaptive_layer_disposition)
             }
             update {
+                self.member_run_starts_held = true;
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
             }
@@ -17045,9 +17070,13 @@ macro_rules! mob_catalog_machine_dsl {
         transition BeginCleanupCompleted {
             on signal BeginCleanup
             guard { self.lifecycle_phase == Phase::Completed }
-            update {}
+            update { self.member_run_starts_held = true; }
             to Stopped
             emit EmitRunLifecycleNotice
+            // Every path into Stopped holds member run starts (#1500), so only
+            // Resume (or Reset) releases them; Completed -> Stopped matches the
+            // Shutdown and Stop arms.
+            emit HoldMemberRunStarts
         }
 
         transition FinishCleanupStopped {
@@ -17061,9 +17090,13 @@ macro_rules! mob_catalog_machine_dsl {
         transition FinishCleanupCompleted {
             on signal FinishCleanup
             guard { self.lifecycle_phase == Phase::Completed }
-            update {}
+            update { self.member_run_starts_held = true; }
             to Stopped
             emit EmitRunLifecycleNotice
+            // Every path into Stopped holds member run starts (#1500), so only
+            // Resume (or Reset) releases them; Completed -> Stopped matches the
+            // Shutdown and Stop arms.
+            emit HoldMemberRunStarts
         }
 
         // =====================================================================
@@ -19174,6 +19207,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "pending_spawns_present" { self.pending_spawn_count > 0 }
             guard "pending_identity_present" { self.pending_spawn_sessions.contains_key(agent_identity) == true }
             update {
+                self.member_run_starts_held = true;
                 self.pending_spawn_count -= 1;
                 self.pending_spawn_sessions.remove(agent_identity);
             }

@@ -358,6 +358,20 @@ them.
 
 ### Fixed
 
+- GPT Live: the narration and other spoken context that follow a client
+  delegation no longer arrive about 8 s late. Spoken context waits while the
+  provider reports an open user turn, so the assistant does not talk over the
+  user. That turn is closed by its finish, or by the client delegation joined
+  to it, because the delegation is the user turn's terminal observation and no
+  finish follows it. The delegation never closed it, so every delegated
+  request's "Started voice request" narration waited out the full
+  `SPOKEN_CONTEXT_USER_TURN_BOUND`.
+  - A late tail that continues the delegation's utterance still holds spoken
+    context until its own finish.
+  - The 8 s bound remains only as the failure bound for a user turn the
+    provider never closes.
+  - The observation pump now follows the user turn in provider order, before
+    adapter fan-out.
 - GPT Live Turbo S S105 no longer races its voice recall against executor
   result delivery. Results are released one at a time per channel, so a
   result can still be waiting for the previous one's provider

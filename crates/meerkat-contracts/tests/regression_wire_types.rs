@@ -477,6 +477,14 @@ fn agent_event_all_variants_roundtrip() {
             point: HookPoint::RunStarted,
             reason: HookFailureReason::execution_failed("hook error"),
         },
+        AgentEvent::HookLaunchRefused {
+            hook_id: HookId::new("refused-hook"),
+            point: HookPoint::PreToolExecution,
+            reason: HookFailureReason::ConfinementRefused {
+                refusal: meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement,
+            },
+            tool_use_id: Some("call-refused".to_string()),
+        },
         AgentEvent::HookDenied {
             hook_id: HookId::new("h1"),
             point: HookPoint::PreToolExecution,
@@ -747,6 +755,14 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             reason: HookFailureReason::execution_failed("boom"),
+        },
+        AgentEvent::HookLaunchRefused {
+            hook_id: HookId::new("refused-hook"),
+            point: HookPoint::PreToolExecution,
+            reason: HookFailureReason::ConfinementRefused {
+                refusal: meerkat_core::confinement::ConfinementRefusal::UnsupportedRequirement,
+            },
+            tool_use_id: Some("call-refused".to_string()),
         },
         AgentEvent::HookDenied {
             hook_id: HookId::new("hook-1"),

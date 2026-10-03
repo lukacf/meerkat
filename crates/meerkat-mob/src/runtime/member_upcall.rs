@@ -182,6 +182,7 @@ pub(crate) enum UpcallToolErrorClass {
     PolicyDenied,
     PolicyIndeterminate,
     Other,
+    ConfinementRefused,
 }
 
 /// Typed error payload: enough atoms to reconstruct the exact `ToolError`
@@ -292,6 +293,15 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+                settlement_failures: Vec::new(),
+            },
+            ToolError::ConfinementRefused { refusal } => UpcallToolError {
+                class: UpcallToolErrorClass::ConfinementRefused,
+                message: refusal.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: Some(serde_json::json!(refusal)),
                 settlement_failures: Vec::new(),
             },
             ToolError::AuthorizationRefused { refusal } => UpcallToolError {
@@ -451,6 +461,15 @@ impl UpcallToolError {
                 ToolError::inactivity_timeout(name, self.timeout_ms.unwrap_or_default())
             }
             UpcallToolErrorClass::AccessDenied => ToolError::access_denied(name),
+            UpcallToolErrorClass::ConfinementRefused => self
+                .data
+                .and_then(|data| serde_json::from_value(data).ok())
+                .map(|refusal| ToolError::ConfinementRefused { refusal })
+                .unwrap_or_else(|| {
+                    ToolError::execution_failed(
+                        "member upcall carried malformed confinement_refused data",
+                    )
+                }),
             UpcallToolErrorClass::AuthorizationRefused => ToolError::AuthorizationRefused {
                 refusal: meerkat_core::authorization::OperationRefused::new(
                     self.data
@@ -1545,6 +1564,71 @@ mod tests {
             restored.settlement_failures().cloned().collect::<Vec<_>>(),
             vec![marker]
         );
+    }
+
+    #[test]
+    fn confinement_refusal_upcall_roundtrip_keeps_exact_cause_and_settlement_sequence() {
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        let marker = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            let primary = ToolError::ConfinementRefused { refusal };
+            let error = primary
+                .clone()
+                .with_settlement_failures(vec![marker.clone()]);
+            let envelope = UpcallToolOutcome::from_tool_error(&error);
+            let wire = WireOpaqueJson::from_value(&serde_json::to_value(&envelope).unwrap());
+            let back: UpcallToolOutcome = serde_json::from_value(wire.to_value().unwrap()).unwrap();
+            let restored = back
+                .into_dispatch_outcome("call-refused", "shell_execute")
+                .unwrap_err();
+            assert_eq!(restored.primary_error(), &primary);
+            assert_eq!(restored.error_code(), "confinement_refused");
+            assert_eq!(restored.structured_data(), primary.structured_data());
+            assert_eq!(
+                restored.settlement_failures().cloned().collect::<Vec<_>>(),
+                vec![marker.clone()]
+            );
+            let expected =
+                meerkat_core::ops::terminal_tool_outcome_for_error("call-refused", error);
+            let actual =
+                meerkat_core::ops::terminal_tool_outcome_for_error("call-refused", restored);
+            assert_eq!(actual.result, expected.result);
+        }
+    }
+
+    #[test]
+    fn malformed_upcall_confinement_cause_does_not_fabricate_a_mechanical_refusal() {
+        for data in [
+            None,
+            Some(json!("unknown_cause")),
+            Some(json!({"refusal": "invalid_launch"})),
+        ] {
+            let envelope = UpcallToolError {
+                class: UpcallToolErrorClass::ConfinementRefused,
+                message: "copied diagnostic must not select a cause".into(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data,
+                settlement_failures: Vec::new(),
+            };
+            let error = envelope.into_tool_error("shell_execute");
+            assert_eq!(error.error_code(), "execution_failed");
+            assert!(error.structured_data().is_none());
+            assert!(!matches!(error, ToolError::ConfinementRefused { .. }));
+        }
     }
 
     #[test]

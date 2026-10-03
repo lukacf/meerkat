@@ -18,6 +18,7 @@ KNOWN_AGENT_EVENT_TYPES: frozenset[str] = frozenset({
     "hook_started",
     "hook_completed",
     "hook_failed",
+    "hook_launch_refused",
     "hook_denied",
     "turn_started",
     "reasoning_delta",

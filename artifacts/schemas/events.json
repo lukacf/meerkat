@@ -376,6 +376,26 @@
               "reason"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason"
+              },
+              "reason_type": {
+                "const": "hook_launch_refused",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
+              "reason"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1129,6 +1149,17 @@
         ],
         "type": "object"
       },
+      "ConfinementRefusal": {
+        "description": "Bounded operation-local diagnostics. Never expose an environment value,\ncredential path, gate token, or secret-bearing command line in this error.",
+        "enum": [
+          "invalid_requirement",
+          "invalid_launch",
+          "unsupported_requirement",
+          "backend_unavailable",
+          "preparation_failed"
+        ],
+        "type": "string"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -1669,7 +1700,7 @@
             "type": "object"
           },
           {
-            "description": "The hook runtime executed but failed.",
+            "description": "The invocation failed. Entry disposition is retained by its engine error.",
             "properties": {
               "message": {
                 "description": "Display projection of the underlying execution error.",
@@ -1714,6 +1745,23 @@
             },
             "required": [
               "reason_code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mechanical requirements prevented the hook from entering.",
+            "properties": {
+              "reason_code": {
+                "const": "confinement_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ConfinementRefusal"
+              }
+            },
+            "required": [
+              "reason_code",
+              "refusal"
             ],
             "type": "object"
           }
@@ -6676,6 +6724,38 @@
           "phase"
         ],
         "type": "object"
+      },
+      {
+        "description": "A hook prerequisite was refused before target code entered.",
+        "properties": {
+          "hook_id": {
+            "$ref": "#/$defs/HookId"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "reason": {
+            "$ref": "#/$defs/HookFailureReason"
+          },
+          "tool_use_id": {
+            "description": "Exact attempted tool call, when this hook belongs to one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "hook_launch_refused",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "hook_id",
+          "point",
+          "reason"
+        ],
+        "type": "object"
       }
     ],
     "title": "AgentEvent"
@@ -7054,6 +7134,26 @@
               "reason_type",
               "provider",
               "model",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason"
+              },
+              "reason_type": {
+                "const": "hook_launch_refused",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
               "reason"
             ],
             "type": "object"
@@ -8457,6 +8557,38 @@
               "phase"
             ],
             "type": "object"
+          },
+          {
+            "description": "A hook prerequisite was refused before target code entered.",
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason"
+              },
+              "tool_use_id": {
+                "description": "Exact attempted tool call, when this hook belongs to one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "hook_launch_refused",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "reason"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -9185,6 +9317,17 @@
         ],
         "type": "object"
       },
+      "ConfinementRefusal": {
+        "description": "Bounded operation-local diagnostics. Never expose an environment value,\ncredential path, gate token, or secret-bearing command line in this error.",
+        "enum": [
+          "invalid_requirement",
+          "invalid_launch",
+          "unsupported_requirement",
+          "backend_unavailable",
+          "preparation_failed"
+        ],
+        "type": "string"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -9725,7 +9868,7 @@
             "type": "object"
           },
           {
-            "description": "The hook runtime executed but failed.",
+            "description": "The invocation failed. Entry disposition is retained by its engine error.",
             "properties": {
               "message": {
                 "description": "Display projection of the underlying execution error.",
@@ -9770,6 +9913,23 @@
             },
             "required": [
               "reason_code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mechanical requirements prevented the hook from entering.",
+            "properties": {
+              "reason_code": {
+                "const": "confinement_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ConfinementRefusal"
+              }
+            },
+            "required": [
+              "reason_code",
+              "refusal"
             ],
             "type": "object"
           }
@@ -13438,6 +13598,7 @@
       "hook_started",
       "hook_completed",
       "hook_failed",
+      "hook_launch_refused",
       "hook_denied",
       "turn_started",
       "reasoning_delta",

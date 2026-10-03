@@ -235,7 +235,12 @@ impl TurnFailureSourceKind {
             AgentError::InvalidOutputSchema(_) => Self::InvalidOutputSchema,
             AgentError::HookDenied { .. } => Self::HookDenied,
             AgentError::HookTimeout { .. } => Self::HookTimeout,
-            AgentError::HookExecutionFailed { .. } => Self::HookExecutionFailed,
+            // Non-PreTool points retain their existing fatal disposition until
+            // their operation owners define local recovery. This classifier
+            // preserves the hook fault category, not a claim of target entry.
+            AgentError::HookExecutionFailed { .. } | AgentError::HookLaunchRefused { .. } => {
+                Self::HookExecutionFailed
+            }
             AgentError::HookConfigInvalid { .. } => Self::HookConfigInvalid,
             AgentError::TerminalFailure { .. } => Self::TerminalFailure,
             AgentError::NoPendingBoundary => Self::NoPendingBoundary,

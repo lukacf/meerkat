@@ -652,6 +652,14 @@ pub enum AgentError {
     /// genuine [`AgentError::ConfigError`].
     #[error("durable session snapshot synchronization is not supported by this session agent")]
     DurableSnapshotSyncUnsupported,
+
+    /// A hook prerequisite failed before target entry. Its calling operation
+    /// owner decides local feedback; the cause is not an authorization denial.
+    #[error("Hook launch refused for '{hook_id}': {reason}")]
+    HookLaunchRefused {
+        hook_id: HookId,
+        reason: crate::hooks::HookFailureReason,
+    },
 }
 
 impl From<crate::OperationAuthorizationError> for AgentError {

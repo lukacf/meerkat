@@ -339,6 +339,10 @@ pub enum AgentErrorReason {
         model: String,
         reason: crate::model_fallback::ModelFallbackSkipReason,
     },
+    HookLaunchRefused {
+        hook_id: HookId,
+        reason: HookFailureReason,
+    },
 }
 
 impl AgentErrorReason {
@@ -383,6 +387,10 @@ impl AgentErrorReason {
 
     pub fn from_agent_error(error: &AgentError) -> Option<Self> {
         match error {
+            AgentError::HookLaunchRefused { hook_id, reason } => Some(Self::HookLaunchRefused {
+                hook_id: hook_id.clone(),
+                reason: reason.clone(),
+            }),
             AgentError::ModelFallbackResumeHeld { target } => Some(Self::ModelFallbackResumeHeld {
                 provider: target.identity.provider,
                 model: target.identity.model.clone(),
@@ -496,7 +504,8 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::HookDenied { .. }
             | AgentError::HookTimeout { .. }
             | AgentError::HookExecutionFailed { .. }
-            | AgentError::HookConfigInvalid { .. } => Self::Hook,
+            | AgentError::HookConfigInvalid { .. }
+            | AgentError::HookLaunchRefused { .. } => Self::Hook,
             AgentError::TerminalFailure { cause_kind, .. } => {
                 if cause_kind.is_specific_failure_cause() {
                     cause_kind.agent_error_class()
@@ -1046,6 +1055,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::HookStarted { .. } => "hook_started",
         AgentEvent::HookCompleted { .. } => "hook_completed",
         AgentEvent::HookFailed { .. } => "hook_failed",
+        AgentEvent::HookLaunchRefused { .. } => "hook_launch_refused",
         AgentEvent::HookDenied { .. } => "hook_denied",
         AgentEvent::TurnStarted { .. } => "turn_started",
         AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
@@ -2728,6 +2738,15 @@ pub enum AgentEvent {
     OperationObservationFailed {
         operation_id: crate::OperationId,
         phase: crate::authorization::OperationObservationPhase,
+    },
+    /// A hook prerequisite was refused before target code entered.
+    HookLaunchRefused {
+        hook_id: HookId,
+        point: HookPoint,
+        reason: HookFailureReason,
+        /// Exact attempted tool call, when this hook belongs to one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
 }
 
@@ -4769,6 +4788,14 @@ mod tests {
                 hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
                 reason: HookFailureReason::execution_failed("failed"),
+            },
+            AgentEvent::HookLaunchRefused {
+                hook_id: HookId::new("refused-hook"),
+                point: HookPoint::PreToolExecution,
+                reason: HookFailureReason::ConfinementRefused {
+                    refusal: crate::confinement::ConfinementRefusal::UnsupportedRequirement,
+                },
+                tool_use_id: Some("call-refused".to_string()),
             },
             AgentEvent::HookDenied {
                 hook_id: HookId::new("hook-1"),

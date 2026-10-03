@@ -70,6 +70,38 @@ import type {
 export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
 /**
+ * Bounded operation-local diagnostics. Never expose an environment value,
+ * credential path, gate token, or secret-bearing command line in this error.
+ */
+export type ConfinementRefusal = "invalid_requirement" | "invalid_launch" | "unsupported_requirement" | "backend_unavailable" | "preparation_failed";
+
+/**
+ * Typed reason a hook execution failed (engine-level fault, not a guardrail
+ * denial).
+ *
+ * Mirrors the [`HookReasonCode`] precedent: the variant is the typed owner of
+ * the failure cause; the human-readable string is a [`Display`] derivation,
+ * never a separately-stored field.
+ *
+ * [`Display`]: std::fmt::Display
+ */
+export type HookFailureReason = {
+  reason_code: "timeout";
+  timeout_ms: number;
+} | {
+  message: string;
+  reason_code: "execution_failed";
+} | {
+  message: string;
+  reason_code: "config_invalid";
+} | {
+  reason_code: "observe_only_violation";
+} | {
+  reason_code: "confinement_refused";
+  refusal: ConfinementRefusal;
+};
+
+/**
  * Stable identifier for a configured hook.
  */
 export type HookId = string;
@@ -164,6 +196,10 @@ export type AgentErrorReason = {
   provider: Provider;
   reason: ModelFallbackSkipReason;
   reason_type: "model_fallback_resume_held";
+} | {
+  hook_id: HookId;
+  reason: HookFailureReason;
+  reason_type: "hook_launch_refused";
 };
 
 export type AgentErrorReport = {
@@ -498,29 +534,6 @@ export interface DisputedTurnUsageAccountingIdentity {
   reported_model: string;
   reported_provider: Provider;
 }
-
-/**
- * Typed reason a hook execution failed (engine-level fault, not a guardrail
- * denial).
- *
- * Mirrors the [`HookReasonCode`] precedent: the variant is the typed owner of
- * the failure cause; the human-readable string is a [`Display`] derivation,
- * never a separately-stored field.
- *
- * [`Display`]: std::fmt::Display
- */
-export type HookFailureReason = {
-  reason_code: "timeout";
-  timeout_ms: number;
-} | {
-  message: string;
-  reason_code: "execution_failed";
-} | {
-  message: string;
-  reason_code: "config_invalid";
-} | {
-  reason_code: "observe_only_violation";
-};
 
 /**
  * Typed reason an interaction stream was abandoned before normal terminal
@@ -1482,6 +1495,12 @@ export type AgentEvent = {
   operation_id: OperationId;
   phase: OperationObservationPhase;
   type: "operation_observation_failed";
+} | {
+  hook_id: HookId;
+  point: HookPoint;
+  reason: HookFailureReason;
+  tool_use_id?: string | null;
+  type: "hook_launch_refused";
 };
 
 /**

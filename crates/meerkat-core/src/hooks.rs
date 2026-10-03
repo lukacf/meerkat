@@ -569,7 +569,7 @@ pub enum HookReasonCode {
 pub enum HookFailureReason {
     /// The hook runtime did not complete within its configured timeout.
     Timeout { timeout_ms: u64 },
-    /// The hook runtime executed but failed.
+    /// The invocation failed. Entry disposition is retained by its engine error.
     ExecutionFailed {
         /// Display projection of the underlying execution error.
         message: String,
@@ -582,11 +582,16 @@ pub enum HookFailureReason {
     /// A background hook attempted a non-observe action, which is not
     /// permitted for observe-only background hooks at any hook point.
     ObserveOnlyViolation,
+    /// Mechanical requirements prevented the hook from entering.
+    ConfinementRefused {
+        refusal: crate::confinement::ConfinementRefusal,
+    },
 }
 
 impl std::fmt::Display for HookFailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ConfinementRefused { refusal } => write!(f, "{refusal}"),
             Self::Timeout { timeout_ms } => write!(f, "hook timed out after {timeout_ms}ms"),
             Self::ExecutionFailed { message } => write!(f, "{message}"),
             Self::ConfigInvalid { message } => write!(f, "{message}"),
@@ -609,6 +614,7 @@ impl HookFailureReason {
     #[must_use]
     pub fn from_engine_error(error: &HookEngineError) -> Self {
         match error {
+            HookEngineError::LaunchRefused { reason, .. } => reason.clone(),
             HookEngineError::InvalidConfiguration(reason) => Self::ConfigInvalid {
                 message: reason.clone(),
             },
@@ -1044,18 +1050,28 @@ pub enum HookEngineError {
     ExecutionFailed { hook_id: HookId, reason: String },
     #[error("Hook '{hook_id}' timed out after {timeout_ms}ms")]
     Timeout { hook_id: HookId, timeout_ms: u64 },
+    /// The hook was refused before its target code entered. The reason remains
+    /// in its original domain, including ordinary invocation setup failures.
+    #[error("Hook launch refused for '{hook_id}': {reason}")]
+    LaunchRefused {
+        hook_id: HookId,
+        reason: HookFailureReason,
+    },
 }
 
 impl HookEngineError {
     pub fn hook_id(&self) -> Option<&HookId> {
         match self {
-            Self::InvalidConfiguration(_) => None,
+            Self::InvalidConfiguration(_) | Self::LaunchRefused { .. } => None,
             Self::ExecutionFailed { hook_id, .. } | Self::Timeout { hook_id, .. } => Some(hook_id),
         }
     }
 
     pub fn into_agent_error(self) -> AgentError {
         match self {
+            Self::LaunchRefused { hook_id, reason } => {
+                AgentError::HookLaunchRefused { hook_id, reason }
+            }
             Self::InvalidConfiguration(reason) => AgentError::HookConfigInvalid { reason },
             Self::Timeout {
                 hook_id,

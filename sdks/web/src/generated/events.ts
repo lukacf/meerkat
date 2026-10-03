@@ -67,6 +67,10 @@ export type AgentErrorReason = {
   provider: Provider;
   reason: ModelFallbackSkipReason;
   reason_type: "model_fallback_resume_held";
+} | {
+  hook_id: HookId;
+  reason: HookFailureReason;
+  reason_type: "hook_launch_refused";
 };
 
 export type AgentErrorReport = {
@@ -213,6 +217,8 @@ export interface CompactionRewriteRange {
   start: number;
 }
 
+export type ConfinementRefusal = "invalid_requirement" | "invalid_launch" | "unsupported_requirement" | "backend_unavailable" | "preparation_failed";
+
 export type ContentBlock = {
   text: string;
   type: "text";
@@ -313,6 +319,9 @@ export type HookFailureReason = {
   reason_code: "config_invalid";
 } | {
   reason_code: "observe_only_violation";
+} | {
+  reason_code: "confinement_refused";
+  refusal: ConfinementRefusal;
 };
 
 export type HookId = string;
@@ -1327,6 +1336,14 @@ export interface OperationObservationFailedEvent {
   type: "operation_observation_failed";
 }
 
+export interface HookLaunchRefusedEvent {
+  hook_id: HookId;
+  point: HookPoint;
+  reason: HookFailureReason;
+  tool_use_id?: string | null;
+  type: "hook_launch_refused";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1336,6 +1353,7 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "hook_started",
   "hook_completed",
   "hook_failed",
+  "hook_launch_refused",
   "hook_denied",
   "turn_started",
   "reasoning_delta",
@@ -1428,4 +1446,5 @@ export type AgentEvent =
   ModelFallbackTargetFailedEvent |
   BoundaryAppendAppliedEvent |
   BoundaryAppendsDiscardedEvent |
-  OperationObservationFailedEvent;
+  OperationObservationFailedEvent |
+  HookLaunchRefusedEvent;

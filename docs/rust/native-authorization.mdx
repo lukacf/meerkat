@@ -146,8 +146,20 @@ shell feedback from an entered process. A backend or launch refusal happens
 before the command runs. Shell dispatch preserves its exact mechanical cause as
 `confinement_refused` tool feedback, including foreground, background and monitor
 recovery paths. Ordinary IO and custody failures retain their execution error
-class. This bounded scenario does not establish restart,
+class. The member upcall bridge preserves the exact confinement cause and
+settlement companions in tool feedback; malformed causes become an ordinary
+execution failure rather than a fabricated mechanical refusal.
+This bounded scenario does not establish restart,
 performance acceptance or full surface/platform coverage.
+
+The core pre-tool path also accepts a typed `HookEngineError::LaunchRefused`
+from an injected hook engine. It skips that tool and returns the exact
+`confinement_refused` or ordinary `execution_failed` feedback; permitted
+siblings and the next model turn continue. `HookLaunchRefused` retains the
+attempted tool call ID without emitting hook start or completion events.
+This core integration does not yet wire required confinement into the native
+command-hook engine or record the refusal in protected audit. Explicit hook
+decisions and other hook points still need their own local-refusal integration.
 
 ## Attach and pin the controller before submitting work
 

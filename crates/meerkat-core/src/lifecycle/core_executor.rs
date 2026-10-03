@@ -157,7 +157,8 @@ impl CoreApplyFailureCause {
             AgentError::HookDenied { .. } => Self::hook_denied(error.to_string()),
             AgentError::HookTimeout { .. }
             | AgentError::HookExecutionFailed { .. }
-            | AgentError::HookConfigInvalid { .. } => Self::hook_runtime_failure(error.to_string()),
+            | AgentError::HookConfigInvalid { .. }
+            | AgentError::HookLaunchRefused { .. } => Self::hook_runtime_failure(error.to_string()),
             _ => Self::runtime_turn(error.to_string()),
         }
     }

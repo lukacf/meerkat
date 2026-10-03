@@ -764,6 +764,23 @@ fn render_event(
             );
         }
 
+        AgentEvent::HookLaunchRefused {
+            hook_id, reason, ..
+        } => {
+            chrome_line(
+                mux,
+                scope_id,
+                &format!(
+                    "{}{}hook launch refused: {}: {}{}",
+                    style(ansi, RED),
+                    style(ansi, BOLD),
+                    hook_id,
+                    reason,
+                    reset(ansi)
+                ),
+            );
+        }
+
         AgentEvent::HookDenied {
             hook_id, message, ..
         } => {

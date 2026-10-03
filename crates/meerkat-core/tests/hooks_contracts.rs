@@ -336,3 +336,151 @@ fn run_override_fixture_contract() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(overrides.entries[1].point, HookPoint::PostToolExecution);
     Ok(())
 }
+
+#[test]
+fn hook_launch_refusal_preserves_domain_cause_without_claiming_entry() {
+    use meerkat_core::confinement::ConfinementRefusal;
+    use meerkat_core::error::AgentError;
+    use meerkat_core::event::AgentErrorReason;
+    use meerkat_core::hooks::{HookEngineError, HookFailureReason};
+
+    let reasons = [
+        ConfinementRefusal::InvalidRequirement,
+        ConfinementRefusal::InvalidLaunch,
+        ConfinementRefusal::UnsupportedRequirement,
+        ConfinementRefusal::BackendUnavailable,
+        ConfinementRefusal::PreparationFailed,
+    ]
+    .into_iter()
+    .map(|refusal| HookFailureReason::ConfinementRefused { refusal })
+    .chain(std::iter::once(HookFailureReason::execution_failed(
+        "native spawn setup IO failed",
+    )));
+    for reason in reasons {
+        let hook_id = HookId::new("guard-pre-tool");
+        let error = HookEngineError::LaunchRefused {
+            hook_id: hook_id.clone(),
+            reason: reason.clone(),
+        };
+        assert_eq!(error.hook_id(), None, "target code never entered");
+        assert_eq!(HookFailureReason::from_engine_error(&error), reason);
+        let error = error.into_agent_error();
+        assert!(matches!(
+            &error,
+            AgentError::HookLaunchRefused { hook_id: actual_id, reason: actual_reason }
+                if actual_id == &hook_id && actual_reason == &reason
+        ));
+        assert_eq!(AgentErrorClass::from(&error), AgentErrorClass::Hook);
+        assert_eq!(
+            AgentErrorReason::from_agent_error(&error),
+            Some(AgentErrorReason::HookLaunchRefused { hook_id, reason })
+        );
+    }
+
+    // Runtime failures retain their prior entered disposition and agent carrier.
+    let hook_id = HookId::new("entered-hook");
+    let entered = HookEngineError::ExecutionFailed {
+        hook_id: hook_id.clone(),
+        reason: "runtime body failed".to_string(),
+    };
+    assert_eq!(entered.hook_id(), Some(&hook_id));
+    assert!(matches!(
+        entered.into_agent_error(),
+        AgentError::HookExecutionFailed { hook_id: actual, reason }
+            if actual == hook_id && reason == "runtime body failed"
+    ));
+}
+
+#[test]
+fn hook_launch_refused_event_retains_typed_identity_cause_and_call()
+-> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_core::confinement::ConfinementRefusal;
+    use meerkat_core::hooks::HookFailureReason;
+
+    let reasons = [
+        ConfinementRefusal::InvalidRequirement,
+        ConfinementRefusal::InvalidLaunch,
+        ConfinementRefusal::UnsupportedRequirement,
+        ConfinementRefusal::BackendUnavailable,
+        ConfinementRefusal::PreparationFailed,
+    ]
+    .into_iter()
+    .map(|refusal| HookFailureReason::ConfinementRefused { refusal })
+    .chain(std::iter::once(HookFailureReason::execution_failed(
+        "native spawn setup IO failed",
+    )));
+    for reason in reasons {
+        for tool_use_id in [Some("call-refused".to_string()), None] {
+            let hook_id = HookId::new("guard-pre-tool");
+            let event = AgentEvent::HookLaunchRefused {
+                hook_id: hook_id.clone(),
+                point: HookPoint::PreToolExecution,
+                reason: reason.clone(),
+                tool_use_id: tool_use_id.clone(),
+            };
+            let value = serde_json::to_value(&event)?;
+            assert_eq!(value["type"], "hook_launch_refused");
+            assert_eq!(value["reason"], serde_json::to_value(&reason)?);
+            if let Some(call) = &tool_use_id {
+                assert_eq!(value["tool_use_id"], call.as_str());
+            } else {
+                assert!(value.get("tool_use_id").is_none());
+            }
+            match serde_json::from_value::<AgentEvent>(value)? {
+                AgentEvent::HookLaunchRefused {
+                    hook_id: parsed_hook_id,
+                    point,
+                    reason: parsed_reason,
+                    tool_use_id: parsed_tool_use_id,
+                } => {
+                    assert_eq!(parsed_hook_id, hook_id);
+                    assert_eq!(point, HookPoint::PreToolExecution);
+                    assert_eq!(parsed_reason, reason);
+                    assert_eq!(parsed_tool_use_id, tool_use_id);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+    }
+    // An envelope with no tool call decodes through the same optional default.
+    let event: AgentEvent = serde_json::from_value(json!({
+        "type": "hook_launch_refused",
+        "hook_id": "guard-start",
+        "point": "run_started",
+        "reason": {"reason_code": "execution_failed", "message": "spawn setup failed"}
+    }))?;
+    assert!(matches!(
+        event,
+        AgentEvent::HookLaunchRefused {
+            tool_use_id: None,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn explicit_pre_tool_policy_denial_retains_hook_denied_contract() {
+    use meerkat_core::error::AgentError;
+    use meerkat_core::hooks::HookExecutionReport;
+
+    let hook_id = HookId::new("explicit-policy-denial");
+    let report = HookExecutionReport {
+        decision: Some(HookDecision::Deny {
+            hook_id: hook_id.clone(),
+            reason_code: HookReasonCode::PolicyViolation,
+            message: "explicit policy denial".to_string(),
+            payload: None,
+        }),
+        ..HookExecutionReport::empty()
+    };
+    assert!(matches!(
+        report.denial_error(HookPoint::PreToolExecution),
+        Some(AgentError::HookDenied {
+            hook_id: denied_hook_id,
+            point: HookPoint::PreToolExecution,
+            reason_code: HookReasonCode::PolicyViolation,
+            ..
+        }) if denied_hook_id == hook_id
+    ));
+}

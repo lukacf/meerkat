@@ -6929,6 +6929,32 @@ where
         {
             let pre_tool_report = match pre_tool_report {
                 Ok(report) => report,
+                Err(AgentError::HookLaunchRefused {
+                    reason: crate::hooks::HookFailureReason::ConfinementRefused { refusal },
+                    ..
+                }) => {
+                    // This unmet prerequisite refuses only its attempted tool.
+                    refused_tool_calls.push((
+                        tool_index,
+                        tc,
+                        Err(ToolError::ConfinementRefused { refusal }),
+                        0,
+                    ));
+                    continue;
+                }
+                Err(AgentError::HookLaunchRefused {
+                    reason: crate::hooks::HookFailureReason::ExecutionFailed { message },
+                    ..
+                }) => {
+                    // Preserve ordinary setup IO/custody feedback in its domain.
+                    refused_tool_calls.push((
+                        tool_index,
+                        tc,
+                        Err(ToolError::execution_failed(message)),
+                        0,
+                    ));
+                    continue;
+                }
                 Err(error) => {
                     self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
                         .await?;
@@ -16255,7 +16281,56 @@ mod tests {
         hide_blocked_tool: bool,
         denied_first: bool,
         dispatch_refusal: Option<crate::confinement::ConfinementRefusal>,
+        confinement_refusal: Option<crate::confinement::ConfinementRefusal>,
+        pre_entry_io_failure: bool,
     ) {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookFailureReason, HookId,
+            HookInvocation, HookPoint,
+        };
+
+        let launch_reason = if pre_entry_io_failure {
+            Some(HookFailureReason::execution_failed(
+                "native spawn setup IO failed",
+            ))
+        } else {
+            confinement_refusal.map(|refusal| HookFailureReason::ConfinementRefused { refusal })
+        };
+
+        struct LaunchRefusedHook {
+            reason: HookFailureReason,
+            pre_tool_invocations: Mutex<Vec<HookInvocation>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for LaunchRefusedHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::PreToolExecution {
+                    return Ok(HookExecutionReport::empty());
+                }
+                self.pre_tool_invocations
+                    .lock()
+                    .unwrap()
+                    .push(invocation.clone());
+                if invocation
+                    .tool_call
+                    .as_ref()
+                    .is_some_and(|call| call.name == "blocked_tool")
+                {
+                    return Err(HookEngineError::LaunchRefused {
+                        hook_id: HookId::new("required-command-hook"),
+                        reason: self.reason.clone(),
+                    });
+                }
+                Ok(HookExecutionReport::empty())
+            }
+        }
+
         struct RecordingDispatcher {
             tools: Arc<[Arc<ToolDef>]>,
             dispatched: Mutex<Vec<(String, String)>>,
@@ -16371,7 +16446,7 @@ mod tests {
                 Arc::new(
                     ToolDef::new(
                         "blocked_tool",
-                        "denied by the execution policy",
+                        "blocked by the selected fixture boundary",
                         serde_json::json!({ "type": "object" }),
                     )
                     .with_provenance(crate::ToolProvenance {
@@ -16388,8 +16463,8 @@ mod tests {
             dispatched: Mutex::new(Vec::new()),
             dispatch_refusal,
         });
-        let access_policy = if dispatch_refusal.is_some() {
-            // Admit the attempted call so the executor's typed error is tested.
+        let access_policy = if launch_reason.is_some() || dispatch_refusal.is_some() {
+            // A policy denial would mask the hook refusal under test.
             crate::ops::ToolAccessPolicy::AllowList(
                 ["blocked_tool", "open_tool"].into_iter().collect(),
             )
@@ -16397,7 +16472,7 @@ mod tests {
             crate::ops::ToolAccessPolicy::DenyList(["blocked_tool"].into_iter().collect())
         };
         let policy = crate::tool_execution_policy::ToolExecutionPolicy::resolve(access_policy)
-            .expect("deny list must resolve");
+            .expect("fixture access policy must resolve");
         let gated = Arc::new(
             crate::tool_execution_policy::ExecutionPolicyGatedDispatcher::new(
                 Arc::clone(&inner),
@@ -16411,8 +16486,18 @@ mod tests {
             observed_messages: Mutex::new(Vec::new()),
             observed_tools: Mutex::new(Vec::new()),
         });
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .with_tool_visibility_owner(explicit_test_visibility_owner())
+        let hook = launch_reason.clone().map(|reason| {
+            Arc::new(LaunchRefusedHook {
+                reason,
+                pre_tool_invocations: Mutex::new(Vec::new()),
+            })
+        });
+        let mut builder = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner());
+        if let Some(hook) = &hook {
+            builder = builder.with_hook_engine(Arc::clone(hook) as Arc<dyn HookEngine>);
+        }
+        let mut agent = builder
             .build_standalone(client.clone(), gated, Arc::new(NoopStore))
             .await;
         if hide_blocked_tool {
@@ -16434,7 +16519,7 @@ mod tests {
         )
         .await
         .expect("run must complete promptly after the denial")
-        .expect("agent run must continue after a per-call access denial");
+        .expect("agent run must continue after an operation-local tool refusal");
 
         // The denied call resolves to an error tool result, so the second
         // turn ends the conversation: two turns total.
@@ -16471,19 +16556,29 @@ mod tests {
         );
         for result in follow_up_results {
             if result.tool_use_id == "call-blocked" {
-                let error = match dispatch_refusal {
-                    Some(refusal) => ToolError::ConfinementRefused { refusal },
-                    None => ToolError::access_denied("blocked_tool"),
+                let error = if pre_entry_io_failure {
+                    ToolError::execution_failed("native spawn setup IO failed")
+                } else {
+                    match confinement_refusal.or(dispatch_refusal) {
+                        Some(refusal) => ToolError::ConfinementRefused { refusal },
+                        None => ToolError::access_denied("blocked_tool"),
+                    }
                 };
                 let expected = crate::ops::terminal_tool_outcome_for_error("call-blocked", error);
                 assert!(result.is_error);
                 assert_eq!(result.content, expected.result.content);
-                if let Some(refusal) = dispatch_refusal {
+                if let Some(refusal) = confinement_refusal.or(dispatch_refusal) {
                     let payload: serde_json::Value =
                         serde_json::from_str(&crate::types::text_content(&result.content))
                             .expect("typed refusal feedback must use the canonical JSON envelope");
                     assert_eq!(payload["error"], "confinement_refused");
                     assert_eq!(payload["data"]["refusal"], serde_json::json!(refusal));
+                } else if pre_entry_io_failure {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&crate::types::text_content(&result.content))
+                            .expect("ordinary IO feedback must use the canonical JSON envelope");
+                    assert_eq!(payload["error"], "execution_failed");
+                    assert!(payload.get("data").is_none());
                 }
             } else {
                 assert!(!result.is_error);
@@ -16500,10 +16595,36 @@ mod tests {
             );
         }
 
+        if let Some(hook) = &hook {
+            let invocations = hook.pre_tool_invocations.lock().unwrap();
+            assert_eq!(
+                invocations.len(),
+                2,
+                "both siblings reach the same pre-tool boundary"
+            );
+            assert!(
+                invocations[0].run_id.is_some(),
+                "the fixture must bind an admitted run"
+            );
+            for invocation in invocations.iter() {
+                assert_eq!(&invocation.session_id, agent.session().id());
+                assert_eq!(invocation.run_id, invocations[0].run_id);
+            }
+            assert_eq!(
+                invocations
+                    .iter()
+                    .map(|invocation| invocation.tool_call.as_ref().unwrap().tool_use_id.as_str())
+                    .collect::<Vec<_>>(),
+                expected_ids,
+                "the refused call and permitted sibling must belong to the same run"
+            );
+        }
+
         let mut completion_ids = Vec::new();
         let mut result_ids = Vec::new();
         let mut blocked_started = false;
         let mut run_completed = false;
+        let mut hook_launch_refusals = 0;
         while let Ok(event) = rx.try_recv() {
             match event {
                 crate::event::AgentEvent::ToolExecutionStarted { id, .. } => {
@@ -16517,6 +16638,25 @@ mod tests {
                     assert_eq!(is_error, id == "call-blocked");
                     result_ids.push(id);
                 }
+                crate::event::AgentEvent::HookLaunchRefused {
+                    hook_id,
+                    point,
+                    reason,
+                    tool_use_id,
+                } => {
+                    assert_eq!(hook_id, HookId::new("required-command-hook"));
+                    assert_eq!(point, HookPoint::PreToolExecution);
+                    assert_eq!(Some(reason), launch_reason);
+                    assert_eq!(tool_use_id.as_deref(), Some("call-blocked"));
+                    hook_launch_refusals += 1;
+                }
+                crate::event::AgentEvent::HookStarted { hook_id, .. }
+                | crate::event::AgentEvent::HookCompleted { hook_id, .. }
+                | crate::event::AgentEvent::HookFailed { hook_id, .. }
+                    if hook_id == HookId::new("required-command-hook") =>
+                {
+                    panic!("a rejected hook launch must not claim hook entry or runtime failure");
+                }
                 crate::event::AgentEvent::RunFailed { .. } => {
                     panic!("per-call denial must not emit RunFailed");
                 }
@@ -16526,21 +16666,77 @@ mod tests {
         }
         assert_eq!(completion_ids, expected_ids);
         assert_eq!(result_ids, expected_ids);
-        assert_eq!(blocked_started, !hide_blocked_tool);
+        assert_eq!(
+            blocked_started,
+            !hide_blocked_tool && launch_reason.is_none()
+        );
+        assert_eq!(hook_launch_refusals, usize::from(launch_reason.is_some()));
         assert!(run_completed);
     }
 
     #[tokio::test]
     async fn visibility_precheck_denial_preserves_sibling_and_model_turn() {
         for denied_first in [true, false] {
-            assert_tool_denial_preserves_sibling_and_model_turn(true, denied_first, None).await;
+            assert_tool_denial_preserves_sibling_and_model_turn(
+                true,
+                denied_first,
+                None,
+                None,
+                false,
+            )
+            .await;
         }
     }
 
     #[tokio::test]
     async fn execution_policy_gate_denial_is_ordinary_tool_error_and_run_continues() {
         for denied_first in [true, false] {
-            assert_tool_denial_preserves_sibling_and_model_turn(false, denied_first, None).await;
+            assert_tool_denial_preserves_sibling_and_model_turn(
+                false,
+                denied_first,
+                None,
+                None,
+                false,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_tool_confinement_refusal_preserves_sibling_and_model_turn() {
+        use crate::confinement::ConfinementRefusal;
+
+        for refusal in [
+            ConfinementRefusal::InvalidRequirement,
+            ConfinementRefusal::InvalidLaunch,
+            ConfinementRefusal::UnsupportedRequirement,
+            ConfinementRefusal::BackendUnavailable,
+            ConfinementRefusal::PreparationFailed,
+        ] {
+            for refused_first in [true, false] {
+                assert_tool_denial_preserves_sibling_and_model_turn(
+                    false,
+                    refused_first,
+                    None,
+                    Some(refusal),
+                    false,
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_tool_launch_io_failure_preserves_sibling_and_model_turn() {
+        for refused_first in [true, false] {
+            assert_tool_denial_preserves_sibling_and_model_turn(
+                false,
+                refused_first,
+                None,
+                None,
+                true,
+            )
+            .await;
         }
     }
 
@@ -16560,6 +16756,8 @@ mod tests {
                     false,
                     refused_first,
                     Some(refusal),
+                    None,
+                    false,
                 )
                 .await;
             }

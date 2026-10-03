@@ -37,6 +37,15 @@ them.
 
 ### Breaking
 
+- Exhaustive matches must handle `meerkat_core::HookFailureReason::ConfinementRefused`,
+  `meerkat_core::HookEngineError::LaunchRefused`,
+  `meerkat_core::AgentError::HookLaunchRefused`,
+  `meerkat_core::AgentErrorReason::HookLaunchRefused` and
+  `meerkat_core::AgentEvent::HookLaunchRefused`. A pre-tool launch refusal
+  skips only its attempted tool and returns its exact confinement or execution
+  cause to the model. The event retains the attempted call ID when present and
+  does not claim that the hook started. Other hook points retain their existing
+  disposition pending their operation-specific integration.
 - Exhaustive matches must handle `meerkat_core::ToolError::ConfinementRefused`,
   `meerkat_core::ToolDispatchTerminalErrorKind::ConfinementRefused` and
   `meerkat_tools::BuiltinToolError::ConfinementRefused`. Tool feedback uses

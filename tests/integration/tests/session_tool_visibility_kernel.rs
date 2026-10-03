@@ -149,6 +149,10 @@ fn prepared_meerkat_state(kernel: &GeneratedMachineKernel) -> KernelState {
                 fields: BTreeMap::from([
                     (field("session_id"), named_string("SessionId", "session-1")),
                     (field("runtime_epoch_id"), KernelValue::None),
+                    (
+                        field("initial_run_start_holds"),
+                        KernelValue::Set(std::collections::BTreeSet::new()),
+                    ),
                 ]),
             },
         )

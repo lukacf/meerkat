@@ -201,16 +201,18 @@ need the unbounded verification set.
 ## CI Shape
 
 Pull-request CI is `.github/workflows/ci.yml`. It runs on pull requests,
-pushes to `main`, and manual dispatches (a branch head runs once, through its
-pull request), entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
+pushes to `main` and to `release/**` integration branches, and manual
+dispatches (any other branch head runs once, through its pull request), entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
 (4 vCPU), and it is sized to a 25-minute lane execution budget. Compiled
 objects are cached by sccache (content-addressed, shared by every lane and
 readable from `main` by every pull request); rust-cache holds only the
 registry, because per-lane target caches exceeded the repository's 10 GB
 cache limit in one pull request:
 
-What runs where (`pull_request` is budgeted; `push: main` is not; nightly and
-the release tag carry the rest):
+What runs where (`pull_request` is budgeted; `push: main` is not; a push to a
+`release/**` integration branch runs the same push-only lanes as `main`, so
+reverse-dependency suites run on every release merge, but only `main` writes
+the exact-tree attestation; nightly and the release tag carry the rest):
 
 | Lane | `pull_request` | `push: main` | nightly | release tag |
 | --- | --- | --- | --- | --- |

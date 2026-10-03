@@ -1131,6 +1131,11 @@ them.
     provider never closes.
   - The observation pump now follows the user turn in provider order, before
     adapter fan-out.
+- `meerkat` builds without a dead-code warning when `live` is on but
+  `openai-live` is off (for example default features with clippy
+  `-D warnings`): `meerkat::surface::live_media_health_rms_micros` is now
+  compiled only with its users, under `live-webrtc` and `openai-live`.
+
 - The release semver gate (`make semver-breaks`) fails closed on any
   cargo-semver-checks finding whose message shape it cannot read in full.
   Such a finding is now an error naming the lint, not a NOTE. Before, it fell

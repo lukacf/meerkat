@@ -505,7 +505,9 @@ impl<B: SessionAgentBuilder + 'static>
 }
 
 /// A reported linear RMS (0.0 to 1.0) in the machine's millionths; anything
-/// non-finite or non-positive is silence.
+/// non-finite or non-positive is silence. Built with its only users, the
+/// experimental live media-health report paths.
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[must_use]
 pub fn live_media_health_rms_micros(max_rms: f64) -> u64 {
     if max_rms.is_finite() && max_rms > 0.0 {

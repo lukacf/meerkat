@@ -1249,11 +1249,23 @@ async fn open_public_live_with(
             .as_str()
             .ok_or("spawned executor has no durable session")?,
     )?;
+    let followups = bootstrap
+        .as_ref()
+        .map(|bootstrap| bootstrap.seed_followups.clone())
+        .unwrap_or_default();
     if let Some(prompt) = bootstrap
         .as_ref()
         .map(|bootstrap| bootstrap.seed_prompt.as_str())
         .or(seed_prompt.as_deref())
     {
+        rpc.call(
+            "turn/start",
+            json!({"session_id":session_id,"prompt":prompt}),
+            120,
+        )
+        .await?;
+    }
+    for prompt in followups {
         rpc.call(
             "turn/start",
             json!({"session_id":session_id,"prompt":prompt}),
@@ -2030,12 +2042,49 @@ fn history_text(history: &Value) -> String {
     out.join("\n")
 }
 
+/// Text turns committed after the vault-phrase turn so the phrase is outside
+/// the create-time seed of a summary-pending open and reachable only through
+/// the summary. That seed is the newest `LIVE_STARTUP_RECENT_TURNS`
+/// conversation turns, trimmed to the newest `LIVE_STARTUP_VERBATIM_ITEMS_MAX`
+/// provider items from a user row (`with_pending_context_after_recent`); each
+/// text turn is at least one item, so this many follow-ups put the phrase
+/// outside whichever bound binds. The test follows the constants: it breaks
+/// if the window changes. The last follow-up carries the positive control
+/// (`S99_SEEDED_FACT`), inside the window.
+fn s99_seed_followups() -> Vec<String> {
+    let count = meerkat::experimental_gpt_live::LIVE_STARTUP_RECENT_TURNS
+        .max(meerkat::experimental_gpt_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX);
+    let mut followups: Vec<String> = (1..count)
+        .map(|index| {
+            format!(
+                "Planning note {index} for later: shelf {index} in the studio holds spare cables. \
+                 Acknowledge briefly. Do not use tools or start a task."
+            )
+        })
+        .collect();
+    followups.push(format!(
+        "One more note: {S99_SEEDED_FACT}. Acknowledge briefly. Do not use tools or start a task."
+    ));
+    followups
+}
+
+/// A fact in the newest text turn, inside the create-time seed: the
+/// positive control recalled before the summary is released.
+const S99_SEEDED_FACT: &str = "today I parked on level nine of the garage";
+
+fn s99_recalls_seeded_fact(text: &str) -> bool {
+    let words = normalize_words(text);
+    words.split(' ').any(|word| word == "nine" || word == "9")
+}
+
 const S99_MIN_SUMMARY_DELAY: Duration = Duration::from_secs(20);
 const S99_SUMMARY_LLM_TIMEOUT: Duration = Duration::from_secs(90);
 const S99_SUMMARY_MAX_TOKENS: u32 = 1024;
 
 struct ConcurrentContextBootstrap {
     seed_prompt: String,
+    /// Text turns committed after `seed_prompt`, before the channel opens.
+    seed_followups: Vec<String>,
     captures: mpsc::Sender<GatedSummaryCapture>,
     evidence: Journal,
 }
@@ -2692,6 +2741,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
              The current code word is Tangerine. My current favorite flower is Daffodil. \
              Acknowledge briefly. Do not use tools or start a task."
             ),
+            seed_followups: s99_seed_followups(),
         }),
     )
     .await?;
@@ -2717,6 +2767,11 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     let unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
     assert!(s99_honest_unknown(&unknown.to_lowercase()));
     assert!(!s99_recalls_phrase(&unknown, &phrase));
+    s99_assert_pending(&mut live, &first_capture).await?;
+    // Positive control: a fact inside the create-time seed is known at once,
+    // before the summary is released, so the gate above is the summary's.
+    let seeded = s99_native_exchange(&mut live, "seeded_fact", s99_recalls_seeded_fact).await?;
+    assert!(s99_recalls_seeded_fact(&seeded));
     s99_assert_pending(&mut live, &first_capture).await?;
 
     // Commit newer ordinary context through the existing source session while
@@ -9835,8 +9890,10 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     wait_for_assistant_quiet(&mut live.peer).await?;
     let before_updated_recall = live.peer.events().await?.len();
     let audio_baseline = live.peer.audio_evidence().await?;
+    // `recall` asks for the word the user asked to remember, which stays
+    // Tangerine after the update; `recall_now` asks for the current word.
     live.peer
-        .call(json!({"type":"play","name":"recall"}))
+        .call(json!({"type":"play","name":"recall_now"}))
         .await?;
     let recalled_update = wait_for_events(&mut live.peer, 90, |events| {
         output_transcript_text(events, before_updated_recall)

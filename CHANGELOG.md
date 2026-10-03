@@ -1987,6 +1987,16 @@ them.
     stutter, journaled as a metric. The browser peer records responses; it no longer raises
     `duplicate_readout` itself, and missing or malformed records fail the
     scenario.
+  - S98 asks for the code word after the background update with an
+    unambiguous question ("What is the code word now?"); the earlier recall
+    asked for the word the user asked to remember, which stays the old one.
+  - S99 tests the summary gate against the create-time seed: the vault phrase
+    is followed by enough text turns to fall outside the seed window of a
+    summary-pending open (derived from `LIVE_STARTUP_RECENT_TURNS` and
+    `LIVE_STARTUP_VERBATIM_ITEMS_MAX`), so it is unknown until the summary is
+    released, and a fact inside the window is recalled at once as a positive
+    control. The phrase used to sit inside the seed, so the old "unknown
+    before release" probe only passed while the model ignored history it had.
 - Model calls and shell rounds are attributable in debug logs. The agent loop
   logs each model call's session, turn, attempt, elapsed time and outcome
   ("model call settled"); shell tool calls log their tool call id at start and

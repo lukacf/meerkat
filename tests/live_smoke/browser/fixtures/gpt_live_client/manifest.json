@@ -47,6 +47,17 @@
       "notes": "Historical fixture from the OpenAI speech API (commit 96d43d6a8); voice not recorded. Text recovered by transcription. Not re-mintable byte-exact."
     },
     {
+      "name": "recall_now",
+      "file": "recall-code-word-now.wav",
+      "voice": "alloy",
+      "text": "What is the code word now? Say only the code word.",
+      "sha256": "75d5fa6c3679f93d53f2eb4e5bcb4b28e0adc5a59917b325eead275a270fe15c",
+      "duration_ms": 5018,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S98 recall after the delayed background update (Tangerine to Violet). The earlier `recall` asks for the word the user asked to remember, which stays Tangerine after the update, so it cannot test the update (Live gate run 37104827171: the model answered Tangerine after acknowledging Violet). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
       "name": "history",
       "file": "historical-vault-query.wav",
       "voice": "alloy",
@@ -56,6 +67,17 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
       "notes": "S99 pre-acknowledgement question; offers an honest-unknown escape. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor. The text states its constraint positively and never names a delegate: the earlier wording (\"do not ask a delegate\", \"do not delegate\") primed delegation, and the provider replayed a split \" delegate.\" fragment as its own user row (S99 attempt-1 miss, BuildBuddy 2026-09-30)."
+    },
+    {
+      "name": "seeded_fact",
+      "file": "seeded-fact-query.wav",
+      "voice": "alloy",
+      "text": "Which level of the garage did I say I parked on in our text chat? Say only the level.",
+      "sha256": "da556e76945c3480f1dca468eefdf4f0fb25e757b719e1cd42d40f61bfd64bea",
+      "duration_ms": 6138,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1626,
+      "notes": "S99 positive control: asks for a fact in the newest text turn, inside the create-time seed of a summary-pending open, so it is answered before the summary is released. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "recall_history",

@@ -2003,3 +2003,15 @@ const canonicalHookLaunchRefusedEvent: Extract<
   reason: { reason_code: "confinement_refused", refusal: "preparation_failed" },
 };
 void [canonicalHookFailedEvent, canonicalHookLaunchRefusedEvent];
+
+
+// Future native tags remain raw adapter causes, not fabricated known variants.
+const futureHookFailedReason: NonNullable<import("../src/index.js").HookFailedEvent["reason"]> = {
+  reason_code: "future_guard_busy", retry_after_ms: 23,
+  details: { owner: "future-native-owner", token: null },
+};
+const futureHookConfinementCause: NonNullable<import("../src/index.js").HookFailedEvent["reason"]> = {
+  reason_code: "confinement_refused", refusal: "future_backend_busy",
+  detail: { generation: 9, resource: null },
+};
+void [futureHookFailedReason, futureHookConfinementCause];

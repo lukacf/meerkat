@@ -504,7 +504,7 @@ class HookFailed(Event):
     hook_id: HookId = ""
     point: str = ""
     error: str = ""
-    reason: HookFailureReason | None = None
+    reason: HookFailureReason | dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1174,7 +1174,7 @@ _CONFINEMENT_REFUSAL_MESSAGES = {
 }
 
 
-def _parse_hook_failure_reason(raw: Any) -> HookFailureReason:
+def _parse_hook_failure_reason(raw: Any) -> HookFailureReason | dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("hook reason must be object")
     code = _require_str(raw, "reason_code")
@@ -1185,14 +1185,12 @@ def _parse_hook_failure_reason(raw: Any) -> HookFailureReason:
     elif code == "observe_only_violation":
         pass
     elif code == "confinement_refused":
-        if _require_str(raw, "refusal") not in _CONFINEMENT_REFUSAL_MESSAGES:
-            raise ValueError("hook confinement refusal is invalid")
-    else:
-        raise ValueError("hook reason_code is invalid")
-    return cast(HookFailureReason, raw)
+        _require_str(raw, "refusal")
+    # Future native tags are raw causes, not malformed known variants.
+    return raw
 
 
-def _hook_failure_message(reason: HookFailureReason) -> str:
+def _hook_failure_message(reason: HookFailureReason | dict[str, Any]) -> str:
     code = reason["reason_code"]
     if code == "timeout":
         return f"hook timed out after {reason['timeout_ms']}ms"
@@ -1200,7 +1198,9 @@ def _hook_failure_message(reason: HookFailureReason) -> str:
         return reason["message"]
     if code == "observe_only_violation":
         return "background hooks are observe-only"
-    return _CONFINEMENT_REFUSAL_MESSAGES[reason["refusal"]]
+    if code == "confinement_refused":
+        return _CONFINEMENT_REFUSAL_MESSAGES.get(reason["refusal"], "unknown hook failure")
+    return "unknown hook failure"
 
 
 def _require_bool(raw: dict[str, Any], field_name: str) -> bool:

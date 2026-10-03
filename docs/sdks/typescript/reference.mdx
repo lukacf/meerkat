@@ -533,13 +533,21 @@ derives its `errorClass` and `error` display fields from that report.
 `retry` schedule: `attempt`, `maxAttempts`, `error` and `delayMs` are
 projections of `retry.plan.attempt`, `retry.plan.max_retries`,
 `retry.failure.message` and `retry.plan.selected_delay_ms`, and the schedule
-itself is kept in `retry`. The flat legacy shape is still accepted. The
-`HookFailedEvent` retains the canonical typed `reason`; its `error` remains a
-display projection for existing consumers. Read `reason.reason_code` and, for
-confinement refusal, `reason.refusal` instead of parsing `error`. The legacy
-flat `error` wire remains accepted with `reason` absent. When both fields are
-present, `reason` is authoritative; a malformed reason produces
-`MalformedEvent` with raw data preserved.
+itself is kept in `retry`. The flat legacy shape is still accepted.
+
+`HookFailedEvent.reason` contains a generated known cause or the unchanged
+raw object for a future cause. Read `reason.reason_code` and, for confinement
+refusal, `reason.refusal` instead of parsing the display-only `error`.
+Unknown string reason codes and confinement refusal strings retain the whole
+reason object and project `error` as `"unknown hook failure"`. Within a known
+reason-code branch, check fields before use, for example
+`typeof reason.message === "string"`; the code check alone does not narrow
+away the raw-object type.
+
+The legacy flat `error` wire remains accepted with `reason` absent. A present
+`reason` is authoritative even when `error` is also supplied. Malformed
+required fields in a known cause still produce `MalformedEvent` with the raw
+payload preserved, without falling back to the legacy error.
 
 `hook_launch_refused` is recognized through the current generated inventory
 and preserved by the existing raw-event path, including `reason` and the exact
@@ -655,6 +663,9 @@ interface RetryingEvent { type: "retrying"; attempt: number; maxAttempts: number
 ### Hook events
 
 ```typescript
+type HookFailureReason = NonNullable<
+  import("@rkat/sdk").HookFailedEvent["reason"]
+>;
 type HookPoint =
   | "run_started" | "run_completed" | "run_failed"
   | "pre_llm_request" | "post_llm_response"

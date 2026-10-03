@@ -27,21 +27,23 @@
 //
 // Shards are packed by an estimated lane cost, not by crate count: a crate's
 // Rust line count (its lib-test binary compiles every inline test) plus a
-// term per workspace crate in its dependency closure (each top-level crate's
+// term per workspace crate in its build closure (each top-level crate's
 // test binary links the whole graph; the cold hosted-runner shards that
 // bundled several such crates ran 18-25 minutes while the line-count
 // balanced shards of leaf crates ran 7-9). --max-shards bounds a
 // changed-package plan, --workspace-shards a whole-workspace plan.
 //
 // Budget model. A pull-request lane models at
-//   minutes = 1 + (lines + 8000 * dependency_closure) / 35000
-// (calibrated on hosted 4-vCPU runners: meerkat-mob 722k -> 21.6 modelled,
-// 21.8 measured; meerkat-runtime 453k -> 13.9 modelled, 11.7-12.2 measured)
-// and the pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES.
+//   minutes = 1 + (lines + 8000 * build_closure) / 35000
+// The constants came from earlier hosted 4-vCPU runs. Those historical source
+// sizes and recursive closures do not calibrate today's build-closure input;
+// current estimates require comparison with hosted results. On d1dda1482 the
+// runtime unit lane models 15.1 minutes, not a measured completion guarantee.
+// The pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES.
 // Every unit lane that ever exceeded the 1200 s push-to-terminal budget
 // compiled meerkat-mob's 442k lines: mob's own lane, and the lanes of crates
 // that depend on mob and rebuild it under their own feature unification
-// (rkat, rpc, rest, mcp-server, mob-mcp, mob-pack, xtask, ...). Those
+// (rkat, rpc, rest, mcp-server, mob-mcp, mob-pack, ...). Those
 // crates' unit tests therefore run on the push-to-main run (no budget) and
 // on nightly, never in the pull-request unit lane; the chain is computed
 // from cargo metadata, not listed here. Clippy of a changed crate always
@@ -140,7 +142,14 @@ export const INTEGRATION_SUITES = [
   { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/"] },
   // The ordinary native governed loops and cost correctness controls live in
   // tests/*.rs; unit rows only select lib/bin tests. Keep real/perf opt-ins.
-  { package: "meerkat-authorization", triggers: ["meerkat-authorization", "meerkat-authorization-contracts", "meerkat-core", "meerkat-runtime"] },
+  {
+    package: "meerkat-authorization",
+    triggers: [
+      ...MACHINE_AUTHORITY_PACKAGES,
+      "meerkat-authorization", "meerkat-authorization-contracts", "meerkat-core", "meerkat-runtime",
+      "meerkat", "meerkat-tools", "meerkat-llm-core", "meerkat-anthropic", "meerkat-auth-core", "meerkat-models",
+    ],
+  },
 ];
 
 // Packages whose own lib-test binary dominates their push-to-main lane. On

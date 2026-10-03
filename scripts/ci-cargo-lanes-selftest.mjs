@@ -496,8 +496,8 @@ for (const path of [
   assert.deepEqual(names(planFor(["crates/meerkat-runtime/src/lib.rs"])), ["meerkat-runtime", "meerkat-machine-codegen", "meerkat-authorization"]);
   assert.deepEqual(
     names(planFor(["crates/meerkat-machine-schema/src/lib.rs"])),
-    ["meerkat-runtime", "meerkat-machine-codegen"],
-    "a machine schema or DSL change runs both suites",
+    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat-authorization"],
+    "a machine schema or DSL change runs all affected integration suites",
   );
   assert.deepEqual(names(planFor(["crates/meerkat-mob/src/lib.rs"])), ["meerkat-machine-codegen"], "mob runs the codegen parity suite");
   assert.deepEqual(names(planFor(["crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs"])), ["meerkat-machine-codegen"]);
@@ -513,6 +513,17 @@ for (const path of [
     "crates/meerkat-authorization-contracts/src/grant.rs",
     "crates/meerkat-core/src/agent/state.rs",
     "crates/meerkat-runtime/src/store/execution_custody.rs",
+    "crates/meerkat/src/session_factory.rs",
+    "crates/meerkat-tools/src/lib.rs",
+    "crates/meerkat-llm-core/src/lib.rs",
+    "crates/meerkat-anthropic/src/lib.rs",
+    "crates/meerkat-auth-core/src/lib.rs",
+    "crates/meerkat-models/src/lib.rs",
+    "crates/meerkat-machine-schema/src/lib.rs",
+    "crates/meerkat-machine-dsl/src/lib.rs",
+    "crates/meerkat-machine-dsl-core/src/lib.rs",
+    "crates/meerkat-machine-derive/src/lib.rs",
+    "crates/meerkat-machine-kernels/src/lib.rs",
   ]) {
     const authorization = planFor([path]);
     const selected = authorization.integration_suites.filter((suite) => suite.packages[0] === "meerkat-authorization");

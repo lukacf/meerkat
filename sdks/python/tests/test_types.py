@@ -8532,9 +8532,11 @@ def test_hook_failed_preserves_each_canonical_reason(reason):
 
 
 @pytest.mark.parametrize("reason", [
-    None, {"reason_code": "future"},
-    {"reason_code": "confinement_refused", "refusal": "future"},
+    None, {}, {"reason_code": 7},
+    {"reason_code": "confinement_refused"},
+    {"reason_code": "confinement_refused", "refusal": None},
     {"reason_code": "execution_failed"},
+    {"reason_code": "execution_failed", "message": {}},
     {"reason_code": "timeout", "timeout_ms": -1},
 ])
 def test_hook_failed_malformed_reason_does_not_fall_back_to_legacy_error(reason):
@@ -8558,3 +8560,52 @@ def test_hook_failed_legacy_string_wire_remains_compatible():
     assert isinstance(event, HookFailed)
     assert event.error == "legacy diagnostic"
     assert event.reason is None
+
+
+@pytest.mark.parametrize("reason", [
+    {"reason_code": "future_guard_busy", "retry_after_ms": 23,
+     "details": {"owner": "future-native-owner", "token": None, "stages": ["prepared"]}},
+    *[{"reason_code": "confinement_refused", "refusal": refusal,
+       "detail": {"generation": 9, "resource": None}}
+      for refusal in ["future_backend_busy", "constructor", "__proto__"]],
+])
+def test_hook_failed_preserves_unknown_future_causes(reason):
+    from meerkat.events import HookFailed
+
+    raw = {
+        "type": "hook_failed", "hook_id": "  hook-future  ", "point": "post_tool_execution",
+        "reason": reason, "error": "permission denied by legacy string",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, HookFailed)
+    assert event.hook_id == raw["hook_id"]
+    assert event.point == raw["point"]
+    assert event.reason == reason
+    assert event.error == "unknown hook failure"
+    control = parse_event({"type": "text_delta", "delta": "continued after future cause"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued after future cause"
+
+
+@pytest.mark.parametrize(("refusal", "message"), [
+    ("invalid_requirement", "invalid execution confinement requirement"),
+    ("invalid_launch", "invalid confined process launch"),
+    ("unsupported_requirement", "required execution confinement is unsupported by this backend"),
+    ("backend_unavailable", "required execution confinement backend is unavailable"),
+    ("preparation_failed", "confined process preparation failed"),
+])
+def test_hook_failed_displays_each_known_confinement_cause_exactly(refusal, message):
+    from meerkat.events import HookFailed
+
+    reason = {"reason_code": "confinement_refused", "refusal": refusal}
+    event = parse_event({"type": "hook_failed", "hook_id": "hook-1", "point": "post_tool_execution", "reason": reason})
+    assert isinstance(event, HookFailed)
+    assert event.reason == reason
+    assert event.error == message
+
+
+def test_hook_failed_display_mapping_matches_generated_confinement_causes():
+    from meerkat.events import _CONFINEMENT_REFUSAL_MESSAGES
+    from meerkat.generated.event_types import ConfinementRefusal
+
+    assert set(_CONFINEMENT_REFUSAL_MESSAGES) == set(get_args(ConfinementRefusal))

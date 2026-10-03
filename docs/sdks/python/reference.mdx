@@ -437,13 +437,18 @@ fields from that report.
 schedule: `attempt`, `max_attempts`, `error` and `delay_ms` are projections of
 `retry.plan.attempt`, `retry.plan.max_retries`, `retry.failure.message` and
 `retry.plan.selected_delay_ms`, and the schedule itself is kept in `retry`.
-The flat legacy shape is still accepted. `HookFailed` retains the canonical
-typed `reason`; its `error` remains a display projection for existing
-consumers. Read `reason["reason_code"]` and, for confinement refusal,
-`reason["refusal"]` instead of parsing `error`. The legacy flat `error` wire
-remains accepted with `reason=None`. When both fields are present, `reason`
-is authoritative; a malformed reason produces
-`UnknownEvent(type="malformed_event")` with raw data preserved.
+The flat legacy shape is still accepted. `HookFailed.reason` contains a
+generated known cause or the unchanged raw dictionary for a future cause.
+Read `reason["reason_code"]` and, for confinement refusal, `reason["refusal"]`
+instead of parsing the display-only `error`. Unknown string reason codes and
+confinement refusal strings retain the whole dictionary and project `error`
+as `"unknown hook failure"`. Check field types before using a future cause.
+
+The legacy flat `error` wire remains accepted with `reason=None`. A present
+`reason` is authoritative even when `error` is also supplied. Malformed
+required fields in a known cause still produce
+`UnknownEvent(type="malformed_event")` with the raw payload preserved, without
+falling back to the legacy error.
 
 `hook_launch_refused` is recognized through the current generated inventory
 and arrives as `UnknownEvent` with the full wire payload in `event.data`,

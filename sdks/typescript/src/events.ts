@@ -34,6 +34,7 @@ import type { ContentBlock, SchemaWarning, SkillKey } from "./types.js";
 import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
 import { MeerkatError } from "./generated/errors.js";
 import type {
+  ConfinementRefusal,
   HookFailureReason,
   LlmProviderErrorKind,
   LlmProviderErrorRetryability,
@@ -499,14 +500,17 @@ export interface HookCompletedEvent {
   readonly durationMs: number;
 }
 
+// Unknown native tags retain their complete reason object in the adapter.
+type RawHookFailureReason = Readonly<Record<string, unknown>> & { readonly reason_code: string };
+
 export interface HookFailedEvent {
   readonly type: "hook_failed";
   readonly hookId: HookId;
   readonly point: HookPoint;
   /** Display projection retained for existing SDK consumers. */
   readonly error: string;
-  /** Canonical typed cause; absent only on the legacy string wire. */
-  readonly reason?: HookFailureReason;
+  /** Canonical typed cause or raw future cause; absent only on the legacy string wire. */
+  readonly reason?: HookFailureReason | RawHookFailureReason;
 }
 
 export interface HookDeniedEvent {
@@ -827,9 +831,9 @@ const CONFINEMENT_REFUSAL_MESSAGES = {
   unsupported_requirement: "required execution confinement is unsupported by this backend",
   backend_unavailable: "required execution confinement backend is unavailable",
   preparation_failed: "confined process preparation failed",
-} as const;
+} as const satisfies Record<ConfinementRefusal, string>;
 
-function parseHookFailureReason(raw: unknown): HookFailureReason {
+function parseHookFailureReason(raw: unknown): HookFailureReason | RawHookFailureReason {
   if (!isPlainRecord(raw)) throw new Error("hook reason must be object");
   const code = requireStringField(raw, "reason_code");
   switch (code) {
@@ -843,21 +847,21 @@ function parseHookFailureReason(raw: unknown): HookFailureReason {
     case "observe_only_violation":
       break;
     case "confinement_refused":
-      requireOneOf(requireStringField(raw, "refusal"), "refusal", Object.keys(CONFINEMENT_REFUSAL_MESSAGES));
+      requireStringField(raw, "refusal");
       break;
-    default:
-      throw new Error("hook reason_code is invalid");
   }
-  return raw as HookFailureReason;
+  return raw as HookFailureReason | RawHookFailureReason;
 }
 
-function hookFailureMessage(reason: HookFailureReason): string {
+function hookFailureMessage(reason: HookFailureReason | RawHookFailureReason): string {
   switch (reason.reason_code) {
     case "timeout": return `hook timed out after ${reason.timeout_ms}ms`;
     case "execution_failed":
-    case "config_invalid": return reason.message;
+    case "config_invalid": return reason.message as string;
     case "observe_only_violation": return "background hooks are observe-only";
-    case "confinement_refused": return CONFINEMENT_REFUSAL_MESSAGES[reason.refusal];
+    case "confinement_refused": return hasOwn(CONFINEMENT_REFUSAL_MESSAGES, reason.refusal as string)
+      ? CONFINEMENT_REFUSAL_MESSAGES[reason.refusal as ConfinementRefusal] : "unknown hook failure";
+    default: return "unknown hook failure";
   }
 }
 
@@ -1751,7 +1755,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
       };
     }
     case "hook_denied":
-      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, reasonCode: requireStringField(raw, "reason_code"), message: requireStringField(raw, "message"), ...(raw.payload != null ? { payload: raw.payload } : {}) };
+      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, reasonCode: requireStringField(raw, "reason_code"), message: requireStringField(raw, "message"), ...(hasOwn(raw, "payload") ? { payload: raw.payload } : {}) };
 
     // Skills
     case "skills_resolved":

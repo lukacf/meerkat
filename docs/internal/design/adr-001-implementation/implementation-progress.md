@@ -16,11 +16,18 @@ tests. Its estimate followed dependencies' dev fixtures even though Cargo does
 not build them for the runtime unit target. Reusing the existing build-graph
 calculation fixes that estimate while preserving the 16-minute budget and the
 runtime PR unit lane. Tests-first public planning failures and the repaired
-full classifier selftest are recorded. One entry in the existing integration
-suite table now schedules the ordinary authorization tests for authorization,
-contract, core and runtime changes. It adds no job or runner; ignored acceptance
-and timing cases retain their explicit commands. Other consumer-only triggers
-remain a coverage task.
+full classifier selftest are recorded. On the recorded native source, the
+runtime unit model is 15.1 minutes; this is neither a new timing measurement nor
+a guarantee that a hosted job finishes within that estimate. The classifier's
+earlier calibration figures describe historical source and closure inputs.
+One entry in the existing integration suite table now schedules the ordinary
+authorization tests for authorization/contracts, core, runtime, facade, tools,
+llm-core, Anthropic, auth-core and models changes, plus the existing machine
+schema/DSL/derive/kernel owner group. It creates an additional matrix instance
+of the existing integration job on its existing hosted runner configuration,
+without a new workflow or runner setup. Ignored acceptance and timing cases
+retain their explicit commands. Other consumer-only triggers remain a coverage
+task.
 
 SDK inspection then reproduced canonical HookFailed events being rejected by
 obsolete flat-error validation, and TypeScript's exhaustive settlement map
@@ -31,6 +38,19 @@ parser RED/GREEN and the existing full TypeScript suite (495 passed) and Python
 type/parser file (463 passed) qualify that compatibility repair. Raw launch
 refusal events preserve their optional call IDs; no event serializer, generated
 contract or native production source changed.
+
+Bounded publication review found that facade/tools, model/credential and
+machine-authority changes also need the native integration row. Public planner
+assertions reproduced the missing schema and tools selections before the
+expanded trigger repair. The complete existing classifier selftest and actual
+PR plan then passed. The reviewers also found that non-exhaustive future hook
+causes were incorrectly rejected by both SDKs. Focused parser tests reproduced
+those failures; the repair preserves the entire unknown reason with neutral
+display text, validates known fields and retains canonical-present priority.
+TypeScript now preserves explicit-null HookDenied payloads too. The final
+existing TypeScript suite passed 499 tests and Python type/parser file passed
+476 tests; root verified the five source/test files match the executed bytes.
+These are SDK and CI routing repairs, with no Rust source change.
 
 The parallel Console candidate is committed at `42df889d` with current main,
 local-feedback documentation and a browser fixture compatibility fix. Existing
@@ -43,9 +63,13 @@ the native Rust gate.
 
 Root owns overhead measurement on meerkat-dev after the GCP lead prepares the
 exact published candidate's optimized binary and passes both existing cost
-correctness selectors. The tentative 22:30-23:00 UTC window requires publication
-by 21:45 UTC and explicit quiet-host clearance. Otherwise the lead schedules a
-new window after readiness. No accepted overhead result or green native
+correctness selectors. The lead marked the tentative 22:30-23:00 UTC window
+NOT_MEASURED when publication missed its 21:45 cutoff. A standard Git bundle
+let the lead prepare the exact frozen d1 candidate while normal gates ran:
+the optimized build passed in 8m41s and both existing correctness selectors
+passed. Publication review requires a successor; its exact optimized binary
+must be rebuilt/reconciled with the published SHA before the lead schedules
+explicit quiet clearance. No accepted overhead result or green native
 implementation PR CI exists yet. Publication-only repairs continue; additional
 runtime integration remains held.
 

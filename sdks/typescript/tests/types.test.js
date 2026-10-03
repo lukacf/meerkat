@@ -6231,7 +6231,7 @@ it("hook failed preserves all canonical reason variants", () => {
 });
 
 it("hook failed malformed reasons do not fall back to legacy strings", () => {
-  for (const reason of [null, { reason_code: "future" }, { reason_code: "confinement_refused", refusal: "future" }, { reason_code: "execution_failed" }, { reason_code: "timeout", timeout_ms: -1 }]) {
+  for (const reason of [null, {}, { reason_code: 7 }, { reason_code: "confinement_refused" }, { reason_code: "confinement_refused", refusal: null }, { reason_code: "execution_failed" }, { reason_code: "execution_failed", message: {} }, { reason_code: "timeout", timeout_ms: -1 }]) {
     const raw = { type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason, error: "legacy diagnostic" };
     const event = parseEvent(raw);
     assert.equal(event.type, "malformed_event");
@@ -6253,4 +6253,75 @@ it("native refusal terminal kinds remain valid settlement companions", () => {
     const event = MeerkatClient.parseSessionMessage(row).results[0];
     assert.deepEqual(event.settlementFailures, row.results[0].settlement_failures);
   }
+});
+
+
+it("hook failed preserves unknown future reason codes", () => {
+  const reason = {
+    reason_code: "future_guard_busy",
+    retry_after_ms: 23,
+    details: { owner: "future-native-owner", token: null, stages: ["prepared"] },
+  };
+  const raw = {
+    type: "hook_failed", hook_id: "  hook-future  ", point: "post_tool_execution",
+    reason, error: "permission denied by legacy string",
+  };
+  const event = parseEvent(raw);
+  assert.equal(event.type, "hook_failed");
+  assert.equal(event.hookId, raw.hook_id);
+  assert.equal(event.point, raw.point);
+  assert.deepEqual(event.reason, reason);
+  assert.equal(event.error, "unknown hook failure");
+  assert.equal(parseEvent({ type: "text_delta", delta: "continued after future reason" }).delta, "continued after future reason");
+});
+
+it("hook failed preserves unknown future confinement causes", () => {
+  for (const refusal of ["future_backend_busy", "constructor", "__proto__"]) {
+    const reason = {
+      reason_code: "confinement_refused", refusal,
+      detail: { generation: 9, resource: null },
+    };
+    const raw = {
+      type: "hook_failed", hook_id: "  hook-future  ", point: "post_tool_execution",
+      reason, error: "permission denied by legacy string",
+    };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, reason);
+    assert.equal(event.error, "unknown hook failure");
+    assert.equal(parseEvent({ type: "text_delta", delta: "continued after future cause" }).delta, "continued after future cause");
+  }
+});
+
+it("hook failed displays each known confinement cause exactly", () => {
+  const messages = {
+    invalid_requirement: "invalid execution confinement requirement",
+    invalid_launch: "invalid confined process launch",
+    unsupported_requirement: "required execution confinement is unsupported by this backend",
+    backend_unavailable: "required execution confinement backend is unavailable",
+    preparation_failed: "confined process preparation failed",
+  };
+  for (const [refusal, message] of Object.entries(messages)) {
+    const reason = { reason_code: "confinement_refused", refusal };
+    const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason });
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, reason);
+    assert.equal(event.error, message);
+  }
+});
+
+
+it("hook denied preserves payload presence including explicit null", () => {
+  const wire = {
+    type: "hook_denied", hook_id: "hook-1", point: "pre_tool_execution",
+    reason_code: "policy_violation", message: "blocked by hook",
+  };
+  const absent = parseEvent(wire);
+  assert.equal(absent.type, "hook_denied");
+  assert.equal(Object.hasOwn(absent, "payload"), false);
+
+  const present = parseEvent({ ...wire, payload: null });
+  assert.equal(present.type, "hook_denied");
+  assert.equal(Object.hasOwn(present, "payload"), true);
+  assert.equal(present.payload, null);
 });

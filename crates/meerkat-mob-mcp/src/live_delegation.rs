@@ -2976,17 +2976,30 @@ impl ExperimentalLiveDelegationCoordinator {
         cancellation: CancellationToken,
     ) {
         loop {
+            // Every exit ends the channel's delegation custody and closes its
+            // retained results, so each one is logged with its reason.
             let observation = match tokio::select! {
                 biased;
-                () = cancellation.cancelled() => break,
+                () = cancellation.cancelled() => {
+                    tracing::info!(channel_id = %binding.channel_id(), "live delegation channel loop ended: bound run cancelled");
+                    break;
+                }
                 observation = control.next_observation(&binding) => observation,
             } {
                 Ok(Some(observation)) => observation,
-                Ok(None) | Err(_) => break,
+                Ok(None) => {
+                    tracing::info!(channel_id = %binding.channel_id(), "live delegation channel loop ended: the observation stream ended");
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(channel_id = %binding.channel_id(), %error, "live delegation channel loop ended: the observation stream failed");
+                    break;
+                }
             };
             match observation {
                 ExperimentalGptLiveControlObservation::Provider(observation) => {
                     if observation.binding() != &binding {
+                        tracing::warn!(channel_id = %binding.channel_id(), "live delegation channel loop ended: an observation carried another binding");
                         break;
                     }
                     if let LiveSidebandObservationKind::UserTurnContinuesDelegation {

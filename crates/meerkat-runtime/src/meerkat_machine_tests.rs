@@ -607,6 +607,86 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
     assert_eq!(recovered_recovery.generation(), first_recovery.generation());
 }
 
+/// A waiter on the commit signal retries a guarded transition on each
+/// advance. A refusal, and an observation that leaves the machine state
+/// unchanged, must not advance it: the release loop applies such an
+/// observation on every retry, and a self-advance would wake it in a hot
+/// loop (combined3 S99, 405 refused attempts in 350 ms).
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn state_preserving_observations_and_refusals_do_not_advance_the_commit_signal() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live session");
+    let channel = "live-commit-signal".to_string();
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        state
+            .live_channel_session_by_channel
+            .insert(channel.clone(), session_id.to_string());
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed the channel's session binding");
+    }
+    let mut commits = machine
+        .subscribe_session_machine_commits(&session_id)
+        .await
+        .expect("registered session exposes its machine commit signal");
+    commits.borrow_and_update();
+
+    let (_, effects) = machine
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
+                session_id: session_id.to_string(),
+                channel_id: channel.clone(),
+            },
+            "ObserveLiveContextDeliveryReadiness",
+        )
+        .await
+        .expect("the readiness observation applies");
+    assert!(
+        effects.as_slice().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveContextDeliveryReadinessObserved { .. }
+        )),
+        "the observation emitted its readiness"
+    );
+    assert!(
+        !commits
+            .has_changed()
+            .expect("the session entry is still registered"),
+        "an observation that leaves the state unchanged is not a commit"
+    );
+
+    machine
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
+                session_id: SessionId::new().to_string(),
+                channel_id: channel,
+            },
+            "ObserveLiveContextDeliveryReadiness",
+        )
+        .await
+        .expect_err("another session's observation is refused");
+    assert!(
+        !commits
+            .has_changed()
+            .expect("the session entry is still registered"),
+        "a refused input is not a commit"
+    );
+}
+
 fn uuid(n: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(n)
 }

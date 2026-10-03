@@ -13435,7 +13435,11 @@ impl MeerkatMachine {
     #[cfg(feature = "live")]
     /// Observe commits of a session's machine authority: the generation
     /// advances once after every transition committed through the session's
-    /// apply seam, including every transition that writes an
+    /// apply seam that changed the machine state. A refused input and a
+    /// transition that leaves the state unchanged (an observation that only
+    /// emits effects) do not advance it, so a waiter that applies an
+    /// observation while retrying never wakes itself. It advances on every
+    /// state-changing transition, including every transition that writes an
     /// `AuthorizeLiveDelegationResultRelease` guard input (result delivery
     /// resolution, which frees the channel's result slot; live close; open
     /// abandonment; transcript confirmation; worker terminal recording). A

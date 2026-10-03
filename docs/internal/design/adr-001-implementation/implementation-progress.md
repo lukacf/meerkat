@@ -65,7 +65,7 @@ persistent controller administration and additional-platform acceptance remain
 open. The source-reviewed canonical service-slot adaptation is a separate next
 slice, not included in this checkpoint.
 
-The next tests-only slice executes fresh authenticated work after physical
+The fresh-work tests-only slice executes authenticated work after physical
 close/reopen. Its first run failed at credential setup (5.23s compile, 0.34s
 body): a newly created empty token vault requested release of the still-live
 credential registry. This was a fixture ownership error, not a native recovery
@@ -76,8 +76,14 @@ republishing or changing lifecycle state. The fresh model-tool-model run passed
 audit, local denial feedback and a permitted sibling. All four stock controls
 passed; the final existing native-loop target passed nine tests with six existing
 acceptance cases explicitly ignored (0.23s compile, 0.88s body). Targeted test
-Clippy passed in 5m31s; normal commit hooks are the remaining gate. This is same-process current-owner
-work, not process restart or restored controller authority.
+Clippy passed in 5m31s. The slice is committed locally at
+`249b13147f78af6c615b3bf0347e71f962ab33a3`, tree
+`26972407da9ae3e702084dd36cbd344b2cb1a4de`; normal commit hooks passed.
+On that clean commit, all six acceptance cases were then explicitly executed
+and passed (0.90s compile, 0.32s bodies). Raw results are retained in
+`native7899-current-ignored-scenarios-r1.log` under the existing evidence
+directory below. Publication remains pending. This is same-process
+current-owner work, not process restart or restored controller authority.
 
 [Meerkat issue 1618](https://github.com/lukacf/meerkat/issues/1618) is part of
 full default-profile coverage: effective per-identity policy must survive fresh,

@@ -1830,7 +1830,7 @@ impl Message {
             // host-attached injected context carry typed exclusion reasons.
             Message::User(u) => match u.transcript_role {
                 TranscriptUserRole::Conversational => {
-                    MemoryIndexableContent::Indexable(u.text_content())
+                    MemoryIndexableContent::from_text(u.text_content())
                 }
                 TranscriptUserRole::CompactionSummary => {
                     MemoryIndexableContent::Excluded(MemoryIndexExclusion::CompactionSummary)
@@ -1847,7 +1847,9 @@ impl Message {
                     }
                     result.push_str(text);
                 }
-                MemoryIndexableContent::Indexable(result)
+                // An assistant turn with no text blocks (tool calls or
+                // reasoning only) has nothing to index.
+                MemoryIndexableContent::from_text(result)
             }
             Message::System(_) => {
                 MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemPrompt)
@@ -1885,6 +1887,28 @@ pub enum MemoryIndexableContent {
 }
 
 impl MemoryIndexableContent {
+    /// Classify projected text: empty or whitespace-only text is
+    /// [`MemoryIndexExclusion::EmptyText`], never an indexable entry.
+    pub fn from_text(text: String) -> Self {
+        if text.trim().is_empty() {
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::EmptyText)
+        } else {
+            MemoryIndexableContent::Indexable(text)
+        }
+    }
+
+    /// Re-apply the [`Self::from_text`] rule to a decision built directly
+    /// from the variant: `Indexable` with empty or whitespace-only text
+    /// becomes `Excluded(EmptyText)`. Memory stores call this at their
+    /// indexing seam so no producer can index text that cannot match.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        match self {
+            MemoryIndexableContent::Indexable(text) => Self::from_text(text),
+            excluded @ MemoryIndexableContent::Excluded(_) => excluded,
+        }
+    }
+
     /// Whether this message contributes content to the index.
     pub fn is_indexable(&self) -> bool {
         matches!(self, MemoryIndexableContent::Indexable(_))
@@ -1922,6 +1946,10 @@ pub enum MemoryIndexExclusion {
     /// Host-attached injected context — ambient material delivered alongside
     /// (not inside) the user's message; not user-authored conversation.
     InjectedContext,
+    /// The message projects to empty or whitespace-only text (for example an
+    /// assistant turn with only tool calls or reasoning): there is nothing
+    /// to match, and an empty embedding would match every query.
+    EmptyText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

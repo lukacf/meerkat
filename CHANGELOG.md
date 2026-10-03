@@ -601,6 +601,16 @@ them.
     with `MobError::ActorCommandChannelClosed`, the answer it gets once the
     actor exits. Treat it as "mob shutting down". A task the Shutdown joins
     can therefore never wait on the actor that joins it.
+- `meerkat_core::types::MemoryIndexExclusion` gains `EmptyText`: a message
+  whose text projection is empty or whitespace-only (for example a
+  tool-call-only assistant turn) is now `Excluded(EmptyText)` rather than
+  `Indexable("")`. Exhaustive matches must handle it. New:
+  `MemoryIndexableContent::from_text` and `MemoryIndexableContent::normalized`
+  (see Fixed).
+- The memory store's schema domain moves to v3, a data-only step that purges
+  empty-text rows (see Fixed). Opening a store migrates it forward once.
+  Binaries from before this release refuse a v3 file, as they refuse any
+  newer schema.
 
 ### Security
 
@@ -1983,6 +1993,25 @@ them.
   The host now keeps a typed closed tombstone with no TTL, and the runtime
   releases a session's tombstones from the point the entry is removed
   (#1519).
+- `memory_search` no longer returns only empty hits. Compaction indexed one
+  empty-text entry per discarded message with no text (a tool call, a tool
+  result, or reasoning only), and an empty text embeds to the zero vector,
+  which cosine distance scores as a perfect match for every query, so empty
+  entries filled the top results. A production 0.8.50 store had 50% empty
+  rows (89% in its most recent month).
+  - Empty or whitespace-only text is never indexed. `Message::indexable_content`
+    classifies it as `Excluded(EmptyText)`, and the HNSW and in-memory stores
+    apply `MemoryIndexableContent::normalized` at their indexing seam, so a
+    decision built directly as `Indexable("")` is skipped too.
+  - A zero-norm embedding never enters the HNSW index (live inserts and
+    rebuilds from durable rows), whatever produced it, and a query whose
+    embedding has no direction (an empty or whitespace-only query) returns
+    no hits.
+  - Existing stores are purged once on open by the memory schema's v3
+    migration: empty-text rows are deleted, and staged compaction batches
+    are rewritten without their empty entries, with digest and count
+    recomputed so a retried stage still compares equal.
+
 ### Changed
 
 - Model calls and shell rounds are attributable in debug logs. The agent loop

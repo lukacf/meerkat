@@ -4915,15 +4915,15 @@ async fn declared_deny_of_an_unmounted_bundle_tool_is_inert_and_unknown_names_fa
         .err()
         .expect("a name in no vocabulary must fail");
     match &err {
-        BuildAgentError::DeclaredToolUnknown {
-            tool, vocabulary, ..
-        } => {
-            assert_eq!(tool, "bundle_typo");
+        BuildAgentError::DeclaredToolUnknown(unknown) => {
+            assert_eq!(unknown.tool, "bundle_typo");
             assert!(
-                vocabulary
+                unknown
+                    .vocabulary
                     .iter()
                     .any(|source| source == "tool bundle 'probe'"),
-                "{vocabulary:?}"
+                "{:?}",
+                unknown.vocabulary
             );
         }
         other => panic!("expected DeclaredToolUnknown, got: {other:?}"),
@@ -5026,7 +5026,7 @@ async fn declared_deny_rejects_a_deferred_non_bundle_external_tool() {
         .err()
         .expect("a deferred external tool outside the bundles must fail");
     assert!(
-        matches!(&err, BuildAgentError::DeclaredToolUnknown { tool, .. } if tool == "bundle_deferred"),
+        matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "bundle_deferred"),
         "got: {err:?}"
     );
 }

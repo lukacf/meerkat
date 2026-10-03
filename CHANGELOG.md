@@ -887,6 +887,30 @@ them.
   that arrives while the user's latest utterance is unanswered. A held
   narration that a close leaves unsent is dropped, since it is ephemeral
   progress speech.
+- Public GPT Live releases held delegation commentary once the user stops
+  holding the floor, even if the model never answers. Before, only the model's
+  next output or a delegation released it, so a user who kept talking past
+  the delegation to a silent model left the result unsent for good (Turbo S
+  S103).
+  - The floor is a real user turn: an input transcript delta whose speech
+    began after the model's last output ended and after the last delegation.
+    A backchannel over the model's speech takes no floor, and audio energy
+    alone (noise) never opens one.
+  - The floor ends after `USER_FLOOR_SILENCE_RELEASE_MS` (1600 ms) of
+    reflected-input silence on the provider's audio clock, below
+    `USER_FLOOR_SPEECH_DBFS` (-50 dBFS). There is no wall-clock timer, and
+    both constants document their derivation from Turbo S provider streams
+    and fixtures.
+- Public GPT Live no longer lets the model claim a delegated request is done
+  before its result exists (S103: "I've updated it to Friday afternoon"
+  3.6 s early, then silence once the result arrived).
+  - Every client delegation now gets a broker-owned in-progress notice on the
+    instructions lane, bound to it. It says not to describe the request as done
+    or state its outcome until the result arrives.
+  - The result cue now says that anything said about the request before the
+    result arrived came before it was done. If the user's latest request is
+    still unanswered, the model answers it first, then confirms the actual
+    outcome.
 - Public GPT Live holds a delegation result that arrives while the user's
   latest utterance is unanswered. Appending it then diverted the model into
   answering the result instead of the user, and the request was never

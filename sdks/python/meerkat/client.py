@@ -4420,7 +4420,15 @@ class MeerkatClient:
     _InputStreamMode = Literal["none", "reserve_interaction"]
     _ResponseStatus = Literal["accepted", "completed", "failed"]
     _PeerLifecycleKind = Literal[
-        "mob.peer_added", "mob.peer_retired", "mob.peer_unwired"
+        "mob.peer_added",
+        "mob.peer_retired",
+        "mob.peer_unwired",
+        "mob.kickoff_pending",
+        "mob.kickoff_starting",
+        "mob.kickoff_started",
+        "mob.kickoff_callback_pending",
+        "mob.kickoff_failed",
+        "mob.kickoff_cancelled",
     ]
 
     async def send(

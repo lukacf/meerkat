@@ -9811,6 +9811,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PeerIngressClassified`
 - To: `Running`
 
+### `ClassifyExternalEnvelopeLifecycleKickoffAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_kickoff`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeLifecycleKickoffRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_kickoff`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
+- To: `Running`
+
 ### `ClassifyExternalEnvelopeResponseAcceptedAttached`
 - From: `Attached`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)

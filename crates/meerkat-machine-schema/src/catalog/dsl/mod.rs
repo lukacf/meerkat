@@ -2066,11 +2066,22 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "SilentRequest",
                     "Ack",
                     "PlainEvent",
+                    "PeerLifecycleKickoff",
                 ],
             ),
             NamedTypeBinding::string_enum(
                 "PeerIngressLifecycleClass",
-                &["PeerAdded", "PeerRetired", "PeerUnwired"],
+                &[
+                    "PeerAdded",
+                    "PeerRetired",
+                    "PeerUnwired",
+                    "KickoffPending",
+                    "KickoffStarting",
+                    "KickoffStarted",
+                    "KickoffCallbackPending",
+                    "KickoffFailed",
+                    "KickoffCancelled",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "PeerIngressAuthorityPhaseClass",

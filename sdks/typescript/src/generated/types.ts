@@ -4192,7 +4192,7 @@ export interface CommsCommandPeerMessage {
 
 export interface CommsCommandPeerLifecycle {
   kind: "peer_lifecycle";
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss" | "mob.kickoff_pending" | "mob.kickoff_starting" | "mob.kickoff_started" | "mob.kickoff_callback_pending" | "mob.kickoff_failed" | "mob.kickoff_cancelled";
   params: CommsPeerLifecycleParams;
   to: PeerId;
 }
@@ -5057,7 +5057,7 @@ export interface CommsSendParamsPeerMessage {
 
 export interface CommsSendParamsPeerLifecycle {
   kind: "peer_lifecycle";
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss" | "mob.kickoff_pending" | "mob.kickoff_starting" | "mob.kickoff_started" | "mob.kickoff_callback_pending" | "mob.kickoff_failed" | "mob.kickoff_cancelled";
   params: CommsPeerLifecycleParams;
   session_id: string;
   to: PeerId;

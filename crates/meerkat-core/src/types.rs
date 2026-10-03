@@ -2184,6 +2184,10 @@ pub enum CommsNoticeKind {
     ResponseProgress,
     /// Terminal response, completed or failed (wire tag `response_terminal`).
     ResponseTerminal,
+    /// One-way peer lifecycle notice such as a member-kickoff status (wire
+    /// tag `lifecycle`). The notice's `intent` names the lifecycle kind
+    /// (`mob.kickoff_*`); it never carries a request id.
+    Lifecycle,
     /// Forward-compatible escape hatch for an unrecognized wire kind. Projects
     /// as a plain peer message but is matched explicitly, never silently.
     Other(String),
@@ -2198,6 +2202,7 @@ impl CommsNoticeKind {
             Self::Request => "request",
             Self::ResponseProgress => "response_progress",
             Self::ResponseTerminal => "response_terminal",
+            Self::Lifecycle => "lifecycle",
             Self::Other(raw) => raw.as_str(),
         }
     }
@@ -2211,6 +2216,7 @@ impl CommsNoticeKind {
             "request" => Self::Request,
             "response_progress" => Self::ResponseProgress,
             "response_terminal" => Self::ResponseTerminal,
+            "lifecycle" => Self::Lifecycle,
             other => Self::Other(other.to_string()),
         }
     }
@@ -2718,6 +2724,22 @@ impl SystemNoticeBlock {
                         }
                         vec![text]
                     }
+                    CommsNoticeKind::Lifecycle => {
+                        let notice = crate::interaction::format_peer_lifecycle_projection(
+                            peer_id,
+                            peer.as_ref().and_then(|peer| peer.display_name.as_deref()),
+                            intent.as_deref().unwrap_or("lifecycle"),
+                            payload.as_ref().unwrap_or(&Value::Null),
+                        );
+                        // The admitted content is normally this same rendered
+                        // notice; only distinct content is appended.
+                        let distinct_body = !body.trim().is_empty() && body.trim() != notice.trim();
+                        let mut lines = vec![notice];
+                        if distinct_body {
+                            lines.push(body);
+                        }
+                        lines
+                    }
                     CommsNoticeKind::Message | CommsNoticeKind::Other(_) => {
                         vec![crate::interaction::format_peer_message_projection(
                             peer_label, &body,
@@ -2726,7 +2748,9 @@ impl SystemNoticeBlock {
                 };
                 let appends_extras = !matches!(
                     kind,
-                    CommsNoticeKind::Request | CommsNoticeKind::ResponseTerminal
+                    CommsNoticeKind::Request
+                        | CommsNoticeKind::ResponseTerminal
+                        | CommsNoticeKind::Lifecycle
                 );
                 if appends_extras {
                     if let Some(request_id) = request_id {

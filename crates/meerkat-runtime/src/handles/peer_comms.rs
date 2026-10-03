@@ -82,6 +82,24 @@ fn lifecycle_to_dsl(
             "PeerCommsHandle::classify_external_envelope",
             "mob.dismiss is a drain-lifecycle terminal and is not classifiable as peer ingress",
         )),
+        meerkat_core::comms::PeerLifecycleKind::KickoffPending => {
+            Ok(mm_dsl::PeerIngressLifecycleClass::KickoffPending)
+        }
+        meerkat_core::comms::PeerLifecycleKind::KickoffStarting => {
+            Ok(mm_dsl::PeerIngressLifecycleClass::KickoffStarting)
+        }
+        meerkat_core::comms::PeerLifecycleKind::KickoffStarted => {
+            Ok(mm_dsl::PeerIngressLifecycleClass::KickoffStarted)
+        }
+        meerkat_core::comms::PeerLifecycleKind::KickoffCallbackPending => {
+            Ok(mm_dsl::PeerIngressLifecycleClass::KickoffCallbackPending)
+        }
+        meerkat_core::comms::PeerLifecycleKind::KickoffFailed => {
+            Ok(mm_dsl::PeerIngressLifecycleClass::KickoffFailed)
+        }
+        meerkat_core::comms::PeerLifecycleKind::KickoffCancelled => {
+            Ok(mm_dsl::PeerIngressLifecycleClass::KickoffCancelled)
+        }
     }
 }
 
@@ -97,6 +115,24 @@ fn lifecycle_from_dsl(
         }
         mm_dsl::PeerIngressLifecycleClass::PeerUnwired => {
             meerkat_core::comms::PeerLifecycleKind::PeerUnwired
+        }
+        mm_dsl::PeerIngressLifecycleClass::KickoffPending => {
+            meerkat_core::comms::PeerLifecycleKind::KickoffPending
+        }
+        mm_dsl::PeerIngressLifecycleClass::KickoffStarting => {
+            meerkat_core::comms::PeerLifecycleKind::KickoffStarting
+        }
+        mm_dsl::PeerIngressLifecycleClass::KickoffStarted => {
+            meerkat_core::comms::PeerLifecycleKind::KickoffStarted
+        }
+        mm_dsl::PeerIngressLifecycleClass::KickoffCallbackPending => {
+            meerkat_core::comms::PeerLifecycleKind::KickoffCallbackPending
+        }
+        mm_dsl::PeerIngressLifecycleClass::KickoffFailed => {
+            meerkat_core::comms::PeerLifecycleKind::KickoffFailed
+        }
+        mm_dsl::PeerIngressLifecycleClass::KickoffCancelled => {
+            meerkat_core::comms::PeerLifecycleKind::KickoffCancelled
         }
     }
 }
@@ -437,6 +473,9 @@ fn classification_from_effect(
         }
         mm_dsl::PeerIngressInputClass::PeerLifecycleUnwired => {
             meerkat_core::PeerInputClass::PeerLifecycleUnwired
+        }
+        mm_dsl::PeerIngressInputClass::PeerLifecycleKickoff => {
+            meerkat_core::PeerInputClass::PeerLifecycleKickoff
         }
         mm_dsl::PeerIngressInputClass::SilentRequest => meerkat_core::PeerInputClass::SilentRequest,
         mm_dsl::PeerIngressInputClass::Ack => meerkat_core::PeerInputClass::Ack,
@@ -853,7 +892,7 @@ mod tests {
     #[test]
     fn machine_emits_actionable_bit_matching_grouping_for_classified_envelopes() {
         // The machine is the authority on the actionable grouping; assert the
-        // emitted `actionable` bit matches the documented 7-of-12 grouping for
+        // emitted `actionable` bit matches the documented 6-of-11 grouping for
         // every class the MeerkatMachine PeerIngress classifier can emit.
         let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
 
@@ -987,6 +1026,139 @@ mod tests {
             meerkat_core::PeerInputClass::SilentRequest
         );
         assert!(!silent.classification.actionable);
+    }
+
+    /// #1608: an Idle receiver (registered, no runtime bound) admits no
+    /// visible peer work: admission has no Idle transitions, so the
+    /// classifier refuses every visible class there. A kickoff notice is
+    /// refused exactly like a peer message and like the request form it
+    /// replaces, while a silent topology notice still classifies.
+    #[test]
+    fn idle_receiver_refuses_kickoff_notices_like_every_visible_class() {
+        use meerkat_core::comms::PeerLifecycleKind;
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Idle);
+        let envelope = |item: &str, kind| PeerIngressEnvelopeFacts {
+            item_id: item.to_string(),
+            from_peer: "worker-1".to_string(),
+            from_peer_id: meerkat_core::comms::PeerId::new(),
+            kind,
+        };
+        assert!(
+            handle
+                .classify_external_envelope(envelope(
+                    "kickoff",
+                    meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                        kind: PeerLifecycleKind::KickoffStarted,
+                        params: serde_json::json!({ "peer": "worker-1" }),
+                    },
+                ))
+                .is_err(),
+            "Idle must refuse a kickoff notice"
+        );
+        assert!(
+            handle
+                .classify_external_envelope(envelope(
+                    "legacy-kickoff-request",
+                    meerkat_core::PeerIngressEnvelopeKind::Request {
+                        intent: "mob.kickoff_started".to_string(),
+                        params: serde_json::json!({ "peer": "worker-1" }),
+                    },
+                ))
+                .is_err(),
+            "Idle refused the request form too"
+        );
+        assert!(
+            handle
+                .classify_external_envelope(envelope(
+                    "message",
+                    meerkat_core::PeerIngressEnvelopeKind::Message {
+                        body: "hi".to_string(),
+                    },
+                ))
+                .is_err(),
+            "Idle refuses every visible class"
+        );
+        let topology = handle
+            .classify_external_envelope(envelope(
+                "retired",
+                meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                    kind: PeerLifecycleKind::PeerRetired,
+                    params: serde_json::json!({ "peer": "worker-1" }),
+                },
+            ))
+            .expect("Idle still classifies silent topology notices");
+        assert!(!topology.classification.actionable);
+    }
+
+    /// #1608: every member-kickoff kind is a visible, actionable lifecycle
+    /// notice that is not a request. The machine emits no request id (so no
+    /// inbound peer request lifecycle can open), echoes the typed kind, and
+    /// the admitted text asks for no reply. A topology lifecycle notice in
+    /// the same phase stays silent.
+    #[test]
+    fn kickoff_lifecycle_notices_classify_visible_without_a_request_id() {
+        use meerkat_core::comms::PeerLifecycleKind;
+        // The Running transition is the Attached one's twin; the recoverable
+        // test fixture state is Attached.
+        {
+            let phase = mm_dsl::MeerkatPhase::Attached;
+            let handle = handle_for_phase(phase);
+            for kind in [
+                PeerLifecycleKind::KickoffPending,
+                PeerLifecycleKind::KickoffStarting,
+                PeerLifecycleKind::KickoffStarted,
+                PeerLifecycleKind::KickoffCallbackPending,
+                PeerLifecycleKind::KickoffFailed,
+                PeerLifecycleKind::KickoffCancelled,
+            ] {
+                let admission = handle
+                    .classify_external_envelope(PeerIngressEnvelopeFacts {
+                        item_id: format!("kickoff-{kind}"),
+                        from_peer: "worker-1".to_string(),
+                        from_peer_id: meerkat_core::comms::PeerId::new(),
+                        kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                            kind,
+                            params: serde_json::json!({ "peer": "worker-1", "role": "worker" }),
+                        },
+                    })
+                    .unwrap_or_else(|error| panic!("{phase:?} must classify {kind}: {error}"));
+                assert_eq!(
+                    admission.classification.class,
+                    meerkat_core::PeerInputClass::PeerLifecycleKickoff,
+                    "{kind} in {phase:?}"
+                );
+                assert!(
+                    admission.classification.actionable,
+                    "{kind} must be visible"
+                );
+                assert_eq!(admission.classification.lifecycle_kind, Some(kind));
+                assert_eq!(
+                    admission.request_id, None,
+                    "{kind} must not carry a request id"
+                );
+                assert_eq!(admission.lifecycle_peer.as_deref(), Some("worker-1"));
+                assert!(
+                    admission.rendered_text.contains(kind.as_str())
+                        && admission.rendered_text.contains("not a request")
+                        && !admission.rendered_text.contains("Request ID"),
+                    "{kind} must render as a one-way notice: {}",
+                    admission.rendered_text
+                );
+            }
+            let topology = handle
+                .classify_external_envelope(PeerIngressEnvelopeFacts {
+                    item_id: "retired-1".to_string(),
+                    from_peer: "orchestrator".to_string(),
+                    from_peer_id: meerkat_core::comms::PeerId::new(),
+                    kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                        kind: PeerLifecycleKind::PeerRetired,
+                        params: serde_json::json!({ "peer": "worker-1" }),
+                    },
+                })
+                .expect("topology lifecycle classifies");
+            assert!(!topology.classification.actionable);
+            assert!(topology.rendered_text.is_empty());
+        }
     }
 
     #[test]

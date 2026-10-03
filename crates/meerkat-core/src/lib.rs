@@ -281,8 +281,9 @@ pub use interaction::{
     PeerIngressRuntimeSnapshot, PeerIngressTerminalOutcomeCounts, PeerIngressTerminalOutcomeKind,
     PeerInputClass, ResponseStatus, SendResponseCallProjection, TerminalDisposition,
     TerminalityClass, format_external_event_projection, format_peer_ack_projection,
-    format_peer_message_projection, format_peer_request_projection,
-    format_peer_response_projection, render_peer_ingress_admitted_text,
+    format_peer_lifecycle_projection, format_peer_message_projection,
+    format_peer_request_projection, format_peer_response_projection,
+    render_peer_ingress_admitted_text,
 };
 pub use lifecycle::run_primitive::{
     ProviderParamsCarrier, ProviderParamsMergeError, ProviderParamsOverride, ProviderTag,

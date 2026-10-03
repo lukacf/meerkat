@@ -1429,9 +1429,13 @@ peer ID, never a display name.
   that recorded request to still be repliable.
 
 `peer_message` is the ordinary collaboration primitive. `peer_lifecycle`
-is a one-way topology notification: its `lifecycle_kind` is
-`"mob.peer_added"`, `"mob.peer_retired"`, `"mob.peer_unwired"`, or
-`"mob.dismiss"`. `mob.dismiss` is supervisor-directed; accepting that enum
+is a one-way notification: its `lifecycle_kind` is a topology kind
+(`"mob.peer_added"`, `"mob.peer_retired"`, `"mob.peer_unwired"`,
+`"mob.dismiss"`) or a member-kickoff status kind (`"mob.kickoff_pending"`,
+`"mob.kickoff_starting"`, `"mob.kickoff_started"`,
+`"mob.kickoff_callback_pending"`, `"mob.kickoff_failed"`,
+`"mob.kickoff_cancelled"`). Kickoff kinds reach the receiving agent as a
+visible `lifecycle` comms notice; none of them opens a request. `mob.dismiss` is supervisor-directed; accepting that enum
 value does not grant the caller dismissal authority. Its required
 `CommsPeerLifecycleParams` object contains `peer` (string) and optional
 `role`, `description`, and typed `peer_spec` (`BridgePeerSpec`).

@@ -392,6 +392,7 @@ fn comms_notice_kind_wire_tags_match_legacy_strings() {
         (CommsNoticeKind::Request, "request"),
         (CommsNoticeKind::ResponseProgress, "response_progress"),
         (CommsNoticeKind::ResponseTerminal, "response_terminal"),
+        (CommsNoticeKind::Lifecycle, "lifecycle"),
     ];
     for (kind, tag) in cases {
         assert_eq!(serde_json::to_value(&kind).unwrap(), json!(tag));

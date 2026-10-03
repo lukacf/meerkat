@@ -1269,7 +1269,7 @@ runtime-owned default. All paths still enforce runtime authority and response
 contracts. Host overrides are available through RPC `comms/send`, REST, and
 MCP `meerkat_comms_send`.
 
-**Peer lifecycle typing**: mob lifecycle notices are typed at peer ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle context; `mob.kickoff_failed` and `mob.kickoff_cancelled` are visible lifecycle notices. Do not rely on mob defaults in `silent_comms_intents` for canonical behavior.
+**Peer lifecycle typing**: mob lifecycle notices are typed at peer ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle context; the six `mob.kickoff_*` kinds (pending, starting, started, callback_pending, failed, cancelled) are visible lifecycle notices that open no inbound request and need no reply. Do not rely on mob defaults in `silent_comms_intents` for canonical behavior.
 
 **Comms choice**: use `send_message` for ordinary collaboration. Use `send_request` only for structured ask/reply semantics (`intent + params` plus later `send_response`). Peer-side reservation streams were removed.
 

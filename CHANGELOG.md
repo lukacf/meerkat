@@ -1224,6 +1224,11 @@ them.
   queue an ambient cancel on an idle member that its next run could pick up.
   `MobProvisioner` gains `cancel_member_current_run_at_boundary`, whose
   default interrupts the member as before.
+- GPT Live voice session instructions and bridge descriptions no longer name
+  the product. Words in the model-facing instructions bias the provider's
+  input transcription: in Turbo S S103 a planted "Marigold" was transcribed
+  as "meerkat". The voice layer is now "the low-latency voice layer for an
+  executor agent", with the same meaning.
 - GPT Live no longer announces "Finished voice request ... The result follows."
   for a result whose work is still waiting on another member's answer
   (Turbo S combined5 S102 R3: the voice answered that announcement with an

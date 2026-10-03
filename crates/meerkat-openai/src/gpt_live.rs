@@ -42,7 +42,7 @@ pub const GPT_LIVE_RESPONSES_BRIDGE_TOOL: &str = "invoke_meerkat";
     reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
 )]
 const GPT_LIVE_RESPONSES_BRIDGE_DESCRIPTION: &str =
-    "Delegate this request to the channel-bound Meerkat agent.";
+    "Delegate this request to the channel-bound executor agent.";
 #[allow(
     dead_code,
     reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
@@ -953,6 +953,19 @@ fn context_content(text: String) -> InputTextContent {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// The model-facing bridge description names no product: words the
+    /// voice model is given bias its input transcription (Turbo S S103).
+    #[test]
+    fn bridge_description_names_no_product() {
+        assert!(
+            !GPT_LIVE_RESPONSES_BRIDGE_DESCRIPTION
+                .to_ascii_lowercase()
+                .contains("meerkat"),
+            "{}",
+            GPT_LIVE_RESPONSES_BRIDGE_DESCRIPTION
+        );
+    }
     use std::sync::Arc;
 
     use axum::Router;

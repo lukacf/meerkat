@@ -2883,11 +2883,12 @@ enum LiveSessionAuthority {
 /// A live actor holding transcript rows the store has not committed
 /// (`LiveUncommittedTranscript`) is either a run whose boundary commit is
 /// pending or a run that ended without committing. Holding the boundary, no
-/// commit can be pending, so the uncommitted image is resynced. Outside it
-/// the two cannot be told apart, so the actor is left alone: a pending
-/// commit must keep its actor and checkpoint receipt, and an uncommitted
-/// terminal is resynced by the next turn's in-loop entry, which holds the
-/// boundary.
+/// commit can be pending, so the uncommitted image is stale. Outside it, the
+/// image is stale only when the run is recorded as having ended without a
+/// commit ([`PersistentSessionService::live_transcript_awaits_no_boundary_commit`]);
+/// otherwise its commit may still land and its actor and checkpoint receipt
+/// are kept (see
+/// [`PersistentSessionService::uncommitted_live_transcript_is_stale`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveStalenessPosition {
     /// The caller holds the turn-finalization boundary (or runs inside the
@@ -5390,22 +5391,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         else {
             return Ok(false);
         };
-        match (reason, position) {
+        match reason {
             // A run may be between its apply and its boundary commit: its
             // actor and checkpoint receipt are what that commit promotes.
-            (
-                LiveSessionAuthorityReason::LiveUncommittedTranscript,
-                LiveStalenessPosition::OutsideTurnBoundary,
-            ) => return Ok(false),
-            (
-                LiveSessionAuthorityReason::LiveUncommittedTranscript,
-                LiveStalenessPosition::TurnBoundaryHeld,
-            )
-            | (
-                LiveSessionAuthorityReason::StoredArchived
-                | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged,
-                _,
-            ) => {}
+            LiveSessionAuthorityReason::LiveUncommittedTranscript
+                if !self.uncommitted_live_transcript_is_stale(id, position) =>
+            {
+                return Ok(false);
+            }
+            LiveSessionAuthorityReason::LiveUncommittedTranscript
+            | LiveSessionAuthorityReason::StoredArchived
+            | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged => {}
         }
 
         if self
@@ -11258,6 +11254,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(id)
+    }
+
+    /// Whether a live transcript held ahead of the store is stale to a
+    /// caller at `position`. Holding the turn-finalization boundary no
+    /// boundary commit can be pending, so it is. Outside it, it is stale
+    /// only when the run that holds it ended without a commit; a run between
+    /// its apply and its boundary commit keeps its actor and the checkpoint
+    /// receipt that commit promotes.
+    #[must_use]
+    pub fn uncommitted_live_transcript_is_stale(
+        &self,
+        id: &SessionId,
+        position: LiveStalenessPosition,
+    ) -> bool {
+        match position {
+            LiveStalenessPosition::TurnBoundaryHeld => true,
+            LiveStalenessPosition::OutsideTurnBoundary => {
+                self.live_transcript_awaits_no_boundary_commit(id)
+            }
+        }
     }
 
     fn note_live_authority_advanced(&self, id: &SessionId) {

@@ -38,7 +38,7 @@ them.
 ### Breaking
 
 - `meerkat::session_runtime::runtime_state::RuntimeStateOps::live_session_is_stale`
-  takes a `LiveStalenessPosition` (`TurnBoundaryHeld` or
+  takes a `meerkat_session::LiveStalenessPosition` (`TurnBoundaryHeld` or
   `OutsideTurnBoundary`): whether the caller holds the session's
   turn-finalization boundary. See Fixed.
 - MobMachine state records that member run starts are held (#1500):
@@ -1259,10 +1259,14 @@ them.
   - `PersistentSessionService::live_session_export` now answers with a typed
     `LiveSessionExport` (`Live`, `NoLive` or `DurableAuthoritative { reason
     }`).
-  - Staleness applies the reason by caller position: outside the
-    turn-finalization boundary an uncommitted transcript is never stale (the
-    next turn's in-loop entry resyncs an uncommitted terminal); holding the
-    boundary it is resynced as before.
+  - An uncommitted live transcript is stale per
+    `PersistentSessionService::uncommitted_live_transcript_is_stale` and a
+    `LiveStalenessPosition` (`TurnBoundaryHeld` or `OutsideTurnBoundary`).
+    Holding the turn-finalization boundary it always is. Outside it, it is
+    stale only when its run ended without a commit
+    (`live_transcript_awaits_no_boundary_commit`), so a run between its apply
+    and its boundary commit keeps its actor and checkpoint receipt, while a
+    stopped or failed run's image is still discarded as before.
 - Generated TLA+ models applied a set insert or remove to only one branch of a
   field that a conditional update had already changed in the same transition.
   The pending value `IF c THEN a ELSE b` was spliced unparenthesized as the

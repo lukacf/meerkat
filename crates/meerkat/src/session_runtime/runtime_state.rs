@@ -510,14 +510,11 @@ mod ops {
         /// the live snapshot already mirrors the durable record.
         ///
         /// A live actor holding transcript rows the store has not committed
-        /// (`LiveUncommittedTranscript`) is either a turn whose boundary
-        /// commit is pending or a turn that ended without committing.
-        /// `position` says which the caller can tell apart: holding the
-        /// turn-finalization boundary, no commit can be pending, so the
-        /// uncommitted image is stale and is resynced; outside it the two
-        /// cannot be told apart, so the actor is not stale (a pending commit
-        /// must never lose its actor, and an uncommitted terminal is resynced
-        /// by the next turn's in-loop entry, which holds the boundary).
+        /// (`LiveUncommittedTranscript`) is stale per
+        /// `PersistentSessionService::uncommitted_live_transcript_is_stale`:
+        /// always to a caller holding the turn-finalization boundary, and
+        /// outside it only when its run ended without a commit, so a run
+        /// between its apply and its boundary commit keeps its actor.
         ///
         /// `recovery_ctx` provides the
         /// [`RecoveryContext::load_persisted_session`] flow used to
@@ -542,13 +539,13 @@ mod ops {
                 LiveSessionExport::DurableAuthoritative {
                     reason: LiveSessionAuthorityReason::LiveUncommittedTranscript,
                 } => {
-                    return Ok(match position {
-                        LiveStalenessPosition::TurnBoundaryHeld => recovery_ctx
+                    return Ok(self
+                        .service
+                        .uncommitted_live_transcript_is_stale(session_id, position)
+                        && recovery_ctx
                             .load_persisted_session(session_id)
                             .await?
-                            .is_some(),
-                        LiveStalenessPosition::OutsideTurnBoundary => false,
-                    });
+                            .is_some());
                 }
                 LiveSessionExport::NoLive
                 | LiveSessionExport::DurableAuthoritative {

@@ -14511,6 +14511,106 @@ mod tests {
         }
     }
 
+    /// The other half of the staleness rule: a live actor left holding an
+    /// uncommitted terminal (a run that ended without committing its
+    /// boundary) is stale even to a turn/start outside the turn-finalization
+    /// boundary, because no commit is coming for it. The racing turn/start
+    /// discards it as before and the next turn runs on durable truth: the
+    /// stopped run's rows never reach it. Only a run whose commit may still
+    /// land is left alone (see the racing test below).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_uncommitted_terminal_is_stale_from_either_position_and_the_next_turn_runs_on_durable_truth() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(AgentFactory::new(temp.path().join("sessions")), 4);
+        let (build, calls, release) = block_after_first_build_config();
+        let session_id = runtime
+            .create_or_resume_session_without_turn(build, None, None, Default::default())
+            .await
+            .unwrap();
+        let turn = |prompt: &'static str| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        prompt.into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+        turn("committed prompt")
+            .await
+            .unwrap()
+            .expect("the first turn commits");
+
+        // A stopped run ends without committing its boundary.
+        let mut notifications = capture_session_events(&runtime);
+        let stopped = turn("stopped prompt");
+        wait_for_llm_calls(&calls, 2, "the second turn's provider call is in flight").await;
+        let run_id = run_started_run_id(&mut notifications, &session_id).await;
+        assert!(matches!(
+            runtime
+                .stop_run(&session_id, &run_id, "stop it".into())
+                .await
+                .expect("stop the run"),
+            meerkat_runtime::RunStopReceipt::Stopped { .. }
+        ));
+        assert!(
+            tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, stopped)
+                .await
+                .expect("the stopped turn returns")
+                .unwrap()
+                .is_err(),
+            "the stopped turn reports cancellation"
+        );
+
+        // The actor holds the stopped run's rows and no commit is coming for
+        // them: stale from either position.
+        for position in [
+            LiveStalenessPosition::OutsideTurnBoundary,
+            LiveStalenessPosition::TurnBoundaryHeld,
+        ] {
+            assert!(
+                runtime
+                    .live_session_is_stale(&session_id, position)
+                    .await
+                    .unwrap(),
+                "{position:?}: the stopped run's uncommitted image is stale"
+            );
+        }
+
+        release.notify_one();
+        turn("next prompt")
+            .await
+            .unwrap()
+            .expect("the next turn runs on durable truth");
+        let transcript = serde_json::to_string(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .unwrap()
+                .messages(),
+        )
+        .unwrap();
+        assert!(
+            transcript.contains("committed prompt") && transcript.contains("next prompt"),
+            "{transcript}"
+        );
+        assert!(
+            !transcript.contains("stopped prompt"),
+            "the stopped run's uncommitted rows were resynced away: {transcript}"
+        );
+    }
+
     /// Where a run of the racing test is held.
     #[derive(Clone, Copy, Debug)]
     enum InFlightRunWindow {

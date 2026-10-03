@@ -2015,6 +2015,12 @@ them.
     opens channels on its own request tasks, so S97's open installs the
     provider-stream recorder as a process-wide fallback (test-realtime-fixtures
     only) around `live/open` and the answer.
+  - S97's result readout is anchored on the provider's acknowledgement of
+    the result append as the browser saw it: the peer journals every
+    `session.*.appended` with its media counters, and decoded speech plus an
+    output transcript delta must follow that row. The old baseline was taken
+    after the harness noticed the worker retire, so a prompt readout could
+    finish before it and fail a correct run.
   - A failed scenario (an error or a panic) closes its live channel through
     the exact close before teardown, so the provider's `session.closed`
     drains the sideband and the provider stream records every frame sent

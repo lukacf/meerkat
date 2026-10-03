@@ -1830,14 +1830,47 @@ async fn run_s97_client_context_vertical(
         }
         sleep(Duration::from_millis(500)).await;
     };
-    let post_result_audio_baseline = peer.audio_evidence().await?;
+    // When the harness noticed the worker retire: evidence only. It lags the
+    // result by an output-driven amount (this loop also drains outputs), so
+    // it is never the readout's baseline (verdict 67bf6160 S97 run 3).
+    let channel = evidence.current_channel()?;
+    record_metric(
+        &evidence,
+        channel,
+        "S97",
+        "member_retired_observed",
+        format!(
+            "journal_ms={}",
+            evidence.elapsed_ms_at(std::time::Instant::now())
+        ),
+    )?;
+    // The readout is anchored on the provider's acknowledgement of this
+    // delegation's result append, as the peer saw it: decoded speech and an
+    // output transcript delta must both follow it. A readout that completes
+    // before the retirement poll still counts; a result that is never voiced
+    // still fails.
+    let (ack_index, ack_audio) =
+        s97_result_ack(&evidence, channel, &provider_delegation_ref).await?;
+    record_metric(
+        &evidence,
+        channel,
+        "S97",
+        "result_ack",
+        format!(
+            "peer_event_index={ack_index} journal_ms={} baseline={ack_audio:?}",
+            evidence.elapsed_ms_at(std::time::Instant::now())
+        ),
+    )?;
+    let after_ack = usize::try_from(ack_index)? + 1;
     let readout = wait_for_events(&mut peer, 120, |events| {
-        events[delegation_index + 1..]
-            .iter()
-            .any(|event| event["type"] == "session.output_transcript.delta")
+        events.get(after_ack..).is_some_and(|after| {
+            after
+                .iter()
+                .any(|event| event["type"] == "session.output_transcript.delta")
+        })
     })
     .await?;
-    wait_for_spoken_output(&mut peer, post_result_audio_baseline, 60).await?;
+    wait_for_spoken_output(&mut peer, ack_audio, 60).await?;
     while let Some(output) = rpc
         .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(5))
         .await?
@@ -2389,6 +2422,35 @@ impl Drop for SummaryJobGuard {
                 eprintln!("{fault}; journal={}", evidence.path().display());
             }
         }
+    }
+}
+
+/// The peer's sighting of the provider's acknowledgement of the result
+/// append for `provider_delegation_id` (keyed by the result's recorded
+/// `client_event_id`): its index in the peer's event log and the media
+/// counters at that moment, from the journal's `appended` row.
+async fn s97_result_ack(
+    evidence: &Journal,
+    channel: u32,
+    provider_delegation_id: &str,
+) -> Result<(u64, support::AudioEvidence), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(client_event_id) =
+            meerkat::experimental_gpt_live::__released_result_client_event_id(
+                provider_delegation_id,
+            )
+            && let Some(ack) = evidence.appended_ack(channel, &client_event_id)?
+        {
+            return Ok(ack);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "S97: the peer saw no acknowledgement of the result append for delegation {provider_delegation_id} within 120 s"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
     }
 }
 

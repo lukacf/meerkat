@@ -279,6 +279,16 @@ pub enum NativeRecord {
         browser_ms: f64,
         audio: AudioEvidence,
     },
+    /// The provider's acknowledgement of a client append
+    /// (`session.*.appended`) as the peer saw it, with the media counters at
+    /// that moment.
+    Appended {
+        event_type: String,
+        client_event_id: Option<String>,
+        event_index: u64,
+        browser_ms: f64,
+        audio: AudioEvidence,
+    },
     Fault {
         fault: BrowserFault,
         /// Soft faults are sampled through the evidence chain and carry the
@@ -971,6 +981,9 @@ struct State {
     instructions_appends: HashMap<String, InstructionsAppendReassembly>,
     /// Soft browser faults (overlap, duplicate readout); never invalidate.
     browser_faults: Vec<BrowserFault>,
+    /// The peer's `session.*.appended` sightings: (channel, client event id,
+    /// peer event index, media counters).
+    appended: Vec<(u32, String, u64, AudioEvidence)>,
     /// Speech end to input final lag of every exchange that reached its
     /// final, in order.
     exchange_lags: Vec<(String, i64)>,
@@ -1142,6 +1155,7 @@ impl Journal {
                 framed_summary_attempts: 0,
                 instructions_appends: HashMap::new(),
                 browser_faults: Vec::new(),
+                appended: Vec::new(),
                 exchange_lags: Vec::new(),
                 pending_exchange: None,
                 timed_out_exchange: None,
@@ -1380,7 +1394,40 @@ impl Journal {
                 }
             }
         }
+        if let NativeRecord::Appended {
+            client_event_id: Some(client_event_id),
+            event_index,
+            audio,
+            ..
+        } = &record
+        {
+            self.0
+                .state
+                .lock()
+                .map_err(|_| Fault::Poisoned)?
+                .appended
+                .push((channel, client_event_id.clone(), *event_index, *audio));
+        }
         self.record(Record::Native { channel, record })
+    }
+
+    /// The peer's first sighting of the provider's acknowledgement of the
+    /// client append `client_event_id` on `channel`: its event index in the
+    /// peer's event log and the media counters at that moment.
+    pub fn appended_ack(
+        &self,
+        channel: u32,
+        client_event_id: &str,
+    ) -> Result<Option<(u64, AudioEvidence)>, Fault> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .appended
+            .iter()
+            .find(|(c, id, _, _)| *c == channel && id == client_event_id)
+            .map(|(_, _, index, audio)| (*index, *audio)))
     }
 
     /// Soft browser faults recorded so far. Scenarios assert on this; the
@@ -2378,6 +2425,61 @@ mod tests {
             Err(Fault::AfterFinish)
         );
         assert_eq!(journal.check(), Err(Fault::AfterFinish));
+    }
+
+    /// The peer's `session.*.appended` sightings are kept per channel and
+    /// client event id with their media counters (S97's readout baseline);
+    /// the first sighting wins and an id-less one is not indexed.
+    #[test]
+    fn appended_sightings_carry_the_media_counters_of_that_moment() {
+        let root = root();
+        let journal = Journal::at(
+            root.path(),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let appended = |id: Option<&str>, index: u64, frames: u64| -> NativeRecord {
+            serde_json::from_value(serde_json::json!({
+                "kind": "appended",
+                "event_type": "session.commentary.appended",
+                "client_event_id": id,
+                "event_index": index,
+                "browser_ms": 1000.0,
+                "audio": {
+                    "decoded_non_silent_frames": frames, "decoded_non_silent_seconds": 0.5,
+                    "non_silent_frames": frames, "total_audio_energy": null,
+                    "total_samples_received": null, "total_samples_duration": null,
+                    "bytes_received": 10, "packets_received": 10
+                }
+            }))
+            .unwrap()
+        };
+        journal.native(1, appended(None, 3, 1)).unwrap();
+        journal
+            .native(1, appended(Some("meerkat-append-6"), 7, 42))
+            .unwrap();
+        journal
+            .native(1, appended(Some("meerkat-append-6"), 9, 99))
+            .unwrap();
+        let (index, audio) = journal
+            .appended_ack(1, "meerkat-append-6")
+            .unwrap()
+            .unwrap();
+        assert_eq!((index, audio.decoded_non_silent_frames), (7, 42));
+        assert!(
+            journal
+                .appended_ack(2, "meerkat-append-6")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            journal
+                .appended_ack(1, "meerkat-append-7")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

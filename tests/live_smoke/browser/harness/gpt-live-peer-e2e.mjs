@@ -618,6 +618,18 @@ async function prepare(command) {
       }
       state.events.push(parsed);
       const t = nowMs();
+      // A provider acknowledgement of a client append, stamped with the
+      // media counters at the moment the peer saw it: the exact baseline for
+      // "speech after this context reached the model" (S97's result readout).
+      if (captureEvidence && typeof parsed?.type === 'string' && parsed.type.endsWith('.appended')) {
+        state.recordEvidence({
+          kind: 'appended',
+          event_type: parsed.type,
+          client_event_id: typeof parsed.client_event_id === 'string' ? parsed.client_event_id : null,
+          event_index: state.events.length - 1,
+          browser_ms: performance.now(),
+        });
+      }
       const isInputDelta = protocol === 'public'
         ? parsed?.type === 'session.input_transcript.delta'
         : parsed?.type === 'input_transcript.added';

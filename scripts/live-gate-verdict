@@ -5,7 +5,8 @@ usage: scripts/live-gate-verdict <bazel-log> <bazel-exit-code>
 
 The lane runs every GPT Live scenario exactly once (no Bazel retry), with
 --test_output=errors, so each failed run prints one
-"==== Test output for //:<target> (run N of M):" section. A section carrying
+"==== Test output for //:<target>:" section ("... (run N of M):" when a
+target runs more than once). A section carrying
 the scenario's typed provider-degraded verdict (GPT_LIVE_VERDICT ...
 verdict=provider_degraded, emitted by Journal::provider_degraded_verdict when
 the provider's input transcription lagged past the measured threshold) is
@@ -24,7 +25,9 @@ Exit codes:
 import re
 import sys
 
-SECTION = re.compile(r"^=+ Test output for (//\S+) \(run (\d+) of (\d+)\):\s*$")
+# Bazel prints "(run N of M)" only when a target runs more than once; the
+# gate's single run prints the bare target.
+SECTION = re.compile(r"^=+ Test output for (//[^\s:]*:[^\s:]+)(?: \(run (\d+) of (\d+)\))?:\s*$")
 SECTION_END = re.compile(r"^={40,}\s*$")
 DEGRADED = re.compile(r"GPT_LIVE_VERDICT .*verdict=provider_degraded|PROVIDER_DEGRADED: ")
 
@@ -41,7 +44,7 @@ def main() -> int:
             line = line.rstrip("\n")
             start = SECTION.match(line)
             if start:
-                current = {"target": start.group(1), "run": start.group(2), "degraded": False}
+                current = {"target": start.group(1), "run": start.group(2) or "1", "degraded": False}
                 sections.append(current)
                 continue
             if current is not None:

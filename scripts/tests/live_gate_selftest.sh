@@ -72,6 +72,17 @@ section 104 "GPT_LIVE_VERDICT scenario=S104 verdict=provider_degraded exchange=e
 [[ "$(run_verdict "$work/void.log" 3)" == 3 ]] || fail "a provider-degraded-only run was not VOID"
 { section 104 "GPT_LIVE_VERDICT scenario=S104 verdict=provider_degraded exchange=e2"; section 101 "S101 deterministic checks failed"; } > "$work/red.log"
 [[ "$(run_verdict "$work/red.log" 3)" == 1 ]] || fail "a real failure next to a void was not RED"
+# The gate runs each target once, and Bazel then prints the bare target with
+# no "(run N of M)" suffix (#1544's first full run reported its four real
+# failures as "Bazel exited 3 without test output").
+bare() { printf '==================== Test output for //:e2e_smoke_turbo_s_s%s:\n%s\n%s\n' "$1" "$2" "$(printf '=%.0s' $(seq 1 80))"; }
+bare 103 "S103 deterministic checks failed" > "$work/bare-red.log"
+[[ "$(run_verdict "$work/bare-red.log" 3)" == 1 ]] || fail "a single-run failure section was not parsed as RED"
+bare_out="$(python3 "$verdict" "$work/bare-red.log" 3 2>/dev/null || true)"
+grep -q '^RED  //:e2e_smoke_turbo_s_s103 run 1$' <<<"$bare_out" \
+  || fail "a single-run failure section was not attributed to its target"
+bare 104 "GPT_LIVE_VERDICT scenario=S104 verdict=provider_degraded exchange=e2" > "$work/bare-void.log"
+[[ "$(run_verdict "$work/bare-void.log" 3)" == 3 ]] || fail "a single-run provider-degraded section was not VOID"
 
 # The setup-buildbuddy-ci composite action reads BUILDBUDDY_API_KEY from the
 # job environment; a step-level env never reaches it (#1544's first runs

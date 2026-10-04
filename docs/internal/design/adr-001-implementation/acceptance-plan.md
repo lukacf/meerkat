@@ -38,8 +38,10 @@ original opt-ins. Interrupted recovery and persistent administration remain open
 The revised restart case also proves current ingress accepts historical claims
 before current grant authority refuses them, with no effect or durable input
 entry. The full revised native target passed 16 cases with no ignores; three
-smoke-wrapper controls passed separately. Normal successor gates/publication
-remain open.
+smoke-wrapper controls passed separately. The selected changed-path governance
+and Clippy checks and actual prebuilt outer E1 wrapper also passed. The failed
+Make agent gate and deliberately stopped first Make smoke materializer remain
+recorded separately; normal successor publication/CI are pending.
 The exact published-source optimized build and both cost correctness selectors
 passed. The first quiet small-fixture timing run is measured: whole-turn
 Local-minus-Trusted overhead was +117.33 percent at grant lineage depth 1 and
@@ -48,7 +50,7 @@ the representative-turn gate and individual-operation acceptance remain unproven
 
 The accepted order is publication, exact published-source optimized-build and
 correctness qualification, then an explicitly allocated 45-minute small quiet
-window. The verified `157` binary remains qualified for local `51`'s unchanged
+window. The verified `157` binary remains qualified for published `51`'s unchanged
 benchmark/build-selection inputs; its four generated/lock files do not require a
 redundant workload rebuild. The implementation lead owns measurement and the GCP
 resource owner explicitly clears the host before START. The first small run

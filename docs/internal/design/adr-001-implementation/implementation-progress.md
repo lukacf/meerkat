@@ -165,16 +165,27 @@ of the outer smoke wrapper. Documentation checks passed after the status edits.
 The Make agent gate stopped before Clippy on two existing lane-doctor failures:
 archive-mode nextest workflow scanning and the Rust selector module parser
 selftest. Its shell also cannot source the Bash backend helper under /bin/sh.
-The documented Cargo changed-path gate is running separately with all selected
-governance and Clippy checks; the Make gate is not recorded as green.
+The documented Cargo changed-path gate passed all selected governance and
+Clippy checks (`restart-acceptance51-cargo-agent-gate-r1.log`); Clippy finished
+its dev-profile check in 23m49s. This does not make the failed Make agent gate green.
+
+The first Make e2e-smoke attempt was deliberately stopped during redundant
+dev-profile materialization (exit 143;
+`restart-acceptance51-outer-e1-prebuilt-r1.log`). The existing prebuilt outer E1
+wrapper then passed 1 selected case (15.88s leaf compile, 0.72s outer body),
+running the already-built native case with 1 inner pass in 0.63s
+(`restart-acceptance51-outer-e1-prebuilt-r2.log`). Its existing
+`restart-e1-artifact-manifest.json` records the artifact selection. These are
+outer/inner wrapper results for E1, not a new execution of all 16 native cases.
 
 This qualifies completed-turn reconstruction followed by new work in the
 explicit embedding fixture. The HTTP Bearer header is synthetic and independent
 of restored secret bytes; the read is a callback rather than filesystem/source
 access. It does not qualify interrupted replay, provider secret refresh/rotation,
 persistent controller/grant administration, automatic constructors, full surface
-coverage or performance. These body results do not establish wrapper/lint
-or normal checkpoint qualification. No runtime production change is included.
+coverage or performance. The changed-path governance/Clippy and selected outer
+wrapper results are qualified separately above; full Make-gate and normal
+successor publication/CI remain open. No runtime production change is included.
 
 ## Current local shell and hook checkpoint, 2026-10-03
 
@@ -191,7 +202,10 @@ confinement causes and ordinary pre-entry IO. Its normal commit hooks, broader
 Clippy, schema/SDK freshness and 18 wire regressions passed. The broader Clippy
 command spent 43m01s compiling/checking; the wire test body took 0.01s after
 2m53s compilation. Raw results remain in the existing evidence directory below.
-These are local checkpoints; publication, native PR CI and overhead remain open.
+These results describe the local shell/hook checkpoints before publication.
+The publication section above records CI-green `51` and the measured small
+fixture. Native command-hook integration, full surface coverage and the
+representative/per-operation performance gates remain open.
 
 The explicit pre-tool policy-denial slice is committed locally at
 `9a3a80964b486e86416d1cab99448d5e90184150`, tree

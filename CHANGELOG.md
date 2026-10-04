@@ -1327,6 +1327,25 @@ them.
   ends without `Done`, rather than assembling the partial blocks. Its live
   deltas carry the retried id and are discarded on `Retrying`, as for any
   retried attempt.
+- SQLite sessions no longer report `Corrupted` on a cold load after a
+  compaction rewrite that rotated the row-lineage anchor. A rotated anchor
+  sealed the whole head, including the live tail the rotating rewrite
+  persisted after its last edge's result. The graph bases the next rewrite
+  on that result, below the anchor's end, and cold row replay can only
+  advance from its anchor. The anchor rotates every 32 rewrites, and in this
+  release also whenever the history retention cut passes it. The rotated
+  anchor now seals the last edge's result, and the live tail stays
+  post-anchor rows.
+
+  Data note: 0.8.50 and earlier SQLite sessions with more than 32 compaction
+  rewrites could already be in this state, failing to load with
+  `Corrupted`. No rows were lost. Cold load now replays such a session from
+  the edge its anchor sealed (the core accepts that origin only when the
+  edge's result witness, extended by the anchor's own tail rows, reproduces
+  the anchor exactly), and the session's next rewrite re-mints the anchor.
+  `SessionHead::begin_row_lineage_replay_from_released_rotated_anchor` is
+  the new, hidden, store-facing entry point.
+
 - A GPT Live typed update that later speech corrected only in part keeps
   its other values (Turbo S S99, #1629: after a typed "code word Violet,
   favorite flower Marigold" and a spoken "code word Cobalt", the voice

@@ -1,10 +1,16 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 17:33 UTC
+## Current delivery status, 2026-10-04 at 17:56 UTC
 
-The native governed-flow checkpoint is published and CI-green at `00b0cab3`.
-Its allocation/benchmark successor `b12d81e7` is still running normal push
-hooks; the earlier CI result does not qualify that successor. Performance is
+Native PR1634 is published at `b12d81e71e57bfeb2c3bc677c21c782f57cc3df6`,
+tree `1f9553187e12d0a7f91ac0cdd0ff54e56e658c77`. All normal push hooks,
+including the workspace unit, integration and E2E gate, passed in 117m48s,
+ending at 17:52:00 UTC. Successful hook output does not retain individual
+lane counts; no counts are inferred from that result. The raw log is
+`publicb12d-normal-push-r1.log` in the retained evidence directory.
+[Fresh CI37222144847](https://github.com/lukacf/meerkat/actions/runs/37222144847)
+is in progress; [semver readiness](https://github.com/lukacf/meerkat/actions/runs/37222144843)
+passed. Predecessor `00b0cab3` remains separately CI-green. Performance is
 still unacceptable: the latest six-cell study missed every conditional mean
 threshold, with fresh-turn overhead of 137.01 and 145.20 percent at grant
 depths 1 and 3. Individual-operation p99 and full coverage remain open.
@@ -52,8 +58,10 @@ and separate small-matrix profile remain unchanged. Raw `red.log`, `green.log`
 and `deadline.log` are retained in
 `/private/tmp/adr-001-representative-profile-contract-r1`. This qualifies profile
 selection, not performance. Strict scoped Clippy passed in 3m21s and the
-repository analyzer self-test passed all 20 cases in 1.419s. Publication is
-pending.
+repository analyzer self-test passed all 20 cases in 1.419s. The correction is
+committed at `ce8d57524897fe656df8c9944ea13d4913c82f8f`, tree
+`535415075d176351885843d763628804363ffbf7`, with normal commit hooks passed.
+Its publication is pending.
 
 ## Publication gate, 2026-10-04
 

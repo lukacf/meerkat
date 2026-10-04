@@ -403,6 +403,32 @@ else
   bad "direct TLC witness replaced explicit stack policy, duplicated JVM defaults, or left the launcher layer inconsistent"
 fi
 
+# The lane runs as parts (Bazel runs each as its own target): every hand
+# audit runs in exactly one audit shard, the machine-verify part runs none,
+# and the shards together run exactly the audits of the whole lane.
+lane_part_output() {
+  PATH="$tlc_env_tmp:$PATH" \
+    TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+    TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+    bash crates/xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" "$@" 2>&1
+}
+audit_lines() { grep -E '^running bounded .* TLC audit$' | sort; }
+if all_out="$(lane_part_output)" \
+  && a_out="$(lane_part_output --part audits-a)" \
+  && b_out="$(lane_part_output --part audits-b)" \
+  && mv_out="$(lane_part_output --part machine-verify)" \
+  && [ -n "$(printf '%s\n' "$a_out" | audit_lines)" ] \
+  && [ -n "$(printf '%s\n' "$b_out" | audit_lines)" ] \
+  && [ -z "$(printf '%s\n' "$mv_out" | audit_lines)" ] \
+  && printf '%s\n' "$mv_out" | grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' \
+  && ! printf '%s\n' "$a_out" "$b_out" | grep -Fq 'running bounded adaptive_mob_bundle' \
+  && [ -z "$(comm -12 <(printf '%s\n' "$a_out" | audit_lines) <(printf '%s\n' "$b_out" | audit_lines))" ] \
+  && [ "$( (printf '%s\n' "$a_out"; printf '%s\n' "$b_out") | audit_lines)" = "$(printf '%s\n' "$all_out" | audit_lines)" ]; then
+  ok "TLC lane parts: each hand audit runs in exactly one shard, machine-verify runs none, and the shards cover the whole lane"
+else
+  bad "TLC lane parts drop, duplicate, or misplace a hand audit, or the machine-verify part runs one"
+fi
+
 echo ""
 echo "gate summary: ${pass} passed, ${fail} failed"
 if [ "$fail" -ne 0 ]; then

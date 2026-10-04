@@ -918,6 +918,16 @@ function onPlaybackHint(params: { channel_id: string; hint: "duck" | "restore" }
 }
 ```
 
+The hint is advisory, and the policy above is the strict one: no assistant
+audio over the user. Its cost is a short user acknowledgement ("okay",
+"mm-hmm") loud enough to count as speech: playback stays ducked for the
+acknowledgement plus 1.6 s of the user's silence, so roughly two seconds of a
+long readout go unheard. Faint backchannels under the speech threshold never
+duck. A client that prefers to keep backchannel-time audio over strict
+talk-over may attenuate partially instead of silencing, for example
+`applyLiveAssistantPlaybackHint(gate, hint, now, { duckedGain: 0.2 })`; the
+restore timing is the same either way.
+
 `applyLiveAssistantPlaybackHint` takes any object with a
 `gain.setTargetAtTime` method, so it stays independent of the DOM types. The
 constants `LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN` (0),

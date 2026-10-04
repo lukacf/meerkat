@@ -113,13 +113,26 @@ export const LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S = 0.01;
  *
  * `currentTime` is the audio context's clock (`AudioContext.currentTime`).
  */
+export interface LiveAssistantPlaybackGateOptions {
+  /**
+   * Gain while ducked, 0 (silence, the default) to 1. A client that would
+   * rather keep backchannel-time audio than enforce strict talk-over can
+   * attenuate partially, for example 0.2.
+   */
+  readonly duckedGain?: number;
+}
+
 export function applyLiveAssistantPlaybackHint(
   node: LiveGainNodeLike,
   hint: LiveAssistantPlaybackHint,
   currentTime: number,
+  options: LiveAssistantPlaybackGateOptions = {},
 ): void {
-  const target =
-    hint === "duck" ? LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN : LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN;
+  const duckedGain = Math.min(
+    LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN,
+    Math.max(0, options.duckedGain ?? LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN),
+  );
+  const target = hint === "duck" ? duckedGain : LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN;
   node.gain.cancelScheduledValues?.(currentTime);
   node.gain.setTargetAtTime(target, currentTime, LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S);
 }

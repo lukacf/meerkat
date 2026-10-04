@@ -127,3 +127,13 @@ test("a throwing live listener does not stop the next one", async () => {
   );
   assert.deepEqual(seen, ["duck"]);
 });
+
+test("a client may duck partially; the gain is clamped to [0, 1]", () => {
+  const node = recordingGain();
+  applyLiveAssistantPlaybackHint(node, "duck", 1, { duckedGain: 0.2 });
+  applyLiveAssistantPlaybackHint(node, "duck", 2, { duckedGain: -1 });
+  applyLiveAssistantPlaybackHint(node, "duck", 3, { duckedGain: 4 });
+  applyLiveAssistantPlaybackHint(node, "restore", 4, { duckedGain: 0.2 });
+  const targets = node.calls.filter((call) => call[0] === "target").map((call) => call[1]);
+  assert.deepEqual(targets, [0.2, 0, 1, LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN]);
+});

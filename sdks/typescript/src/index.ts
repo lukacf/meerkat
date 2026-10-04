@@ -56,6 +56,7 @@ export {
   liveWebrtcMediaConstraints,
 } from "./live_webrtc.js";
 export type {
+  LiveAssistantPlaybackGateOptions,
   LiveAssistantPlaybackHint,
   LiveAudioParamLike,
   LiveGainNodeLike,

@@ -742,7 +742,8 @@ them.
   (with `ExperimentalLivePlaybackHint`), which drops them unless overridden,
   so a publisher that forwards every observation as a playback handle never
   sees one. In the TypeScript SDK, `applyLiveAssistantPlaybackHint(gainNode,
-  hint, currentTime)` with the gain constants
+  hint, currentTime, options?)` (`LiveAssistantPlaybackGateOptions.duckedGain`
+  for partial attenuation instead of silence) with the gain constants
   `LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN`, `LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN`
   and `LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S`.
 - The TypeScript and Python SDKs deliver `live/*` notifications

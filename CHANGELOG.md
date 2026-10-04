@@ -77,7 +77,6 @@ them.
   `TransitionId::ClassifyExternalEnvelopeLifecycleKickoffRunning`, appended.
   Code matching any of these enums exhaustively must handle the new
   variants.
-
 - MobMachine state records that member run starts are held (#1500):
   `MobMachineState` (meerkat-machine-schema) and the kernel `State`
   (meerkat-machine-kernels) gain the field `member_run_starts_held`, so code
@@ -1253,25 +1252,26 @@ them.
 
 ### Fixed
 
-- A GPT Live result cue no longer leaves delegation framing behind for the
-  user's next question (Turbo S S99). Cues go on the instructions lane,
-  which persists. Every cue now ends with a scope sentence that keeps
-  questions about the conversation native: "Only this result: answer
-  questions about this conversation yourself." The "if the user's latest
-  request is still unanswered, answer it first" clause is sent only while a
-  request is open: one the model's output or a delegation has not answered,
-  a typed broker fact that reflected-input silence does not clear (S103 r2).
-  A cue that does not fit one 500-byte append (an outcome cue with an open
-  request) is split before the scope sentence. A deferred cue is also no longer
-  released into the user's next question by the model's own lagging
-  transcript: an output transcript delta that started before the user's
-  utterance is the tail of the previous reply and clears neither the
-  user's floor nor the open request, and a deferred cue waits while
-  reflected input still carries the user's speech (S99 on #1630 r3). The
-  cue is a thinking append, not an instructions append: instructions
-  persist as standing session instructions, and a persisted cue's
-  delegation framing carried into the next question.
-
+- A GPT Live result cue no longer carries delegation framing into the user's
+  next question (Turbo S S99: recall questions were delegated after a cue)
+  (#1630).
+  - The cue is a thinking append, still bound to its delegation. Cues went
+    on the instructions lane, which persists as standing session
+    instructions, so a cue's delegation framing stayed in force for the next
+    question.
+  - Every cue ends with a scope sentence that keeps questions about the
+    conversation native: "Only this result: answer questions about this
+    conversation yourself." A cue that does not fit one 500-byte append (an
+    outcome cue with an open request) is split before that sentence.
+  - The "if the user's latest request is still unanswered, answer it first"
+    clause is sent only while a request is open: one that neither the
+    model's output nor a delegation has answered, a typed broker fact that
+    reflected-input silence does not clear (S103 r2).
+  - A deferred cue is no longer released into the user's next question by
+    the model's own lagging transcript. An output transcript delta that
+    started before the user's utterance is the tail of the previous reply
+    and clears neither the user's floor nor the open request, and a deferred
+    cue waits while reflected input still carries the user's speech (S99).
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to
   acquire the boundary, so a caller that dropped its last service handle while
@@ -1295,7 +1295,6 @@ them.
   brief goodbye itself and the app ends the call (Turbo S S106 r4). The voice
   model cannot end a call, and the instructions route work it cannot do to
   the executor, so "Close the call" was delegated.
-
 - GPT Live no longer replays its own "let me check" speech after a late
   summary as if it were a fact (Turbo S S99 r1: after the summary had
   answered the vault-phrase question, the quiet replay re-showed the model
@@ -1347,7 +1346,6 @@ them.
   comms notice naming the kind, waking it as before), no inbound request is
   recorded, and the notice asks for no reply. A notice from an older sender
   still arrives as a request. Topology notices (`mob.peer_*`) are unchanged.
-
 - GPT Live no longer announces "Finished voice request ... The result follows."
   for a result whose work is still waiting on another member's answer
   (Turbo S combined5 S102 R3: the voice answered that announcement with an
@@ -1386,7 +1384,6 @@ them.
   S102 R3, and S102 r2 before it). The check now reads the typed comms row:
   `response_terminal` for the exact request id, from the member, with status
   `completed`.
-
 - GPT Live answers questions about text chat turns typed during a call
   itself (Turbo S S105 r5: after a typed correction committed mid-call, "So
   what are the two numbers now" was delegated). The session instructions
@@ -1458,7 +1455,6 @@ them.
   changes the machine state. The live delegation channel loop also logs why
   it ended (cancelled, stream ended, stream failed, or binding mismatch);
   before, it could end and close the channel without a trace.
-
 - GPT Live no longer primes the voice model to delegate questions about the
   conversation itself (Turbo S S99: after the summary release, a run
   delegated "now tell me my historical vault phrase" instead of answering it
@@ -1541,7 +1537,6 @@ them.
   re-drives that retirement once per archive request, as the archive
   re-drove it before owned retirement. A cause that still fails is
   surfaced as `MemberRetirementStuck`, never looped and never masked.
-
 - `MobHandle::stop`, `shutdown` and `shutdown_with_report` no longer poll
   a refused Stop or Shutdown with sleep-and-resend (25 ms doubling to
   250 ms) (#1494). Each refusal now waits on the mob machine-state watch:
@@ -1715,8 +1710,8 @@ them.
   suppressed when the gap was under 1000 ms. A result that landed 400 ms
   after the last word was never read out (S106), while voiced results land
   from -200 to +400 ms after it, so no gap can separate the two cases.
-  Every acknowledged result now gets one instructions-lane cue, bound to the
-  result's `delegation_id`. It is phrased to be safe either way: tell the
+  Every acknowledged result now gets one cue, bound to the result's
+  `delegation_id` (a thinking append since #1630). It is phrased to be safe either way: tell the
   user the outcome unless it was already reported since the result arrived.
   Speech before the delivery (an intention such as "I'll use Friday") does
   not count as a report.
@@ -2220,21 +2215,34 @@ them.
 - Push CI on `release/**` integration branches is never superseded by a
   later push, so every merge commit on the branch gets a complete run
   (#1581).
+- PR CI runs the generated-kernel test-oracle tests (#1621).
 - The CI gate's 2700 s runaway ceiling no longer counts runner queue: it
   applies to each lane's terminal minus the queue on its path, so a pull
   request whose lanes all pass is not failed while hosted runners are
   saturated. Queue is still reported (#1548).
-- Test and build hygiene with no product change: the facade's pre-ledger
-  bridge tests derive their target versions from each domain instead of a
-  literal (#1559); the queued-steer mob test waits for the steer's admission
-  receipt instead of a 50 ms sleep (#1554); the barge-in recovered fixture
-  registers the session its live channel is bound to (#1510); the
-  `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515); and the
-  GPT Live Turbo S S102, S104 and S106 checks assert typed delivery
-  contracts instead of wording, with the S102 harness now wiring its extra
-  member (#1539); and the live end-to-end lane can record real GPT Live
-  provider streams for deterministic replay (`test-realtime-fixtures`,
-  test-only) (#1545).
+- Test and build hygiene with no product change:
+  - the facade's pre-ledger bridge tests derive their target versions from
+    each domain instead of a literal (#1559);
+  - the queued-steer mob test waits for the steer's admission receipt
+    instead of a 50 ms sleep (#1554);
+  - the barge-in recovered fixture registers the session its live channel
+    is bound to (#1510);
+  - the `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515);
+  - the GPT Live Turbo S S102, S104 and S106 checks assert typed delivery
+    contracts instead of wording, with the S102 harness now wiring its
+    extra member (#1539), and S102 prints its executor and member comms rows
+    on every run (#1594);
+  - the live end-to-end lane can record real GPT Live provider streams
+    (`test-realtime-fixtures`, test-only) (#1545), and PR CI replays S104
+    and S106 from recorded streams (#1557);
+  - the result-barrier TLA audit registers with an empty run-start hold set
+    (#1611), and the remaining test and kernel-level `RegisterSession`
+    literals set no initial run-start holds, restoring the workspace
+    all-targets build (#1617, #1619);
+  - a test pins that a mob Stop cancels a member run staged before its
+    agent claimed the turn (#1616, for #1471);
+  - the successor-claim sentinel test waits on the runtime loop's park
+    instead of a state poll (#1628).
 - A GPT Live WebRTC session whose media track carries silence while the model
   speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
   opens) no longer leaves the user in a silent call. The runtime judges the

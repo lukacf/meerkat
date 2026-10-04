@@ -1661,7 +1661,11 @@ async fn run_s97_client_context_vertical(
         seed_prompt: None,
         evidence: Some(evidence.clone()),
         unmeasured_playback: false,
-        executor_instructions: None,
+        // The result states S97's fact (the workspace is empty) only when
+        // the executor reports what it found; told nothing, it sometimes
+        // returned "Current directory inspected; no changes made." (soak
+        // d98607e1 R2), which the readout oracle cannot check.
+        executor_instructions: Some(vec![S97_EXECUTOR_INSTRUCTION.to_owned()]),
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
@@ -2541,6 +2545,11 @@ impl Drop for SummaryJobGuard {
         }
     }
 }
+
+/// S97's executor instruction: the result must say what the inspection
+/// found, so the readout oracle can check that fact was voiced.
+const S97_EXECUTOR_INSTRUCTION: &str =
+    "When you inspect a directory, say whether it is empty and name any files in it.";
 
 /// S97's executor result fact: it inspects the scenario's scratch workspace,
 /// which is empty.
@@ -6287,18 +6296,14 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let barge_in_start_ms = fixture_start_entry(&timeline, barge_in)
             .map(|e| e.t_ms)
             .ok_or("barge-in fixture_start")?;
-        let timeline = live
-            .peer
-            .wait_for_timeline(
-                Duration::from_secs(45),
-                "barge-in input_final then a re-issued assistant_audio_start and assistant_audio_end",
-                |t| {
-                    let input_final = timeline_find(t, TimelineKind::InputFinal, barge_in_start_ms)?;
-                    let restart = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
-                    timeline_find(t, TimelineKind::AssistantAudioEnd, restart.t_ms).map(|_| t.to_vec())
-                },
-            )
-            .await?;
+        // The reply to the barge-in is judged by what the user hears: the
+        // assistant says "done" in speech that started after the user's
+        // barge-in speech did (provider audio clock), whether or not the
+        // provider closed the user's input final first. gpt-live-1 may answer
+        // before the user finishes (soak d98607e1 R5: "Done." while the user
+        // was still saying "... just say done"); talking over the user is
+        // judged by the talk-over check below, not by event order.
+        let timeline = s100_wait_barge_in_reply(&mut live, barge_in_start_ms).await?;
         let barge_in_timing = SpokenTurn::from_timeline(&timeline, barge_in).ok_or("barge-in timing")?;
         let assistant_quiet_after_barge_in_ms = timeline
             .iter()
@@ -7247,6 +7252,72 @@ fn thinking_tokens(lines: &[provider_recording::Line], channel: u32) -> Vec<Thin
             }
         })
         .collect()
+}
+
+/// Waits until the assistant has said "done" in output that started (provider
+/// audio clock) at or after the start of the user's first transcribed
+/// barge-in speech, and its audio has ended (the last assistant audio event
+/// since the barge-in onset is an end). Returns the timeline.
+async fn s100_wait_barge_in_reply(
+    live: &mut PublicLiveHarness,
+    barge_in_start_ms: u64,
+) -> Result<Vec<TimelineEntry>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let timeline = live.peer.timeline().await?;
+        let events = live.peer.events().await?;
+        let audio_ended = timeline
+            .iter()
+            .rev()
+            .find(|e| {
+                e.t_ms >= barge_in_start_ms
+                    && matches!(
+                        e.kind,
+                        TimelineKind::AssistantAudioStart | TimelineKind::AssistantAudioEnd
+                    )
+            })
+            .is_some_and(|e| e.kind == TimelineKind::AssistantAudioEnd);
+        if audio_ended && s100_barge_in_answered(&timeline, &events, barge_in_start_ms) {
+            return Ok(timeline);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the assistant did not say \"done\" after the barge-in within 45 s; timeline:\n{}",
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Whether an assistant output delta saying "done" started (provider audio
+/// clock) at or after the user's first barge-in input delta.
+fn s100_barge_in_answered(
+    timeline: &[TimelineEntry],
+    events: &[Value],
+    barge_in_start_ms: u64,
+) -> bool {
+    let heard_index = timeline
+        .iter()
+        .find(|e| e.kind == TimelineKind::FirstInputDelta && e.t_ms >= barge_in_start_ms)
+        .and_then(|e| e.detail_u64("event_index"))
+        .and_then(|index| usize::try_from(index).ok());
+    let Some(heard_index) = heard_index else {
+        return false;
+    };
+    let Some(heard_start) = events.get(heard_index).and_then(|e| e["start_ms"].as_f64()) else {
+        return false;
+    };
+    events.iter().skip(heard_index).any(|e| {
+        e["type"] == "session.output_transcript.delta"
+            && e["start_ms"]
+                .as_f64()
+                .is_some_and(|start| start >= heard_start)
+            && normalize_words(e["delta"].as_str().unwrap_or_default())
+                .split(' ')
+                .any(|word| word == "done")
+    })
 }
 
 /// The text blocks of one `block_assistant` history row, joined.
@@ -9817,6 +9888,8 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
                 && tokens
                     .get(index + 1)
                     .is_some_and(|w| *w == "file" || *w == "files")
+                // "marker one file" names job 1's file; it is not a count.
+                && (index == 0 || tokens[index - 1] != "marker")
             {
                 Some(index)
             } else {
@@ -9898,14 +9971,16 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
 // Scenario 101: busy backend (slow job, quick question, second slow job)
 // ===========================================================================
 
-/// Quick question and second job offsets after job 1's delegation.created.
+/// Quick question offset after job 1's delegation.created.
 const S101_QUICK_OFFSET_MS: u64 = 5000;
-const S101_JOB2_OFFSET_MS: u64 = 12_000;
 
 /// Scenario 101: with the WorkGraph-scheduled DurableFork policy, a slow
 /// executor job (shell sleep 25 s, then marker-one.txt) is running when the
 /// user asks an unrelated quick question at +5 s and starts a second slow job
-/// (sleep 20 s, marker-two.txt) at +12 s.
+/// (sleep 20 s, marker-two.txt) as soon as the quick question is delegated.
+/// Job 2 is anchored on that delegation, not on a fixed offset: a fixed
+/// offset let the two utterances run together and the provider joined them
+/// into one delegation (soak e963088c R1, after the quick fixture grew).
 ///
 /// Deterministic: three client delegations; the quick question's worker
 /// starts while job 1's shell command is still running (no marker file yet),
@@ -10058,7 +10133,9 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
         let job2 = live
             .peer
             .play_at(
-                &PlayAt::new("busy_job2", Anchor::Now, S101_JOB2_OFFSET_MS).overlap_bound_ms(60_000),
+                &PlayAt::new("busy_job2", Anchor::Event, 0)
+                    .event_type("session.delegation.created")
+                    .overlap_bound_ms(60_000),
             )
             .await?;
         live.record_time_to_talk("S101").await?;
@@ -12261,6 +12338,105 @@ mod config_tests {
             "{claims:#?}"
         );
         assert!(super::s101_premature_outcome_claims(&lines, 2).is_empty());
+    }
+
+    /// Job 1's file named with its number ("the marker one file is
+    /// created") is not a stated count of files (soak 769f207d R2).
+    #[test]
+    fn s101_marker_file_names_are_not_counts() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let event =
+            |value: serde_json::Value| super::provider_recording::Entry::ServerFrame { raw: value };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append", "delegation_id": id, "content": content}),
+        };
+        let lines = vec![
+            line(
+                100,
+                event(
+                    serde_json::json!({"type": "session.delegation.created", "delegation": {"id": "j1"}}),
+                ),
+            ),
+            line(
+                110,
+                append(
+                    "j1",
+                    "Started voice request: \"Start a slow job and create marker1 dot txt\".",
+                ),
+            ),
+            line(
+                200,
+                event(
+                    serde_json::json!({"type": "session.delegation.created", "delegation": {"id": "q"}}),
+                ),
+            ),
+            line(
+                210,
+                append(
+                    "q",
+                    "Started voice request: \"How many files are in your working directory?\".",
+                ),
+            ),
+            line(
+                300,
+                append(
+                    "j1",
+                    "Finished voice request: \"Start a slow job ...\". The result follows.",
+                ),
+            ),
+            line(
+                400,
+                event(
+                    serde_json::json!({"type": "session.output_transcript.delta", "delta": " The marker one file is created."}),
+                ),
+            ),
+            line(900, append("q", "There are 0 files.")),
+        ];
+        assert!(super::s101_premature_outcome_claims(&lines, 1).is_empty());
+    }
+
+    /// The barge-in reply is judged by content: "done" in assistant speech
+    /// that started after the user's barge-in speech did, even before the
+    /// user's input final (soak d98607e1 R5). A "done" said before the
+    /// barge-in (the previous readout's "Done!") does not count, and no
+    /// "done" after it fails.
+    #[test]
+    fn s100_barge_in_reply_is_judged_by_content_after_the_barge_in() {
+        use super::support::{TimelineEntry, TimelineKind};
+        let first_delta = |t_ms: u64, index: u64| TimelineEntry {
+            t_ms,
+            kind: TimelineKind::FirstInputDelta,
+            detail: serde_json::json!({"event_index": index}),
+        };
+        let timeline = vec![first_delta(100, 0), first_delta(500, 2)];
+        let input = |text: &str, start: f64| serde_json::json!({"type": "session.input_transcript.delta", "delta": text, "start_ms": start});
+        let output = |text: &str, start: f64| serde_json::json!({"type": "session.output_transcript.delta", "delta": text, "start_ms": start});
+        let answered = vec![
+            input(" Now open that file", 37000.0),
+            output(" Done! I added the section.", 44200.0),
+            input(" Hold", 46400.0),
+            output(" Done.", 49000.0),
+            input(" just say done", 49400.0),
+        ];
+        assert!(super::s100_barge_in_answered(&timeline, &answered, 400));
+        let unanswered: Vec<_> = answered
+            .iter()
+            .filter(|e| e["delta"] != " Done.")
+            .cloned()
+            .collect();
+        assert!(
+            !super::s100_barge_in_answered(&timeline, &unanswered, 400),
+            "the readout's \"Done!\" before the barge-in is not its reply"
+        );
     }
 
     /// Local only: replay the oracle against recorded S101 provider streams

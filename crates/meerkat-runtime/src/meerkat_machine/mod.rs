@@ -1976,16 +1976,6 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
     epoch_id: meerkat_core::RuntimeEpochId,
 }
 
-/// Opaque identity for one exact runtime-session registration.
-///
-/// Unlike [`RuntimeExecutorAttachmentWitness`], this witness deliberately
-/// carries no executor identity. It exists for machine-owned cleanup of a
-/// terminal registration that never published an attachment (for example, a
-/// registration materialized only to recover its durable ops lifecycle).
-/// Callers may clone and compare the witness, but only this machine can use it
-/// to admit exact compare-and-remove teardown. Durable epoch identity alone is
-/// not exact because an epoch may survive an in-process entry rebuild; the
-/// private weak mutation-gate identity distinguishes those incarnations.
 /// What a run-start hold (#1500) found when it took effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunStartsHold {
@@ -1993,6 +1983,20 @@ pub struct RunStartsHold {
     /// execute, and the only one a stop may still cancel. `None` means the
     /// member had no run.
     pub current_run: Option<meerkat_core::lifecycle::RunId>,
+}
+
+/// The work a session had admitted at a cancel point, taken by
+/// [`MeerkatMachine::abandon_queued_inputs_at_cancel_point`] under one hold
+/// of the session's mutation gate.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedWork {
+    /// The run the machine recorded as current at the cancel point. The cancel
+    /// point leaves it running; the caller cancels exactly this run.
+    pub current_run: Option<meerkat_core::lifecycle::RunId>,
+    /// The inputs that were queued at the cancel point, in either lane, in
+    /// admission order. The cancel point abandoned each of them.
+    pub queued_inputs: Vec<InputId>,
 }
 
 /// Why a runtime's run starts are held (#1500). No new run starts while any
@@ -2055,6 +2059,16 @@ impl std::fmt::Debug for MaterializationClaimObservation {
     }
 }
 
+/// Opaque identity for one exact runtime-session registration.
+///
+/// Unlike [`RuntimeExecutorAttachmentWitness`], this witness deliberately
+/// carries no executor identity. It exists for machine-owned cleanup of a
+/// terminal registration that never published an attachment (for example, a
+/// registration materialized only to recover its durable ops lifecycle).
+/// Callers may clone and compare the witness, but only this machine can use it
+/// to admit exact compare-and-remove teardown. Durable epoch identity alone is
+/// not exact because an epoch may survive an in-process entry rebuild; the
+/// private weak mutation-gate identity distinguishes those incarnations.
 #[derive(Clone)]
 pub struct RuntimeSessionRegistrationWitness {
     machine: std::sync::Weak<MeerkatMachineShared>,

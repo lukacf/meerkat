@@ -34676,7 +34676,7 @@ impl MobActor {
                     .then(|| self.placed_member_incarnation(&entry))
                     .transpose()?;
                 self.provisioner
-                    .cancel_member_current_run_at_boundary(&member_ref, expected_member.as_ref())
+                    .cancel_member_admitted_work(&member_ref, expected_member.as_ref())
                     .await?;
             } else {
                 tracing::warn!(
@@ -53178,7 +53178,7 @@ impl MobActor {
         let machine_member_ref =
             self.machine_member_ref_for_behavior(&entry, "cancel all work interrupt")?;
         self.provisioner
-            .cancel_member_current_run_at_boundary(&machine_member_ref, expected_member.as_ref())
+            .cancel_member_admitted_work(&machine_member_ref, expected_member.as_ref())
             .await
     }
 

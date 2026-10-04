@@ -1426,8 +1426,18 @@ them.
   run, exactly that run, at its next boundary, and succeed when there is
   nothing left to cancel (no run, or the run ended first). They no longer
   queue an ambient cancel on an idle member that its next run could pick up.
-  `MobProvisioner` gains `cancel_member_current_run_at_boundary`, whose
-  default interrupts the member as before.
+  `MobProvisioner` gains `cancel_member_admitted_work`, whose default
+  interrupts the member as before.
+- `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` (and the
+  `force_cancel_member` mob tool) now also cancel work the member admitted
+  before the cancel but has not started, such as the run a fork admits for
+  its child. Previously a force cancel that arrived before that run started
+  returned `Ok` and the run then went ahead. Both verbs take one cancel point
+  under the session gate that stages runs: every input queued there is
+  abandoned, and the run current there is cancelled exactly, at its next
+  boundary. Input admitted after the cancel is untouched. `MeerkatMachine`
+  gains `abandon_queued_inputs_at_cancel_point`, returning the new
+  `AdmittedWork`.
 - GPT Live voice session instructions and bridge descriptions no longer name
   the product. Words in the model-facing instructions bias the provider's
   input transcription: in Turbo S S103 a planted "Marigold" was transcribed

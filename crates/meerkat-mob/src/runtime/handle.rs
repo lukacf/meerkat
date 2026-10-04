@@ -12936,12 +12936,13 @@ impl MobHandle {
 
     /// Cancel all in-flight work for a mob member.
     ///
-    /// The fence token is validated before cancellation proceeds. The member's
-    /// current run is cancelled at its next boundary, exactly that run.
-    /// `Ok(())` means the member has no run left that this cancel is
-    /// responsible for: its current run is cancelled, or it had none, or that
-    /// run ended before the cancel reached it. A member that is idle is not an
-    /// error, and no cancel is left behind for a later run.
+    /// The fence token is validated before cancellation proceeds. The cancel
+    /// covers the work the member had admitted when it was taken: its current
+    /// run is cancelled at its next boundary, exactly that run, and the input
+    /// it held queued is abandoned. Input admitted after the cancel is
+    /// untouched. `Ok(())` means the member has no admitted work left that
+    /// this cancel is responsible for. A member that is idle is not an error,
+    /// and no cancel is left behind for a later run.
     pub async fn cancel_all_work(
         &self,
         runtime_id: AgentRuntimeId,
@@ -13425,15 +13426,16 @@ impl MobHandle {
         self.command_tx.is_closed()
     }
 
-    /// Force-cancel a member's in-flight turn: its current run is cancelled at
-    /// its next boundary, exactly that run.
+    /// Force-cancel the work a member had admitted when the cancel was taken:
+    /// its current run is cancelled at its next boundary, exactly that run,
+    /// and the input it held queued (for example a run admitted by a fork that
+    /// has not started yet) is abandoned.
     ///
     /// Unlike [`retire`](Self::retire), this does not archive the session or
-    /// remove the member from the roster — it only cancels the current turn.
-    /// `Ok(())` means the member has no run left that this cancel is
-    /// responsible for: its current run is cancelled, or it had none, or that
-    /// run ended before the cancel reached it. A member that is idle is not an
-    /// error, and no cancel is left behind for a later run.
+    /// remove the member from the roster. Input admitted after the cancel is
+    /// untouched. `Ok(())` means the member has no admitted work left that
+    /// this cancel is responsible for. A member that is idle is not an error,
+    /// and no cancel is left behind for a later run.
     pub async fn force_cancel_member(&self, identity: AgentIdentity) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::ForceCancel {

@@ -24706,9 +24706,10 @@ async fn forker_force_cancels_only_running_members_it_owns() {
         }
     };
 
-    // force_cancel_member requests a cooperative boundary cancel of the
-    // member's in-flight run; count those requests to see which calls reached
-    // a member and which were refused before any effect.
+    // force_cancel_member covers the work the member admitted before it: a
+    // run already current gets a cooperative boundary cancel (counted here),
+    // and a run still queued is abandoned at the cancel point (its supervised
+    // run then ends at once). A refused call has neither effect.
     let before = service.cancel_after_boundary_call_count();
     assert!(
         matches!(
@@ -24726,29 +24727,33 @@ async fn forker_force_cancels_only_running_members_it_owns() {
         .await
         .expect("the forker cancels its grandchild's run");
     let after_grandchild = service.cancel_after_boundary_call_count();
-    assert!(
-        after_grandchild > before,
-        "the grandchild's run received the cancel"
-    );
+    let grandchild_run =
+        settle_force_cancelled_fork_run("grandchild", grandchild_run, after_grandchild > before)
+            .await;
     force_cancel("cancel-child")
         .await
         .expect("the forker cancels its child's run");
-    assert!(
+    let child_run = settle_force_cancelled_fork_run(
+        "child",
+        child_run,
         service.cancel_after_boundary_call_count() > after_grandchild,
-        "the child's run received the cancel"
-    );
+    )
+    .await;
     assert!(handle.get_member(&bystander).await.unwrap().is_some());
 
-    // Release the deliberately endless runs: retiring the child cascades to
-    // the grandchild, and both supervised runs then reach an outcome.
+    // Release the deliberately endless runs still in flight: retiring the
+    // child cascades to the grandchild, and each supervised run then reaches
+    // an outcome.
     handle
         .retire_with_descendants(child.clone())
         .await
         .expect("retire the cancelled subtree");
     for (member, run) in [("grandchild", grandchild_run), ("child", child_run)] {
-        tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
-            .await
-            .unwrap_or_else(|_| panic!("the retired {member} run must end"));
+        if let Some(run) = run {
+            tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+                .await
+                .unwrap_or_else(|_| panic!("the retired {member} run must end"));
+        }
     }
     assert!(handle.get_member(&grandchild).await.unwrap().is_none());
 }
@@ -24967,6 +24972,30 @@ async fn owned_member_tools_report_absent_targets_as_typed_not_found() {
             );
         }
     }
+}
+
+/// A force cancel reaches a fork child's run one of two typed ways. A run
+/// already current receives an exact boundary cancel (`boundary_cancelled`);
+/// a run still queued is abandoned at the cancel point, so its supervised run
+/// ends at once as failed. Returns the run that is still in flight.
+async fn settle_force_cancelled_fork_run(
+    member: &str,
+    run: ForkChildRun,
+    boundary_cancelled: bool,
+) -> Option<ForkChildRun> {
+    if boundary_cancelled {
+        return Some(run);
+    }
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the {member}'s run received neither a boundary cancel nor an abandonment")
+        });
+    assert!(
+        matches!(outcome, Some(ForkChildRunOutcome::Failed(_))),
+        "the {member}'s queued run was abandoned at the cancel point: {outcome:?}"
+    );
+    None
 }
 
 async fn caller_turn_fork_child(
@@ -46426,6 +46455,112 @@ async fn test_cancel_verbs_on_an_attached_member_without_a_run_succeed_and_leave
         baseline_boundary,
         "the next turn received no leftover cancel"
     );
+}
+
+/// Force cancel and cancel-all-work cover the work a member had admitted at
+/// the cancel point. A turn admitted before the cancel that the runtime loop
+/// has woken for but not started (here: paused before it takes the batch) is
+/// abandoned and never reaches the executor. A turn admitted after the cancel
+/// is untouched: it runs and completes.
+async fn assert_cancel_verb_covers_admitted_unstarted_work(cancel_all_work: bool) {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from(if cancel_all_work {
+        "cancel-all-work-unstarted"
+    } else {
+        "force-cancel-unstarted"
+    });
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let entry = handle
+        .get_member(&identity)
+        .await
+        .unwrap()
+        .expect("member exists");
+    let member = handle.member(&identity).await.expect("member handle");
+
+    let (queue_gap_entered, queue_gap_release) = service
+        .runtime_adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let admitted_before = member
+        .start_turn(
+            ContentInput::Text("admitted before the cancel".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit a turn before the cancel");
+    tokio::time::timeout(Duration::from_secs(30), queue_gap_entered)
+        .await
+        .expect("the runtime loop wakes for the admitted turn")
+        .expect("queue-authority hook armed");
+
+    if cancel_all_work {
+        handle
+            .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+            .await
+            .expect("cancel-all-work");
+    } else {
+        handle
+            .force_cancel_member(identity.clone())
+            .await
+            .expect("force cancel");
+    }
+    let before = tokio::time::timeout(Duration::from_secs(30), admitted_before.wait())
+        .await
+        .expect("the abandoned turn's waiter resolves");
+    assert!(
+        before.is_err(),
+        "the turn admitted before the cancel is abandoned, never completed: {before:?}"
+    );
+
+    queue_gap_release
+        .send(())
+        .expect("release the runtime loop");
+    let admitted_after = member
+        .start_turn(
+            ContentInput::Text("admitted after the cancel".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit a turn after the cancel");
+    tokio::time::timeout(Duration::from_secs(30), admitted_after.wait())
+        .await
+        .expect("the turn admitted after the cancel runs")
+        .expect("the turn admitted after the cancel completes");
+    assert_eq!(
+        service
+            .applied_runtime_contributing_input_ids(&session_id)
+            .await
+            .len(),
+        1,
+        "only the turn admitted after the cancel reached the executor"
+    );
+}
+
+#[tokio::test]
+async fn test_force_cancel_abandons_admitted_unstarted_work_and_spares_later_work() {
+    assert_cancel_verb_covers_admitted_unstarted_work(false).await;
+}
+
+#[tokio::test]
+async fn test_cancel_all_work_abandons_admitted_unstarted_work_and_spares_later_work() {
+    assert_cancel_verb_covers_admitted_unstarted_work(true).await;
 }
 
 #[tokio::test]

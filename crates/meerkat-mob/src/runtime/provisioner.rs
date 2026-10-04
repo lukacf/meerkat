@@ -1401,6 +1401,17 @@ pub(super) fn classify_stop_member_cancel(
     }
 }
 
+/// What a force cancel or cancel-all-work did to the work the member had
+/// admitted at the cancel point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberWorkCancelOutcome {
+    /// The run current at the cancel point.
+    run: MemberRunCancelOutcome,
+    /// The inputs queued at the cancel point, abandoned before any of them
+    /// started.
+    abandoned_queued_inputs: Vec<meerkat_core::lifecycle::InputId>,
+}
+
 /// What a force cancel or cancel-all-work did to the member's run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MemberRunCancelOutcome {
@@ -1615,12 +1626,13 @@ pub trait MobProvisioner: Send + Sync {
             .await
     }
 
-    /// Cancel the member's current run, exactly that run, at its next
-    /// boundary (force cancel, cancel all work). `Ok(())` means the member has
-    /// no run left that this cancel is responsible for: the run current when
-    /// it was taken is cancelled, or there was none, or it ended first. The
-    /// default interrupts the member.
-    async fn cancel_member_current_run_at_boundary(
+    /// Cancel the work the member had admitted when the cancel was taken
+    /// (force cancel, cancel all work): its current run, exactly that run, at
+    /// its next boundary, and the input it held queued. Input admitted after
+    /// the cancel is untouched. `Ok(())` means the member has no admitted work
+    /// left that this cancel is responsible for. The default interrupts the
+    /// member.
+    async fn cancel_member_admitted_work(
         &self,
         member_ref: &MemberRef,
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
@@ -4784,11 +4796,15 @@ impl SessionBackend {
         })
     }
 
-    /// Cancel the member's current run, exactly that run, at its next
-    /// boundary through the runtime. A member with no run, or whose run ended
-    /// first, has nothing left to cancel: never an untyped failure for those,
-    /// and never an ambient cancel that a later run could pick up.
-    async fn cancel_member_current_run_at_boundary_exact(
+    /// Cancel the work the member had admitted at one cancel point, through
+    /// the runtime. The runtime takes the cancel point under the session gate
+    /// that stages runs: it abandons every queued input there and names the
+    /// run current there, which is then cancelled exactly, at its next
+    /// boundary. Input admitted after the cancel point, and any run it
+    /// starts, is never touched: no ambient cancel that a later run could pick
+    /// up. A member with no admitted work, or whose run ended first, has
+    /// nothing left to cancel and succeeds.
+    async fn cancel_member_admitted_work_exact(
         &self,
         member_ref: &MemberRef,
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
@@ -4797,7 +4813,19 @@ impl SessionBackend {
         let Some(adapter) = &self.runtime_adapter else {
             return self.interrupt_member(member_ref, expected_member).await;
         };
-        let outcome = match adapter.current_run(&session_id).await {
+        let admitted = adapter
+            .abandon_queued_inputs_at_cancel_point(&session_id, "member work cancelled")
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "abandoning the queued input of '{session_id}' failed: {error}"
+                ))
+            })?;
+        let Some(admitted) = admitted else {
+            // An unregistered runtime has no queue and no run.
+            return Ok(());
+        };
+        let run = match admitted.current_run {
             None => MemberRunCancelOutcome::NoRun,
             Some(run_id) => classify_member_run_cancel(
                 adapter
@@ -4811,10 +4839,14 @@ impl SessionBackend {
                 ))
             })?,
         };
+        let outcome = MemberWorkCancelOutcome {
+            run,
+            abandoned_queued_inputs: admitted.queued_inputs,
+        };
         tracing::debug!(
             session_id = %session_id,
             ?outcome,
-            "member run cancel resolved"
+            "member work cancel resolved"
         );
         Ok(())
     }
@@ -12868,12 +12900,12 @@ impl MobProvisioner for SessionBackend {
             .await
     }
 
-    async fn cancel_member_current_run_at_boundary(
+    async fn cancel_member_admitted_work(
         &self,
         member_ref: &MemberRef,
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
     ) -> Result<(), MobError> {
-        self.cancel_member_current_run_at_boundary_exact(member_ref, expected_member)
+        self.cancel_member_admitted_work_exact(member_ref, expected_member)
             .await
     }
 
@@ -16536,7 +16568,7 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
     }
 
-    async fn cancel_member_current_run_at_boundary(
+    async fn cancel_member_admitted_work(
         &self,
         member_ref: &MemberRef,
         expected_member: Option<&super::bridge_protocol::BridgeMemberIncarnation>,
@@ -16550,7 +16582,7 @@ impl MobProvisioner for MultiBackendProvisioner {
             }
             _ => {
                 self.session
-                    .cancel_member_current_run_at_boundary(member_ref, expected_member)
+                    .cancel_member_admitted_work(member_ref, expected_member)
                     .await
             }
         }

@@ -725,6 +725,7 @@ impl LiveSidebandNarrationAuthority {
 
     /// Mark the narration as ending its delegation without a result. Set
     /// only by the generated narration authority, from its typed kind.
+    #[cfg(feature = "__meerkat-generated-authority-bridge")]
     #[doc(hidden)]
     #[must_use]
     pub fn __ending_the_delegation(mut self) -> Self {
@@ -1677,15 +1678,11 @@ mod tests {
                 "provider-delegation-secret".to_string(),
             )
             .expect("opaque provider delegation");
-            let authority = LiveSidebandNarrationAuthority::__from_generated_narration_authority(
-                binding(),
-                "operation-4:failed".to_string(),
-            )
-            .expect("narration authority");
-            let authority = if ends {
-                authority.__ending_the_delegation()
-            } else {
-                authority
+            let authority = LiveSidebandNarrationAuthority {
+                binding: binding(),
+                attempt: LiveSidebandAppendAttempt("narration:operation-4:failed".to_string()),
+                consumed: Arc::new(AtomicBool::new(false)),
+                ends_delegation: ends,
             };
             let command = LiveSidebandCommand::narrate_delegation(
                 authority,

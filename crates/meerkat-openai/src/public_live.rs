@@ -2046,6 +2046,11 @@ impl PublicLiveBrokerSession {
             // held while they are sent, so a result appended concurrently
             // cannot overtake them.
             for (token, event) in state.take_releasable_held_commentary() {
+                // Recorded like every other client event (`deliver_append`):
+                // a held result released here is a real provider append,
+                // and replay and the result-timing oracles key on it.
+                #[cfg(feature = "test-realtime-fixtures")]
+                self.record_client_event(&event);
                 if self.sender.send(event).await.is_err() {
                     state.append_delivery_ambiguous = true;
                     tracing::warn!(
@@ -8194,6 +8199,134 @@ mod tests {
     /// S102 r2's shape, deterministically: a result whose work asked
     /// analyst-pemberton, whose answer has not arrived. The provider gets the
     /// pending-answer notice, bound to the delegation, strictly before the
+    /// A result held behind the user's unanswered utterance and released by
+    /// provider ordering (`session.delegation.created`) is recorded as a
+    /// client event, after the server frame that released it, exactly like a
+    /// result sent at once (Turbo S S101 93b6aaec R2: the quick result was
+    /// held and released but missing from the recording, so the
+    /// result-timing oracle saw no result at all).
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn a_held_then_released_result_is_recorded_as_a_client_event() {
+        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+        let held = Arc::new(tokio::sync::Notify::new());
+        let server_held = Arc::clone(&held);
+        let attach = move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| {
+            let held = Arc::clone(&server_held);
+            async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    send_json(&mut socket, input_delta("book a table")).await;
+                    send_json(&mut socket, delegation_created("dlg_cue", "client")).await;
+                    send_json(&mut socket, output_delta_span("one moment", 1500.0, 2000.0)).await;
+                    send_json(&mut socket, input_delta_at("and also order a taxi", 2500.0)).await;
+                    // The result is now appended and held behind that
+                    // utterance; the next delegation answers it.
+                    held.notified().await;
+                    send_json(&mut socket, delegation_created("dlg_taxi", "client")).await;
+                    loop {
+                        let event = recv_json(&mut socket, &capture).await;
+                        match event["type"].as_str() {
+                            Some("session.commentary.append") => {
+                                send_json(&mut socket, ack(event["event_id"].as_str())).await;
+                            }
+                            Some("session.thinking.append" | "session.instructions.append") => {
+                                let mut receipt = ack(event["event_id"].as_str());
+                                receipt["type"] =
+                                    json!(if event["type"] == "session.thinking.append" {
+                                        "session.thinking.appended"
+                                    } else {
+                                        "session.instructions.appended"
+                                    });
+                                send_json(&mut socket, receipt).await;
+                            }
+                            Some("session.close") => {
+                                send_json(&mut socket, session_closed()).await;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+            }
+        };
+        let app = Router::new()
+            .route("/v1/live/sessions", post(create_session))
+            .route("/v1/live/sessions/{session_id}/attach", get(attach))
+            .with_state(Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider-stream.jsonl");
+        let recorder = provider_recording::Recorder::create(&path).unwrap();
+        // The client captures the task's recorder when it is constructed.
+        let (_, session) = recorder
+            .scope(async {
+                PublicLiveBrokerFactory::__try_from_target_with_base_url(
+                    realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+                    &format!("http://{address}/v1/"),
+                )
+                .unwrap()
+                .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+                .await
+            })
+            .await
+            .unwrap()
+            .into_parts();
+        loop {
+            if let Some(GptLiveBrokerObservation::UserTranscriptFragment { text, .. }) =
+                session.next_observation().await.unwrap()
+                && text.contains("taxi")
+            {
+                break;
+            }
+        }
+        let delegation = GptLiveDelegationRef("dlg_cue".to_string());
+        let token = session
+            .append_delegation_result(&delegation, "Table booked for two.")
+            .await
+            .expect("result appended");
+        held.notify_one();
+        loop {
+            if let Some(GptLiveBrokerObservation::DelegationContextAppendAcknowledged {
+                token: acked,
+            }) = session.next_observation().await.unwrap()
+                && acked == token
+            {
+                break;
+            }
+        }
+        session.close().await.expect("close requested");
+        while session.next_observation().await.unwrap().is_some() {}
+        server.abort();
+
+        let lines = provider_recording::read(&path).unwrap();
+        let released_at = lines.iter().position(|line| {
+            matches!(&line.entry, provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.delegation.created"
+                    && raw["delegation"]["id"] == "dlg_taxi")
+        });
+        let recorded_at = lines.iter().position(|line| {
+            matches!(&line.entry, provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append"
+                    && event["content"] == "Table booked for two.")
+        });
+        let (Some(released_at), Some(recorded_at)) = (released_at, recorded_at) else {
+            panic!("the released result must be recorded: {lines:?}");
+        };
+        assert!(
+            released_at < recorded_at,
+            "recorded after the frame that released it"
+        );
+        let acked_at = lines.iter().position(|line| {
+            matches!(&line.entry, provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.commentary.appended")
+        });
+        assert!(acked_at.is_some_and(|acked| recorded_at < acked));
+    }
+
     /// result that says "I asked", and the result's cue is the awaiting cue.
     #[tokio::test]
     async fn a_result_awaiting_a_peer_answer_is_preceded_by_the_pending_notice() {

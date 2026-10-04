@@ -151,7 +151,8 @@ The strengthened negative control explicitly lets current authentication accept
 an attempt carrying the writer's historical association and the reader's actual
 fresh controller pin. Current grant authority must then return typed Denied,
 with zero HTTP/tool entry and no accepted native or durable input row. Independent
-document loads verify transcript preservation and stored hash/authority agreement.
+document loads verify transcript preservation; stored digest agreement with
+document authority is enforced by the existing store loader.
 The revised full target passed all 16 tests with no ignored or filtered cases
 (14.87s compile, 2.05s bodies;
 `restart-acceptance51-ordinary-antifallback-r1.log`).

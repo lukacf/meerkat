@@ -392,7 +392,8 @@ Gap with a reason, and Impossible only for a justified contract exclusion.
 
 Recorded evidence as of 2026-10-03 remains prerequisite coverage. Native PR1634
 is now published at `51` after all normal GCP hooks passed in 3,833s; fresh CI
-37177141203, created at 04:29:24 UTC, remains pending. The later local tests-only
+37177141203 passed at exact `51` with 38 successful jobs and 4 intentional skips.
+The later local tests-only
 restart successor is separate from that publication, as detailed in the
 [implementation checkpoint](adr-001-implementation/implementation-progress.md).
 The repair later committed as native `141aad15` passed 49 selected integration tests and
@@ -447,8 +448,8 @@ The revised cold test then passed within the full 16-case target (14.87s compile
 2.05s bodies, no ignores). Its negative attempt uses the fresh actual controller
 pin and historical association: current ingress explicitly accepts it, then
 current grant authority must refuse with typed Denied, zero model/tool entry and
-no durable input row. Independent document reloads preserve the transcript and
-validate the stored hash against its authority. Three E1 wrapper controls passed
+no durable input row. Independent document reloads preserve the transcript;
+digest/authority agreement is enforced by the store loader. Three E1 wrapper controls passed
 separately; outer smoke execution and normal successor publication remain open.
 
 The completed-turn close/reopen slice preserves stored input/session and audit

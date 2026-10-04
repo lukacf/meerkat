@@ -1026,6 +1026,7 @@ rust_test(
     data = [
         ":package_runfiles",
         "//:live_smoke_browser_fixtures",
+        "//:repo_governance_files",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
     ],

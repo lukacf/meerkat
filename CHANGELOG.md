@@ -2506,7 +2506,9 @@ them.
     question now asks for "there are N files", and once its result is in, a
     stated count other than the result's fails, unless a result already
     delivered states that count (the voice reading job 2's "There are 1
-    files." is that result, not the quick answer).
+    files." is that result, not the quick answer). That holds before the
+    quick result too: reading another delivered result's count is not a
+    premature quick answer (bargesoak2 R1).
   - S102 fails when the voice attributes an answer to the peer before the
     peer's reply reached the provider conversation (a premature claim), by the
     provider's transcript timing: the peer's name or a pronoun standing for it

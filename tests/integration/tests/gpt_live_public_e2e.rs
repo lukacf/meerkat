@@ -10109,7 +10109,15 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
             else {
                 continue;
             };
-            if quick_window(when) {
+            // A count another delivered result already stated is that result
+            // being read, before the quick result as after it (bargesoak2
+            // S101 R1: job 2's result said "There are 1 files." at 69388 ms
+            // and the voice read it at 70344 ms, ten seconds before the quick
+            // result existed).
+            let read_from_another_result = result_counts.iter().any(|(at, stated)| {
+                *at <= when && s101_number_value(tokens[number_at]) == Some(*stated)
+            });
+            if quick_window(when) && !read_from_another_result {
                 claims.push(format!(
                     "the voice stated the quick question's answer ({:?}) at {when} ms, before its result (known at {} ms)",
                     sentence.trim(),
@@ -10133,9 +10141,7 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
                 && answer_phrase
                 && when >= *result_at
                 && s101_number_value(tokens[number_at]) != Some(value)
-                && !result_counts.iter().any(|(at, stated)| {
-                    *at <= when && s101_number_value(tokens[number_at]) == Some(*stated)
-                })
+                && !read_from_another_result
             {
                 claims.push(format!(
                     "the voice misreported the quick question's answer at {when} ms ({:?}); the result says {result_text:?}",
@@ -12776,6 +12782,94 @@ mod config_tests {
 
     /// Job 1's file named with its number ("the marker one file is
     /// created") is not a stated count of files (soak 769f207d R2).
+    /// bargesoak2 S101 R1: job 2's result stated "There are 1 files." before
+    /// the quick question's own result existed, and the voice read it. That is
+    /// job 2's result being read, not a premature quick answer. A count no
+    /// delivered result stated is still a premature answer.
+    #[test]
+    fn s101_a_count_read_from_another_result_before_the_quick_result_is_not_premature() {
+        // Recording order is elapsed order here, so the instant is the seq.
+        let line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            super::provider_recording::Line {
+                seq: elapsed_ms,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append",
+                "delegation_id": id, "content": content}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let recording = |voice: &str| {
+            vec![
+                line(13571, created("j1")),
+                line(
+                    13889,
+                    append(
+                        "j1",
+                        "Started voice request: \"Start a slow job for me in the shell, sleep for 25 seconds, and then create a file called marker 1 dot txt\".",
+                    ),
+                ),
+                line(25838, created("q")),
+                line(
+                    26157,
+                    append(
+                        "q",
+                        "Started voice request: \"While that runs, how many files are in your working directory right now? Answer as, there are n files.\".",
+                    ),
+                ),
+                line(38856, created("j2")),
+                line(
+                    39176,
+                    append(
+                        "j2",
+                        "Started voice request: \"And hand the executor a second slow job right away. Sleep 20 seconds and create marker 2 dot txt\".",
+                    ),
+                ),
+                line(
+                    43244,
+                    append(
+                        "j1",
+                        "Finished voice request: \"Start a slow job ...\". The result follows.\nThe file `marker1.txt` is created.",
+                    ),
+                ),
+                line(
+                    69388,
+                    append(
+                        "j2",
+                        "Finished voice request: \"And hand the executor a second slow job ...\". The result follows.\nThere are 1 files. marker1.txt and marker2.txt are now created.",
+                    ),
+                ),
+                line(70344, delta(voice)),
+                line(
+                    80136,
+                    append(
+                        "q",
+                        "Finished voice request: \"While that runs, how many files ...\". The result follows.\nThere are 1 files.",
+                    ),
+                ),
+            ]
+        };
+        let read_back = super::s101_premature_outcome_claims(
+            &recording(" There is 1 file. Marker one and marker two are now created."),
+            1,
+        );
+        assert!(read_back.is_empty(), "{read_back:#?}");
+        let guessed = super::s101_premature_outcome_claims(&recording(" There are 3 files."), 1);
+        assert_eq!(guessed.len(), 1, "{guessed:#?}");
+        assert!(
+            guessed[0].contains("before its result (known at 80136 ms)"),
+            "{guessed:#?}"
+        );
+    }
+
     #[test]
     fn s101_marker_file_names_are_not_counts() {
         let mut seq = 0;

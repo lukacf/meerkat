@@ -391,8 +391,9 @@ fn replay_digest(input: &Input) -> Result<[u8; 32], RuntimeDriverError> {
     // original work, qualified requester/target, content, and authority claims.
     replay.header_mut().id = InputId::from_uuid(uuid::Uuid::nil());
     replay.header_mut().timestamp = chrono::DateTime::UNIX_EPOCH;
-    let bytes = serde_json::to_vec(&replay).map_err(|_| unavailable())?;
-    Ok(Sha256::digest(bytes).into())
+    let mut digest = Sha256::new();
+    serde_json::to_writer(&mut digest, &replay).map_err(|_| unavailable())?;
+    Ok(digest.finalize().into())
 }
 
 pub(crate) fn verify_retained_replay(
@@ -467,7 +468,7 @@ pub(crate) mod tests {
 
         let original = input("caller");
         let header = original.header().clone();
-        let escaped = "quoted \"text\"\\path\n\t\0\u{00e9}\u{1f642}".repeat(96);
+        let escaped = "quoted \"text\"\\path\n\t\0\u{00e9}\u{1f642}".repeat(2048);
         let blocks = vec![
             ContentBlock::Text {
                 text: escaped.clone(),
@@ -481,7 +482,9 @@ pub(crate) mod tests {
         ];
         let payload = serde_json::json!({
             "text": escaped,
-            "nested": [null, true, 17, {"b": "second", "a": "first"}]
+            "nested": [null, true, 17, {"b": "second", "a": "first"}],
+            "numbers": [0.5, -0.0, -16.75, u64::MAX, i64::MIN],
+            "ordered": ["first", "second"]
         });
         let mut prompt = original;
         let Input::Prompt(prompt_body) = &mut prompt else {
@@ -579,6 +582,15 @@ pub(crate) mod tests {
             let encoded: serde_json::Value = serde_json::from_slice(&bytes).expect("input JSON");
             assert_eq!(encoded["input_type"], family);
             assert!(encoded["header"].get("ingress_context").is_none());
+            let decoded: Input = serde_json::from_slice(&bytes).expect("owned input roundtrip");
+            assert_eq!(
+                replay_digest(&decoded).expect("roundtrip digest"),
+                expected,
+                "{family} roundtrip"
+            );
+            if matches!(family, "prompt" | "peer" | "flow_step" | "external_event") {
+                assert!(bytes.len() > 64 * 1024, "large escaped {family} payload");
+            }
         }
     }
 
@@ -662,6 +674,60 @@ pub(crate) mod tests {
                 retained.verify_replay(&altered),
                 Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
                     if existing_id == *original.id()
+            ));
+        }
+
+        let event = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: crate::input::InputHeader {
+                source: crate::input::InputOrigin::External {
+                    source_name: "replay-fixture".into(),
+                },
+                ingress_context: None,
+                ..original.header().clone()
+            },
+            event_type: "record-updated".into(),
+            payload: serde_json::json!({
+                "nested": {"ratio": 0.5, "ordered": ["first", "second"]},
+                "large": "quoted \"text\"\\path\n\u{00e9}\u{1f642}".repeat(2048)
+            }),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+            objective_id: None,
+        });
+        let event_digest = replay_digest(&event).expect("external event digest");
+        let retained_event = RetainedInputAuthority::from_input(&event)
+            .expect("retained external event")
+            .expect("association");
+        for change in 0..3 {
+            let mut altered = event.clone();
+            let Input::ExternalEvent(body) = &mut altered else {
+                panic!("external event fixture");
+            };
+            match change {
+                0 => body.payload["nested"]["ratio"] = serde_json::json!(0.75),
+                1 => body.payload["nested"]["ordered"]
+                    .as_array_mut()
+                    .expect("ordered payload")
+                    .reverse(),
+                _ => {
+                    let mut large = body.payload["large"]
+                        .as_str()
+                        .expect("large payload")
+                        .to_owned();
+                    large.push('x');
+                    body.payload["large"] = serde_json::json!(large);
+                }
+            }
+            assert_ne!(
+                replay_digest(&altered).expect("changed external event digest"),
+                event_digest,
+                "external payload {change}"
+            );
+            assert!(matches!(
+                retained_event.verify_replay(&altered),
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == *event.id()
             ));
         }
     }

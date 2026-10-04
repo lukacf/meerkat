@@ -2132,6 +2132,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-sandbox"
+version = "0.8.50"
+dependencies = [
+ "meerkat-core",
+ "nix 0.29.0",
+ "tokio",
+]
+
+[[package]]
 name = "meerkat-schedule"
 version = "0.8.50"
 dependencies = [
@@ -2250,6 +2259,7 @@ dependencies = [
  "meerkat-jobs",
  "meerkat-llm-core",
  "meerkat-runtime",
+ "meerkat-sandbox",
  "meerkat-skills",
  "meerkat-store",
  "nix 0.29.0",

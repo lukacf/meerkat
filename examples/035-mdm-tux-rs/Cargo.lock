@@ -2716,6 +2716,16 @@ dependencies = [
  "tokio_with_wasm",
  "tracing",
  "uuid",
+ "winapi-util",
+]
+
+[[package]]
+name = "meerkat-sandbox"
+version = "0.8.50"
+dependencies = [
+ "meerkat-core",
+ "nix 0.29.0",
+ "tokio",
 ]
 
 [[package]]
@@ -2838,6 +2848,7 @@ dependencies = [
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-runtime",
+ "meerkat-sandbox",
  "meerkat-skills",
  "meerkat-sqlite",
  "meerkat-store",

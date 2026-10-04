@@ -1292,7 +1292,14 @@ them.
     the user's utterance came first, that output answered the user, so the
     cue is still owed. Both are provider-timeline starts. The cue has one
     wording per kind, with no "unless you have already told the user"
-    exception.
+    exception. Output that starts inside the result's insertion span also
+    counts when it opens a new response (the previous output ended at least
+    1600 ms earlier): the model often begins answering exactly as the
+    result lands (S100 r1: a fresh " Done." over the insertion's own span,
+    then the user's "skip the details, just say done", then a cue that made
+    the model read the details out). A cue owed because the user spoke
+    first adds "The user has spoken since this result arrived: if they said
+    how to report it, do that."
   - Every in-progress notice and every result cue names the other
     delegations still running, by the user's words for them: "Still
     running: "X". Do not say it is done until its result arrives." (S101:

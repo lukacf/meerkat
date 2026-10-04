@@ -303,12 +303,12 @@
       "name": "busy_quick",
       "file": "busy-quick.wav",
       "voice": "ash",
-      "text": "While that runs, a quick one: how many files are in the workspace right now? Just the number.",
-      "sha256": "00cf287027555e9e29c0dae9cd92d43d2446dc79ff5eec319c34ec64e75db869",
-      "duration_ms": 7252,
+      "text": "While that runs, how many files are in your working directory right now? Answer as: there are N files.",
+      "sha256": "97b2c46662ed71dbc55779abd1fbb0ffca604491a9e3f5c016a3efa8affea8be",
+      "duration_ms": 7882,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 1580,
-      "notes": "S101 unrelated quick question 5 s after job 1's delegation; it must not cancel job 1 and should finish before it under parallel scheduling. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ash), VAD-normalised, 1500 ms trailing-silence floor."
+      "trailing_silence_ms": 1673,
+      "notes": "S101 unrelated quick question 5 s after job 1's delegation; it must not cancel job 1 and should finish before it under parallel scheduling. Asks for an explicit count phrase (\"there are N files\") so the oracle identifies the stated count deterministically: before the job completed it is a premature outcome, after the result a wrong N is a misreport. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ash), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "busy_job2",

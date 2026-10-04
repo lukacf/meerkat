@@ -5345,13 +5345,26 @@ impl ExperimentalGptLiveDeferredAdapter {
             // Telemetry is recorded by the sideband actor and never routed
             // to the adapter.
             LiveSidebandObservationKind::ProviderInputLatency(_) => None,
-            LiveSidebandObservationKind::UnsupportedProviderEvent
-            | LiveSidebandObservationKind::DelegationActionableInputUnsupported { .. } => {
+            LiveSidebandObservationKind::UnsupportedProviderEvent => {
                 Some(LiveAdapterObservation::Error {
                     code: LiveAdapterErrorCode::ProviderError,
                     message: "experimental GPT Live emitted an unsupported actionable event"
                         .to_string(),
                 })
+            }
+            // A delegation the broker cannot turn into executor input (no
+            // user request on the channel to re-present, or a non-client
+            // target) is a refused stray, not a provider failure: nothing
+            // runs for it and the call continues. Lowered as a terminal error
+            // it closed the whole call (Turbo S S104 R1: a reopened channel
+            // delegated from its seeded history 1.35 s in, before any user
+            // speech, and the channel was muted and closed). The control lane
+            // receives the same observation and starts nothing for it.
+            LiveSidebandObservationKind::DelegationActionableInputUnsupported { .. } => {
+                tracing::info!(
+                    "experimental GPT Live delegation without actionable input refused; the channel continues"
+                );
+                None
             }
             LiveSidebandObservationKind::UserTranscriptFragment { .. }
             | LiveSidebandObservationKind::AssistantTranscriptFragment { .. }
@@ -15901,6 +15914,106 @@ mod tests {
             )
             .expect("unsupported terminal remains typed");
         assert!(matches!(terminal, LiveAdapterObservation::Error { .. }));
+    }
+
+    fn stray_delegation(binding: &ProviderWebrtcBinding) -> LiveSidebandObservation {
+        LiveSidebandObservation::new(
+            binding.clone(),
+            LiveSidebandObservationKind::DelegationActionableInputUnsupported {
+                delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                    "delegation:1".to_string(),
+                    "item_stray_delegation".to_string(),
+                )
+                .expect("delegation ref"),
+            },
+        )
+    }
+
+    /// S104 R1: a delegation without actionable input (no user request on a
+    /// freshly reopened channel) is a refused stray, never a terminal error;
+    /// an unsupported provider event stays terminal.
+    #[test]
+    fn delegation_without_actionable_input_is_not_terminal() {
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("stray-delegation"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let adapter = test_deferred_adapter();
+        assert!(
+            adapter
+                .lower_observation(stray_delegation(&binding), None)
+                .is_none(),
+            "a stray delegation is refused without an adapter observation"
+        );
+        assert!(matches!(
+            adapter.lower_observation(
+                LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::UnsupportedProviderEvent,
+                ),
+                None,
+            ),
+            Some(LiveAdapterObservation::Error { .. })
+        ));
+    }
+
+    /// A channel with no pending request that receives a stray delegation
+    /// stays open, and the user's next utterance is still served.
+    #[tokio::test]
+    async fn stray_delegation_keeps_the_channel_and_serves_the_next_utterance() {
+        let channel_id = meerkat_live::LiveChannelId::new("stray-delegation-stays-open");
+        let binding = ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let adapter = test_deferred_adapter();
+        adapter
+            .push_observation(stray_delegation(&binding))
+            .expect("stray delegation ingress");
+        let turn = LiveSidebandTurnRef::__from_provider_observation(
+            &channel_id,
+            "turn-after-stray".to_string(),
+            "provider-turn-after-stray".to_string(),
+        )
+        .expect("turn ref");
+        adapter
+            .push_observation(LiveSidebandObservation::new(
+                binding,
+                LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "what is the team mascot".to_string(),
+                },
+            ))
+            .expect("user turn ingress after the stray delegation");
+        let next = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("the adapter yields the next observation")
+        .expect("adapter stream healthy")
+        .expect("observation present");
+        let next = match next {
+            LiveAdapterObservation::WithContextObservation { observation, .. } => *observation,
+            other => other,
+        };
+        assert!(
+            matches!(
+                &next,
+                LiveAdapterObservation::UserTranscriptFinal { text, .. }
+                    if text == "what is the team mascot"
+            ),
+            "the next user utterance is served after the stray delegation: {next:?}"
+        );
+        assert!(
+            !adapter.current_status().is_terminal(),
+            "the channel stays open"
+        );
     }
 
     fn test_deferred_adapter() -> Arc<ExperimentalGptLiveDeferredAdapter> {

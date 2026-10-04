@@ -1259,7 +1259,12 @@ them.
   transcript: an output transcript delta that started before the user's
   utterance is the tail of the previous reply and clears neither the
   user's floor nor the open request, and a deferred cue waits while
-  reflected input still carries the user's speech (S99 on #1630 r3).
+  reflected input still carries the user's speech (S99 on #1630 r3). A
+  result the model has already spoken after (output starting at or after
+  the end of the result's insertion) gets no cue at all: in every recorded
+  readout that output voiced the result before any cue, and the cue that
+  followed only left standing delegation framing behind (S97 on #1630: 10
+  of 10 readouts before the cue; S99: the cue preceded every recall miss).
 
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to

@@ -145,6 +145,28 @@ export const INTEGRATION_SUITES = [
   // kernel_typed_round_trip drives the generated kernels with hand-built
   // inputs, so any machine DSL change can break it; it needs `test-oracle`.
   { package: "meerkat-machine-kernels", features: ["test-oracle"], triggers: MACHINE_AUTHORITY_PACKAGES },
+  // The facade's store and cold-restart suites, with the Bazel target's
+  // features. No other lane ran them before a release tag: the Bazel graph
+  // runs only nightly (on main) and at the tag, so a compaction plus
+  // cold-restart store corruption reached a green release/0.8.51 (#1673).
+  {
+    package: "meerkat",
+    name: "meerkat-store-restart",
+    features: [
+      "anthropic", "atif", "comms", "copilot", "gemini", "integration-real-tests", "jsonl-store", "live",
+      "live-webrtc", "mcp", "memory-store", "memory-store-session", "openai", "openai-live", "openai-realtime",
+      "schedule", "session-compaction", "session-store", "skills", "test-mcp-oauth-fixtures",
+      "test-realtime-fixtures", "workgraph",
+    ],
+    tests: [
+      "cold_restart_resume_after_compaction",
+      "cold_restart_resume",
+      "persistence_contract",
+      "storage_provider_seam",
+      "brain_swap_surface_parity",
+    ],
+    triggers: ["meerkat", "meerkat-core", "meerkat-store", "meerkat-session", "meerkat-runtime", "meerkat-sqlite"],
+  },
   // Deterministic replays of recorded Turbo S gpt-live-1 provider streams
   // (tests/integration/fixtures/gpt_live_replay): the S104/S106 voice
   // contracts without a provider or a key. `tests` names the one target, so

@@ -1012,14 +1012,16 @@ impl EphemeralRuntimeDriver {
         input: mm_dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, RuntimeDriverError> {
-        let state = {
-            let authority = self.dsl.lock();
-            authority.state().clone()
-        };
-        let mut preview =
-            mm_dsl::MeerkatMachineAuthority::recover_from_state(state).map_err(|err| {
-                RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}"))
-            })?;
+        let mut preview = match self.dsl.0.lock() {
+            Ok(authority) => Ok(authority.fork()),
+            Err(poisoned) => {
+                // A panic may have left a partial state. Retain cold validation
+                // after cloning and releasing the actual poisoned guard.
+                let state = poisoned.into_inner().state().clone();
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            }
+        }
+        .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))?;
         mm_dsl::MeerkatMachineMutator::apply(&mut preview, input)
             .map(|transition| transition.into_effects())
             .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))

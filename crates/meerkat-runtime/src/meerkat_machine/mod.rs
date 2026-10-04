@@ -6809,13 +6809,11 @@ impl MeerkatMachine {
         crate::handles::RuntimePeerCommsHandle::install_generated_on(handle, runtime)
     }
 
-    fn preview_dsl_input_on_state(
-        state: dsl::MeerkatMachineState,
+    fn preview_dsl_input_on_authority(
+        mut preview: dsl::MeerkatMachineAuthority,
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
-        let mut preview = dsl::MeerkatMachineAuthority::recover_from_state(state)
-            .map_err(|err| dsl_authority::map_error(err, context))?;
         dsl::MeerkatMachineMutator::apply(&mut preview, input)
             .map(|transition| transition.into_effects())
             .map_err(|err| dsl_authority::map_error(err, context))
@@ -6828,13 +6826,17 @@ impl MeerkatMachine {
         context: &str,
     ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
         let authority = self.session_dsl_authority(session_id).await?;
-        let state = {
-            let authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state().clone()
-        };
-        Self::preview_dsl_input_on_state(state, input, context)
+        let preview = match authority.lock() {
+            Ok(authority) => Ok(authority.fork()),
+            Err(poisoned) => {
+                // Live forks require a healthy lock. A possibly partial state
+                // still crosses the existing cold-recovery validation boundary.
+                let state = poisoned.into_inner().state().clone();
+                dsl::MeerkatMachineAuthority::recover_from_state(state)
+            }
+        }
+        .map_err(|err| dsl_authority::map_error(err, context))?;
+        Self::preview_dsl_input_on_authority(preview, input, context)
     }
 
     async fn session_dsl_state(

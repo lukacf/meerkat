@@ -1,6 +1,6 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 18:17 UTC
+## Current delivery status, 2026-10-04 at 18:36 UTC
 
 Native PR1634 is published at `b12d81e71e57bfeb2c3bc677c21c782f57cc3df6`,
 tree `1f9553187e12d0a7f91ac0cdd0ff54e56e658c77`. All normal push hooks,
@@ -35,12 +35,26 @@ The preview safety baseline is committed at
 archival/recovery test passed with zero failures or ignores; normal commit
 hooks passed. They cover isolated effects and full state, binding rejection,
 retained poison, and cleanup. They do not prove that a poisoned preview invokes
-cold validation. The production fork optimization remains held. The first
+cold validation. The first
 compile attempt used a stale macro artifact and ran no tests; rebuilding the
 correct macro took 2m31s before the two preview cases passed in 0.04s.
 Raw results are `costf9-preview-live-fork-baseline-r1.log`,
 `costf9-preview-live-fork-baseline-r2.log` and
 `costf9-preview-live-fork-archive-baseline-r1.log` in the retained evidence.
+
+The reviewed production preview change is now under qualification. Healthy
+locks use the generated authority's existing isolated fork; poisoned locks
+retain cold recovery validation. On GCP, the same two preview tests passed
+with zero failures or ignores after 11m13s of optimized compilation. Three
+existing provisional-transition tests and the archival/recovery control also
+passed, with test bodies reported as 0.00s. Raw logs use the
+`native34f-preview-` prefix in the retained evidence directory. Both optimized
+native-workload correctness tests then passed with zero failures or ignores in
+8.05s, after a 6m18s rebuild. These eight controls cover local refusal feedback,
+permitted effects, revocation, queued-work cancellation, isolation and cleanup.
+Ordinary publication hooks and fresh CI remain pending. No new performance
+result is claimed; timing requires fresh GCP clearance after both active release
+tags.
 
 The separate push-range workflow fix `5ecab297` remains unpublished. Its
 70m13s normal push passed Clippy, machine and hook checks, then failed one of
@@ -49,8 +63,12 @@ cleanup test observed FIFO closure before its immediate process-state check
 reported exit. A bounded process-exit check with a still-running negative is
 prepared; the cause is not yet proven. Its first focused test attempt exhausted
 600 seconds rebuilding a different dependency feature graph, before any test
-body ran. The repair remains unapplied. Integration and E2E gates were not
-reached. These attempts are validation time, not delivered feature coverage.
+body ran. A second attempt using the existing workspace unit graph reached its
+840-second limit at 18:27:08 UTC, also before any test body ran. An unrelated
+Mac gateway build overlapped that second attempt. The owned build lane was
+released and the repair remains unapplied. These are compile-only timeouts,
+not observed failures of the new assertions. Integration and E2E gates were
+not reached. These attempts are validation time, not delivered feature coverage.
 
 The representative benchmark now defaults to the approved fixed W20/N32
 profile and rejects the withdrawn tail profile or conflicting count overrides.

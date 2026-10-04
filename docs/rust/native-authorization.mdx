@@ -533,6 +533,41 @@ requests and one allowed read callback, with zero denied-delete callbacks. It
 also checks retained seed/context/controller ownership, committed audit and the
 saved transcript. These fixture checks do not establish live-provider coverage.
 
+## Acceptance boundary for a Console host adapter
+
+A governed Console submission adapter is still required. A compatible native
+dependency and `local-authorization` feature are prerequisites; enabling them
+or Console access does not commission native owners. Keep the same governed
+bundle, session service, machine and attached controller described above.
+
+Implement this handoff with tests in the existing Console send and native ingress
+modules, after declaring the missing host adapter with unsupported behavior:
+
+1. Thread trusted identity to final admission. Keep `console_send_handler`'s
+   authenticated `agent.send` check, then carry the host-qualified requester,
+   ingress actor, represented subject and authentication evidence through
+   `dispatch_message_to_resolved_member` to the final member input. The browser
+   cannot supply these facts. Obtain the actual actor's controller pin and bind
+   the final input using `NativeIngressContext`, as in `GovernedConnection::bind`.
+   Assert the exact runtime, input, identities and pin seen by native owners;
+   mismatched or missing facts must refuse before model or tool entry.
+2. Exercise a real denied operation alongside a permitted sibling. Extend the
+   existing Console send fixture with the commissioned native owners and a
+   loopback model, retaining the fixed JSONL fixture's real callback, second
+   model-request, transcript and audit assertions. Require zero denied body
+   entries, the permitted result, model-visible refusal and later completion.
+   Transport the actual owner events through SDK and Console projection;
+   decoded synthetic packets alone do not establish this path.
+3. Preserve acceptance and repair boundaries. Extend the existing send-attempt
+   tests for a native input refusal or readiness failure after Console reservation:
+   settle the reserved interaction without reporting that nothing was accepted.
+   A generic HTTP 403 currently means pre-dispatch rejection to this UI. A lost
+   acknowledgement remains outcome-unknown under the frozen idempotency key.
+   Keep operation refusal separate from input readiness, and outcome-audit failure
+   separate from the actual effect; neither infrastructure failure authorizes
+   replaying an effect. Persistent grant or credential administration remains
+   outside this adapter's supported scope.
+
 ## Preserve the result and test the actual effect
 
 An operation-local `OperationAuthorizationError::Refused` can become safe model

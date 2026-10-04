@@ -1,6 +1,6 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 19:38 UTC
+## Current delivery status, 2026-10-04 at 21:03 UTC
 
 Native PR1634 is published at `b12d81e71e57bfeb2c3bc677c21c782f57cc3df6`,
 tree `1f9553187e12d0a7f91ac0cdd0ff54e56e658c77`. All normal push hooks,
@@ -19,16 +19,19 @@ still unacceptable: the latest six-cell study missed every conditional mean
 threshold, with fresh-turn overhead of 137.01 and 145.20 percent at grant
 depths 1 and 3. Individual-operation p99 and full coverage remain open.
 
-Console PR520 is published at `86e0cdf0a17d9727c90ba036a8b9dbca97c521b8`,
-tree `509ffe7e9bd7606b80349120f381d1518dfab891`. Its refused-send handling
-now derives busy state from retained owner events, so rejecting a steer does
-not clear an already active run. The regression failed before the repair;
-the existing queue and send-attempt suites passed all 98 cases after it.
-Normal commit, embedded-asset freshness and the applicable push hooks passed.
-[Fresh CI37226632903](https://github.com/lukacf/meerkat-mobkit/actions/runs/37226632903)
-is still pending. Predecessor `127331ff` passed all 11 CI jobs in 37m19s,
-19 access-view tests and 313 adapter tests. These remain Console projection
-results; MobKit's native dependency is still 0.8.50.
+Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published
+at `b997bdcc5bcab37f7080215099c1d5be1307b892`, tree
+`2b9e7d232dbce80c82e58b0824279c74575e52d0`. Local queue/send-attempt suites
+passed 102 cases and the adapter suite passed 317, all without skips. Normal
+commit, embedded freshness and applicable push hooks passed. However,
+[CI37230079692](https://github.com/lukacf/meerkat-mobkit/actions/runs/37230079692)
+failed: nine jobs passed, Console failed and the aggregate gate failed. The
+5,000-turn send-streaming browser scenario timed out. A source reproduction
+finds anonymous historical tool results appended after the assistant snapshot's
+observation boundary, leaving the queue busy after the current run completes.
+The real gateway can emit this ordering too. Repair and fresh CI remain open.
+Predecessor `86e0cdf0a17d9727c90ba036a8b9dbca97c521b8` passed all 11 CI jobs
+in 39m34s. These are Console projection results; MobKit still pins Meerkat 0.8.50.
 
 The preview safety baseline is committed at
 `64b44ff9d0fb6d3118c324b20e0bcc4449ac6659`, tree
@@ -60,17 +63,38 @@ not reached. A reviewed test-only explicit Send boundary then passed the
 same workspace, all-target, all-feature Clippy command in 7.58s using the
 retained warm target. The existing CLI RPC-deployment scenario then passed
 with zero failures in 0.158s after a 9m24s compile, finishing at 19:37:46 UTC.
-The test-only repair awaits commit and ordinary publication retry. No
-production allocation or recursion-limit change is part of that repair. Toolkit's bounded preview source review found no
-blocker; it does not supply missing execution or performance evidence.
+The test-only repair is committed in candidate
+`d6f2369fab6caed654caa992ffe9423d1e3736a4`. Its normal push failed after
+66m21s at 20:46:42 UTC, before integration/E2E: 12,796 of 12,798 unit tests
+passed, two OpenAI authorization tests failed, and 22 were skipped. One success
+fixture received two HTTP requests; the transport-failure fixture did not see
+a transport error. The failure tests release an ephemeral port before using
+it, allowing another parallel test to receive the request. A repair retains
+port ownership through an actual request followed by transport closure across
+OpenAI, Anthropic and Gemini. All 39 selected authorization tests passed
+across the three provider binaries after 2m33s of compilation, with 0.07s test
+bodies and 617 unrelated tests excluded by the selection. This includes both
+previously failed cases. The scoped raw log is
+`/private/tmp/adr-001-http-test-isolation-r1/provider-authorization-tests.log`.
+Normal publication and fresh CI for this repair remain open. The full failed push log is
+`publicd6f-normal-push-r1.log` in the retained evidence directory.
+No production allocation or recursion-limit change is part of the CLI repair.
+Toolkit's bounded preview source review found no blocker; it does not supply
+missing execution or performance evidence.
 Raw logs are `public4cff-normal-push-r1.log` and
 `native4cff-cli-send-clippy-r1.log` and `native4cff-cli-send-scenario-r1.log`
 in the retained evidence directory.
 No new performance result is claimed; timing requires fresh GCP clearance
 after both active release tags.
 
-The separate push-range workflow repair is committed at
-`032547f2ab26462842fb1d113bd73eb5d510d0b1` and its normal push is running.
+The separate push-range workflow repair is published in
+[PR1682](https://github.com/lukacf/meerkat/pull/1682) at
+`032547f2ab26462842fb1d113bd73eb5d510d0b1`. Its complete normal push passed
+in 126m22s, ending at 20:59:08 UTC, including the deterministic unit,
+integration and E2E gate. Individual counts are not retained in successful
+hook output and are not inferred. Fresh
+[CI37234271914](https://github.com/lukacf/meerkat/actions/runs/37234271914)
+is running.
 It follows `5ecab297`, whose 70m13s push passed Clippy and machine checks,
 then failed one of 12,155 unit tests (17 skipped). Two new controls reproduced
 the cleanup observer's assumption that FIFO closure implies process exit.
@@ -81,7 +105,7 @@ Two earlier 600s and 840s attempts expired during compilation before tests
 ran; the completed baseline then took 8m47s to compile and the repair 1.91s.
 Raw results are retained under
 `/private/tmp/adr-001-cargo-push-range-r1/cleanup-oracle-r1`.
-The current first-branch push conservatively validates the whole tree because
+That first-branch push conservatively validated the whole tree because
 its source ref was `HEAD`; future first pushes will name the source branch
 explicitly so the existing dispatcher can select its proven comparison base.
 

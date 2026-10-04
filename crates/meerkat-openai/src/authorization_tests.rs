@@ -877,13 +877,25 @@ async fn failed_entry_audit_prevents_physical_http_request() {
 async fn transport_failure_retains_original_error_beside_outcome_diagnostic() {
     for route in ROUTES {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let unused_url = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        let failing_url = format!("http://{}", listener.local_addr().unwrap());
         let policy = Policy::new();
         policy.fail_outcome.store(true, Ordering::SeqCst);
-        let client = client(route, &unused_url, Authorizer::new(false, None));
+        let client = client(route, &failing_url, Authorizer::new(false, None));
         let request = request(client.as_ref(), Arc::clone(&policy), simple_request());
-        let results = collect(client.as_ref(), &request).await;
+        // Keep the port owned until collection finishes. Releasing it before
+        // connecting lets another parallel test receive this request.
+        let break_transport = async {
+            use tokio::io::AsyncReadExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 1024];
+            assert!(stream.read(&mut bytes).await.unwrap() > 0);
+            // Close after request entry, without sending an HTTP response.
+        };
+        let (results, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(collect(client.as_ref(), &request), break_transport)
+        })
+        .await
+        .unwrap();
         assert!(
             results
                 .iter()

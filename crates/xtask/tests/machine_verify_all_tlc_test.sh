@@ -233,6 +233,21 @@ fi
 echo "running bounded live media health TLC audit"
 TLC_WORKERS="${tlc_workers}" "${live_media_health_audit}" "${LIVE_MEDIA_HEALTH_AUDIT_MAX_STEPS:-20}"
 
+# Bounded audit of a durable worker start that resolves after its channel
+# closed (Turbo S S104 R7): from an authorized worker start it explores the
+# close and close settlement, start resolution through the operation's own
+# channel and a foreign never-bound one, terminal recording and every
+# revoked-worker reconciliation arm, under every generated invariant plus
+# AuditForeignChannelNeverResolves. Both goals (resolved after the close;
+# settled through the revoked-worker reconciliation) must be reached.
+live_worker_start_after_close_audit="${workspace_root}/specs/machines/meerkat_machine/live_delegation_worker_start_after_close_audit.sh"
+if [[ ! -x "${live_worker_start_after_close_audit}" ]]; then
+  echo "error: live worker start after close audit runner is missing from workspace runfiles: ${live_worker_start_after_close_audit}" >&2
+  exit 1
+fi
+echo "running bounded live worker start after close TLC audit"
+TLC_WORKERS="${tlc_workers}" "${live_worker_start_after_close_audit}" "${LIVE_WORKER_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-22}"
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier

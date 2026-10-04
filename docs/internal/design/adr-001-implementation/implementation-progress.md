@@ -3,7 +3,18 @@
 ## Publication gate, 2026-10-04
 
 Native [PR1634](https://github.com/lukacf/meerkat/pull/1634) is published at
-`c18c619bf2d140663eb0a78d17d7122d9ac1a5ef`, tree
+`7defcdd7fa069782b12c9073bd3b128a08147d6d`, tree
+`6cf73b7019955daa40e653abf047687535fa3d37`. All normal push hooks passed
+in 4,788s (79m48s; `public7def-normal-push.log`), without bypass. Fresh
+[CI run 37196269479](https://github.com/lukacf/meerkat/actions/runs/37196269479)
+passed on exact7def: 38 successful jobs and 4 intentional skips in 17m27s
+(10:43:05 creation to 11:00:32 UTC last completion). Exact-head
+[semver run 37196269475](https://github.com/lukacf/meerkat/actions/runs/37196269475)
+also passed. Root's PR readback confirmed exact7def and clean merge state;
+raw records are `public7def-ci-37196269479-final.json` and
+`public7def-semver-37196269475-final.json`. No merge or release is recorded.
+
+Published predecessor `c18c619bf2d140663eb0a78d17d7122d9ac1a5ef`, tree
 `f81231a73c2f4ba5befa1cf2575fe1834016c77f`. Its normal GCP push passed all
 required hooks in 4,078s wall time and completed at 06:17:43 UTC
 (`native-c18-gcp-normal-push-green-r1.log`). Fresh
@@ -29,7 +40,7 @@ completed with 35 successful jobs. Format + governance failed because two
 standalone example locks were stale; Generation ratchets failed only poster
 freshness in two HTML outputs, after canonical coverage and typed content
 checks passed. The dependent CI gate failed too. Those results remain historical
-for the previous head; they do not describe the current CI-green publication.
+for the previous head; they do not describe CI-green predecessor c18.
 
 The preceding repair is `51cd489916387039121e751e595670b92a0d4b65`, tree
 `f365afd3b3bc18f14c70da35db3615ce97e5fc7c`. Its only four changed files are the
@@ -41,11 +52,24 @@ example/root-lock checks and full compiled-alphabet poster gate before the
 normal successor publication. Published `51` has identical Rust bytes to `157`.
 Additional runtime production integration remains held.
 
-Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is now published
-at docs-only successor `37ca84df0fb3b6c956501374183b3e0866880db6`. Its normal
-push passed, and [CI run 37188101522](https://github.com/lukacf/meerkat-mobkit/actions/runs/37188101522)
-was still in progress at this checkpoint. Only the Console guide and changelog
-differ from `17`; Console/Rust bytes and assets remain unchanged. The preceding
+Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published
+at tests-only `e26bb4173df36e2aab0ee7e485d6568fa152d1bd`, tree
+`4b803040731ed497d5736132cdf9010d92ae8cb7`. Its applicable normal hooks
+passed; fresh [CI run 37194585660](https://github.com/lukacf/meerkat-mobkit/actions/runs/37194585660)
+passed all 11 jobs in 40m05s, with its last job completing at 10:52:00 UTC.
+Root's exact-head PR readback confirmed e26 and clean merge state; the raw
+record is `consolee26-ci-37194585660-final.json`.
+The existing SDK event modules passed Python 19/19 in 0.16s and
+TypeScript 43/43 in 224.54ms, with the unchanged SDK build successful. These
+synthetic packet controls preserve exact refusal/result fields, unfamiliar raw
+hook events and decoder continuation; they do not prove native entry, actual
+sibling execution, model continuation or integrated native-plus-Console enforcement.
+Console/Rust production bytes and assets are unchanged from `37`.
+
+Docs-only predecessor `37ca84df0fb3b6c956501374183b3e0866880db6` passed its normal
+push and all 11 jobs in [CI run 37188101522](https://github.com/lukacf/meerkat-mobkit/actions/runs/37188101522)
+(32m20s elapsed). Only the Console guide and changelog differ from `17`.
+The preceding
 `17fe7af8b2b374402d0e198f44879c2891446ac8` is the ordinary merge of published
 `fc0509cfe` and main `fa233b756`, whose five-file delta added Python init-timeout
 SDK/tests/docs and retained both changelog entries.
@@ -59,7 +83,7 @@ five-file Python/docs/changelog delta, rather than repeating that test result.
 Fresh [CI run 37172144001](https://github.com/lukacf/meerkat-mobkit/actions/runs/37172144001)
 passed all 11 jobs at exact 17, including the final gate at 03:24:41 UTC
 (36m53s elapsed from run creation). This remains the predecessor's CI result,
-not a completed current-head result for `37ca84df0`.
+separate from current e26's completed 11-job result.
 
 The published SDK adapter exports known hook reasons plus an explicit unknown
 wrapper retaining the exact original reason/code. Known TypeScript variants
@@ -134,8 +158,8 @@ remain mixed, so this is not an incremental governed-cost or optimization result
 The separate exact-byte hex production candidate is committed at
 `f4671b7c5f190d0a165cffe87e43f86845a6c718`, with only the reviewed 4-line/3-line
 encoding change. Seven input-authority tests, the canonical encoding control
-and both native cost correctness selectors passed. This is correctness evidence,
-not a measured performance gain, and it is separate from published c18.
+and both native cost correctness selectors passed. These qualify encoding and
+correctness; the later comparison below is separate from published c18.
 The fixed-mean harness is committed locally at
 `761ce0d1b25454daf49bfbafb59d85d5f3c66f8b`: four deadline/profile controls
 failed behaviorally before repair (9m21s compile, 0.28s bodies) and then passed
@@ -143,12 +167,26 @@ failed behaviorally before repair (9m21s compile, 0.28s bodies) and then passed
 two intentional ignored timing matrices (0.45s compile, 216.25s debug bodies;
 `native-fixed-mean-harness-all-ordinary-r1.log`). The repository-owned analyzer's
 fixed-profile extension passed 20 pure-Python tests. These qualify the harness
-and analysis contract; neither ignored matrix ran, and there is still no
-candidate timing gain or representative measurement.
+and analysis contract; neither ignored matrix ran as part of those checks.
 
-The approved next order is a quiet matched comparison of preserved `157` and
-that hex candidate first. Only a material improvement permits the representative
-attempt. The approved representative profile is fixed W20/N32 in all six
+The prerequisite small comparison of preserved `157` and `f467` completed in
+91s, including both runs, output and repository analysis. Each raw retained
+16,000 samples, four cells, 100 warmups and 2,000 matched pairs per cell;
+independent review reproduced the summaries and effect/audit counts. Signed
+added means fell 18.50/14.59 percent at lineage depths 1/3, meeting the declared
+GO screen for representative investigation only. Trusted controls rose
+9.09/17.68 percent, while Local means fell only about 6.3/3.8 percent;
+candidate whole-turn overhead remained 94.46/144.09 percent. This establishes
+neither causal optimization gain nor cheap-default acceptance
+(`native157-small-comparison-r1.log`, `nativef467-small-comparison-r1.log`).
+The preceding quiet queue consumed 53m40s; waiting, the 79m48s publication push
+and the 91s measurement are separate costs.
+
+Exact clean `761` optimized qualification then passed: build 6m24s, small
+correctness 1/1 in 0.03s, representative correctness 1/1 in 11.04s, four profile
+controls in 0.04s and analyzer 20/20 in 1.709s. The initial wrong control filter
+selected zero tests and is retained as setup failure, not qualification.
+No fixed-mean representative timing has run. The approved profile is W20/N32 in all six
 existing depth/workload cells, with no interim analysis. Its 624 fresh fixtures
 must fit the less-than-20-minute total budget; budget exhaustion or incomplete
 cells yield UNCERTAIN. Six paired Fieller mean-ratio intervals use family alpha
@@ -156,9 +194,63 @@ cells yield UNCERTAIN. Six paired Fieller mean-ratio intervals use family alpha
 independent, approximately bivariate-normal blocks. Fresh-admission cells measure
 whole turns; continuing intervals and summed direct calls remain separate
 units. This mean-only profile cannot establish p99 or full performance acceptance.
-The implementation lead and GCP resource owner must explicitly clear the quiet
-host and issue START before either measurement; no candidate gain or fixed-profile
-representative result is recorded yet.
+Root owns measurement and the GCP resource owner owns host quiet qualification.
+The reserved representative attempt now waits for actual owner acknowledgments
+to pause at the next completed build/test command boundary, then two quiet
+samples and explicit START; root retains the less-than-20-minute total measurement
+bound and the GCP resource owner qualifies host quiet. No UTC slot is inferred.
+No representative result or cheap-default acceptance is recorded.
+
+The fixture-only `685e336d3b0984f72dab5517e6617bd366ce2b7a` checkpoint passed
+input-authority 9 and controller-custody 5 tests under ordinary parallelism,
+with no failures or ignores; post-format passes and applicable normal hooks
+also passed. It isolates the actual retained credential selection in two test
+files. The earlier four Busy failures remain separate from these 14 passes;
+this is not production, a full-runtime suite or persistent administration.
+
+The backend-only scaffold's initial 14-test batch reported 2 passed and 12
+failed. The runtime E0502 counter-borrow compile failure ran no test bodies;
+its narrow repair preceded the actual 8-test runtime RED
+(`persistent-backend-runtime-red-r1.log`, `persistent-backend-runtime-red-r2.log`;
+2m16s compile, 0.16s bodies). Strict-fence/profile/schema selectors each ran two
+cases; the no-conversion profile case failed at fence setup before checking WAL.
+The two added catalog controls then reported 1 pass and 1 failure after 1.27s
+compilation, 0.03s bodies: foreign/retired compatibility passed, while the old
+normalizer accepted oversized owned SQL. Those 16 controls reported 3 passes
+and 13 failures. The two canonical grant-lock probes then both failed after
+2m28s compilation and 5.01s bodies
+(`persistent-controller-grant-locks-red-r1.log`): mutation waited while the actual
+publication or grant-owner lock remained held instead of returning Unavailable.
+The initial backend and nonwaiting-mutation selections executed 18 critical
+tests: 3 passed, 15 failed and none ignored. That is the historical RED result;
+the earlier counter-borrow compile failure remains separate from executed bodies.
+
+The local nonwaiting grant repair is committed at
+`e108e2053768554bdc8a4948a8429f0e1650ca2b`, tree
+`5b934671599491734102a9cc22296e8f49455fa1`. It changes only the two canonical
+publication/grant owners and the existing grant tests. Native-custody revocation
+tries the actual publication and generated-owner locks; Busy returns Unavailable,
+while the generated Revoke decision and publication/result semantics remain.
+The first repaired authorization library run passed all 97 tests after 18.72s
+compilation, with 0.06s bodies. Strict library Clippy passed in 1m24s before the
+normal commit's whitespace-only Rust formatting. The first normal commit attempt
+stopped after that formatter changed a file; the second passed. Post-format
+library execution again passed all 97 tests, with no failures or ignores, after
+21.61s compilation and 0.06s bodies. Both formerly failing grant-lock probes and
+the publication/grant invariant companions passed
+(`persistent-controller-nonwaiting-grants-green-r1.log`,
+`persistent-controller-nonwaiting-clippy-r1.log`,
+`persistent-controller-nonwaiting-normal-commit-r1.log`,
+`persistent-controller-nonwaiting-normal-commit-r2.log`,
+`persistent-controller-nonwaiting-grants-green-postfmt-r1.log`).
+
+Published native remains exact `7def`. Root separately applied only the reviewed
+three-file repair to its local public candidate; successor commit, normal push
+and exact-head CI remain pending. The two grant-lock REDs are resolved locally;
+the separate 16 backend controls remain at 3 passes and 13 failures. No backend
+production repair or native/grant assembly has been accepted, and persistent
+public Try remains unsupported. This narrow lock repair does not qualify full
+persistent controller administration or performance.
 
 Historical failure/preparation logs remain in the existing evidence directory.
 The first Web SDK exhaustive-event check omitted HookLaunchRefused, while its
@@ -259,16 +351,20 @@ executes exported JSONL setup/serve, two actual model requests, zero denied
 delete callbacks, one permitted read callback, same-run feedback/completion,
 protected native audit and ordered public event notifications. The negative
 unsupported/ungoverned entry and existing refusal case passed too. Normal commit
-hooks passed. The current source-reviewed local successor is
+hooks passed. Its source-reviewed local successor was
 `f687e95d6c2611491e102a192429e7c8558b2c6a`, tree
 `da4bce4bddba21698fbce883aae9cb0d556e3ba1`. Its same three cases passed with
 0 failed, 0 ignored and 553 filtered in 0.04s bodies after a 9m06s release build
 (`publicf687-governed-jsonl-r1.log`, SHA256
 `4298fa4acb389ccf1f7631370ae3885e2996aeaae4392dab479a8108e04cc1fd`).
 This includes the source-reviewed cross-operation model-tool-model audit ordering,
-without imposing serial order on siblings. The candidate remains unpublished
-with no exact-candidate CI result. These local results do not extend c18's
-two-selector CI evidence or establish integrated native-plus-Console acceptance.
+without imposing serial order on siblings. Published `7def` retains those
+exact test bytes and adds no production behavior. Its fresh CI Governed JSONL
+job 111418874872 listed and ran all three exact names: 3 passed, 0 failed,
+0 ignored and 553 filtered, with 0.21s bodies
+(`public7def-governed-jsonl-ci-job.log`). These exact-head results are separate
+from c18's two-selector evidence and do not establish integrated
+native-plus-Console acceptance.
 
 ## Current local shell and hook checkpoint, 2026-10-03
 

@@ -24,57 +24,21 @@ coverage remain required; deployment opt-in
 does not make sandbox implementation optional. No design verdict counts as
 implementation acceptance, and missing coverage cannot be relabeled out of scope.
 
-The [implementation checkpoint](implementation-progress.md) records current
-execution and publication status. Native PR1634 is published at
-`c18c619bf2d140663eb0a78d17d7122d9ac1a5ef`; its normal GCP push passed all
-required hooks in 4,078s and completed at 06:17:43 UTC. Fresh CI run 37182383940
-passed on exact c18 with 38 successful jobs and 4 intentional skips in 21m42s;
-its exact-head semver run passed too. The preceding `51` repair/CI success and
-`157` freshness failures remain separately source-qualified historical evidence.
-The published tests-only restart delta has direct acceptance evidence for all
-16 default native-loop cases, including completed-turn SQLite reconstruction in
-a new process followed by fresh governed work. Normal publication's recorded
-unit/integration selection and exact-head CI do not establish an independently
-verified CI native-loop exact-selector count. Its six formerly ignored
-deterministic cases are ordinary;
-published `157` retains its historical opt-ins. Interrupted recovery and
-persistent administration remain open.
-The revised restart case also proves current ingress accepts historical claims
-before current grant authority refuses them, with no effect or durable input
-entry. The full revised native target passed 16 cases with no ignores; three
-smoke-wrapper controls passed separately. The selected changed-path governance
-and Clippy checks and actual prebuilt outer E1 wrapper also passed. The failed
-Make agent gate and deliberately stopped first Make smoke materializer remain
-recorded separately; normal c18 publication and exact-head CI are now green.
-The current separate public-entry/notification candidate `f687e95d6` passed
-all three existing-target RPC cases with no ignores in the
-no-default/local-authorization profile (9m06s release build, 0.04s bodies).
-The earlier `c936` fixture repair reads in-flight audit from the actual native
-adapter while retaining final durable audit checks; its failed first execution
-and subsequent three-case pass remain historical evidence. The current local
-pass and source review do not establish candidate publication, exact-head CI or
-integrated native-plus-Console acceptance. Console's docs-only published
-`37ca84df0` has fresh CI in progress; the 11-job green result belongs to its
-source-compatible predecessor `17`.
-The exact published `157` optimized build and both cost correctness selectors
-passed. The first quiet small-fixture timing run is measured: whole-turn
-Local-minus-Trusted overhead was +117.33 percent at grant lineage depth 1 and
-+189.37 percent at depth 3. These turns exceed 10 percent in this small fixture and require investigation;
-the representative-turn gate and individual-operation acceptance remain unproven.
+Use the [implementation checkpoint](implementation-progress.md) as the single
+record of current source identities, publication and CI, executed test inventories,
+performance measurements and queued work. It distinguishes current evidence
+from historical failures, local candidates and unexecuted proposals; this plan
+keeps the acceptance scope and measurement rules.
 
-The first small run and its 45-minute allocation are completed historical
-evidence. The verified `157` binary remains qualified for published `51`'s
-unchanged benchmark/build-selection inputs; those four generated/lock files do
-not require a redundant workload rebuild. The separate committed `f467` exact-byte
-hex candidate has passed compatibility and both cost correctness selectors, with
-no timing gain measured yet. The local `761ce0d1b` fixed-mean harness has four
-controls that failed before repair and then passed, followed by all six ordinary
-cases, leaving its
-two timing matrices ignored; the analyzer extension passed 20 pure-Python tests.
-These are correctness/contract results, not measurements. The next cost step
-requires an explicitly cleared quiet START for a matched preserved-157/hex-candidate
-comparison. Only material
-improvement permits the representative attempt.
+Qualified restart coverage includes 16 default native-loop cases, including
+completed-turn SQLite reconstruction in a new process followed by fresh governed
+work. The cold-reopen fixture accepts a historical claimed association through its
+current ingress before the current grant owner refuses it, with no effect or
+durable input entry. These
+direct acceptance results do not imply a CI exact-selector count beyond the
+recorded job inventory. Interrupted recovery and persistent administration remain
+open. Fixed commissioned JSONL acceptance and Console feedback/access projection
+are separate qualifications, not integrated native-plus-Console activation.
 
 Luka rejected the former 6-7-hour representative allocation. Every benchmark
 attempt must finish in less than 20 minutes total, including setup, warmup,
@@ -89,11 +53,8 @@ acceptance. The implementation lead owns measurement and the GCP resource owner
 explicitly clears the host before START. The under-1-ms p99 added authorization
 per-operation and at-most-10-percent representative-turn targets remain open with
 full required coverage. Added whole-turn p99 is not an individual-operation
-measurement. A second unchanged-157-binary CPU capture
-passed the small fixture in 51.24s with 5,447 samples and zero reported loss;
-increasing the DWARF user-stack capture to 32,768 bytes did not establish useful
-application-owner attribution improvement. Mixed-mode/setup/capture samples
-are diagnostics, not an optimization result or a performance gate pass.
+measurement. Profiling diagnostics and build/correctness checks do not replace
+uninstrumented cost results or establish the full acceptance gates.
 
 ## Historical baselines and isolation
 

@@ -81,6 +81,26 @@ impl LocalAuthorizationPublication {
             .writer
             .lock()
             .map_err(|_| PublicationError::Unavailable)?;
+        self.reservation_with_writer(writer)
+    }
+
+    /// Reserve without waiting while native custody remains held. Contention
+    /// or poison returns before mutation and leaves publication unchanged.
+    pub(crate) fn try_reserve_owner_change(
+        &self,
+    ) -> Result<LocalPublicationGuard<'_>, PublicationError> {
+        let writer = self
+            .inner
+            .writer
+            .try_lock()
+            .map_err(|_| PublicationError::Unavailable)?;
+        self.reservation_with_writer(writer)
+    }
+
+    fn reservation_with_writer<'a>(
+        &'a self,
+        writer: MutexGuard<'a, ()>,
+    ) -> Result<LocalPublicationGuard<'a>, PublicationError> {
         let previous = self.inner.sequence.load(Ordering::Acquire);
         if previous >= INVALID - 2 || !previous.is_multiple_of(2) {
             self.inner.sequence.store(INVALID, Ordering::Release);

@@ -1375,3 +1375,148 @@ fn recovered_grant_state_rejects_revoke_without_revision_advance() {
         "a retained revocation without its revision update must not be repaired"
     );
 }
+
+#[test]
+fn native_controller_revoke_refuses_busy_publication_without_waiting_or_publishing() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = Arc::new(Fixture::new());
+    let grant = fixture.root();
+    let before = fixture
+        .authority
+        .owner
+        .lock()
+        .expect("before owner")
+        .state()
+        .clone();
+    let original = fixture.publication.observe(|| ()).expect("before stamp").1;
+    let held = fixture
+        .publication
+        .reserve_owner_change()
+        .expect("actual publication writer");
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let worker_fixture = Arc::clone(&fixture);
+    let worker_grant = grant.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).expect("caller entered");
+        let result = worker_fixture.authority.revoke(
+            &who("root"),
+            &worker_grant,
+            &mut IsolatedGrantTestCustody,
+        );
+        result_tx.send(result).expect("record actual result");
+        result
+    });
+    let started = started_rx.recv_timeout(Duration::from_secs(5));
+    let while_held = result_rx.recv_timeout(Duration::from_secs(5));
+    // Always release and join before an assertion, including baseline blocking
+    // failure. No detached grant mutation outlives this fixture.
+    drop(held);
+    let joined = worker.join().expect("grant worker joined");
+    assert!(started.is_ok(), "actual grant caller must enter");
+    assert_eq!(
+        while_held,
+        Ok(Err(GrantRefusal::Unavailable)),
+        "native controller mutation must refuse while the actual owner lock remains held"
+    );
+    assert_eq!(joined, Err(GrantRefusal::Unavailable));
+    assert_eq!(
+        fixture
+            .authority
+            .owner
+            .lock()
+            .expect("unchanged owner")
+            .state(),
+        &before
+    );
+    assert_eq!(
+        original.check_current(),
+        Ok(()),
+        "Busy refusal cannot publish"
+    );
+    assert!(
+        fixture
+            .authority
+            .resolve_lineage(
+                std::slice::from_ref(&grant),
+                &who("delegator"),
+                Some(&who("represented-human"))
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn native_controller_revoke_refuses_busy_grant_owner_without_waiting_or_publishing() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = Arc::new(Fixture::new());
+    let grant = fixture.root();
+    let before = fixture
+        .authority
+        .owner
+        .lock()
+        .expect("before owner")
+        .state()
+        .clone();
+    let original = fixture.publication.observe(|| ()).expect("before stamp").1;
+    let held = fixture
+        .authority
+        .owner
+        .lock()
+        .expect("actual generated grant owner");
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let worker_fixture = Arc::clone(&fixture);
+    let worker_grant = grant.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).expect("caller entered");
+        let result = worker_fixture.authority.revoke(
+            &who("root"),
+            &worker_grant,
+            &mut IsolatedGrantTestCustody,
+        );
+        result_tx.send(result).expect("record actual result");
+        result
+    });
+    let started = started_rx.recv_timeout(Duration::from_secs(5));
+    let while_held = result_rx.recv_timeout(Duration::from_secs(5));
+    // Always release and join before an assertion, including baseline blocking
+    // failure. No detached grant mutation outlives this fixture.
+    drop(held);
+    let joined = worker.join().expect("grant worker joined");
+    assert!(started.is_ok(), "actual grant caller must enter");
+    assert_eq!(
+        while_held,
+        Ok(Err(GrantRefusal::Unavailable)),
+        "native controller mutation must refuse while the actual owner lock remains held"
+    );
+    assert_eq!(joined, Err(GrantRefusal::Unavailable));
+    assert_eq!(
+        fixture
+            .authority
+            .owner
+            .lock()
+            .expect("unchanged owner")
+            .state(),
+        &before
+    );
+    assert_eq!(
+        original.check_current(),
+        Ok(()),
+        "Busy refusal cannot publish"
+    );
+    assert!(
+        fixture
+            .authority
+            .resolve_lineage(
+                std::slice::from_ref(&grant),
+                &who("delegator"),
+                Some(&who("represented-human"))
+            )
+            .is_ok()
+    );
+}

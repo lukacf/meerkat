@@ -11,30 +11,18 @@ context taint and semantic disclosure prevention are not implementation goals.
 There is no pending user decision about terminality: a permission refusal is
 ordinary feedback to the model, and admitted work retains its usable controller.
 
-The [implementation checkpoint](implementation-progress.md) records the current
-published native head `c18c619bf2d140663eb0a78d17d7122d9ac1a5ef` in
-[PR1634](https://github.com/lukacf/meerkat/pull/1634): normal publication hooks
-passed in 4,078s; exact-head CI run 37182383940 passed 38 jobs with 4 intentional
-skips in 21m42s, and semver passed too.
-[Console PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is
-published at `17fe7af8b2b374402d0e198f44879c2891446ac8` with all 11 CI jobs
-passed. Console results qualify feedback/access projection, not integrated
-native-plus-Console governance. No merge or release is recorded.
+Use the [implementation checkpoint](implementation-progress.md) for current
+source identities, publication and CI results, executed test inventories,
+performance measurements and queued work. It is the single status record;
+the historical sections below describe their dated checkpoints.
 
-The published restart checkpoint passed its selected ordinary/cold-process and
-cost-correctness tests, changed-path governance/Clippy gate and prebuilt outer
-E1 scenario (1 outer pass in 0.72s, 1 inner pass in 0.63s, after 15.88s leaf
-compilation). Separate public-entry/notification test additions remain
-source-qualified and unexecuted. The first small quiet cost run
-measured turn overhead of +117.33 percent and +189.37 percent at grant lineage
-depths 1 and 3. This is an unfavorable small-fixture investigation signal, not
-a measured representative-turn or per-operation gate result. Full coverage and
-performance acceptance remain open. The accepted ordering is publication,
-exact-source optimized build/correctness qualification, then an explicitly
-owned quiet timing window; the first small window completed, while full
-representative capacity remains separately pending. The second unchanged-binary
-CPU capture also did not establish useful application-owner attribution
-improvement; it is not an optimization or gate result.
+Qualified restart coverage includes 16 ordinary native-loop cases, including
+completed-turn SQLite reconstruction in a new process followed by fresh governed
+work. Fixed commissioned JSONL ingress and Console feedback/access projection
+have separate evidence; neither establishes integrated native-plus-Console
+activation. Interrupted recovery, persistent administration, automatic surface
+activation and full performance acceptance remain open. The checkpoint keeps
+these boundaries separate from design acceptance and historical diagnostics.
 
 ## Historical foundation extraction and first native milestone, 2026-10-01
 

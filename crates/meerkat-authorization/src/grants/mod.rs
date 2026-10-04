@@ -338,6 +338,8 @@ impl LocalGrantAuthority {
     /// Native custody vetoes only references in unfinished controller lineages,
     /// including their ancestors. Ordinary delegation/work-use references do
     /// not prevent revocation. The veto has the distinct `ControllerInUse` result.
+    /// Once custody permits mutation, busy or poisoned local publication/grant
+    /// locks return `Unavailable` without waiting, mutation or publication.
     pub fn revoke(
         &self,
         caller: &PrincipalRef,
@@ -363,9 +365,12 @@ impl LocalGrantAuthority {
         let actor = principal(caller.clone())?;
         let mut publication = self
             .publication
-            .reserve_owner_change()
+            .try_reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
-        let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        let mut owner = self
+            .owner
+            .try_lock()
+            .map_err(|_| GrantRefusal::Unavailable)?;
         let record = exact_record(&owner, grant)?.clone();
         let revision = owner.state().revision;
         owner

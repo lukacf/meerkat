@@ -11373,6 +11373,189 @@ Ok::<(), RuntimeDriverError>(())
         Ok(abandoned)
     }
 
+    /// Abandon every input `session_id` holds queued, in either lane, at one
+    /// cancel point, and report the run the machine records as current there.
+    ///
+    /// The cancel point is one hold of the session mutation gate, the gate
+    /// the runtime loop holds to stage queued input into a run. While it is
+    /// held nothing is staged, so the snapshot of the current run and the
+    /// queued inputs is exact, and each queued input is abandoned through the
+    /// machine's `AbandonInput` transition before any of them could start.
+    /// Input admitted after the gate is released is never named here, so it
+    /// is never touched.
+    ///
+    /// The current run is left running: the caller cancels exactly that run
+    /// (for example with [`Self::cancel_after_boundary_run_if_current`]). A run
+    /// started after the cancel point comes from input admitted after it.
+    ///
+    /// Returns `Ok(None)` when the session is not registered.
+    pub async fn abandon_queued_inputs_at_cancel_point(
+        &self,
+        session_id: &SessionId,
+        reason: impl Into<String>,
+    ) -> Result<Option<AdmittedWork>, RuntimeDriverError> {
+        use crate::input_state::InputAbandonReason;
+
+        let reason = reason.into();
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(None);
+            };
+            entry.driver.clone()
+        };
+        let gate_guard = match self
+            .lock_current_session_driver_gate(session_id, &driver)
+            .await
+        {
+            Ok(gate_guard) => gate_guard,
+            Err(
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                }
+                | RuntimeDriverError::Destroyed,
+            ) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let (runtime_id, completions, mutation_gate, publication_handle, dsl_authority) = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(None);
+            };
+            (
+                entry.runtime_id.clone(),
+                entry.completions.clone(),
+                Arc::clone(&entry.mutation_gate),
+                entry.publication_handle(),
+                Arc::clone(&entry.dsl_authority),
+            )
+        };
+
+        let mut driver_guard = driver.lock().await;
+        let (current_run, lane) = {
+            let authority = dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            let mut lane = state
+                .input_lane
+                .keys()
+                .map(|key| {
+                    let seq = state
+                        .input_admission_seq
+                        .get(key)
+                        .copied()
+                        .unwrap_or(u64::MAX);
+                    (seq, key.clone())
+                })
+                .collect::<Vec<_>>();
+            lane.sort();
+            (
+                super::dsl_authority::current_run_id_from_authority(&authority),
+                lane,
+            )
+        };
+        // Each input is abandoned with its own terminal carrier, so an error
+        // leaves every input before it consistently terminal; the error is
+        // returned after those are published.
+        let mut abandoned: Vec<(InputId, Option<InputId>)> = Vec::new();
+        let mut failure = None;
+        for (_, key) in lane {
+            let input_id = match uuid::Uuid::parse_str(&key) {
+                Ok(uuid) => InputId(uuid),
+                Err(error) => {
+                    failure = Some(RuntimeDriverError::Internal(format!(
+                        "queued input lane key {key:?} is not an input id: {error}"
+                    )));
+                    break;
+                }
+            };
+            let prepared = match driver_guard
+                .prepare_runless_runtime_terminated_interaction_outboxes(
+                    std::slice::from_ref(&input_id),
+                    reason.clone(),
+                ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            };
+            match driver_guard
+                .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
+                .await
+            {
+                Ok(true) => {
+                    let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                    abandoned.push((input_id, candidate_owner_input_id));
+                }
+                // Lane membership is the queued phase, and nothing leaves the
+                // lane while the gate is held; an input that is not queued has
+                // no queued work to abandon.
+                Ok(false) => {
+                    driver_guard.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                }
+                Err(error) => {
+                    driver_guard.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        drop(driver_guard);
+
+        let dispatch = match publication_handle.clone() {
+            Some(publication_handle)
+                if abandoned
+                    .iter()
+                    .any(|(_, candidate_owner_input_id)| candidate_owner_input_id.is_some()) =>
+            {
+                Some(self.prepare_runless_terminal_publication_dispatch(
+                    &driver,
+                    &completions,
+                    &mutation_gate,
+                    publication_handle,
+                )?)
+            }
+            _ => None,
+        };
+        drop(gate_guard);
+
+        if let Some((result_rx, start_tx)) = dispatch {
+            if let Some(start_tx) = start_tx {
+                let _ = start_tx.send(());
+            }
+            self.await_runless_terminal_publication_dispatch(&runtime_id, result_rx, None)
+                .await?;
+        }
+        for (input_id, candidate_owner_input_id) in &abandoned {
+            if candidate_owner_input_id.is_some() && publication_handle.is_some() {
+                // Published by the dispatch above.
+                continue;
+            }
+            crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+                &driver,
+                Some(&completions),
+                None,
+                std::slice::from_ref(input_id),
+                candidate_owner_input_id.as_ref(),
+                &reason,
+                None,
+            )
+            .await?;
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(Some(AdmittedWork {
+            current_run,
+            queued_inputs: abandoned
+                .into_iter()
+                .map(|(input_id, _)| input_id)
+                .collect(),
+        }))
+    }
+
     /// Stage a durable session visibility filter through the machine-owned visibility state.
     pub async fn stage_persistent_filter(
         &self,

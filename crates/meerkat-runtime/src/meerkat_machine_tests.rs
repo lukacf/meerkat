@@ -14978,6 +14978,91 @@ async fn a_hold_landing_after_the_loop_woke_parks_it() {
     assert_eq!(applies.load(Ordering::SeqCst), 1);
 }
 
+/// A cancel point taken while the runtime loop has woken for queued input but
+/// not yet staged it abandons that input (every queued input, in admission
+/// order) and names no current run. Input admitted after the cancel point is
+/// untouched and runs.
+#[tokio::test]
+async fn a_cancel_point_abandons_the_queued_input_and_spares_later_input() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    let (gap_entered, gap_release) =
+        machine.arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+
+    let mut admitted = Vec::new();
+    let mut completions = Vec::new();
+    for text in ["queued first", "queued second"] {
+        let (outcome, completion) = machine
+            .accept_input_with_completion(&session_id, make_prompt(text))
+            .await
+            .expect("admit");
+        let AcceptOutcome::Accepted { input_id, .. } = outcome else {
+            panic!("input must be accepted: {outcome:?}");
+        };
+        admitted.push(input_id);
+        completions.push(completion.expect("an accepted input has a completion"));
+    }
+    tokio::time::timeout(Duration::from_secs(30), gap_entered)
+        .await
+        .expect("the loop wakes for the input")
+        .expect("queue-authority hook armed");
+
+    let cancel_point = machine
+        .abandon_queued_inputs_at_cancel_point(&session_id, "cancel point under test")
+        .await
+        .expect("cancel point")
+        .expect("registered session");
+    assert_eq!(cancel_point.current_run, None, "no run was staged");
+    assert_eq!(
+        cancel_point.queued_inputs, admitted,
+        "every queued input, in admission order"
+    );
+    // Each abandoned input's own terminal is a cancellation, and its waiter
+    // receives the published runless terminal carrying the cancel reason.
+    for (input_id, completion) in admitted.iter().zip(completions) {
+        let stored = machine
+            .input_state(&session_id, input_id)
+            .await
+            .expect("read input state")
+            .expect("the abandoned input is retained");
+        assert_eq!(
+            stored.seed.terminal_outcome,
+            Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                reason: crate::input_state::InputAbandonReason::Cancelled,
+            }),
+            "the input is abandoned as cancelled"
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(30), completion.wait())
+            .await
+            .expect("the abandoned input's waiter resolves")
+            .expect("completion outcome");
+        assert!(
+            matches!(
+                &outcome,
+                CompletionOutcome::RuntimeTerminated { reason, .. }
+                    if reason == "cancel point under test"
+            ),
+            "the waiter receives the published cancellation terminal: {outcome:?}"
+        );
+    }
+
+    gap_release.send(()).expect("release the loop");
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("admitted after"))
+        .await
+        .expect("admit after the cancel point");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("input admitted after the cancel point runs");
+    assert_eq!(
+        applies.load(Ordering::SeqCst),
+        1,
+        "only the input admitted after the cancel point ran"
+    );
+}
+
 /// #1471: a boundary cancel taken after the runtime loop started a run but
 /// before the executor entered it (here: blocked at the top of `apply`) is not
 /// lost. The executor receives a cooperative cancel bound to that exact run

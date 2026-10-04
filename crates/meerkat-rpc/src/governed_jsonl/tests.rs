@@ -946,10 +946,10 @@ fn audit(
         .authorization_audit
 }
 
-async fn cleanup_jsonl(
+async fn cleanup_jsonl<E: std::fmt::Debug>(
     mut reader: impl tokio::io::AsyncBufRead + Unpin + Send + 'static,
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    mut server_task: tokio::task::JoinHandle<Result<(), crate::server::ServerError>>,
+    mut server_task: tokio::task::JoinHandle<Result<(), E>>,
     http: &mut Server,
 ) -> Vec<String> {
     let mut failures = Vec::new();
@@ -1012,6 +1012,386 @@ fn finish_scenario(
         }
         Ok(Ok(())) => assert!(cleanup_failures.is_empty(), "{cleanup_failures:?}"),
     }
+}
+
+// Exercise the exported API independently of the private construct fixture.
+// Both callers use the same trusted host setup and real callback/HTTP owners.
+#[cfg(not(feature = "mcp"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_completed_native_run() {
+    let mut http = Server::start().await;
+    let Fixture {
+        setup,
+        store,
+        permissions,
+        produced,
+    } = fixture(&http).await;
+    let selected = setup.client.controller_model_selection().unwrap();
+    let adapter = setup.persistence.runtime_adapter();
+    let (client_io, server_io) = tokio::io::duplex(1 << 20);
+    let (reader, writer) = tokio::io::split(server_io);
+    let server_task = tokio::spawn(serve_governed_jsonl(BufReader::new(reader), writer, setup));
+    let (reader, mut writer) = tokio::io::split(client_io);
+    let mut reader = BufReader::new(reader);
+    let effects: Arc<Mutex<Vec<String>>> = Arc::default();
+    let scenario = async {
+        send(
+            &mut writer,
+            json!({"jsonrpc":"2.0","id":101,"method":"initialize"}),
+        )
+        .await;
+        let initialized = response(&mut reader, &mut writer, 101, &effects).await;
+        assert_eq!(
+            initialized["result"]["methods"],
+            json!([
+                "initialize",
+                "initialized",
+                "cancel",
+                "session/create",
+                "turn/start"
+            ])
+        );
+        send(&mut writer, json!({"jsonrpc":"2.0","id":102,"method":"session/create","params":{
+            "prompt":"deferred-seed-s2", "injected_context":["deferred-context-s2"], "initial_turn":"deferred"
+        }})).await;
+        let created = response(&mut reader, &mut writer, 102, &effects).await;
+        assert!(created.get("error").is_none(), "{created}");
+        let sid = SessionId::parse(created["result"]["session_id"].as_str().unwrap()).unwrap();
+        let rid = LogicalRuntimeId::for_session(&sid);
+        assert!(
+            store
+                .load_input_states_strict(&rid)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(produced.lock().unwrap().is_empty());
+        assert!(http.receiver.bodies.lock().unwrap().is_empty());
+        assert!(effects.lock().unwrap().is_empty());
+        permissions.lock().unwrap().push(InvocationPermission {
+            runtime: rid.clone(),
+            requester: principal("requester"),
+            ingress: principal("ingress"),
+        });
+        send(&mut writer, json!({"jsonrpc":"2.0","id":103,"method":"turn/start","params":{
+            "session_id":sid.to_string(), "prompt":"turn-prompt-s2", "injected_context":["turn-context-s2"]
+        }})).await;
+        let wait = response(&mut reader, &mut writer, 103, &effects);
+        tokio::pin!(wait);
+        tokio::select! {
+            result = &mut wait => panic!("public entry completed before held model request2: {result}"),
+            _ = http.receiver.second_request.notified() => {}
+        }
+        let (submitted, pin) = {
+            let produced = produced.lock().unwrap();
+            assert_eq!(produced.len(), 1, "exactly one real input association");
+            produced[0].clone()
+        };
+        assert_eq!(pin.selection(), &selected);
+        let Input::Prompt(prompt) = submitted else {
+            panic!("real public prompt")
+        };
+        assert_eq!(
+            prompt.content.text_content(),
+            "deferred-seed-s2\n\nturn-prompt-s2"
+        );
+        assert_eq!(
+            prompt
+                .injected_context
+                .iter()
+                .map(|item| item.text_content())
+                .collect::<Vec<_>>(),
+            ["deferred-context-s2", "turn-context-s2"]
+        );
+        let live_rows = store.load_input_states_strict(&rid).await.unwrap();
+        assert_eq!(live_rows.len(), 1);
+        let input_id = live_rows[0].state.input_id.clone();
+        let live_audit = audit(&live_rows[0]);
+        assert!(!live_audit.is_empty());
+        let run_id = live_audit[0].observation.run_id.clone().unwrap();
+        let bodies = http.receiver.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        assert_wire_sibling_feedback(&bodies[1]);
+        assert_eq!(*effects.lock().unwrap(), ["read_record"]);
+        http.receiver.finish.notify_one();
+        let result = wait.await;
+        assert!(result.get("error").is_none(), "{result}");
+        assert_eq!(result["result"]["text"], FINISHED);
+        let row = store
+            .load_input_state(&rid, &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.seed.phase,
+            meerkat_runtime::input_state::InputLifecycleState::Consumed
+        );
+        assert_eq!(row.seed.last_run_id.as_ref(), Some(&run_id));
+        assert_eq!(
+            row.seed.terminal_outcome,
+            Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed)
+        );
+        assert!(row.state.persisted_input.is_none());
+        let completion = adapter
+            .input_terminal_completion(&sid, &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let CompletionOutcome::Completed(completed) = completion else {
+            panic!("completed public native run")
+        };
+        assert_eq!(completed.session_id, sid);
+        assert_eq!(completed.text, FINISHED);
+        assert!(completed.terminal_cause_kind.is_none());
+        let final_audit = audit(&row);
+        assert_eq!(
+            final_audit.len(),
+            11,
+            "exact terminal model/tool operation audit"
+        );
+        assert!(final_audit.starts_with(&live_audit));
+        for record in &final_audit {
+            assert_eq!(record.observation.run_id.as_ref(), Some(&run_id));
+            assert_eq!(record.contributors.len(), 1);
+            assert_eq!(record.contributors[0].input_id, input_id);
+            assert_eq!(record.contributors[0].requester, principal("requester"));
+            assert_eq!(
+                record.contributors[0].logical_executor,
+                principal("executor")
+            );
+            assert!(record.contributors[0].represented_subject.is_none());
+            assert!(matches!(&record.observation.execution_scope,
+                OperationExecutionScope::RuntimeInput { owner_session_id, submitted_input_id, canonical_input_id, .. }
+                if owner_session_id == &sid && submitted_input_id == &input_id && canonical_input_id == &input_id));
+        }
+        let denied: Vec<_> = final_audit
+            .iter()
+            .filter(|record| {
+                matches!(&record.observation.observation,
+            AuditObservation::Refused { target, reason: OperationRefusalKind::Denied }
+            if matches!(target.as_ref(), AuditTarget::Tool { call_id, tool_name, .. }
+                if call_id == DENIED_CALL && tool_name == "delete_record"))
+            })
+            .collect();
+        assert_eq!(denied.len(), 1);
+        let denied_id = &denied[0].observation.operation_id;
+        assert_eq!(
+            final_audit
+                .iter()
+                .filter(|record| &record.observation.operation_id == denied_id)
+                .count(),
+            1,
+            "denied callback has only its refusal, no fabricated entry or outcome"
+        );
+        let prepared: Vec<_> = final_audit
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.observation.observation,
+                    AuditObservation::Prepared { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            prepared.len(),
+            3,
+            "two actual model requests and one permitted read"
+        );
+        let mut model_count = 0;
+        let mut read_count = 0;
+        for record in prepared {
+            let records: Vec<_> = final_audit
+                .iter()
+                .filter(|other| other.observation.operation_id == record.observation.operation_id)
+                .collect();
+            assert_eq!(records.len(), 3);
+            assert!(matches!(
+                records[1].observation.observation,
+                AuditObservation::Entry
+            ));
+            match &record.observation.observation {
+                AuditObservation::Prepared { target, .. }
+                    if matches!(target.as_ref(), AuditTarget::Model(_)) =>
+                {
+                    model_count += 1;
+                    assert!(matches!(
+                        records[2].observation.observation,
+                        AuditObservation::Outcome {
+                            outcome: OperationObservedOutcome::HttpResponse { status: 200 }
+                        }
+                    ));
+                }
+                AuditObservation::Prepared { target, .. }
+                    if matches!(target.as_ref(), AuditTarget::Tool {
+                    call_id, tool_name, .. } if call_id == PERMITTED_CALL && tool_name == "read_record") =>
+                {
+                    read_count += 1;
+                    assert!(
+                        matches!(&records[2].observation.observation, AuditObservation::Outcome {
+                        outcome: OperationObservedOutcome::ToolDispatchReturned { result_is_error: false,
+                            terminal_error: None, asynchronous_operations }
+                    } if asynchronous_operations.is_empty())
+                    );
+                }
+                other => panic!("unexpected prepared target: {other:?}"),
+            }
+        }
+        assert_eq!((model_count, read_count), (2, 1));
+        let refused: Vec<_> = final_audit
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.observation.observation,
+                    AuditObservation::Refused { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            refused.len(),
+            2,
+            "one denied tool plus the fixture's hosted-capability refusal"
+        );
+        assert_eq!(
+            refused
+                .iter()
+                .filter(|record| matches!(&record.observation.observation,
+            AuditObservation::Refused { target, reason: OperationRefusalKind::Denied }
+            if matches!(target.as_ref(), AuditTarget::Model(_))))
+                .count(),
+            1
+        );
+        let document = store
+            .load_committed_whole_blob_snapshot(&rid)
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded = Session::decode_whole_blob_document(document.bytes()).unwrap();
+        assert_eq!(
+            decoded.row_sha256_token(),
+            document.authority().blob_sha256()
+        );
+        let saved = decoded.into_session();
+        assert_saved_transcript(&saved, &sid);
+        assert_wire_initial_prompt(&bodies[0], &saved);
+        assert_eq!(http.receiver.authorized_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(http.receiver.bodies.lock().unwrap().len(), 2);
+    };
+    let result =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(25), scenario))
+            .catch_unwind()
+            .await;
+    let cleanup_failures = cleanup_jsonl(reader, &mut writer, server_task, &mut http).await;
+    drop(adapter);
+    finish_scenario(result, cleanup_failures);
+}
+
+#[cfg(not(feature = "mcp"))]
+async fn exercise_ordinary_constructor_refusal() {
+    let mut http = Server::start().await;
+    let Fixture {
+        setup,
+        store,
+        produced,
+        ..
+    } = fixture(&http).await;
+    let GovernedJsonlSetup {
+        config,
+        persistence,
+        client,
+        ..
+    } = setup;
+    let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+        config.clone(),
+        meerkat_models::canonical(),
+    ));
+    let max_sessions = config.max_sessions();
+    let runtime = Arc::new(SessionRuntime::new_with_config_store(
+        AgentFactory::minimal(),
+        config,
+        config_store.clone(),
+        max_sessions,
+        persistence,
+        NotificationSink::noop(),
+    ));
+    runtime.set_default_llm_client(Some(client));
+    assert!(
+        runtime
+            .runtime_adapter()
+            .has_native_work_authorization_host()
+    );
+    let (client_io, server_io) = tokio::io::duplex(65536);
+    let (reader, writer) = tokio::io::split(server_io);
+    let mut server = RpcServer::new(
+        BufReader::new(reader),
+        writer,
+        runtime.clone(),
+        config_store,
+    )
+    .unwrap();
+    let server_task = tokio::spawn(async move { server.run().await });
+    let (reader, mut writer) = tokio::io::split(client_io);
+    let mut reader = BufReader::new(reader);
+    let effects: Arc<Mutex<Vec<String>>> = Arc::default();
+    let scenario = async {
+        send(
+            &mut writer,
+            json!({"jsonrpc":"2.0","id":201,"method":"initialize"}),
+        )
+        .await;
+        let initialized = response(&mut reader, &mut writer, 201, &effects).await;
+        assert!(
+            initialized.get("error").is_none(),
+            "ordinary connection remains usable"
+        );
+        for request_id in [202, 203] {
+            send(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":request_id,"method":"session/create","params":{
+                    "prompt":"deferred-seed-s2", "initial_turn":"deferred"
+                }}),
+            )
+            .await;
+            let refused = response(&mut reader, &mut writer, request_id, &effects).await;
+            assert!(refused.get("result").is_none(), "{refused}");
+            assert_eq!(
+                refused["error"]["code"],
+                meerkat_contracts::ErrorCode::InputNotReady.jsonrpc_code()
+            );
+            let detail: meerkat_contracts::wire::WireInputAdmissionErrorDetail =
+                serde_json::from_value(refused["error"]["data"].clone()).unwrap();
+            assert_eq!(
+                detail,
+                meerkat_contracts::wire::WireInputAdmissionErrorDetail::NotReady {
+                    reason:
+                        meerkat_contracts::wire::WireControllerReadinessFailure::UnsupportedScope {},
+                }
+            );
+        }
+        assert!(
+            runtime
+                .list_sessions(meerkat_core::service::SessionQuery::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_runtime_session_catalog_entries(meerkat_core::SessionFilter::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(produced.lock().unwrap().is_empty());
+        assert!(http.receiver.bodies.lock().unwrap().is_empty());
+        assert_eq!(http.receiver.authorized_requests.load(Ordering::SeqCst), 0);
+        assert!(effects.lock().unwrap().is_empty());
+    };
+    let result =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(15), scenario))
+            .catch_unwind()
+            .await;
+    let cleanup_failures = cleanup_jsonl(reader, &mut writer, server_task, &mut http).await;
+    finish_scenario(result, cleanup_failures);
 }
 
 #[cfg(not(feature = "mcp"))]
@@ -1526,6 +1906,7 @@ async fn governed_jsonl_rejects_ungoverned_bundle_and_unsupported_wire_before_se
             .await;
     let cleanup_failures = cleanup_jsonl(r, &mut w, server_task, &mut http).await;
     finish_scenario(result, cleanup_failures);
+    exercise_ordinary_constructor_refusal().await;
 }
 
 #[cfg(feature = "mcp")]

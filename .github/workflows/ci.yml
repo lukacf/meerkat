@@ -741,6 +741,7 @@ jobs:
           evidence = Path(os.environ["RUNNER_TEMP"]) / "governed-jsonl"
           evidence.mkdir()
           expected = sorted([
+              "governed_jsonl::tests::governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_completed_native_run",
               "governed_jsonl::tests::governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_read_finishes",
               "governed_jsonl::tests::governed_jsonl_rejects_ungoverned_bundle_and_unsupported_wire_before_setup",
           ])
@@ -771,19 +772,19 @@ jobs:
           names = re.findall(r"^(\S+): test$", listing, re.MULTILINE)
           if sorted(names) != expected or re.findall(
               r"^\d+ tests?, \d+ benchmarks?$", listing, re.MULTILINE
-          ) != ["2 tests, 0 benchmarks"]:
-              sys.exit(f"governed JSONL list must contain exactly the two required tests: {names!r}")
+          ) != ["3 tests, 0 benchmarks"]:
+              sys.exit(f"governed JSONL list must contain exactly the three required tests: {names!r}")
 
           result = run("run", ["--nocapture", "--test-threads=1", "--color", "never"])
           outcomes = re.findall(r"^test (\S+) \.\.\. (ok|FAILED|ignored)$", result, re.MULTILINE)
           if sorted(outcomes) != [(name, "ok") for name in expected]:
-              sys.exit(f"governed JSONL must pass both exact names with zero ignored: {outcomes!r}")
+              sys.exit(f"governed JSONL must pass all exact names with zero ignored: {outcomes!r}")
           summaries = re.findall(
               r"^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; "
               r"(\d+) measured; \d+ filtered out; finished in .+$", result, re.MULTILINE,
           )
-          if summaries != [("ok", "2", "0", "0", "0")]:
-              sys.exit(f"governed JSONL requires exactly 2 passed, 0 failed, 0 ignored: {summaries!r}")
+          if summaries != [("ok", "3", "0", "0", "0")]:
+              sys.exit(f"governed JSONL requires exactly 3 passed, 0 failed, 0 ignored: {summaries!r}")
           PYTHON
 
       - name: Upload governed JSONL logs

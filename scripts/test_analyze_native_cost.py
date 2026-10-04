@@ -231,5 +231,138 @@ class NativeCostAnalysisTests(unittest.TestCase):
         self.assertTrue(summary["acceptance"].startswith("UNPROVEN:"))
 
 
+
+def fixed_mean_raw(ratio=1.01):
+    raw = representative_raw()
+    raw.update(measurement_profile="fixed_mean_32", measurement_status="complete",
+               warmup_pairs=20, pairs_per_cell=32)
+    raw["samples"] = [dict(s) for s in raw["samples"] if s["pair"] < 32]
+    for sample in raw["samples"]:
+        pair = sample["pair"]
+        value = 1000 + 17 * pair + 5 * (pair % 3)
+        if sample["mode"] == "local_governed":
+            value = round(ratio * value + (-3 if pair % 2 else 3))
+        if sample["workload"] == "individual_fenced_tools":
+            sample["individual_ns"] = [[call, value] for call in sample["measured_call_ids"]]
+        else:
+            sample["measured_ns"] = value
+    return raw
+
+
+class FixedMeanAnalysisTests(unittest.TestCase):
+    def test_fixed_profile_uses_six_paired_mean_intervals_without_tail_labels(self):
+        result = analyzer.analyze_representative(fixed_mean_raw())
+        self.assertEqual(len(result["summaries"]), 6)
+        self.assertTrue(result["acceptance"].startswith("UNPROVEN:"))
+        self.assertNotIn('"p99"', json.dumps(result))
+        for cell in result["summaries"]:
+            self.assertEqual(cell["fixture_pairs"], 32)
+            self.assertEqual(cell["independent_candidate_blocks"], 16)
+            self.assertEqual(cell["conditional_classification"], "CLEAR")
+            self.assertLessEqual(cell["ratio_ci"][1], 1.10)
+            self.assertLessEqual(cell["threshold_difference_ci_ns"][1], 0)
+            self.assertEqual(cell["order_strata"]["trusted_first"]["fixture_pairs"], 16)
+            self.assertEqual(cell["order_strata"]["governed_first"]["fixture_pairs"], 16)
+            self.assertEqual(cell["modes_ns"]["trusted_host"]["n"], 32)
+        self.assertEqual(result["confidence_model"]["family_comparisons"], 6)
+        self.assertEqual(result["confidence_model"]["degrees_of_freedom"], 15)
+        self.assertIn("conditional", result["confidence_model"]["qualification"])
+        self.assertIn("four correlated", result["summaries"][2]["interpretation"])
+
+    def test_mean_interval_miss_and_threshold_uncertainty_remain_distinct(self):
+        for ratio, expected in ((1.30, "MISS"), (1.10, "UNCERTAIN")):
+            with self.subTest(ratio=ratio):
+                result = analyzer.analyze_representative(fixed_mean_raw(ratio))
+                self.assertEqual({s["conditional_classification"] for s in result["summaries"]}, {expected})
+                if expected == "MISS":
+                    self.assertTrue(all(s["ratio_ci"][0] > 1.10 for s in result["summaries"]))
+                    self.assertTrue(all(s["threshold_difference_ci_ns"][0] > 0 for s in result["summaries"]))
+
+    def test_degenerate_or_unbounded_denominator_cannot_be_a_clear_result(self):
+        for unstable in (False, True):
+            raw = fixed_mean_raw()
+            for sample in raw["samples"]:
+                value = 100000000 if unstable and sample["pair"] == 31 else 1000
+                if sample["workload"] == "individual_fenced_tools":
+                    sample["individual_ns"] = [[call, value] for call in sample["measured_call_ids"]]
+                else:
+                    sample["measured_ns"] = value
+            with self.subTest(unstable=unstable):
+                result = analyzer.analyze_representative(raw)
+                self.assertEqual({s["conditional_classification"] for s in result["summaries"]}, {"UNCERTAIN"})
+                self.assertTrue(all(s["ratio_ci"] is None for s in result["summaries"]))
+
+    def test_critical_value_matches_the_predeclared_six_cell_family(self):
+        result = analyzer.analyze_representative(fixed_mean_raw())
+        critical = result["confidence_model"]["critical_t"]
+        # Independent Student t(15) CDF via its density after t=sqrt(15)*tan(a).
+        # Integrate cos(a)**14 by the finite even-power recurrence.
+        def cdf(value):
+            import math
+            angle = math.atan(value / math.sqrt(15))
+            integral = angle
+            for power in range(2, 15, 2):
+                integral = math.sin(angle)*math.cos(angle)**(power-1)/power + (power-1)/power*integral
+            return .5 + math.exp(math.lgamma(8)-math.lgamma(7.5))/math.sqrt(math.pi)*integral
+        target = 1-.05/(2*6)
+        self.assertGreaterEqual(cdf(critical), target)
+        self.assertLess(cdf(critical-.000001), target)
+
+    def test_numerical_ratio_and_difference_disagreement_is_uncertain(self):
+        raw = fixed_mean_raw()
+        for sample in raw["samples"]:
+            pair = sample["pair"]
+            value = 10**12 + 17*pair + 5*(pair % 3)
+            if sample["mode"] == "local_governed":
+                value = round(1.10*value) + (-3 if pair % 2 else 3)
+            if sample["workload"] == "individual_fenced_tools":
+                sample["individual_ns"] = [[call, value] for call in sample["measured_call_ids"]]
+            else:
+                sample["measured_ns"] = value
+        cell = analyzer.analyze_representative(raw)["summaries"][0]
+        self.assertLessEqual(cell["ratio_ci"][1], 1.10)
+        self.assertGreater(cell["threshold_difference_ci_ns"][1], 0)
+        self.assertEqual(cell["conditional_classification"], "UNCERTAIN")
+        self.assertIn("inconsistent", cell["classification_reason"])
+
+    def test_fixed_profile_does_not_relax_the_existing_tail_path(self):
+        raw = fixed_mean_raw()
+        raw.pop("measurement_profile")
+        with self.assertRaises(ValueError):
+            analyzer.analyze_representative(raw)
+        for changes in ({"measurement_profile": "unknown"}, {"pairs_per_cell": 32.0},
+                        {"pairs_per_cell": 16}, {"warmup_pairs": 21},
+                        {"measurement_status": "unknown"}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    analyzer.analyze_representative(fixed_mean_raw() | changes)
+
+    def test_timeout_or_incomplete_run_emits_uncertainty_without_numeric_intervals(self):
+        raw = fixed_mean_raw()
+        for changes in ({"measurement_status": "budget_exhausted", "timeouts": 1, "samples": []},
+                        {"samples": raw["samples"][1:]}, {"failures": 1}):
+            with self.subTest(changed_fields=tuple(changes)):
+                result = analyzer.analyze_representative(raw | changes)
+                self.assertEqual(result["analysis_status"], "UNCERTAIN")
+                self.assertEqual(result["summaries"], [])
+                self.assertTrue(result["acceptance"].startswith("UNPROVEN:"))
+
+    def test_conflicting_order_strata_prevent_a_clear_or_miss_claim(self):
+        raw = fixed_mean_raw()
+        for sample in raw["samples"]:
+            pair = sample["pair"]
+            value = 1000 + 17 * pair + 5 * (pair % 3)
+            if sample["mode"] == "local_governed":
+                value = round(value * (1.15 if pair % 2 == 0 else .70))
+            if sample["workload"] == "individual_fenced_tools":
+                sample["individual_ns"] = [[call, value] for call in sample["measured_call_ids"]]
+            else:
+                sample["measured_ns"] = value
+        result = analyzer.analyze_representative(raw)
+        self.assertEqual({s["conditional_classification"] for s in result["summaries"]}, {"UNCERTAIN"})
+        self.assertTrue(all(s["order_strata"]["trusted_first"]["ratio_of_means"] > 1.10 for s in result["summaries"]))
+
+
+
 if __name__ == "__main__":
     unittest.main()

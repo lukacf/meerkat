@@ -172,12 +172,95 @@ def analyze(raw):
             "acceptance": "UNPROVEN: full representative matrix and individual tool cost absent",
             "tail_confidence": "2000 turns per mode/cell, about 20 upper-1-percent observations; repeat independent quiet windows before inference"}
 
+# Fixed plan: six simultaneous two-sided intervals, alpha .05/6 each.
+# t(15) CDF at 1-.05/(2*6) is 3.0362832228211785; round upward.
+# NIST paired Fieller formula and t table are linked in the application note.
+FIXED_MEAN_CRITICAL_T = 3.036284
+
+
+def fixed_mean_uncertain(reason):
+    return {"analysis_status": "UNCERTAIN", "reason": reason, "summaries": [],
+            "acceptance": "UNPROVEN: incomplete or failed fixed mean study; no tail or full-surface acceptance"}
+
+
+def fixed_mean_cell(depth, workload, pairs):
+    direct = workload == "individual_fenced_tools"
+    duration = (lambda sample: sum(call[1] for call in sample["individual_ns"])) if direct else (lambda sample: sample["measured_ns"])
+    values = [(duration(pairs[i]["trusted_host"]), duration(pairs[i]["local_governed"])) for i in range(32)]
+    # Each adjacent block contains both execution orders. The four direct
+    # calls stay one correlated fixture unit; none is an independent replicate.
+    blocks = [tuple((values[i][j] + values[i+1][j]) / 2 for j in range(2)) for i in range(0, 32, 2)]
+    x, y = (math.fsum(row[j] for row in blocks) / 16 for j in range(2))
+    vx = math.fsum((a-x)**2 for a, b in blocks) / (16*15)
+    vy = math.fsum((b-y)**2 for a, b in blocks) / (16*15)
+    covariance = math.fsum((a-x)*(b-y) for a, b in blocks) / (16*15)
+    difference = y - 1.10*x
+    vd = math.fsum(((b-1.10*a)-difference)**2 for a, b in blocks) / (16*15)
+    q2 = FIXED_MEAN_CRITICAL_T**2
+    aa, bb, cc = x*x-q2*vx, x*y-q2*covariance, y*y-q2*vy
+    discriminant = bb*bb-aa*cc
+    ratio_ci = None
+    difference_ci = None
+    classification = "UNCERTAIN"
+    reason = "unbounded, degenerate or numerically inconsistent confidence interval"
+    if aa > 0 and discriminant >= 0 and vd > 0:
+        root = math.sqrt(discriminant)
+        ratio_ci = [(bb-root)/aa, (bb+root)/aa]
+        width = FIXED_MEAN_CRITICAL_T*math.sqrt(vd)
+        difference_ci = [difference-width, difference+width]
+        if all(math.isfinite(v) for v in ratio_ci + difference_ci):
+            ratio_decision = "CLEAR" if ratio_ci[1] <= 1.10 else "MISS" if ratio_ci[0] > 1.10 else "UNCERTAIN"
+            difference_decision = "CLEAR" if difference_ci[1] <= 0 else "MISS" if difference_ci[0] > 0 else "UNCERTAIN"
+            if ratio_decision == difference_decision:
+                classification = ratio_decision
+                reason = "conditional mean interval relative to 10 percent"
+        else:
+            ratio_ci = difference_ci = None
+    strata = {}
+    for name, first in [("trusted_first", True), ("governed_first", False)]:
+        rows = [values[i] for i in range(32) if pairs[i]["trusted_host"]["first_in_pair"] == first]
+        strata[name] = {"fixture_pairs": len(rows), "ratio_of_means": math.fsum(b for a, b in rows)/math.fsum(a for a, b in rows)}
+    if ((classification == "CLEAR" and any(s["ratio_of_means"] > 1.10 for s in strata.values()))
+            or (classification == "MISS" and any(s["ratio_of_means"] <= 1.10 for s in strata.values()))):
+        classification, reason = "UNCERTAIN", "descriptive order strata contradict the pooled threshold direction"
+    return {"depth": depth, "workload": workload, "fixture_pairs": 32,
+            "independent_candidate_blocks": 16,
+            "modes_ns": {"trusted_host": {"n": 32, "mean": x}, "local_governed": {"n": 32, "mean": y}},
+            "ratio_of_means_overhead_percent": 100*(y/x-1),
+            "ratio_ci": ratio_ci, "threshold_difference_mean_ns": difference,
+            "threshold_difference_ci_ns": difference_ci,
+            "conditional_classification": classification, "classification_reason": reason,
+            "order_strata": strata,
+            "interpretation": "sum of four correlated fenced calls per fixture; excludes Agent scheduling" if direct else "same-run post-prefix segment; not admission" if workload == "continuing_segment" else "four-input fresh-admission whole turn"}
+
+
+def fixed_mean_result(summaries):
+    return {"analysis_status": "COMPLETE", "measurement_profile": "fixed_mean_32", "summaries": summaries,
+            "confidence_model": {"method": "paired Fieller on adjacent opposite-order blocks",
+                "family_comparisons": 6, "family_alpha": .05, "degrees_of_freedom": 15,
+                "critical_t": FIXED_MEAN_CRITICAL_T,
+                "qualification": "conditional on stationary independent approximately bivariate-normal block vectors; no distribution-free guarantee; order strata descriptive only"},
+            "acceptance": "UNPROVEN: conditional fixed mean study only; operation p99 and full-surface acceptance absent",
+            "scope": "Only fresh_admission is a whole-turn comparison. Continuing segments and summed direct calls are diagnostic units. Source, build, quiet-host and independence qualification remain external."}
+
+
 def analyze_representative(raw):
-    if raw.get("suite") != "representative" or raw["failures"] or raw["timeouts"]:
-        raise ValueError("not a successful representative suite")
+    profile = raw.get("measurement_profile")
+    if profile not in {None, "tail", "fixed_mean_32"} or raw.get("suite") != "representative":
+        raise ValueError("unknown representative measurement profile or suite")
+    mean_only = profile == "fixed_mean_32"
     expected = raw["pairs_per_cell"]
-    if expected < 2000:
-        raise ValueError("insufficient tail samples")
+    if mean_only:
+        if (type(expected) is not int or expected != 32
+                or type(raw["warmup_pairs"]) is not int or raw["warmup_pairs"] != 20
+                or raw["measurement_status"] not in {"complete", "budget_exhausted"}):
+            raise ValueError("fixed mean profile requires exact W20/N32 and an explicit completion status")
+        if any(type(raw[field]) is not int or raw[field] < 0 for field in ("failures", "timeouts")):
+            raise ValueError("invalid fixed mean failure counts")
+        if raw["measurement_status"] != "complete" or raw["failures"] or raw["timeouts"]:
+            return fixed_mean_uncertain("budget exhausted or work failed; incomplete cells cannot be analyzed")
+    elif raw["failures"] or raw["timeouts"] or expected < 2000:
+        raise ValueError("unsuccessful or insufficient tail samples")
     for sample in raw["samples"]:
         if type(sample["depth"]) is not int or sample["depth"] not in {1, 3}:
             raise ValueError("unknown sample depth")
@@ -220,8 +303,13 @@ def analyze_representative(raw):
                     raise ValueError("invalid full interval")
                 pairs.setdefault(s["pair"], {})[mode] = s
             if set(pairs) != set(range(expected)) or any(set(p) != {"trusted_host", "local_governed"} for p in pairs.values()):
+                if mean_only:
+                    return fixed_mean_uncertain("incomplete fixed mean cell; all six cells are required")
                 raise ValueError("incomplete matched cell")
             validate_pair_order(raw, pairs)
+            if mean_only:
+                summaries.append(fixed_mean_cell(depth, workload, pairs))
+                continue
             deltas, ratios = [], []
             modes = {mode: [] for mode in ["trusted_host", "local_governed"]}
             for pair in pairs.values():
@@ -255,6 +343,8 @@ def analyze_representative(raw):
             summaries.append(entry)
     if len(observed) != len(raw["samples"]):
         raise ValueError("unknown or unaccounted sample cell")
+    if mean_only:
+        return fixed_mean_result(summaries)
     return {"summaries": summaries,
             "acceptance": "UNPROVEN: source-authored subset; qualified repeated quiet runs and full-surface review still required",
             "limits": {"individual_added_p99_ns_strictly_below": 1000000, "matched_turn_overhead_percent_at_most": 10},

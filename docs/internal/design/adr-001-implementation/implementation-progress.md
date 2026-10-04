@@ -1,5 +1,45 @@
 # ADR-001 implementation checkpoint
 
+## Current delivery status, 2026-10-04 at 16:59 UTC
+
+The native governed-flow checkpoint is published and CI-green at `00b0cab3`.
+Its allocation/benchmark successor `b12d81e7` is still running normal push
+hooks; the earlier CI result does not qualify that successor. Performance is
+still unacceptable: the latest six-cell study missed every conditional mean
+threshold, with fresh-turn overhead of 137.01 and 145.20 percent at grant
+depths 1 and 3. Individual-operation p99 and full coverage remain open.
+
+Console PR520 has advanced to `127331ff51605136da5264fe680cb9868b015bf2`,
+tree `7daa82d6f0a359fdc7af52b0734c85c0e268a744`. It adds explicit access
+inspection from group membership and refreshes the required embedded assets.
+The initial CI attempt failed asset freshness; the successor passes that step.
+[CI run 37217158682](https://github.com/lukacf/meerkat-mobkit/actions/runs/37217158682)
+is still running. The focused access-view tests passed 19 cases, and the
+existing adapter suite passed 313. These remain Console projection tests;
+MobKit's native dependency is still 0.8.50.
+
+The preview safety baseline is committed at
+`64b44ff9d0fb6d3118c324b20e0bcc4449ac6659`, tree
+`aeceef3a8ed608b6fab842cf62f80e1595534a49`. Two preview tests and the existing
+archival/recovery test passed with zero failures or ignores; normal commit
+hooks passed. They cover isolated effects and full state, binding rejection,
+retained poison, and cleanup. They do not prove that a poisoned preview invokes
+cold validation. The production fork optimization remains held. The first
+compile attempt used a stale macro artifact and ran no tests; rebuilding the
+correct macro took 2m31s before the two preview cases passed in 0.04s.
+Raw results are `costf9-preview-live-fork-baseline-r1.log`,
+`costf9-preview-live-fork-baseline-r2.log` and
+`costf9-preview-live-fork-archive-baseline-r1.log` in the retained evidence.
+
+The separate push-range workflow fix `5ecab297` remains unpublished. Its
+70m13s normal push passed Clippy, machine and hook checks, then failed one of
+12,155 executed unit tests (17 skipped). The unchanged interrupted-harness
+cleanup test observed FIFO closure before its immediate process-state check
+reported exit. A bounded process-exit check with a still-running negative is
+being prepared; the cause is not yet proven. Integration and E2E gates were
+not reached. This failed attempt is recorded as validation time, not delivered
+feature coverage.
+
 ## Publication gate, 2026-10-04
 
 Native [PR1634](https://github.com/lukacf/meerkat/pull/1634) is published at

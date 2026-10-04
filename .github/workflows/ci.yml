@@ -332,6 +332,9 @@ jobs:
       - name: Semver-breaks analyser self-test
         run: make semver-breaks-selftest
 
+      - name: Native authorization cost analyser self-test
+        run: make native-cost-analysis-selftest
+
       - name: Verify version parity
         run: make verify-version-parity
 

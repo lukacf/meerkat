@@ -46222,6 +46222,12 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
     let mut settlement = handle
         .retirement_settlement(&member_id)
         .expect("the owned retirement publishes its settlement");
+    // The actor publishes the settlement before it replies to the slot task,
+    // which removes the slot and then publishes the slot's own result. Take
+    // that publication now, while the owned retirement still holds the slot.
+    let mut slot_publication =
+        super::handle::pending_retirement_result_publication(&retirement_key)
+            .expect("the owned retirement still holds its exact singleflight slot");
     let released = Instant::now();
     control.release_all();
     // The single owned retirement re-issues its exact-run cancel once the
@@ -46245,6 +46251,13 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
             .expect("read roster after retirement convergence")
             .is_none()
     );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        slot_publication.wait_for(Option::is_some),
+    )
+    .await
+    .expect("the slot task publishes its result after the actor replies")
+    .expect("the slot task publishes before dropping its sender");
     assert!(
         super::handle::retirement_result_slot_removed_check_count(&retirement_key)
             > slot_checks_before,

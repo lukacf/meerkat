@@ -916,6 +916,14 @@ async fn await_result_recovery_attempt_or_shutdown<T>(
     }
 }
 
+/// A std mutex guard that survives poisoning: the guarded maps hold plain
+/// bookkeeping that stays consistent across a panicked holder.
+fn lock_unpoisoned<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct RetainedDelegation {
     operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
     provisional: ProvisionalLiveHandoff,
@@ -1319,6 +1327,15 @@ pub struct ExperimentalLiveDelegationCoordinator {
     active: Arc<Mutex<std::collections::HashMap<OperationId, ActiveDelegation>>>,
     schedules: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ChannelSchedule>>>,
     retained: Arc<Mutex<std::collections::HashMap<OperationId, Arc<RetainedDelegation>>>>,
+    /// Owned workers still running when their voice channel closed, with the
+    /// canonical session the channel served, until their retained entry is
+    /// removed (terminal realized; a completed result is merged first).
+    running_after_close:
+        Arc<std::sync::Mutex<std::collections::HashMap<OperationId, meerkat_core::SessionId>>>,
+    /// Post-close results being merged into their source member, with the
+    /// session, until the merge turn reaches its terminal.
+    merges_awaiting_commit:
+        Arc<std::sync::Mutex<std::collections::HashMap<OperationId, meerkat_core::SessionId>>>,
     /// Utterance continuations for delegations still queued for a worker,
     /// delivered once the worker starts.
     pending_continuations: Arc<Mutex<Vec<PendingContinuation>>>,
@@ -1635,6 +1652,8 @@ impl ExperimentalLiveDelegationCoordinator {
             active: Arc::new(Mutex::new(std::collections::HashMap::new())),
             schedules: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retained: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            running_after_close: Arc::default(),
+            merges_awaiting_commit: Arc::default(),
             pending_continuations: Arc::new(Mutex::new(Vec::new())),
             failed_start_cleanups: Arc::new(Mutex::new(std::collections::HashMap::new())),
             result_delivery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -4705,12 +4724,43 @@ impl ExperimentalLiveDelegationCoordinator {
             post_close_merge_text(&retained.title, result_text),
             WorkOrigin::Internal,
         );
+        let operation_id = retained.operation.operation_id().clone();
+        lock_unpoisoned(&self.merges_awaiting_commit).insert(
+            operation_id.clone(),
+            retained.runtime_binding.session_id().clone(),
+        );
+        let Some(handle) = self
+            .start_post_close_merge(retained, work, result_spec)
+            .await
+        else {
+            lock_unpoisoned(&self.merges_awaiting_commit).remove(&operation_id);
+            return;
+        };
+        // The merged reply reaches a reopened channel once it commits; until
+        // then the result is still on its way.
+        let merges_awaiting_commit = Arc::clone(&self.merges_awaiting_commit);
+        tokio::spawn(async move {
+            if let Err(error) = handle.wait().await {
+                tracing::warn!(%error, %operation_id, "post-close voice result merge turn did not complete");
+            }
+            lock_unpoisoned(&merges_awaiting_commit).remove(&operation_id);
+        });
+    }
+
+    /// Admit the post-close merge turn on the source member, or report why
+    /// it could not be admitted.
+    async fn start_post_close_merge(
+        &self,
+        retained: &RetainedDelegation,
+        work: WorkSpec,
+        result_spec: BoundedResultSpec,
+    ) -> Option<meerkat_mob::WorkTurnHandle> {
         let Some(mob_handle) = retained.mob_handle.as_ref() else {
             tracing::warn!(
                 operation_id = %retained.operation.operation_id(),
                 "post-close voice delegation result has no source mob handle to merge into"
             );
-            return;
+            return None;
         };
         let operation_id = retained.operation.operation_id();
         let delivery_identity = match MobDeliveryIdentity::new(
@@ -4728,7 +4778,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     %operation_id,
                     "post-close voice delegation result has no valid merge delivery identity"
                 );
-                return;
+                return None;
             }
         };
         match mob_handle
@@ -4740,15 +4790,21 @@ impl ExperimentalLiveDelegationCoordinator {
             )
             .await
         {
-            Ok(_) => tracing::info!(
-                operation_id = %retained.operation.operation_id(),
-                "post-close voice delegation result merged into the source member"
-            ),
-            Err(error) => tracing::warn!(
-                %error,
-                operation_id = %retained.operation.operation_id(),
-                "post-close voice delegation result could not be merged"
-            ),
+            Ok(handle) => {
+                tracing::info!(
+                    operation_id = %retained.operation.operation_id(),
+                    "post-close voice delegation result merged into the source member"
+                );
+                Some(handle)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    operation_id = %retained.operation.operation_id(),
+                    "post-close voice delegation result could not be merged"
+                );
+                None
+            }
         }
     }
 
@@ -5454,6 +5510,9 @@ impl ExperimentalLiveDelegationCoordinator {
             .is_some_and(|current| Arc::ptr_eq(current, retained))
         {
             retained_by_operation.remove(operation_id);
+            // Its terminal is realized: a completed result already holds its
+            // own entry until the merge commits.
+            lock_unpoisoned(&self.running_after_close).remove(operation_id);
         }
         drop(retained_by_operation);
 
@@ -5964,6 +6023,21 @@ impl ExperimentalLiveDelegationCoordinator {
                 None => (Vec::new(), std::collections::BTreeSet::new()),
             }
         };
+        // An owned worker still running finishes after the close and merges
+        // its result into the source member: a channel reopened on this
+        // session meanwhile is told the work is still finishing.
+        {
+            let retained = self.retained.lock().await;
+            let mut running_after_close = lock_unpoisoned(&self.running_after_close);
+            for operation_id in &running {
+                if retained.get(operation_id).is_some_and(|retained| {
+                    retained.admission.worker_ownership()
+                        == LiveDelegationWorkerOwnership::OwnedMember
+                }) {
+                    running_after_close.insert(operation_id.clone(), binding.session_id().clone());
+                }
+            }
+        }
         for pending in queued {
             if pending.runtime_binding.generation() != binding.runtime_generation().get()
                 || pending.runtime_binding.fence_token() != binding.runtime_fence().get()
@@ -6022,6 +6096,17 @@ impl ExperimentalLiveDelegationCoordinator {
         }
         self.settle_responses_retirement_debt_for_binding(binding)
             .await;
+    }
+}
+
+impl meerkat::experimental_gpt_live::LivePostCloseWorkSource
+    for ExperimentalLiveDelegationCoordinator
+{
+    fn has_undelivered_post_close_result(&self, session_id: &SessionId) -> bool {
+        lock_unpoisoned(&self.running_after_close)
+            .values()
+            .chain(lock_unpoisoned(&self.merges_awaiting_commit).values())
+            .any(|pending| pending == session_id)
     }
 }
 
@@ -8457,6 +8542,59 @@ mod tests {
                 .await
                 .contains_key(operation.operation_id()),
             "the close retires the retained custody"
+        );
+    }
+
+    /// Turbo S S104 R1: a reopened channel decides how to answer "what
+    /// happened while I was gone" before the finished work reaches it. An
+    /// owned worker still running when its channel closes is reported to
+    /// later opens of its session until its custody ends; a merge that could
+    /// not be admitted leaves nothing on its way.
+    #[tokio::test]
+    async fn an_owned_worker_running_at_close_is_reported_until_its_custody_ends() {
+        use meerkat::experimental_gpt_live::LivePostCloseWorkSource as _;
+        let HeldResultFixture {
+            coordinator,
+            retained,
+            operation,
+            provider_binding,
+            ..
+        } = held_result_fixture("live:post-close-running").await;
+        let session_id = provider_binding.session_id().clone();
+        let mut schedule = ChannelSchedule::new();
+        schedule.running.insert(operation.operation_id().clone());
+        coordinator.schedules.lock().await.insert(
+            (session_id.clone(), provider_binding.channel_id().clone()),
+            schedule,
+        );
+        assert!(
+            !coordinator.has_undelivered_post_close_result(&session_id),
+            "a running worker on an open channel is not post-close work"
+        );
+
+        coordinator.cancel_channel_binding(&provider_binding).await;
+        assert!(
+            coordinator.has_undelivered_post_close_result(&session_id),
+            "the worker outlived its channel"
+        );
+        assert!(
+            !coordinator.has_undelivered_post_close_result(&SessionId::new()),
+            "only its own session is told"
+        );
+
+        // No source handle in this fixture: the merge is refused at once and
+        // holds no entry of its own.
+        coordinator
+            .merge_result_into_source(&retained, "the result")
+            .await;
+        assert!(
+            lock_unpoisoned(&coordinator.merges_awaiting_commit).is_empty(),
+            "a merge that was not admitted is not awaited"
+        );
+        coordinator.remove_retained_delegation(&retained).await;
+        assert!(
+            !coordinator.has_undelivered_post_close_result(&session_id),
+            "nothing is on its way once the custody ends"
         );
     }
 

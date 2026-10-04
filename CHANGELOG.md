@@ -1318,6 +1318,26 @@ them.
   given from it directly and read back when the user asks or asked for it,
   and still never read out unprompted (Turbo S S104 R1: "what happened while
   I was gone" was delegated and the finished work never read back).
+  - A channel opened while delegated work from an earlier channel of the
+    same session is still finishing (its worker outlived the channel, or its
+    result is being merged and has not committed) now says so in its startup
+    session instructions: "Work started before this call is still
+    finishing, and its result will arrive here as context data. Do not say
+    it is done until it arrives." The model decides how to answer before the
+    finished work's replay reaches it, which waits for the user's turn to
+    end. Released at the first words instead, the replay made the model talk
+    over the user. The source is new
+    `meerkat::experimental_gpt_live::LivePostCloseWorkSource`, bound with
+    `ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source` (a
+    defaulted method). The JSON-RPC router binds its live delegation
+    coordinator, which tracks owned workers running at their channel's close
+    until their custody ends and post-close merges until their turn reaches
+    its terminal. Opens with no such work are unchanged.
+  - The "Finished voice request" narration that travels with a result now
+    adds "If the user asked to have it read back, read it back word for
+    word." It precedes the result text in the same event, so it is in
+    context before the model's own readout. In S104 R1 the result carried
+    the requested ode, and the voice summarized it away.
 - GPT Live no longer gives the voice a "Finished voice request: ... The
   result follows." announcement without the result behind it. The Completed
   narration was its own provider event, acknowledged before the result was

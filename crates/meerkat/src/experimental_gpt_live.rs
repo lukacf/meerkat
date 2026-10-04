@@ -213,6 +213,12 @@ pub trait ExperimentalLiveOpenAuthorityProvider: Send + Sync {
         Err(ExperimentalLiveOpenAuthorityError::Unavailable)
     }
 
+    /// Bind the host's source of delegated work that outlived its voice
+    /// channel, read by every later open ([`LivePostCloseWorkSource`]). The
+    /// first binding wins; authorities without startup instructions ignore
+    /// it.
+    fn bind_post_close_work_source(&self, _source: Arc<dyn LivePostCloseWorkSource>) {}
+
     /// Exact cleanup for an open that was bound but could not be published,
     /// or for a later channel close. A stale session/channel pair is a no-op.
     async fn unbind_channel(
@@ -432,6 +438,26 @@ pub trait PublicGptLiveInstructionsPreface: Send + Sync {
     /// instructions at open. `None` or empty adds nothing.
     async fn preface(&self, session_id: &meerkat_core::SessionId) -> Option<String>;
 }
+
+/// Host source of delegated work that outlived its voice channel.
+///
+/// A reopened channel's model decides how to answer "what happened while I
+/// was away" before the finished work's runtime-work replay reaches it (the
+/// replay waits for the user's turn to end, since released earlier it made
+/// the model talk over the user). When the source reports such work, the
+/// public open adds [`LIVE_POST_CLOSE_WORK_PENDING`] to the startup session
+/// instructions, which the model has from the start.
+pub trait LivePostCloseWorkSource: Send + Sync {
+    /// Whether `session_id` has delegated work whose voice channel closed
+    /// before its result reached the session: the work is still running, or
+    /// its result is being merged and has not committed.
+    fn has_undelivered_post_close_result(&self, session_id: &meerkat_core::SessionId) -> bool;
+}
+
+/// Startup instructions line for a channel opened while delegated work from
+/// an earlier channel is still finishing ([`LivePostCloseWorkSource`]).
+pub const LIVE_POST_CLOSE_WORK_PENDING: &str = "Work started before this call is still finishing, \
+and its result will arrive here as context data. Do not say it is done until it arrives.";
 
 /// Longest the open path waits for a host's instructions preface.
 pub const PUBLIC_INSTRUCTIONS_PREFACE_BOUND: std::time::Duration =
@@ -918,6 +944,9 @@ pub struct ExperimentalGptLiveOpenAuthority {
             >,
         >,
     >,
+    /// Bound once when the host composes its delegation owner
+    /// ([`ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source`]).
+    post_close_work: std::sync::OnceLock<Arc<dyn LivePostCloseWorkSource>>,
 }
 
 impl ExperimentalGptLiveOpenAuthority {
@@ -1022,12 +1051,13 @@ impl ExperimentalGptLiveOpenAuthority {
                 instructions_preface,
                 ..
             } => {
-                resolve_public_session_instructions(
+                let instructions = resolve_public_session_instructions(
                     instructions_preface.clone(),
                     session_id,
                     session_instructions.clone(),
                 )
-                .await
+                .await;
+                self.with_post_close_work_line(session_id, instructions)
             }
             #[cfg(feature = "experimental-gpt-live")]
             GptLiveOpenAdmission::Experimental { .. } => None,
@@ -1085,7 +1115,33 @@ impl ExperimentalGptLiveOpenAuthority {
             test_base_url: None,
             pending_context_recovery: Arc::new(Mutex::new(HashMap::new())),
             pending_result_recovery: Arc::new(Mutex::new(HashMap::new())),
+            post_close_work: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The startup instructions with [`LIVE_POST_CLOSE_WORK_PENDING`]
+    /// appended when the bound source reports undelivered post-close work
+    /// for `session_id`; unchanged otherwise.
+    fn with_post_close_work_line(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        instructions: Option<String>,
+    ) -> Option<String> {
+        let pending = self
+            .post_close_work
+            .get()
+            .is_some_and(|source| source.has_undelivered_post_close_result(session_id));
+        if !pending {
+            return instructions;
+        }
+        tracing::info!(
+            %session_id,
+            "public Live open: delegated work from an earlier channel is still finishing"
+        );
+        Some(match instructions {
+            Some(instructions) => format!("{instructions}\n\n{LIVE_POST_CLOSE_WORK_PENDING}"),
+            None => LIVE_POST_CLOSE_WORK_PENDING.to_owned(),
+        })
     }
 
     /// Test-only public base URL injection: the real admission path runs
@@ -1232,6 +1288,8 @@ impl ExperimentalGptLiveOpenAuthority {
             session_instructions,
         )
         .await;
+        let session_instructions =
+            self.with_post_close_work_line(canonical_session_id, session_instructions);
         #[cfg(feature = "test-realtime-fixtures")]
         if let Some(base_url) = &self.test_base_url {
             return ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
@@ -1317,6 +1375,15 @@ pub enum ExperimentalGptLiveOpenAuthorityError {
 
 #[async_trait]
 impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority {
+    fn bind_post_close_work_source(&self, source: Arc<dyn LivePostCloseWorkSource>) {
+        let bound = self.post_close_work.get_or_init(|| Arc::clone(&source));
+        if !std::ptr::addr_eq(Arc::as_ptr(bound), Arc::as_ptr(&source)) {
+            tracing::warn!(
+                "public Live post-close work source already bound; keeping the first binding"
+            );
+        }
+    }
+
     fn execution_feature_capabilities(
         &self,
     ) -> Result<Vec<&'static str>, ExperimentalLiveOpenAuthorityError> {
@@ -12045,6 +12112,75 @@ mod tests {
         assert!(first_text.starts_with(&format!("Roster entry for session {first}.\n\n")));
         assert!(second_text.starts_with(&format!("Roster entry for session {second}.\n\n")));
         assert!(first_text.ends_with(crate::gpt_live_client_context_session_instructions()));
+    }
+
+    /// Post-close work source reporting one session.
+    struct PendingWorkFor(meerkat_core::SessionId);
+
+    impl LivePostCloseWorkSource for PendingWorkFor {
+        fn has_undelivered_post_close_result(&self, session_id: &meerkat_core::SessionId) -> bool {
+            *session_id == self.0
+        }
+    }
+
+    /// Turbo S S104 R1: a reopened channel's startup instructions say that
+    /// earlier work is still finishing only for a session whose delegated
+    /// work outlived its channel; every other open is unchanged. The line
+    /// names no delegate.
+    #[tokio::test]
+    async fn startup_instructions_name_pending_post_close_work_only_when_it_exists() {
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let selected_binding = public_live_binding(&realm);
+        let config = public_live_authority_config(
+            &realm,
+            "marin",
+            public_live_identity(selected_binding.clone()),
+            Arc::new(CountingConfigSource {
+                reads: Arc::new(AtomicUsize::new(0)),
+                config: meerkat_core::Config::default(),
+            }),
+            Arc::new(NeverBindingAuthority {
+                calls: Arc::new(AtomicUsize::new(0)),
+                expected: selected_binding,
+            }),
+            Arc::new(ExperimentalGptLiveWebrtcTransport::new()),
+        );
+        let authority = ExperimentalGptLiveOpenAuthority::new_public(config).expect("authority");
+        let pending = meerkat_core::SessionId::new();
+        let other = meerkat_core::SessionId::new();
+        let unbound = authority
+            .public_session_instructions_for(&pending)
+            .await
+            .expect("instructions");
+        assert!(
+            !unbound.contains(LIVE_POST_CLOSE_WORK_PENDING),
+            "no source bound"
+        );
+
+        authority.bind_post_close_work_source(Arc::new(PendingWorkFor(pending.clone())));
+        let with_work = authority
+            .public_session_instructions_for(&pending)
+            .await
+            .expect("instructions");
+        assert_eq!(
+            with_work,
+            format!("{unbound}\n\n{LIVE_POST_CLOSE_WORK_PENDING}"),
+            "appended once, after the base instructions"
+        );
+        let without_work = authority
+            .public_session_instructions_for(&other)
+            .await
+            .expect("instructions");
+        assert_eq!(
+            without_work, unbound,
+            "a session without pending work is unchanged"
+        );
+        assert!(LIVE_POST_CLOSE_WORK_PENDING.contains("Do not say it is done until it arrives."));
+        assert!(
+            !LIVE_POST_CLOSE_WORK_PENDING
+                .to_lowercase()
+                .contains("delegat")
+        );
     }
 
     /// Binding authority that separates the open's full durable check (the

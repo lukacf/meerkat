@@ -97,6 +97,22 @@ impl meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher
                     },
                 )
             }
+            meerkat::experimental_gpt_live::ExperimentalLivePublicObservationKind::UserSpeechOverAssistant
+            | meerkat::experimental_gpt_live::ExperimentalLivePublicObservationKind::AssistantPlaybackRestorable => {
+                RpcNotification::try_new(
+                    "live/assistant_playback_hint",
+                    &meerkat_contracts::LiveAssistantPlaybackHintParams {
+                        channel_id: output.channel_id.to_string(),
+                        hint: if kind
+                            == meerkat::experimental_gpt_live::ExperimentalLivePublicObservationKind::UserSpeechOverAssistant
+                        {
+                            meerkat_contracts::LiveAssistantPlaybackHint::Duck
+                        } else {
+                            meerkat_contracts::LiveAssistantPlaybackHint::Restore
+                        },
+                    },
+                )
+            }
             _ => RpcNotification::try_new(
                 "live/assistant_output_available",
                 &meerkat_contracts::LiveAssistantOutputAvailableParams {

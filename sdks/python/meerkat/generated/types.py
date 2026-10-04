@@ -5004,6 +5004,22 @@ output unjudged."""
     output_id: str
 
 
+# The playback a `live/assistant_playback_hint` asks the client for.
+LiveAssistantPlaybackHint = Literal['duck', 'restore']
+
+@dataclass
+class LiveAssistantPlaybackHintParams:
+    """Runtime notification `live/assistant_playback_hint`: a barge-in playback
+hint for the channel's assistant audio. The user hears the assistant until
+the provider stops sending audio and the client drains what is already in
+flight; a client that applies `duck` silences it at the user's speech
+onset instead, and `restore` ends the duck. The runtime derives both from
+the provider's reflected input and output audio on the provider's audio
+clock; a client that ignores them plays as before."""
+    channel_id: str
+    hint: Literal['duck', 'restore']
+
+
 @dataclass
 class LiveMediaHealthParams:
     """`live/media_health` request: the client's raw decoded-audio counters from

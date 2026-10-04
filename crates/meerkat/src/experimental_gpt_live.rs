@@ -1917,6 +1917,13 @@ pub enum ExperimentalLivePublicObservationKind {
     /// decoded-audio counters for the channel's first assistant output (an
     /// already consumed output; its id is only the report key).
     MediaHealthRequested,
+    /// `live/assistant_playback_hint` with hint `duck`: the user started
+    /// speaking over the audible assistant (a barge-in). The client silences
+    /// assistant playback now instead of when the provider yields (#1638).
+    /// Names the channel only; its output address carries no output.
+    UserSpeechOverAssistant,
+    /// `live/assistant_playback_hint` with hint `restore`: ends a duck.
+    AssistantPlaybackRestorable,
 }
 
 impl ExperimentalLivePublicObservation {
@@ -1938,6 +1945,27 @@ impl ExperimentalLivePublicObservation {
         Self {
             binding,
             kind: ExperimentalLivePublicObservationKind::MediaHealthRequested,
+            output,
+        }
+    }
+
+    /// A barge-in playback hint for the channel (`kind` is
+    /// [`ExperimentalLivePublicObservationKind::UserSpeechOverAssistant`] or
+    /// [`ExperimentalLivePublicObservationKind::AssistantPlaybackRestorable`]).
+    /// It concerns whatever the channel is playing, so its output address
+    /// names the channel and no output.
+    fn playback_hint(
+        binding: ProviderWebrtcBinding,
+        kind: ExperimentalLivePublicObservationKind,
+    ) -> Self {
+        let output = meerkat_live::LiveAssistantOutputAddress {
+            channel_id: binding.channel_id().clone(),
+            output_id: String::new(),
+            content_index: 0,
+        };
+        Self {
+            binding,
+            kind,
             output,
         }
     }
@@ -5345,6 +5373,10 @@ impl ExperimentalGptLiveDeferredAdapter {
             // Telemetry is recorded by the sideband actor and never routed
             // to the adapter.
             LiveSidebandObservationKind::ProviderInputLatency(_) => None,
+            // #1638: playback hints for the client, never adapter input and
+            // never a channel error.
+            LiveSidebandObservationKind::UserSpeechOverAssistant
+            | LiveSidebandObservationKind::AssistantPlaybackRestorable => None,
             LiveSidebandObservationKind::UnsupportedProviderEvent => {
                 Some(LiveAdapterObservation::Error {
                     code: LiveAdapterErrorCode::ProviderError,
@@ -7639,6 +7671,38 @@ fn spawn_sideband_actors(
                             .await;
                         continue;
                     }
+                    // A barge-in playback hint (#1638) goes straight to the
+                    // client. Like latency telemetry it takes no context
+                    // ordinal and never reaches the machine, the adapter, or
+                    // the control lane; an undelivered hint costs only the
+                    // early silence, never the channel.
+                    let playback_hint = match observation.kind() {
+                        LiveSidebandObservationKind::UserSpeechOverAssistant => {
+                            Some(ExperimentalLivePublicObservationKind::UserSpeechOverAssistant)
+                        }
+                        LiveSidebandObservationKind::AssistantPlaybackRestorable => {
+                            Some(ExperimentalLivePublicObservationKind::AssistantPlaybackRestorable)
+                        }
+                        _ => None,
+                    };
+                    if let Some(kind) = playback_hint {
+                        if let Err(error) = activation
+                            .public_observation_publisher
+                            .publish(ExperimentalLivePublicObservation::playback_hint(
+                                observation_binding.clone(),
+                                kind,
+                            ))
+                            .await
+                        {
+                            tracing::debug!(
+                                channel = %observation_binding.channel_id(),
+                                ?kind,
+                                %error,
+                                "barge-in playback hint was not delivered"
+                            );
+                        }
+                        continue;
+                    }
                     let control_observation = matches!(
                         observation.kind(),
                         LiveSidebandObservationKind::DelegationRequested { .. }
@@ -9061,6 +9125,12 @@ impl ExperimentalGptLiveSideband {
     ) -> Result<LiveSidebandObservation, ProviderWebrtcBrokerError> {
         let kind = match observation {
             GptLiveBrokerObservation::SessionReady => LiveSidebandObservationKind::SessionReady,
+            GptLiveBrokerObservation::UserSpeechOverAssistant => {
+                LiveSidebandObservationKind::UserSpeechOverAssistant
+            }
+            GptLiveBrokerObservation::AssistantPlaybackRestorable => {
+                LiveSidebandObservationKind::AssistantPlaybackRestorable
+            }
             GptLiveBrokerObservation::ThinkingContextAppendAcknowledged { token } => {
                 let attempt = self
                     .correlations
@@ -11070,9 +11140,14 @@ mod tests {
             &self,
             observation: ExperimentalLivePublicObservation,
         ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
-            if observation.kind() == ExperimentalLivePublicObservationKind::MediaHealthRequested {
-                // A media-health request is no playback handle: the matrix
-                // records only actionable outputs.
+            if matches!(
+                observation.kind(),
+                ExperimentalLivePublicObservationKind::MediaHealthRequested
+                    | ExperimentalLivePublicObservationKind::UserSpeechOverAssistant
+                    | ExperimentalLivePublicObservationKind::AssistantPlaybackRestorable
+            ) {
+                // Media-health requests and playback hints are no playback
+                // handles: the matrix records only actionable outputs.
                 return Ok(());
             }
             if self.fail_once.swap(false, Ordering::AcqRel) {

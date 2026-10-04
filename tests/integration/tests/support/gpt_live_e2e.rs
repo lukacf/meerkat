@@ -398,10 +398,94 @@ impl BrowserPeerProtocol {
     }
 }
 
+/// Applies `live/assistant_playback_hint`s to one browser peer's assistant
+/// playback: a fire-and-forget `playback_hint` command the peer answers with
+/// no response line, so it never disturbs the test's request/response
+/// commands.
+#[derive(Clone)]
+pub struct PlaybackHintSender {
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+}
+
+impl PlaybackHintSender {
+    pub async fn send(&self, hint: &str) -> std::io::Result<()> {
+        let line = format!("{}\n", json!({"type": "playback_hint", "hint": hint}));
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await
+    }
+}
+
+/// The browser peer currently answering a channel's playback hints (#1638).
+/// The RPC tee applies each `live/assistant_playback_hint` notification to
+/// it the moment the server writes it, as a client's notification handler
+/// would; a reopen swaps in the new peer.
+#[derive(Clone, Default)]
+pub struct PlaybackHintRelay {
+    peer: Arc<std::sync::Mutex<Option<PlaybackHintSender>>>,
+}
+
+impl PlaybackHintRelay {
+    pub fn attach(&self, peer: &BrowserPeer) {
+        if let Ok(mut slot) = self.peer.lock() {
+            *slot = Some(peer.playback_hint_sender());
+        }
+    }
+
+    async fn apply(&self, hint: &str) {
+        let sender = self.peer.lock().ok().and_then(|slot| slot.clone());
+        if let Some(sender) = sender {
+            let _ = sender.send(hint).await;
+        }
+    }
+}
+
+/// A JSONL RPC duplex whose server-to-client lines pass through unchanged,
+/// except that each `live/assistant_playback_hint` notification is also
+/// applied to the relay's browser peer as soon as the server writes it. The
+/// test's client reads notifications only when it calls, so without the tee
+/// a hint would reach the peer long after the barge-in it is for.
+pub fn playback_hint_tee(
+    relay: &PlaybackHintRelay,
+) -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+    let (client_stream, client_mid) = tokio::io::duplex(1024 * 1024);
+    let (server_stream, server_mid) = tokio::io::duplex(1024 * 1024);
+    let (mut client_mid_read, mut client_mid_write) = tokio::io::split(client_mid);
+    let (server_mid_read, mut server_mid_write) = tokio::io::split(server_mid);
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut client_mid_read, &mut server_mid_write).await;
+    });
+    let relay = relay.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(server_mid_read);
+        loop {
+            let mut line = String::new();
+            match lines.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            if line.contains("live/assistant_playback_hint")
+                && let Ok(message) = serde_json::from_str::<Value>(&line)
+                && message["method"] == "live/assistant_playback_hint"
+                && let Some(hint) = message["params"]["hint"].as_str()
+            {
+                relay.apply(hint).await;
+            }
+            if client_mid_write.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+    (client_stream, server_stream)
+}
+
 pub struct BrowserPeer {
     evidence: Option<(evidence::Journal, u32)>,
     child: Child,
-    stdin: ChildStdin,
+    /// Shared with [`PlaybackHintSender`]s: the test's request/response
+    /// commands and fire-and-forget playback hints each write whole lines
+    /// under this lock.
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     stdout: BrowserOutput,
     next_id: u64,
     pub protocol: BrowserPeerProtocol,
@@ -531,7 +615,7 @@ impl BrowserPeer {
         Ok(Self {
             evidence,
             child,
-            stdin,
+            stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
             stdout,
             next_id: 1,
             protocol,
@@ -540,14 +624,24 @@ impl BrowserPeer {
         })
     }
 
+    /// A sender that applies `live/assistant_playback_hint`s to this peer's
+    /// assistant playback while the test keeps driving the peer.
+    pub fn playback_hint_sender(&self) -> PlaybackHintSender {
+        PlaybackHintSender {
+            stdin: Arc::clone(&self.stdin),
+        }
+    }
+
     pub async fn call(&mut self, command: Value) -> Result<Value, Box<dyn std::error::Error>> {
         let id = self.next_id;
         self.next_id += 1;
         let mut command = command;
         command["id"] = json!(id);
-        self.stdin.write_all(command.to_string().as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        {
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all(format!("{command}\n").as_bytes()).await?;
+            stdin.flush().await?;
+        }
         let response: Value = match &mut self.stdout {
             BrowserOutput::Direct(stdout) => {
                 let mut line = String::new();
@@ -893,6 +987,9 @@ pub enum TimelineKind {
     FirstAudioPacketSent,
     /// First `session.input_transcript.delta` of the channel.
     FirstInputDelta,
+    /// A `live/assistant_playback_hint` applied to the peer's assistant
+    /// playback gate (`hint` in the detail, #1638).
+    PlaybackHint,
     #[serde(other)]
     Other,
 }

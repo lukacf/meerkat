@@ -1256,6 +1256,10 @@ pub fn rpc_notification_catalog(
                 "live/media_health_requested",
                 "Request for the client's decoded-audio counters for a channel's first assistant output",
             ),
+            RpcNotificationDescriptor::basic(
+                "live/assistant_playback_hint",
+                "Barge-in playback hint: duck assistant audio at the user's speech onset, then restore",
+            ),
         ]);
     }
 

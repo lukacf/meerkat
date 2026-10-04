@@ -1074,6 +1074,10 @@
     {
       "description": "Request for the client's decoded-audio counters for a channel's first assistant output",
       "name": "live/media_health_requested"
+    },
+    {
+      "description": "Barge-in playback hint: duck assistant audio at the user's speech onset, then restore",
+      "name": "live/assistant_playback_hint"
     }
   ]
 }

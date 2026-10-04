@@ -661,6 +661,14 @@ them.
   Binaries from before this release refuse a v3 file, as they refuse any
   newer schema.
 
+- Barge-in playback hint (#1638, see Added): new enum variants
+  `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::UserSpeechOverAssistant`,
+  `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::AssistantPlaybackRestorable`,
+  `meerkat_live::LiveSidebandObservationKind::UserSpeechOverAssistant` and
+  `meerkat_live::LiveSidebandObservationKind::AssistantPlaybackRestorable`;
+  exhaustive matches must handle them. Later discriminants move in
+  `GptLiveBrokerObservation::*` and `LiveSidebandObservationKind::*`.
+
 ### Security
 
 - The BuildBuddy launchers no longer send the caller's environment to
@@ -718,6 +726,23 @@ them.
   application tool policy on managed hosts (#1531; see Breaking).
 
 ### Added
+
+- Barge-in playback hint for Public Live (#1638). When the user starts
+  speaking while assistant audio is still audible, the broker's floor guard
+  publishes the RPC notification `live/assistant_playback_hint` with
+  `{channel_id, hint: "duck"}`, and `{hint: "restore"}` once the user's input
+  goes quiet or the assistant output does. New wire types
+  `meerkat_contracts::LiveAssistantPlaybackHint` and
+  `LiveAssistantPlaybackHintParams` (regenerated in both SDKs), new public
+  observation kinds `ExperimentalLivePublicObservationKind::UserSpeechOverAssistant`
+  and `AssistantPlaybackRestorable`, and in the TypeScript SDK
+  `applyLiveAssistantPlaybackHint(gainNode, hint, currentTime)` with the gain
+  constants `LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN`,
+  `LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN` and
+  `LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S`. A browser client routes the
+  remote assistant track through a gain node and applies each hint to it. The
+  gpt-live protocol has no client command that cancels or clears provider
+  output, so the duck is the client's local playback gate.
 
 - `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
   handles are the same live runtime owner (clones share it; a separately
@@ -1251,6 +1276,11 @@ them.
   default route.
 
 ### Fixed
+
+- Public Live talk-over (#1638): assistant audio that kept playing after the
+  user started speaking (a provider tail of up to several seconds) now ducks at
+  the user's speech onset in clients that apply `live/assistant_playback_hint`,
+  including the e2e browser peer.
 
 - GPT Live provider-stream recordings (`test-realtime-fixtures`) now keep
   delegation commentary that was held behind the user's unanswered

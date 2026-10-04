@@ -1221,6 +1221,12 @@ pub struct LiveProviderInputLatency {
 #[derive(Clone, PartialEq, Eq)]
 pub enum LiveSidebandObservationKind {
     SessionReady,
+    /// The user started speaking while the assistant was audible (a
+    /// barge-in), read from the provider's reflected input (#1638). A client
+    /// ducks assistant playback on it. Never a channel error.
+    UserSpeechOverAssistant,
+    /// Ends a [`Self::UserSpeechOverAssistant`]: a client restores playback.
+    AssistantPlaybackRestorable,
     /// Provider input-transcript transport detail. This is not canonical user
     /// transcript authority; only an exact user-role turn terminal can emit
     /// the parent-session final.
@@ -1316,6 +1322,8 @@ impl fmt::Debug for LiveSidebandObservationKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self {
             Self::SessionReady => "session_ready",
+            Self::UserSpeechOverAssistant => "user_speech_over_assistant",
+            Self::AssistantPlaybackRestorable => "assistant_playback_restorable",
             Self::UserTranscriptFragment { .. } => "user_transcript_fragment",
             Self::TurnStarted { .. } => "turn_started",
             Self::TurnSnapshotDelta { .. } => "turn_snapshot_delta",

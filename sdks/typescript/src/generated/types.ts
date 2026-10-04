@@ -5317,6 +5317,13 @@ export interface LiveMediaHealthRequestedParams {
   output_id: string;
 }
 
+export type LiveAssistantPlaybackHint = "duck" | "restore";
+
+export interface LiveAssistantPlaybackHintParams {
+  channel_id: string;
+  hint: "duck" | "restore";
+}
+
 export interface LiveMediaHealthParams {
   audible_frames: number;
   channel_id: string;

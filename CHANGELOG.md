@@ -1313,6 +1313,18 @@ them.
   reconciliation like a worker already running at the close. A cleanup step
   the generated state refuses outright now ends with a typed refusal instead
   of retrying.
+- A provider response that ends before its terminal event is retried instead
+  of failing the turn (Turbo S S103 R1 on 850a38699: the executor's OpenAI
+  stream ended without `Done` and the delegated turn failed).
+  `meerkat_llm_core::LlmError::IncompleteResponse` is now retryable
+  (`is_retryable()` and its `LlmProviderError` retry metadata), so the agent
+  loop's bounded retry policy replays the turn under the same assistant
+  message id. Nothing of the truncated attempt is committed: the adapter
+  returns the error before assembling a result, and it now also fails
+  closed itself (a retryable `IncompleteResponse`) when a client's stream
+  ends without `Done`, rather than assembling the partial blocks. Its live
+  deltas carry the retried id and are discarded on `Retrying`, as for any
+  retried attempt.
 - A GPT Live typed update that later speech corrected only in part keeps
   its other values (Turbo S S99, #1629: after a typed "code word Violet,
   favorite flower Marigold" and a spoken "code word Cobalt", the voice

@@ -9777,9 +9777,25 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
     let mut known: BTreeMap<String, u64> = BTreeMap::new();
     let mut results: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut deltas: Vec<(u64, String)> = Vec::new();
+    // Every recorded client event id, and every commentary acknowledgement:
+    // an acknowledgement whose client event is missing from the recording
+    // is an append the recorder did not capture (before the recorder kept
+    // commentary released from the user's floor hold, 93b6aaec S101 R2).
+    let mut recorded_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut commentary_acks: Vec<(u64, String)> = Vec::new();
     for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
+        if let provider_recording::Entry::ClientEvent { event } = &line.entry
+            && let Some(id) = event["event_id"].as_str()
+        {
+            recorded_ids.insert(id.to_owned());
+        }
         match &line.entry {
             provider_recording::Entry::ServerFrame { raw } => match raw["type"].as_str() {
+                Some("session.commentary.appended") => {
+                    if let Some(id) = raw["client_event_id"].as_str() {
+                        commentary_acks.push((line.elapsed_ms, id.to_owned()));
+                    }
+                }
                 Some("session.delegation.created") => {
                     if let Some(id) = raw["delegation"]["id"].as_str() {
                         created.entry(id.to_owned()).or_insert(line.elapsed_ms);
@@ -9831,18 +9847,33 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
             _ => {}
         }
     }
-    let known_at = |job: S101Job| {
-        jobs.iter()
-            .find(|(_, j)| **j == job)
-            .map_or(u64::MAX, |(id, _)| {
-                known.get(id).copied().unwrap_or(u64::MAX)
-            })
-    };
     let created_at = |job: S101Job| {
         jobs.iter()
             .find(|(_, j)| **j == job)
             .and_then(|(id, _)| created.get(id).copied())
             .unwrap_or(0)
+    };
+    // Fallback anchor for a job whose result row is not in the recording:
+    // the first acknowledgement of an unrecorded append after the job's
+    // delegation was created. The acknowledgement names no delegation, so
+    // this is the earliest moment the result can have been known.
+    let unrecorded_ack_after = |after: u64| {
+        commentary_acks
+            .iter()
+            .filter(|(at, id)| *at >= after && !recorded_ids.contains(id))
+            .map(|(at, _)| *at)
+            .min()
+    };
+    let known_at = |job: S101Job| {
+        jobs.iter()
+            .find(|(_, j)| **j == job)
+            .map_or(u64::MAX, |(id, _)| {
+                known
+                    .get(id)
+                    .copied()
+                    .or_else(|| unrecorded_ack_after(created_at(job)))
+                    .unwrap_or(u64::MAX)
+            })
     };
     let mut claims = Vec::new();
     let quick_window = |at: u64| created_at(S101Job::Quick) <= at && at < known_at(S101Job::Quick);
@@ -12338,6 +12369,71 @@ mod config_tests {
             "{claims:#?}"
         );
         assert!(super::s101_premature_outcome_claims(&lines, 2).is_empty());
+    }
+
+    /// A quick result the recording lacks (held behind the user's floor and
+    /// released unrecorded, 93b6aaec S101 R2) is anchored on the first
+    /// acknowledgement of an unrecorded append after the quick delegation was
+    /// created: a count spoken after it is not premature, one before it is.
+    #[test]
+    fn s101_anchors_an_unrecorded_quick_result_on_its_acknowledgement() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |event_id: &str, id: &str, content: &str| {
+            super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({"type": "session.commentary.append",
+                    "event_id": event_id, "delegation_id": id, "content": content}),
+            }
+        };
+        let acked = |event_id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.commentary.appended",
+                "client_event_id": event_id}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let quick_started = append(
+            "meerkat-append-4",
+            "q",
+            "Started voice request: \"How many files are in your working directory? Answer as there are N files\".",
+        );
+        let after = vec![
+            line(2000, created("q")),
+            line(2100, quick_started.clone()),
+            line(2600, acked("meerkat-append-4")),
+            // meerkat-append-5 (the held quick result) is not recorded.
+            line(4000, acked("meerkat-append-5")),
+            line(4200, delta(" There are 0 files.")),
+        ];
+        assert!(
+            super::s101_premature_outcome_claims(&after, 1).is_empty(),
+            "{:#?}",
+            super::s101_premature_outcome_claims(&after, 1)
+        );
+        let before = vec![
+            line(2000, created("q")),
+            line(2100, quick_started),
+            line(2600, acked("meerkat-append-4")),
+            line(3000, delta(" There are 0 files.")),
+            line(4000, acked("meerkat-append-5")),
+        ];
+        let claims = super::s101_premature_outcome_claims(&before, 1);
+        assert_eq!(claims.len(), 1, "{claims:#?}");
+        assert!(
+            claims[0].contains("before its result (known at 4000 ms)"),
+            "{claims:#?}"
+        );
     }
 
     /// Job 1's file named with its number ("the marker one file is

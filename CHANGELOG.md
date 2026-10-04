@@ -1252,6 +1252,15 @@ them.
 
 ### Fixed
 
+- GPT Live provider-stream recordings (`test-realtime-fixtures`) now keep
+  delegation commentary that was held behind the user's unanswered
+  utterance and released later. The release path sent it without
+  recording it, so a held result was missing from the recording and the
+  Turbo S S101 result-timing oracle reported a correct readout as spoken
+  before its result (93b6aaec S101 R2). For recordings made before this
+  fix, the oracle anchors such a result on the first acknowledgement of an
+  unrecorded append after the delegation was created.
+
 - GPT Live no longer gives the voice a "Finished voice request: ... The
   result follows." announcement without the result behind it. The Completed
   narration was its own provider event, acknowledged before the result was

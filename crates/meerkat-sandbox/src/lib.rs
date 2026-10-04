@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
 
 pub use meerkat_core::confinement::{ConfinementRefusal, ExecutionConfinement};
 
@@ -20,10 +22,17 @@ pub use child::ProcessChild;
 
 /// Exact host-prepared launch data. Environment values are never inherited.
 pub struct ProcessLaunchSpec {
+    #[cfg(target_os = "macos")]
     program: PathBuf,
+    #[cfg(target_os = "macos")]
     arguments: Vec<OsString>,
+    #[cfg(target_os = "macos")]
     directory: PathBuf,
+    #[cfg(target_os = "macos")]
     environment: BTreeMap<OsString, OsString>,
+    // Preserve an opaque validated launch when no backend can retain its data.
+    #[cfg(not(target_os = "macos"))]
+    _unsupported: (),
 }
 
 impl ProcessLaunchSpec {
@@ -73,12 +82,20 @@ impl ProcessLaunchSpec {
                 return Err(ConfinementRefusal::UnsupportedRequirement);
             }
         }
-        Ok(Self {
-            program,
-            arguments,
-            directory,
-            environment,
-        })
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Self {
+                program,
+                arguments,
+                directory,
+                environment,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (program, arguments, directory, environment);
+            Ok(Self { _unsupported: () })
+        }
     }
 }
 
@@ -94,9 +111,15 @@ fn contains_nul(value: &OsStr) -> bool {
 
 /// Prepared exec chain. Fields cannot be retargeted after preparation.
 pub struct PreparedConfinement {
+    #[cfg(target_os = "macos")]
     executor: PathBuf,
+    #[cfg(target_os = "macos")]
     arguments: Vec<OsString>,
+    #[cfg(target_os = "macos")]
     launch: ProcessLaunchSpec,
+    // Compilation and binding always refuse when no supported backend exists.
+    #[cfg(not(target_os = "macos"))]
+    _unsupported: std::convert::Infallible,
 }
 
 impl std::fmt::Debug for PreparedConfinement {
@@ -285,7 +308,7 @@ impl CompiledConfinement {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = launch;
+            let ProcessLaunchSpec { _unsupported: () } = launch;
             Err(ConfinementRefusal::UnsupportedRequirement)
         }
     }

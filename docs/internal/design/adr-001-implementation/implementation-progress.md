@@ -95,6 +95,18 @@ Locking, counters, claims and refusal behavior are unchanged. This is a Rust
 source delta and needs the normal gates and optimized-binary reconciliation;
 earlier runtime test passes remain qualified by their original checkpoint.
 
+
+The successor `9a7f3b8fa` passed the actual no-SQLite WASM lint gate, but its
+normal GCP push failed after 34.4 minutes on Linux workspace Clippy. macOS-only
+sandbox launch fields and a Path import were present on unsupported targets,
+where they had no consumer. A dependent all-target diagnostic also found an
+existing real-shell E2E fixture missing the new confinement field. Publication
+repair keeps launch validation and typed unsupported-requirement refusal intact,
+retains opaque public types, and preserves the fixture's trusted-host behavior.
+The failed push log is retained separately from the earlier WASM failure.
+No native branch, implementation PR CI or benchmark acceptance follows from
+these failed pushes. Additional runtime integration remains held.
+
 ## Current local shell and hook checkpoint, 2026-10-03
 
 The native shell continuation is committed locally through

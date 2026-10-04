@@ -186,20 +186,50 @@ Exact clean `761` optimized qualification then passed: build 6m24s, small
 correctness 1/1 in 0.03s, representative correctness 1/1 in 11.04s, four profile
 controls in 0.04s and analyzer 20/20 in 1.709s. The initial wrong control filter
 selected zero tests and is retained as setup failure, not qualification.
-No fixed-mean representative timing has run. The approved profile is W20/N32 in all six
-existing depth/workload cells, with no interim analysis. Its 624 fresh fixtures
-must fit the less-than-20-minute total budget; budget exhaustion or incomplete
-cells yield UNCERTAIN. Six paired Fieller mean-ratio intervals use family alpha
-.05 and 16 adjacent opposite-order blocks per cell, conditional on stationary,
-independent, approximately bivariate-normal blocks. Fresh-admission cells measure
-whole turns; continuing intervals and summed direct calls remain separate
-units. This mean-only profile cannot establish p99 or full performance acceptance.
-Root owns measurement and the GCP resource owner owns host quiet qualification.
-The reserved representative attempt now waits for actual owner acknowledgments
-to pause at the next completed build/test command boundary, then two quiet
-samples and explicit START; root retains the less-than-20-minute total measurement
-bound and the GCP resource owner qualifies host quiet. No UTC slot is inferred.
-No representative result or cheap-default acceptance is recorded.
+The fixed W20/N32 representative attempt ran on the exact optimized `761`
+fixture from START 12:23:07 to DONE 12:29:02 UTC, 355s elapsed, below the
+1,200s hard limit. The existing test passed 1 case in 354.84s bodies
+(`native761-fixed-mean32-r1.log`). Raw schema2 records complete fixed_mean_32,
+20 warmup pairs, 32 measured pairs per cell, zero failures/timeouts and 384
+measured samples across all six depth/workload cells
+(`raw761-native-fixed-mean32-r1.json`, SHA256
+`8483a11f3283adc11f84464bc437c695dc83964ce90699da0ed79aa06e9ddafe`).
+The repository analyzer's summary is `native761-fixed-mean32-r1-summary.json`,
+SHA256 `5071c7e5b5dca4d75cfc3ca6a0dcfe8dbdad6851b4efe79be040eb253b9391df`.
+
+| Unit | Grant lineage depth | Trusted mean (ms) | Local mean (ms) | Signed added mean (ms) | Ratio-of-means overhead | Conditional result |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fresh-admission whole turn | 1 | 13.221447 | 33.108947 | +19.887500 | +150.42 percent | MISS |
+| Fresh-admission whole turn | 3 | 15.840237 | 41.495532 | +25.655295 | +161.96 percent | MISS |
+| Continuing segment | 1 | 8.052576 | 18.678672 | +10.626096 | +131.96 percent | MISS |
+| Continuing segment | 3 | 8.712939 | 22.311535 | +13.598597 | +156.07 percent | MISS |
+| Sum of four fenced calls | 1 | 0.068328 | 0.432402 | +0.364074 | +532.83 percent | MISS |
+| Sum of four fenced calls | 3 | 0.088986 | 0.979219 | +0.890233 | +1000.42 percent | MISS |
+
+Each cell uses 16 adjacent opposite-order blocks. The six paired Fieller
+mean-ratio intervals use family alpha .05, conditional on stationary, independent,
+approximately bivariate-normal blocks. All six intervals are above the 1.10
+threshold; fresh-admission ratio intervals are [2.494751, 2.513664] and
+[2.570860, 2.669374] at depths 1 and 3. This is a conditional mean-study cheap-turn
+failure, not a passing performance result. Full performance acceptance remains
+UNPROVEN. Only fresh admission measures whole turns; continuing segments and
+summed correlated direct calls are diagnostic units, not individual-operation
+p99 measurements. No small-N tail or full-platform acceptance follows.
+
+The final external observer retained 72 complete overlapping five-second
+frames covering 12:23:03-12:29:06 UTC around the 12:23:07-12:29:02 measurement.
+No unexpected heavy process was observed. Known PID3381992 was zombie ZN;
+gate PID3381990 was suspended TN at 0.0 percent CPU. CPU idle ranged from
+99.34 to 99.77 percent; maximum iowait/steal were zero, minimum available memory
+was 729,390 MiB and swap was zero (`native761-fixed-mean32-r1-monitor.log`, SHA256
+`2f1e3e7e132efd43541f04168bba8e7832d11fd993935cd6e36f31d560f8c1f9`).
+These samples establish observed resource quiet under the prior reservation.
+A fresh typing-lag HOLD acknowledgment was absent; no new all-owner clearance
+is claimed. Root owns measurement and the GCP resource owner owns host quiet
+qualification. The less-than-20-minute total attempt bound includes setup,
+warmup, measured work, oracles, cleanup and output. Functional PASS, sampled
+quiet and the conditional MISS do not establish causal optimization gain or
+full performance acceptance.
 
 The fixture-only `685e336d3b0984f72dab5517e6617bd366ce2b7a` checkpoint passed
 input-authority 9 and controller-custody 5 tests under ordinary parallelism,
@@ -244,9 +274,10 @@ the publication/grant invariant companions passed
 `persistent-controller-nonwaiting-normal-commit-r2.log`,
 `persistent-controller-nonwaiting-grants-green-postfmt-r1.log`).
 
-Published native remains exact `7def`. Root separately applied only the reviewed
-three-file repair to its local public candidate; successor commit, normal push
-and exact-head CI remain pending. The two grant-lock REDs are resolved locally;
+Published native remains exact `7def`. The local public candidate is committed at
+`ec7196736c8c43677724c1c2eb6fb135c121623b`, tree
+`8f1b1b93bf7ddbeb4ba28a48309858fce9c1198a`, with exactly the reviewed three repair
+paths and three status documents. Its normal push and exact-head CI remain pending. The two grant-lock REDs are resolved locally;
 the separate 16 backend controls remain at 3 passes and 13 failures. No backend
 production repair or native/grant assembly has been accepted, and persistent
 public Try remains unsupported. This narrow lock repair does not qualify full

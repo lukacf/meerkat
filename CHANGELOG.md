@@ -2378,7 +2378,9 @@ them.
     provider learned that job was complete: its "Finished" narration or its
     result, on the sideband clock, timed at the claim's words. The quick
     question now asks for "there are N files", and once its result is in, a
-    stated count other than the result's fails.
+    stated count other than the result's fails, unless a result already
+    delivered states that count (the voice reading job 2's "There are 1
+    files." is that result, not the quick answer).
   - S102 fails when the voice attributes an answer to the peer before the
     peer's reply reached the provider conversation (a premature claim), by the
     provider's transcript timing: the peer's name or a pronoun standing for it

@@ -1,6 +1,6 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 17:56 UTC
+## Current delivery status, 2026-10-04 at 18:17 UTC
 
 Native PR1634 is published at `b12d81e71e57bfeb2c3bc677c21c782f57cc3df6`,
 tree `1f9553187e12d0a7f91ac0cdd0ff54e56e658c77`. All normal push hooks,
@@ -9,8 +9,12 @@ ending at 17:52:00 UTC. Successful hook output does not retain individual
 lane counts; no counts are inferred from that result. The raw log is
 `publicb12d-normal-push-r1.log` in the retained evidence directory.
 [Fresh CI37222144847](https://github.com/lukacf/meerkat/actions/runs/37222144847)
-is in progress; [semver readiness](https://github.com/lukacf/meerkat/actions/runs/37222144843)
-passed. Predecessor `00b0cab3` remains separately CI-green. Performance is
+passed 38 jobs with four intentional skips in 22m13s; its final gate completed
+at 18:14:19 UTC. The exact three governed JSONL cases passed with zero failures
+or ignores in 0.21s test bodies. [Semver readiness](https://github.com/lukacf/meerkat/actions/runs/37222144843)
+also passed. Raw final CI JSON and governed JSONL logs use the `publicb12d-`
+prefix in the retained evidence directory. Predecessor `00b0cab3` remains
+separately CI-green. Performance is
 still unacceptable: the latest six-cell study missed every conditional mean
 threshold, with fresh-turn overhead of 137.01 and 145.20 percent at grant
 depths 1 and 3. Individual-operation p99 and full coverage remain open.

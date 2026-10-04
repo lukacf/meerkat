@@ -870,7 +870,8 @@ own playback:
 - `live/assistant_playback_hint { channel_id, hint: "duck" }` is sent once
   when the user's speech and audible assistant audio overlap, whichever side
   started: the user speaking over the assistant, or the assistant starting a
-  response while the user is still talking.
+  response while the user keeps talking (at the user's next voiced frame). A
+  reply that starts after the user has stopped is never ducked.
 - `live/assistant_playback_hint { channel_id, hint: "restore" }` follows when
   the user's input goes quiet (including a false trigger: the user stops
   without taking the turn) or when the assistant output goes quiet, whichever

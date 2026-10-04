@@ -728,7 +728,8 @@ them.
 
 - Barge-in playback hint for Public Live (#1638). When the user's speech and
   audible assistant audio overlap (the user speaking over the assistant, or
-  the assistant starting while the user still talks), the broker's floor guard
+  the assistant starting while the user keeps talking; a reply after the user
+  has stopped never ducks), the broker's floor guard
   publishes the RPC notification `live/assistant_playback_hint` with
   `{channel_id, hint: "duck"}`, and `{hint: "restore"}` once the user's input
   goes quiet or the assistant output does. The gpt-live protocol has no

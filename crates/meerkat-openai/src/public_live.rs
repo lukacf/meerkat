@@ -2718,11 +2718,6 @@ impl SessionState {
             reflected_pcm16_samples(audio).saturating_mul(1000) / SIDEBAND_INPUT_SAMPLE_RATE_HZ;
         if reflected_pcm16_dbfs(audio).is_some_and(|dbfs| dbfs >= USER_FLOOR_SPEECH_DBFS) {
             self.output_silence_run_ms = 0;
-            // The other half of the overlap: assistant audio that starts
-            // while the user is audibly speaking (a premature response into
-            // the user's utterance) ducks too. Either way, while both sides
-            // are audible the user's floor wins on the client.
-            self.duck_assistant_playback_on_overlap();
             return;
         }
         self.output_silence_run_ms = self.output_silence_run_ms.saturating_add(frame_ms);
@@ -2736,19 +2731,6 @@ impl SessionState {
     /// within [`OUTPUT_SILENCE_RELEASE_MS`] on the provider audio clock.
     fn assistant_audible(&self) -> bool {
         self.output_silence_run_ms < OUTPUT_SILENCE_RELEASE_MS
-    }
-
-    /// Open a barge-in duck, once, when the user's speech and audible
-    /// assistant audio overlap, whichever side started.
-    fn duck_assistant_playback_on_overlap(&mut self) {
-        if !self.assistant_playback_ducked
-            && self.reflected_input_speaking()
-            && self.assistant_audible()
-        {
-            self.assistant_playback_ducked = true;
-            self.queued_observations
-                .push_back(GptLiveBrokerObservation::UserSpeechOverAssistant);
-        }
     }
 
     /// Close an open barge-in duck, once.
@@ -2805,10 +2787,19 @@ impl SessionState {
         if speech {
             self.input_silence_run_ms = 0;
             self.reflected_input_speech_seen = true;
-            // Barge-in: the user's speech starts while the assistant is
-            // audible. The same threshold the floor guard reads as speech,
+            // Barge-in: a voiced user frame while the assistant is audible,
+            // whichever started first. Every voiced frame is checked, so
+            // assistant audio that starts into the user's utterance ducks at
+            // the user's next voiced frame. It is not checked on the output
+            // side: the floor guard's 1600 ms release would then duck (and
+            // clip) every ordinary reply that starts within 1.6 s of the
+            // user's last word. Same speech threshold as the floor guard,
             // on the provider's reflected input; no new timer or level.
-            self.duck_assistant_playback_on_overlap();
+            if !self.assistant_playback_ducked && self.assistant_audible() {
+                self.assistant_playback_ducked = true;
+                self.queued_observations
+                    .push_back(GptLiveBrokerObservation::UserSpeechOverAssistant);
+            }
             return;
         }
         let was_speaking = self.reflected_input_speaking();
@@ -6905,6 +6896,23 @@ mod tests {
         assert!(!state.assistant_playback_ducked);
     }
 
+    /// An ordinary reply that starts within the floor guard's 1600 ms release
+    /// after the user's last word (the user is silent, the provider took the
+    /// turn) is never ducked: its first words play.
+    #[test]
+    fn a_reply_that_starts_soon_after_the_user_stops_is_not_ducked() {
+        let mut state = SessionState::default();
+        reflect_input(&mut state, true, 5);
+        // 600 ms after the user's last voiced frame the reply starts.
+        reflect_input(&mut state, false, 3);
+        for _ in 0..10 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, false, 1);
+        }
+        assert!(playback_observations(&mut state).is_empty());
+        assert!(!state.assistant_playback_ducked);
+    }
+
     /// User speech while the assistant is quiet (or before it ever spoke) is
     /// an ordinary turn, never a barge-in.
     #[test]
@@ -6922,15 +6930,15 @@ mod tests {
 
     /// S103 r1 (#1651 soak): the provider began a response ("I'm working on
     /// it") 900 ms into the user's utterance. Assistant audio that starts
-    /// while the user is audibly speaking is the same overlap from the other
-    /// side: it ducks at its first voiced frame and restores once the user
-    /// goes quiet.
+    /// while the user keeps talking ducks at the user's next voiced frame
+    /// and restores once the user goes quiet.
     #[test]
     fn assistant_audio_that_starts_into_the_users_speech_ducks() {
         let mut state = SessionState::default();
         reflect_input(&mut state, true, 4);
         assert!(playback_observations(&mut state).is_empty());
         model_output(&mut state, true, 1);
+        reflect_input(&mut state, true, 1);
         assert_eq!(
             playback_observations(&mut state),
             vec![GptLiveBrokerObservation::UserSpeechOverAssistant]

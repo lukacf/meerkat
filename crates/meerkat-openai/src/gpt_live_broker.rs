@@ -165,9 +165,9 @@ impl GptLiveTurnRole {
 pub enum GptLiveBrokerObservation {
     SessionReady,
     /// The user's speech and audible assistant audio overlap (a barge-in),
-    /// whichever started first: on the floor guard's speech threshold, a
-    /// reflected input frame within the assistant's output-silence window,
-    /// or a voiced output frame while the user is audibly speaking. A client
+    /// whichever started first: a reflected input frame over the floor
+    /// guard's speech threshold within the assistant's output-silence
+    /// window. A client
     /// ducks assistant playback on it, so the user's floor wins at the
     /// overlap instead of when the provider yields.
     UserSpeechOverAssistant,

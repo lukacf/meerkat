@@ -2333,7 +2333,12 @@ them.
   - a test pins that a mob Stop cancels a member run staged before its
     agent claimed the turn (#1616, for #1471);
   - the successor-claim sentinel test waits on the runtime loop's park
-    instead of a state poll (#1628).
+    instead of a state poll (#1628);
+  - a mob retirement test waits for the retirement slot's own publication
+    before reading its check counter (#1653);
+  - two meerkat-rpc lib tests that #1623 left red are fixed: the router's
+    store-committed context test and the session runtime mock client
+    (#1657).
 - A GPT Live WebRTC session whose media track carries silence while the model
   speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
   opens) no longer leaves the user in a silent call. The runtime judges the

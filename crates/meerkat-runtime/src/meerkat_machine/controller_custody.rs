@@ -211,10 +211,7 @@ impl MeerkatMachine {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::input_authority::{
-        NativeIngressContext,
-        tests::{TestIngress, input},
-    };
+    use crate::input_authority::{NativeIngressContext, tests::TestIngress};
     use crate::input_state::InputAbandonReason;
     use crate::traits::RuntimeDriver;
     use meerkat_authorization_contracts::evidence::EvidenceId;
@@ -222,7 +219,8 @@ mod tests {
 
     async fn admitted() -> (MeerkatMachine, SessionId, GrantLineageRef) {
         let machine = MeerkatMachine::ephemeral();
-        let host = Arc::new(TestIngress::new(machine.generated_auth_lease_handle()));
+        let host = Arc::new(TestIngress::isolated(machine.generated_auth_lease_handle()));
+        let mut prompt = host.input("caller");
         let machine = machine
             .with_native_work_authorization_host(host)
             .expect("configured host");
@@ -236,7 +234,6 @@ mod tests {
             let entry = sessions.get(&session_id).expect("session");
             (Arc::clone(&entry.driver), entry.runtime_id.clone())
         };
-        let mut prompt = input("caller");
         let ingress = Arc::clone(
             prompt
                 .header()

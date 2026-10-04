@@ -691,6 +691,12 @@ pub(crate) mod tests {
         }
     }
     fn controller_selection(model: &str) -> meerkat_core::ControllerModelSelection {
+        controller_selection_for_account(model, "controller")
+    }
+    fn controller_selection_for_account(
+        model: &str,
+        account: &str,
+    ) -> meerkat_core::ControllerModelSelection {
         meerkat_core::ControllerModelSelection::new(
             meerkat_core::SessionLlmIdentity {
                 model: model.into(),
@@ -699,15 +705,19 @@ pub(crate) mod tests {
                 provider_params: None,
                 auth_binding: None,
             },
-            serde_json::from_value(
-                serde_json::json!({"realm":"native-test", "account":"controller"}),
-            )
-            .expect("credential identity"),
+            serde_json::from_value(serde_json::json!({"realm":"native-test", "account":account}))
+                .expect("credential identity"),
             "profile".into(),
             "fixture".into(),
         )
     }
     pub(crate) fn input(requester: &str) -> Input {
+        input_with_controller(requester, controller_selection("controller"))
+    }
+    fn input_with_controller(
+        requester: &str,
+        selection: meerkat_core::ControllerModelSelection,
+    ) -> Input {
         let mut prompt = PromptInput::new("exact admitted content", None);
         prompt.header.idempotency_key = Some(IdempotencyKey::new("same-event"));
         prompt.header.authority_association = Some(
@@ -746,7 +756,7 @@ pub(crate) mod tests {
                     grant_id: id("controller-leaf"),
                     issued_revision: 1,
                 }],
-                controller_model: Some(controller_selection("controller")),
+                controller_model: Some(selection),
                 controller_ceiling: ExecutionRestrictions::unrestricted(),
                 admitted_ceiling: ExecutionRestrictions::unrestricted(),
                 source_observations: Vec::new(),
@@ -836,20 +846,39 @@ pub(crate) mod tests {
             Err(OperationRefused::new(OperationRefusalKind::Denied).into())
         }
     }
-    pub(crate) struct TestIngress;
+    pub(crate) struct TestIngress {
+        selection: meerkat_core::ControllerModelSelection,
+    }
     impl TestIngress {
         pub(crate) fn new(authority: meerkat_core::handles::GeneratedAuthLeaseHandle) -> Self {
+            Self::with_selection(authority, controller_selection("controller"))
+        }
+        pub(crate) fn isolated(authority: meerkat_core::handles::GeneratedAuthLeaseHandle) -> Self {
+            Self::with_selection(
+                authority,
+                controller_selection_for_account(
+                    "controller",
+                    &format!("controller-{}", uuid::Uuid::new_v4()),
+                ),
+            )
+        }
+        fn with_selection(
+            authority: meerkat_core::handles::GeneratedAuthLeaseHandle,
+            selection: meerkat_core::ControllerModelSelection,
+        ) -> Self {
             // These owner/serialization fixtures do not use a token store or
             // transport. Supply their initial synthetic credential through the
             // actual generated owner, not a Ready boolean or policy bypass.
-            let selection = controller_selection("controller");
             meerkat_core::publish_token_lifecycle_acquired_for_identity(
                 &authority,
                 selection.credential(),
                 &meerkat_core::auth::PersistedTokens::api_key("synthetic-ingress-fixture"),
             )
             .expect("actual initial credential owner");
-            Self
+            Self { selection }
+        }
+        pub(crate) fn input(&self, requester: &str) -> Input {
+            input_with_controller(requester, self.selection.clone())
         }
     }
     impl NativeWorkAuthorizationHost for TestIngress {
@@ -868,7 +897,7 @@ pub(crate) mod tests {
                 && ingress.realm() == &candidate.ingress_namespace.realm
                 && candidate.represented_subject.is_none()
                 && candidate.logical_executor == principal("executor")
-                && candidate.controller_model == Some(controller_selection("controller"))
+                && candidate.controller_model.as_ref() == Some(&self.selection)
             {
                 Ok(())
             } else {
@@ -893,6 +922,12 @@ pub(crate) mod tests {
     struct DriverFixture {
         driver: EphemeralRuntimeDriver,
         _owner: crate::meerkat_machine::MeerkatMachine,
+        host: Arc<TestIngress>,
+    }
+    impl DriverFixture {
+        fn input(&self, requester: &str) -> Input {
+            self.host.input(requester)
+        }
     }
     impl std::ops::Deref for DriverFixture {
         type Target = EphemeralRuntimeDriver;
@@ -907,13 +942,13 @@ pub(crate) mod tests {
     }
     fn driver(supports: bool) -> DriverFixture {
         let owner = crate::meerkat_machine::MeerkatMachine::ephemeral();
-        let host: Arc<dyn NativeWorkAuthorizationHost> =
-            Arc::new(TestIngress::new(owner.generated_auth_lease_handle()));
+        let host = Arc::new(TestIngress::isolated(owner.generated_auth_lease_handle()));
         let slot = Arc::new(std::sync::OnceLock::new());
         assert!(
             slot.set(
                 crate::meerkat_machine::credential_custody::NativeWorkAuthorizationAttachment::new(
-                    host, &owner
+                    host.clone(),
+                    &owner
                 )
             )
             .is_ok()
@@ -924,16 +959,19 @@ pub(crate) mod tests {
         DriverFixture {
             driver,
             _owner: owner,
+            host,
         }
     }
 
     #[tokio::test]
     async fn decoded_claims_and_unsupported_executor_cannot_admit_governed_work() {
-        let original = input("caller");
+        let mut configured = driver(true);
+        let original = configured.input("caller");
         let mut unconfigured = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("native-test"));
         assert!(unconfigured.accept_input(original.clone()).await.is_err());
-        assert!(driver(false).accept_input(original.clone()).await.is_err());
-        let mut configured = driver(true);
+        let mut unsupported = driver(false);
+        let unsupported_input = unsupported.input("caller");
+        assert!(unsupported.accept_input(unsupported_input).await.is_err());
         let wire = serde_json::to_value(&original).expect("wire");
         assert!(
             !wire["header"]
@@ -962,9 +1000,9 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn qualified_replay_never_aliases_another_requester_and_preserves_retained_bytes() {
-        let original = input("caller-a");
-        let other = input("caller-b");
         let mut driver = driver(true);
+        let original = driver.input("caller-a");
+        let other = driver.input("caller-b");
         let accepted = driver.accept_input(original.clone()).await.expect("first");
         let AcceptOutcome::Accepted { state, seed, .. } = accepted else {
             panic!("first admission");
@@ -1021,23 +1059,24 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn actual_requester_cannot_activate_another_callers_retained_association() {
-        let original = input("caller-a");
+        let mut driver = driver(true);
+        let original = driver.input("caller-a");
         let wrong_caller = attach_ingress(original.clone(), "caller-b", "caller-b-authentication");
-        assert!(driver(true).accept_input(wrong_caller).await.is_err());
+        assert!(driver.accept_input(wrong_caller).await.is_err());
         let mut different_id = original.clone();
         different_id.header_mut().id = InputId::new();
-        assert!(driver(true).accept_input(different_id).await.is_err());
+        assert!(driver.accept_input(different_id).await.is_err());
         assert!(
-            driver(true).accept_input(original).await.is_ok(),
+            driver.accept_input(original).await.is_ok(),
             "matching baseline"
         );
     }
 
     #[tokio::test]
     async fn recovered_accepted_rows_do_not_reconstruct_process_authentication() {
-        let original = input("caller");
-        let input_id = original.id().clone();
         let mut original_driver = driver(true);
+        let original = original_driver.input("caller");
+        let input_id = original.id().clone();
         original_driver
             .accept_input(original)
             .await
@@ -1087,7 +1126,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn unfinished_controller_query_uses_real_lifecycle_and_refuses_missing_truth() {
-        let original = input("caller");
+        let mut driver = driver(true);
+        let original = driver.input("caller");
         let grant = original
             .header()
             .authority_association
@@ -1097,7 +1137,6 @@ pub(crate) mod tests {
             .controller_grant_lineage[0]
             .clone();
         let input_id = original.id().clone();
-        let mut driver = driver(true);
         assert!(
             !driver
                 .unfinished_work_references_controller(&grant)

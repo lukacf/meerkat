@@ -2364,7 +2364,8 @@ them.
     delivered after it is journaled. A repeat inside one response is a
     stutter, journaled as a metric. The browser peer records responses; it no longer raises
     `duplicate_readout` itself, and missing or malformed records fail the
-    scenario.
+    scenario. A result announced with its title ("Finished voice request:
+    ...") in the same append is matched on the text after the announcement.
   - S101 anchors job 2's play on the quick question's delegation instead of a
     fixed offset (with the longer quick question the two utterances ran
     together and the provider joined them), and a number right after
@@ -2375,7 +2376,9 @@ them.
   - S100 judges the barge-in reply by what the user hears: the assistant says
     "done" in speech that started after the user's barge-in speech, whether
     or not the provider closed the user's input final first. Talk-over is
-    still checked separately.
+    still checked separately. The barge-in speech is located after the last
+    provider event logged before its onset (the peer records its first
+    input delta once per session).
   - S101 fails when the voice declares a slow job complete (its marker file
     or ordinal with a completion word, not a promise or a status) or states
     the quick job's file count ("there are N files", "count is N") before the

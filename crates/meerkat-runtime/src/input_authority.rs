@@ -436,6 +436,25 @@ pub(crate) mod tests {
     use meerkat_core::connection::RealmId;
     use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
 
+    #[test]
+    fn hex_preserves_existing_lowercase_byte_format() {
+        use std::fmt::Write;
+
+        let all_bytes: Vec<u8> = (u8::MIN..=u8::MAX).collect();
+        let mixed = [0xff, 0x00, 0x10, 0x0a, 0x7f, 0x01, 0xfe, 0x00, 0xff];
+        for bytes in [&[][..], all_bytes.as_slice(), mixed.as_slice()] {
+            let mut formatted = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                write!(&mut formatted, "{byte:02x}").expect("existing String formatter");
+            }
+            let actual = hex(bytes);
+            assert_eq!(actual, formatted, "exact existing protected binding bytes");
+            assert_eq!(actual.len(), bytes.len() * 2);
+            assert!(actual.is_ascii());
+        }
+        assert_eq!(hex(&mixed), "ff00100a7f01fe00ff");
+    }
+
     fn id(value: &str) -> EvidenceId {
         EvidenceId::new(value).expect("fixture id")
     }

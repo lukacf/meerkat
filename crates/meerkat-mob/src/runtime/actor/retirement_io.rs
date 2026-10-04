@@ -2539,6 +2539,46 @@ impl MobActor {
         self.retirement_stop_host(continuation).await;
     }
 
+    /// Record the cancellation of an autonomous member's in-flight kickoff as
+    /// part of its retirement. Retirement records it as soon as its Retire
+    /// transition commits, before any runtime teardown, so an outcome the
+    /// kickoff waiter delivers afterwards (for example the runtime terminal of
+    /// a kickoff input the teardown abandoned) is a late-arrival no-op, never
+    /// a recorded failure.
+    async fn retirement_record_kickoff_cancel(
+        &mut self,
+        continuation: &mut RetirementContinuation,
+    ) -> Result<(), MobError> {
+        if continuation.entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
+            return Ok(());
+        }
+        let identity = continuation.entry.agent_identity.clone();
+        let member = mob_dsl::AgentIdentity::from_domain(&identity);
+        let state = self.dsl_authority.state();
+        if !(state.member_kickoff_pending.contains(&member)
+            || state.member_kickoff_starting.contains(&member)
+            || state.member_kickoff_callback_pending.contains(&member))
+        {
+            return Ok(());
+        }
+        let effects = self
+            .commit_kickoff_input_effects(
+                &identity,
+                mob_dsl::MobMachineInput::KickoffCancelRequested { member_id: member },
+                "retire_record_kickoff_cancel",
+            )
+            .await?;
+        continuation
+            .kickoff_notices
+            .extend(effects.into_iter().filter_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::EmitKickoffLifecycleNotice { intent, .. } => {
+                    Some(Self::kickoff_notice_intent(intent))
+                }
+                _ => None,
+            }));
+        Ok(())
+    }
+
     async fn retirement_stop_host(&mut self, mut continuation: RetirementContinuation) {
         let identity = continuation.entry.agent_identity.clone();
         let autonomous = continuation.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -2547,44 +2587,21 @@ impl MobActor {
         } else {
             None
         };
-        if autonomous {
-            let member = mob_dsl::AgentIdentity::from_domain(&identity);
-            let state = self.dsl_authority.state();
-            if state.member_kickoff_pending.contains(&member)
-                || state.member_kickoff_starting.contains(&member)
-                || state.member_kickoff_callback_pending.contains(&member)
-            {
-                let effects = self
-                    .commit_kickoff_input_effects(
-                        &identity,
-                        mob_dsl::MobMachineInput::KickoffCancelRequested { member_id: member },
-                        "request_autonomous_kickoff_stop",
-                    )
-                    .await;
-                match effects {
-                    Ok(effects) => {
-                        continuation
-                            .kickoff_notices
-                            .extend(effects.into_iter().filter_map(|effect| match effect {
-                                mob_dsl::MobMachineEffect::EmitKickoffLifecycleNotice {
-                                    intent,
-                                    ..
-                                } => Some(Self::kickoff_notice_intent(intent)),
-                                _ => None,
-                            }));
-                    }
-                    Err(error) => {
-                        if let Some(handle) = handle {
-                            self.autonomous_initial_turns
-                                .lock()
-                                .await
-                                .insert(identity, handle);
-                        }
-                        self.finish_retirement(continuation, Err(error)).await;
-                        return;
-                    }
-                }
+        // Retirement recorded the kickoff cancellation when it was admitted;
+        // a kickoff still in flight here (a redriven retirement) is recorded
+        // now, before its waiter is aborted.
+        if let Err(error) = self
+            .retirement_record_kickoff_cancel(&mut continuation)
+            .await
+        {
+            if let Some(handle) = handle {
+                self.autonomous_initial_turns
+                    .lock()
+                    .await
+                    .insert(identity, handle);
             }
+            self.finish_retirement(continuation, Err(error)).await;
+            return;
         }
         let placed =
             super::super::member_runtime_is_host_owned(self.dsl_authority.state(), &identity);
@@ -3076,6 +3093,13 @@ impl MobActor {
                     "member retirement durably started; owned until it settles"
                 );
                 self.retirement_take_ownership(&mut continuation);
+                if let Err(error) = self
+                    .retirement_record_kickoff_cancel(&mut continuation)
+                    .await
+                {
+                    self.finish_retirement(continuation, Err(error)).await;
+                    return;
+                }
                 self.retirement_runtime_quiesce(continuation, false);
             }
             Err(error) => self.finish_retirement(continuation, Err(error)).await,

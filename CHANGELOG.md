@@ -2442,6 +2442,14 @@ them.
     migration: empty-text rows are deleted, and staged compaction batches
     are rewritten without their empty entries, with digest and count
     recomputed so a retried stage still compares equal.
+- Retiring a member whose autonomous kickoff is still in flight now always
+  records the kickoff as cancelled (`mob.kickoff_cancelled`). Previously the
+  cancellation was recorded only after the retirement had begun tearing the
+  member's runtime down. If that teardown ended the kickoff input first, the
+  kickoff waiter's runtime terminal was recorded as a kickoff failure ("member
+  retire"), with a `mob.kickoff_failed` notice to peers. Retirement now
+  records the cancellation as soon as its Retire transition commits, so a
+  later teardown outcome is a late-arrival no-op.
 
 ### Changed
 

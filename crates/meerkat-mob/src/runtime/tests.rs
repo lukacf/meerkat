@@ -1066,7 +1066,7 @@ impl MockCommsRuntime {
         if let Some(gate) = gate
             && gate.parks(source)
         {
-            gate.barrier.boundary_calls.fetch_add(1, Ordering::Release);
+            gate.barrier.record_boundary_call();
             gate.barrier.wait_for_release().await;
         }
         let peer_id = peer.peer_id.to_string();
@@ -1864,6 +1864,9 @@ struct TestRuntimeControlBarrier {
     /// Signalled (with a stored permit) each time a hard call enters the
     /// barrier.
     hard_entered: tokio::sync::Notify,
+    /// Signalled (with a stored permit) each time a boundary call enters the
+    /// barrier.
+    boundary_entered: tokio::sync::Notify,
     released: AtomicBool,
     release: tokio::sync::Notify,
 }
@@ -1874,9 +1877,15 @@ impl TestRuntimeControlBarrier {
             boundary_calls: AtomicU64::new(0),
             hard_calls: AtomicU64::new(0),
             hard_entered: tokio::sync::Notify::new(),
+            boundary_entered: tokio::sync::Notify::new(),
             released: AtomicBool::new(false),
             release: tokio::sync::Notify::new(),
         }
+    }
+
+    fn record_boundary_call(&self) {
+        self.boundary_calls.fetch_add(1, Ordering::Release);
+        self.boundary_entered.notify_one();
     }
 
     async fn wait_for_release(&self) {
@@ -2015,6 +2024,8 @@ struct MockSessionService {
     interaction_event_injector_release: tokio::sync::Notify,
     checkpointers_armed: AtomicBool,
     start_turn_calls: AtomicU64,
+    /// Bumped each time `start_turn` is entered, after `start_turn_calls`.
+    start_turns_entered: tokio::sync::watch::Sender<u64>,
     keep_alive_start_turn_calls: AtomicU64,
     non_host_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
@@ -2222,6 +2233,7 @@ impl MockSessionService {
             interaction_event_injector_release: tokio::sync::Notify::new(),
             checkpointers_armed: AtomicBool::new(true),
             start_turn_calls: AtomicU64::new(0),
+            start_turns_entered: tokio::sync::watch::channel(0).0,
             keep_alive_start_turn_calls: AtomicU64::new(0),
             non_host_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
@@ -3939,6 +3951,8 @@ impl SessionService for MockSessionService {
         // committed. Tests use this counter as the readiness signal before
         // reading those async record buffers.
         self.start_turn_calls.fetch_add(1, Ordering::Release);
+        self.start_turns_entered
+            .send_modify(|entered| *entered += 1);
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
@@ -5182,7 +5196,7 @@ impl MobSessionService for MockSessionService {
             None => self.runtime_control_barrier.read().await.clone(),
         };
         if let Some(barrier) = barrier {
-            barrier.boundary_calls.fetch_add(1, Ordering::Relaxed);
+            barrier.record_boundary_call();
             barrier.wait_for_release().await;
         }
         let active_runs = self.runtime_apply_runs.read().await;
@@ -82123,6 +82137,127 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
             && !state.member_kickoff_callback_pending.contains(&dsl_member),
         "no kickoff may remain in flight after destroy committed",
     );
+}
+
+/// Retiring a member whose autonomous kickoff is in flight records the kickoff
+/// as Cancelled when the retirement is admitted, before any runtime teardown.
+/// The teardown can end the kickoff input (abandoned or terminated) and the
+/// kickoff waiter then delivers that outcome. Here the outcome is delivered
+/// while retirement is wedged inside its runtime quiesce, the window it used
+/// to land in before Cancelled was recorded. It is a late-arrival no-op: the
+/// kickoff is never recorded Failed, and no failure is persisted (notices are
+/// effects of the same committed transitions).
+#[tokio::test]
+async fn test_retire_records_kickoff_cancelled_before_runtime_teardown() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(sample_definition(), storage.clone())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    service.set_start_turn_delay_ms(600_000);
+    let mut turns_entered = service.start_turns_entered.subscribe();
+    let entered_before = *turns_entered.borrow_and_update();
+    let member = AgentIdentity::from("lead-kickoff-retired");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn autonomous lead");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        turns_entered.wait_for(|entered| *entered > entered_before),
+    )
+    .await
+    .expect("the kickoff run reaches the provider")
+    .expect("start-turn watch");
+    let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
+    assert!(
+        handle
+            .query_machine_state()
+            .await
+            .expect("query machine state")
+            .member_kickoff_starting
+            .contains(&dsl_member),
+        "the kickoff is in flight"
+    );
+
+    let control = service.install_runtime_control_barrier().await;
+    let retiring = handle.clone();
+    let retired_member = member.clone();
+    let retire = tokio::spawn(async move { retiring.retire(retired_member).await });
+    tokio::time::timeout(Duration::from_secs(30), control.boundary_entered.notified())
+        .await
+        .expect("retirement wedges inside its runtime quiesce");
+
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        state.member_kickoff_cancelled.contains(&dsl_member),
+        "retirement records the kickoff cancellation before runtime teardown"
+    );
+    // The kickoff waiter delivers the teardown's runtime terminal.
+    handle
+        .debug_inject_kickoff_outcome(
+            member.clone(),
+            Ok(meerkat_runtime::CompletionOutcome::RuntimeTerminated {
+                reason: "retired".to_string(),
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure("retired"),
+            }),
+        )
+        .await
+        .expect("the teardown outcome is acknowledged as a late arrival");
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(state.member_kickoff_cancelled.contains(&dsl_member));
+    assert!(
+        !state.member_kickoff_failed.contains(&dsl_member)
+            && !state.member_kickoff_error.contains_key(&dsl_member),
+        "the teardown outcome never records the kickoff as Failed"
+    );
+
+    let mut settlement = handle
+        .retirement_settlement(&member)
+        .expect("the owned retirement publishes its settlement");
+    service.clear_runtime_control_barrier().await;
+    control.release_all();
+    let settled = tokio::time::timeout(Duration::from_secs(30), settlement.settled())
+        .await
+        .expect("retirement settles once its callback releases");
+    assert!(
+        matches!(settled, Some(crate::runtime::RetirementSettlement::Retired)),
+        "the owned retirement retires the member: {settled:?}"
+    );
+    // The caller's own retire may have answered in-progress at its budget
+    // while retirement was wedged; the settlement above is the outcome.
+    match retire.await.expect("retire task") {
+        Ok(()) => {}
+        Err(error) => assert!(
+            is_retirement_in_progress(&error),
+            "retire answers only typed in-progress while wedged: {error:?}"
+        ),
+    }
+    let failed_updates = storage
+        .events
+        .replay_all()
+        .await
+        .expect("replay events")
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                crate::event::MobEventKind::MemberKickoffUpdated { member: updated, kickoff }
+                    if updated == &member
+                        && kickoff.phase == crate::roster::MobMemberKickoffPhase::Failed
+            )
+        })
+        .count();
+    assert_eq!(failed_updates, 0, "no kickoff failure is persisted");
 }
 
 #[tokio::test]

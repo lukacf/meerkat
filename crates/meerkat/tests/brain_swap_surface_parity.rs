@@ -14,7 +14,7 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SHARED_HELPER: &str = "persistent_runtime_pre_dequeue_handle";
 const HOOK_FN: &str = "fn pre_dequeue_handle(";
@@ -47,13 +47,23 @@ const WITHOUT_DURABLE_HANDOFF_SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The workspace root: `MEERKAT_WORKSPACE_ROOT` (scripts/repo-cargo), the
+/// working directory when it is the root (Bazel runs the test from its
+/// runfiles root), or two levels above this crate's manifest (a plain `cargo
+/// test` runs from `crates/meerkat`, whose own `Cargo.toml` made the old
+/// "has a Cargo.toml" check pick the crate and read
+/// `crates/meerkat/crates/meerkat-cli/src/main.rs`).
 fn repo_root() -> PathBuf {
+    let is_root = |root: &Path| root.join("crates/meerkat-cli/src/main.rs").is_file();
     std::env::var_os("MEERKAT_WORKSPACE_ROOT")
         .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok().filter(|root| is_root(root)))
         .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .filter(|root| root.join("Cargo.toml").is_file())
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .filter(|root| is_root(root))
+                .map(Path::to_path_buf)
         })
         .expect("test must run from the workspace or through scripts/repo-cargo")
 }

@@ -1870,33 +1870,32 @@ async fn run_s97_client_context_vertical(
         ),
     )?;
     // The result states S97's one fact: the executor inspected the empty
-    // scratch workspace. Speech after the ack must voice that fact; speech
-    // that only finishes an earlier reply ("channel ready") is not the
-    // readout (check c009c3b8 S97 run 5 passed on exactly that).
+    // scratch workspace. Speech the provider produced after the result was
+    // sent must voice that fact; speech recorded before the send (finishing
+    // an earlier reply, "channel ready") is not the readout (check c009c3b8
+    // S97 run 5 passed on exactly that). The send, not the acknowledgement,
+    // is the anchor: the provider can start the readout before its ack
+    // frame arrives (verdict 746845a3 S97 R2: "It's empty." 551 ms after the
+    // send, 186 ms before the ack).
     let lines = evidence.provider_stream_lines()?;
     let result = result_deliveries(&lines)
         .into_iter()
         .find(|delivery| delivery.delegation_id == provider_delegation_ref)
         .ok_or("S97: the acknowledged result has no delivery on the provider stream")?;
     assert!(
-        normalize_words(&result.text)
-            .split(' ')
-            .any(|word| word == S97_RESULT_FACT),
-        "S97: the executor's result does not state the workspace fact {S97_RESULT_FACT:?}: {:?}",
+        s97_states_empty_workspace(&result.text),
+        "S97: the executor's result does not state that the workspace is empty: {:?}",
         result.text
     );
-    let after_ack = usize::try_from(ack_index)? + 1;
+    let before_result = output_deltas_before_result(&lines, &provider_delegation_ref)
+        .ok_or("S97: the result append is missing from the provider stream")?;
     let readout = wait_for_events(&mut peer, 120, |events| {
-        events.get(after_ack..).is_some_and(|_| {
-            normalize_words(&output_transcript_text(events, after_ack))
-                .split(' ')
-                .any(|word| word == S97_RESULT_FACT)
-        })
+        s97_states_empty_workspace(&output_transcript_text_excluding(events, &before_result))
     })
     .await
     .map_err(|error| {
         format!(
-            "S97: the result ({:?}) was never voiced after its acknowledgement: {error}",
+            "S97: the result ({:?}) was never voiced after it was sent: {error}",
             result.text
         )
     })?;
@@ -2552,8 +2551,65 @@ const S97_EXECUTOR_INSTRUCTION: &str =
     "When you inspect a directory, say whether it is empty and name any files in it.";
 
 /// S97's executor result fact: it inspects the scenario's scratch workspace,
-/// which is empty.
-const S97_RESULT_FACT: &str = "empty";
+/// which is empty. Stated as "empty" or as "no files" (verdict 746845a3 S97
+/// R3: "The current directory has no files in it.").
+fn s97_states_empty_workspace(text: &str) -> bool {
+    let normalized = normalize_words(text);
+    let words: Vec<&str> = normalized.split(' ').collect();
+    words.contains(&"empty") || words.windows(2).any(|pair| pair == ["no", "files"])
+}
+
+/// Event ids of the output transcript deltas the provider stream recorded
+/// before the result append for `delegation_id` was sent, or `None` when
+/// the recording has no such append.
+fn output_deltas_before_result(
+    lines: &[provider_recording::Line],
+    delegation_id: &str,
+) -> Option<std::collections::HashSet<String>> {
+    let mut before = std::collections::HashSet::new();
+    for line in lines {
+        match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.output_transcript.delta" =>
+            {
+                if let Some(id) = raw["event_id"].as_str() {
+                    before.insert(id.to_owned());
+                }
+            }
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append"
+                    && event["delegation_id"] == delegation_id
+                    && event["content"]
+                        .as_str()
+                        .and_then(announced_result_text)
+                        .is_some() =>
+            {
+                return Some(before);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The peer's output transcript, without the deltas in `excluded` (by
+/// provider event id). A delta without an event id cannot be placed and is
+/// left out.
+fn output_transcript_text_excluding(
+    events: &[Value],
+    excluded: &std::collections::HashSet<String>,
+) -> String {
+    events
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter(|event| {
+            event["event_id"]
+                .as_str()
+                .is_some_and(|id| !excluded.contains(id))
+        })
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect()
+}
 
 /// The peer's sighting of the provider's acknowledgement of the result
 /// append for `provider_delegation_id` (keyed by the result's recorded
@@ -11835,6 +11891,77 @@ mod config_tests {
             (67787, "assistant_audio_start", json!({"response": 2})),
         ]);
         assert!(super::unprompted_assistant_response_starts(&entries, 53787).is_empty());
+    }
+
+    /// S97's readout is judged on speech after the result was sent: a
+    /// readout that starts before the provider's ack frame counts (746845a3
+    /// R2), speech recorded before the send does not, and "no files" states
+    /// the empty workspace (746845a3 R3).
+    #[test]
+    fn s97_readout_is_speech_after_the_result_was_sent() {
+        let mut seq = 0;
+        let mut line = |entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms: seq * 100,
+                entry,
+            }
+        };
+        let delta = |id: &str, text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta",
+                "event_id": id, "delta": text}),
+        };
+        let lines = vec![
+            line(delta("e1", "Is it empty? On it, checking that now.")),
+            line(super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({"type": "session.commentary.append",
+                    "delegation_id": "d1", "event_id": "meerkat-append-2",
+                    "content": "Started voice request: \"Inspect the directory\"."}),
+            }),
+            line(super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({"type": "session.commentary.append",
+                    "delegation_id": "d1", "event_id": "meerkat-append-3",
+                    "content": "Finished voice request: \"Inspect the directory\". The result follows.\nThe current working directory is empty."}),
+            }),
+            line(delta("e2", "It's empty.")),
+            line(super::provider_recording::Entry::ServerFrame {
+                raw: serde_json::json!({"type": "session.commentary.appended",
+                    "client_event_id": "meerkat-append-3"}),
+            }),
+        ];
+        let before = super::output_deltas_before_result(&lines, "d1").unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(super::output_deltas_before_result(&lines, "d2").is_none());
+        let peer = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(id, text)| {
+                    serde_json::json!({"type": "session.output_transcript.delta",
+                        "event_id": id, "delta": text})
+                })
+                .collect::<Vec<_>>()
+        };
+        let heard = super::output_transcript_text_excluding(
+            &peer(&[("e1", "Is it empty? On it."), ("e2", "It's empty.")]),
+            &before,
+        );
+        assert!(super::s97_states_empty_workspace(&heard), "{heard}");
+        let only_before = super::output_transcript_text_excluding(
+            &peer(&[("e1", "Is it empty? On it."), ("e3", "Done.")]),
+            &before,
+        );
+        assert!(
+            !super::s97_states_empty_workspace(&only_before),
+            "{only_before}"
+        );
+        assert!(super::s97_states_empty_workspace(
+            "Voice channel ready. The current directory has no files in it."
+        ));
+        assert!(!super::s97_states_empty_workspace(
+            "There are two files: a and b."
+        ));
     }
 
     // ---- readout rule -------------------------------------------------------

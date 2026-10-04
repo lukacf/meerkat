@@ -14564,6 +14564,10 @@ mod tests {
      {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(AgentFactory::new(temp.path().join("sessions")), 4);
+        // The next turn rebuilds the session from durable truth, which does
+        // not carry the build's in-memory client override: the runtime's
+        // default client stands in for the host's configured provider.
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let (build, calls, release) = block_after_first_build_config();
         let session_id = runtime
             .create_or_resume_session_without_turn(build, None, None, Default::default())

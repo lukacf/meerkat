@@ -653,8 +653,8 @@ pub struct LiveAssistantOutputAvailableParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LiveAssistantPlaybackHint {
-    /// The user started speaking over the audible assistant (a barge-in):
-    /// silence assistant playback now.
+    /// The user's speech and audible assistant audio overlap (a barge-in,
+    /// either side starting): silence assistant playback now.
     Duck,
     /// The user's speech or the assistant's output has gone quiet: play
     /// assistant audio normally again.
@@ -664,8 +664,8 @@ pub enum LiveAssistantPlaybackHint {
 /// Runtime notification `live/assistant_playback_hint`: a barge-in playback
 /// hint for the channel's assistant audio. The user hears the assistant until
 /// the provider stops sending audio and the client drains what is already in
-/// flight; a client that applies `duck` silences it at the user's speech
-/// onset instead, and `restore` ends the duck. The runtime derives both from
+/// flight; a client that applies `duck` silences it as soon as the user's
+/// speech and assistant audio overlap instead, and `restore` ends the duck. The runtime derives both from
 /// the provider's reflected input and output audio on the provider's audio
 /// clock; a client that ignores them plays as before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

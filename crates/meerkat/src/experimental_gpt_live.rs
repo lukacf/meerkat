@@ -1917,13 +1917,24 @@ pub enum ExperimentalLivePublicObservationKind {
     /// decoded-audio counters for the channel's first assistant output (an
     /// already consumed output; its id is only the report key).
     MediaHealthRequested,
-    /// `live/assistant_playback_hint` with hint `duck`: the user started
-    /// speaking over the audible assistant (a barge-in). The client silences
-    /// assistant playback now instead of when the provider yields (#1638).
-    /// Names the channel only; its output address carries no output.
-    UserSpeechOverAssistant,
-    /// `live/assistant_playback_hint` with hint `restore`: ends a duck.
-    AssistantPlaybackRestorable,
+}
+
+/// A barge-in playback hint for one channel (#1638), published through
+/// [`ExperimentalLivePublicObservationPublisher::publish_playback_hint`].
+///
+/// The gpt-live protocol has no client command that cancels or clears
+/// queued provider audio, so the client silences its own playback. A hint
+/// is advisory: it carries no playback handle and no output identity, and
+/// nothing waits on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExperimentalLivePlaybackHint {
+    /// The user's speech and audible assistant audio overlap (either side
+    /// starting): duck local assistant playback now instead of when the
+    /// provider yields.
+    Duck,
+    /// The duck ends: the user's input or the assistant's output went quiet.
+    Restore,
 }
 
 impl ExperimentalLivePublicObservation {
@@ -1945,27 +1956,6 @@ impl ExperimentalLivePublicObservation {
         Self {
             binding,
             kind: ExperimentalLivePublicObservationKind::MediaHealthRequested,
-            output,
-        }
-    }
-
-    /// A barge-in playback hint for the channel (`kind` is
-    /// [`ExperimentalLivePublicObservationKind::UserSpeechOverAssistant`] or
-    /// [`ExperimentalLivePublicObservationKind::AssistantPlaybackRestorable`]).
-    /// It concerns whatever the channel is playing, so its output address
-    /// names the channel and no output.
-    fn playback_hint(
-        binding: ProviderWebrtcBinding,
-        kind: ExperimentalLivePublicObservationKind,
-    ) -> Self {
-        let output = meerkat_live::LiveAssistantOutputAddress {
-            channel_id: binding.channel_id().clone(),
-            output_id: String::new(),
-            content_index: 0,
-        };
-        Self {
-            binding,
-            kind,
             output,
         }
     }
@@ -2032,6 +2022,22 @@ pub trait ExperimentalLivePublicObservationPublisher: Send + Sync {
         &self,
         observation: ExperimentalLivePublicObservation,
     ) -> Result<(), ExperimentalLivePublicObservationDeliveryError>;
+
+    /// Deliver a barge-in playback hint for `binding`'s channel (#1638).
+    ///
+    /// Hints are advisory and kept off [`Self::publish`], so a surface that
+    /// forwards every observation as a playback handle never mistakes one
+    /// for an output. The default drops the hint: a surface that does not
+    /// implement it behaves exactly as before. An error is only logged; it
+    /// never retires the binding.
+    async fn publish_playback_hint(
+        &self,
+        binding: ProviderWebrtcBinding,
+        hint: ExperimentalLivePlaybackHint,
+    ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        let _ = (binding, hint);
+        Ok(())
+    }
 }
 
 struct ExperimentalGptLiveBoundReadyBinder {
@@ -7678,25 +7684,22 @@ fn spawn_sideband_actors(
                     // early silence, never the channel.
                     let playback_hint = match observation.kind() {
                         LiveSidebandObservationKind::UserSpeechOverAssistant => {
-                            Some(ExperimentalLivePublicObservationKind::UserSpeechOverAssistant)
+                            Some(ExperimentalLivePlaybackHint::Duck)
                         }
                         LiveSidebandObservationKind::AssistantPlaybackRestorable => {
-                            Some(ExperimentalLivePublicObservationKind::AssistantPlaybackRestorable)
+                            Some(ExperimentalLivePlaybackHint::Restore)
                         }
                         _ => None,
                     };
-                    if let Some(kind) = playback_hint {
+                    if let Some(hint) = playback_hint {
                         if let Err(error) = activation
                             .public_observation_publisher
-                            .publish(ExperimentalLivePublicObservation::playback_hint(
-                                observation_binding.clone(),
-                                kind,
-                            ))
+                            .publish_playback_hint(observation_binding.clone(), hint)
                             .await
                         {
                             tracing::debug!(
                                 channel = %observation_binding.channel_id(),
-                                ?kind,
+                                ?hint,
                                 %error,
                                 "barge-in playback hint was not delivered"
                             );
@@ -11140,14 +11143,9 @@ mod tests {
             &self,
             observation: ExperimentalLivePublicObservation,
         ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
-            if matches!(
-                observation.kind(),
-                ExperimentalLivePublicObservationKind::MediaHealthRequested
-                    | ExperimentalLivePublicObservationKind::UserSpeechOverAssistant
-                    | ExperimentalLivePublicObservationKind::AssistantPlaybackRestorable
-            ) {
-                // Media-health requests and playback hints are no playback
-                // handles: the matrix records only actionable outputs.
+            if observation.kind() == ExperimentalLivePublicObservationKind::MediaHealthRequested {
+                // A media-health request is no playback handle: the matrix
+                // records only actionable outputs.
                 return Ok(());
             }
             if self.fail_once.swap(false, Ordering::AcqRel) {
@@ -19106,6 +19104,19 @@ mod tests {
             ] {
                 sideband.push(LiveSidebandObservation::new(binding.clone(), kind));
             }
+            if matches!(exit, ExitKind::Graceful) {
+                // #1638 regression: the matrix publisher implements only the
+                // original `publish`. A barge-in duck/restore must reach it
+                // through the defaulted `publish_playback_hint` (dropped),
+                // never as an observation it would forward as a playback
+                // handle; the first output it records below is the real one.
+                for kind in [
+                    LiveSidebandObservationKind::UserSpeechOverAssistant,
+                    LiveSidebandObservationKind::AssistantPlaybackRestorable,
+                ] {
+                    sideband.push(LiveSidebandObservation::new(binding.clone(), kind));
+                }
+            }
             if matches!(
                 exit,
                 ExitKind::SnapshotCut
@@ -20056,6 +20067,10 @@ mod tests {
                 .await
                 .expect("opaque output publication is prompt")
                 .expect("matrix publisher remains present");
+            assert!(
+                !output.output_id.is_empty(),
+                "a playback hint never reaches a publisher as an output observation"
+            );
             if matches!(exit, ExitKind::UnmeasuredRetry) {
                 let before = service
                     .load_authoritative_session(&session_id)

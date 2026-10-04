@@ -432,7 +432,8 @@ impl PlaybackHintRelay {
         }
     }
 
-    async fn apply(&self, hint: &str) {
+    /// Apply one hint (`"duck"` or `"restore"`) to the attached peer, if any.
+    pub async fn apply(&self, hint: &str) {
         let sender = self.peer.lock().ok().and_then(|slot| slot.clone());
         if let Some(sender) = sender {
             let _ = sender.send(hint).await;

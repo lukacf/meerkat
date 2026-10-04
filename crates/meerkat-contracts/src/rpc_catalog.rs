@@ -1258,7 +1258,7 @@ pub fn rpc_notification_catalog(
             ),
             RpcNotificationDescriptor::basic(
                 "live/assistant_playback_hint",
-                "Barge-in playback hint: duck assistant audio at the user's speech onset, then restore",
+                "Barge-in playback hint: duck assistant audio while it overlaps the user's speech, then restore",
             ),
         ]);
     }

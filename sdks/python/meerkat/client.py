@@ -32,7 +32,7 @@ import warnings
 import zipfile
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Any, Callable, Literal, NotRequired, TypedDict, cast
 from urllib.error import URLError
 
 from .errors import CapabilityUnavailableError, MeerkatError
@@ -227,6 +227,7 @@ from .mob import (
     MobWireMembersBatchEdgeInput,
     WorkOrigin,
 )
+from .live import LiveNotification, parse_live_notification
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import (
     RPC_STDOUT_LIMIT_BYTES,
@@ -587,6 +588,7 @@ class MeerkatClient:
         self._stderr_tail: _StderrTail | None = None
         self._tool_registry = ToolRegistry()
         self._tool_registration_errors: dict[str, MeerkatError] = {}
+        self._live_notification_listeners: list[Callable[[LiveNotification], None]] = []
         self._request = cast(RpcRequest, self._request_impl)
 
     # -- Tool registration -------------------------------------------------
@@ -760,6 +762,7 @@ class MeerkatClient:
             self._stderr_tail.start()
         self._dispatcher = _StdoutDispatcher(self._process.stdout)
         self._dispatcher.set_stderr_tail(self._stderr_tail)
+        self._dispatcher.set_live_notification_sink(self._dispatch_live_notification)
         if self._process.stdin:
             self._dispatcher.set_stdin_writer(self._process.stdin)
         self._dispatcher.start()
@@ -4623,6 +4626,36 @@ class MeerkatClient:
         Returns the `LiveStatusResult` shape: `channel_id`, `status`.
         """
         return await self._request("live/status", {"channel_id": channel_id})
+
+    def on_live_notification(
+        self, callback: Callable[[LiveNotification], None]
+    ) -> Callable[[], None]:
+        """Receive the server's channel-scoped ``live/*`` notifications
+        (``live/assistant_output_available``, ``live/media_health_requested``,
+        ``live/assistant_playback_hint``) as :class:`LiveNotification` values.
+
+        Returns an unsubscribe function. Callbacks run on the reader task and
+        must not block. Notifications that arrive with no callback are
+        dropped; a method this SDK build does not know is ignored. A raising
+        callback does not stop the others or the transport.
+        """
+        self._live_notification_listeners.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._live_notification_listeners:
+                self._live_notification_listeners.remove(callback)
+
+        return unsubscribe
+
+    def _dispatch_live_notification(self, method: str, params: Any) -> None:
+        notification = parse_live_notification(method, params)
+        if notification is None:
+            return
+        for callback in list(self._live_notification_listeners):
+            try:
+                callback(notification)
+            except Exception:  # noqa: BLE001 - a callback fault is its own
+                _logger.debug("live notification callback raised", exc_info=True)
 
     async def live_media_health(
         self,

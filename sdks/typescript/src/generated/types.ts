@@ -5312,6 +5312,12 @@ export interface LiveStatusResult {
   status: WireLiveAdapterStatus;
 }
 
+export interface LiveAssistantOutputAvailableParams {
+  channel_id: string;
+  content_index: number;
+  output_id: string;
+}
+
 export interface LiveMediaHealthRequestedParams {
   channel_id: string;
   output_id: string;

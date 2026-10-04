@@ -3813,6 +3813,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     )
     append_python_dataclass("LiveStatusResult", wire_schema, "Response payload for live/status.")
     append_python_dataclass(
+        "LiveAssistantOutputAvailableParams",
+        wire_schema,
+        "Notification payload for live/assistant_output_available.",
+    )
+    append_python_dataclass(
         "LiveMediaHealthRequestedParams",
         wire_schema,
         "Notification payload for live/media_health_requested.",
@@ -4637,6 +4642,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireLiveProviderInputLatencyReading", wire_schema)
     append_typescript_interface("WireLiveProviderInputLatency", wire_schema)
     append_typescript_interface("LiveStatusResult", wire_schema)
+    append_typescript_interface("LiveAssistantOutputAvailableParams", wire_schema)
     append_typescript_interface("LiveMediaHealthRequestedParams", wire_schema)
     append_typescript_alias("LiveAssistantPlaybackHint", wire_schema)
     append_typescript_interface("LiveAssistantPlaybackHintParams", wire_schema)

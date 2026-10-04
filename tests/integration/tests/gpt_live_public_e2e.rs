@@ -27,11 +27,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
-    ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePublicObservation,
-    ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationKind,
-    ExperimentalLivePublicObservationPublisher, GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
-    GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX, PublicGptLiveOpenAuthorityConfig,
-    PublicGptLivePlaybackPolicy, provider_recording,
+    ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePlaybackHint,
+    ExperimentalLivePublicObservation, ExperimentalLivePublicObservationDeliveryError,
+    ExperimentalLivePublicObservationKind, ExperimentalLivePublicObservationPublisher,
+    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX,
+    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy, provider_recording,
 };
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
@@ -140,6 +140,17 @@ impl<T> Drop for ReceivedOutputs<T> {
 struct MeasuredPlaybackPublisher {
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     output: mpsc::Sender<OutputDelivery>,
+    playback_hints: PlaybackHintRelay,
+}
+
+fn playback_hint_wire(
+    hint: ExperimentalLivePlaybackHint,
+) -> Result<&'static str, ExperimentalLivePublicObservationDeliveryError> {
+    match hint {
+        ExperimentalLivePlaybackHint::Duck => Ok("duck"),
+        ExperimentalLivePlaybackHint::Restore => Ok("restore"),
+        _ => Err(ExperimentalLivePublicObservationDeliveryError::Rejected),
+    }
 }
 
 #[async_trait::async_trait]
@@ -165,6 +176,23 @@ impl ExperimentalLivePublicObservationPublisher for MeasuredPlaybackPublisher {
             .await
             .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)
     }
+
+    /// #1638: a host-composed surface delivers hints to its client the way
+    /// the RPC surface writes `live/assistant_playback_hint`: under the exact
+    /// live binding, straight to the peer playing the channel.
+    async fn publish_playback_hint(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        hint: ExperimentalLivePlaybackHint,
+    ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        let _custody = self
+            .runtime
+            .acquire_live_binding_publication_custody(&binding)
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.playback_hints.apply(playback_hint_wire(hint)?).await;
+        Ok(())
+    }
 }
 
 /// Media-health requests the runtime published (`live/media_health_requested`),
@@ -176,6 +204,7 @@ struct UnmeasuredPlaybackPublicationGuard {
     fault: Arc<AtomicBool>,
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     media_health: MediaHealthRequests,
+    playback_hints: PlaybackHintRelay,
 }
 
 #[async_trait::async_trait]
@@ -202,6 +231,23 @@ impl ExperimentalLivePublicObservationPublisher for UnmeasuredPlaybackPublicatio
         // actionable playback publication. Never mint a delivery/playback ACK.
         self.fault.store(true, Ordering::Release);
         Err(ExperimentalLivePublicObservationDeliveryError::Rejected)
+    }
+
+    /// #1638: a host-composed surface delivers hints to its client the way
+    /// the RPC surface writes `live/assistant_playback_hint`: under the exact
+    /// live binding, straight to the peer playing the channel.
+    async fn publish_playback_hint(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        hint: ExperimentalLivePlaybackHint,
+    ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        let _custody = self
+            .runtime
+            .acquire_live_binding_publication_custody(&binding)
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.playback_hints.apply(playback_hint_wire(hint)?).await;
+        Ok(())
     }
 }
 
@@ -1458,11 +1504,13 @@ async fn open_public_live_with(
                 fault,
                 runtime: runtime.runtime_adapter(),
                 media_health: requests,
+                playback_hints: playback_hints.clone(),
             })
         } else {
             Arc::new(MeasuredPlaybackPublisher {
                 runtime: runtime.runtime_adapter(),
                 output: publisher,
+                playback_hints: playback_hints.clone(),
             })
         };
         let binder = open_authority

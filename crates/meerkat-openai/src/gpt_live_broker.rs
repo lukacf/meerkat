@@ -164,11 +164,12 @@ impl GptLiveTurnRole {
 #[derive(Clone, PartialEq, Eq)]
 pub enum GptLiveBrokerObservation {
     SessionReady,
-    /// The user started speaking while the assistant was audible (a
-    /// barge-in): a reflected input frame crossed the floor guard's speech
-    /// threshold within the assistant's output-silence window. A client
-    /// ducks assistant playback on it, so what the user hears stops at the
-    /// onset instead of when the provider yields.
+    /// The user's speech and audible assistant audio overlap (a barge-in),
+    /// whichever started first: on the floor guard's speech threshold, a
+    /// reflected input frame within the assistant's output-silence window,
+    /// or a voiced output frame while the user is audibly speaking. A client
+    /// ducks assistant playback on it, so the user's floor wins at the
+    /// overlap instead of when the provider yields.
     UserSpeechOverAssistant,
     /// Ends a [`Self::UserSpeechOverAssistant`]: the user's speech or the
     /// assistant's output has gone quiet for its release length on the

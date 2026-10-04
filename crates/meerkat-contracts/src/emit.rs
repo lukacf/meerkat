@@ -229,6 +229,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "LiveWebrtcAnswerResult": schema_for!(crate::wire::LiveWebrtcAnswerResult),
         "LiveChannelParams": schema_for!(crate::wire::LiveChannelParams),
         "LiveStatusResult": schema_for!(crate::wire::LiveStatusResult),
+        "LiveAssistantOutputAvailableParams": schema_for!(crate::wire::LiveAssistantOutputAvailableParams),
         "LiveAssistantPlaybackHint": schema_for!(crate::wire::LiveAssistantPlaybackHint),
         "LiveAssistantPlaybackHintParams": schema_for!(crate::wire::LiveAssistantPlaybackHintParams),
         "LiveMediaHealthRequestedParams": schema_for!(crate::wire::LiveMediaHealthRequestedParams),

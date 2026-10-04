@@ -858,6 +858,73 @@ example, `missing_default_binding`, `lease_absent`, or
 `openai-live-openai-api-backend`) without logging credentials, provider payloads,
 or connection URLs. These diagnostics do not change admission policy.
 
+### Barge-in playback hint
+
+The gpt-live protocol has no client command that cancels or clears assistant
+audio the provider has already queued. When the user starts speaking over the
+assistant, that tail keeps playing until the provider stops it. Meerkat
+already measures both sides of the floor (the reflected input energy and the
+assistant output's silence run), so it tells the client when to silence its
+own playback:
+
+- `live/assistant_playback_hint { channel_id, hint: "duck" }` is sent once
+  when the user's speech and audible assistant audio overlap, whichever side
+  started: the user speaking over the assistant, or the assistant starting a
+  response while the user is still talking.
+- `live/assistant_playback_hint { channel_id, hint: "restore" }` follows when
+  the user's input goes quiet (including a false trigger: the user stops
+  without taking the turn) or when the assistant output goes quiet, whichever
+  comes first. A restore follows every duck, so a duck never leaves playback
+  muted for the next turn.
+
+The hint is purely additive. It is a notification, not a request: nothing
+waits for it, it changes no channel, transcript, playback or close semantics,
+and an undelivered hint is dropped. A client that ignores it behaves exactly
+as it did before the hint existed.
+
+Receiving the hint: `rkat-rpc` writes it on the JSON-RPC connection that owns
+the channel, beside the other `live/*` notifications. The TypeScript SDK
+delivers them typed through `MeerkatClient.onLiveNotification(listener)` and
+the Python SDK through `MeerkatClient.on_live_notification(callback)` (both
+return an unsubscribe function). Those clients drive `rkat-rpc` from a server
+process, so the page that plays the channel receives the hint over whatever
+connection already carries its live control traffic. The web SDK has no live
+transport. Hosts that compose their own surface on
+`ExperimentalLivePublicObservationPublisher` receive hints through its
+`publish_playback_hint` method; the default implementation drops them.
+
+Recommended client policy: route the remote assistant track through a gain
+node (with the media element muted so audio plays only through the graph),
+duck to silence on `duck`, and return to unity gain on `restore`, with a short
+ramp to avoid clicks. Place any meters or analysers after the gain node so
+they report what the user hears. The TypeScript SDK ships this policy:
+
+```ts
+import { applyLiveAssistantPlaybackHint } from "@rkat/sdk";
+
+// Server process: forward each hint to the page playing that channel.
+client.onLiveNotification((notification) => {
+  if (notification.method === "live/assistant_playback_hint") {
+    sendToPage(notification.params); // { channel_id, hint }
+  }
+});
+
+// Page: one gain node between the remote track and the speakers.
+const gate = audioContext.createGain();
+audioContext.createMediaStreamSource(remoteStream).connect(gate);
+gate.connect(audioContext.destination);
+function onPlaybackHint(params: { channel_id: string; hint: "duck" | "restore" }) {
+  applyLiveAssistantPlaybackHint(gate, params.hint, audioContext.currentTime);
+}
+```
+
+`applyLiveAssistantPlaybackHint` takes any object with a
+`gain.setTargetAtTime` method, so it stays independent of the DOM types. The
+constants `LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN` (0),
+`LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN` (1) and
+`LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S` (0.01) are exported for
+clients that implement the gate themselves.
+
 ### Media health of the first output
 
 A public Live WebRTC session can occasionally carry silent media for its whole

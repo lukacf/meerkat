@@ -4991,6 +4991,20 @@ enum — see `wire_live_adapter_status_byte_compatible_with_core`)."""
 
 
 @dataclass
+class LiveAssistantOutputAvailableParams:
+    """Ephemeral control notification emitted after the server has admitted one
+exact assistant playback target.
+
+The opaque `output_id` is the only client control handle. Provider turn,
+response, item, delta, and interaction identities remain server-internal.
+A surface publishes this payload only after the canonical live host has
+applied the corresponding provider observation."""
+    channel_id: str
+    content_index: int
+    output_id: str
+
+
+@dataclass
 class LiveMediaHealthRequestedParams:
     """Runtime request notification `live/media_health_requested`: at the typed
 end of a channel's first assistant output (its first segment settled with
@@ -5012,8 +5026,8 @@ class LiveAssistantPlaybackHintParams:
     """Runtime notification `live/assistant_playback_hint`: a barge-in playback
 hint for the channel's assistant audio. The user hears the assistant until
 the provider stops sending audio and the client drains what is already in
-flight; a client that applies `duck` silences it at the user's speech
-onset instead, and `restore` ends the duck. The runtime derives both from
+flight; a client that applies `duck` silences it as soon as the user's
+speech and assistant audio overlap instead, and `restore` ends the duck. The runtime derives both from
 the provider's reflected input and output audio on the provider's audio
 clock; a client that ignores them plays as before."""
     channel_id: str

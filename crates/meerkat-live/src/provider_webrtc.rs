@@ -1221,8 +1221,9 @@ pub struct LiveProviderInputLatency {
 #[derive(Clone, PartialEq, Eq)]
 pub enum LiveSidebandObservationKind {
     SessionReady,
-    /// The user started speaking while the assistant was audible (a
-    /// barge-in), read from the provider's reflected input (#1638). A client
+    /// The user's speech and audible assistant audio overlap (a barge-in,
+    /// either side starting), read from the provider's reflected input and
+    /// output audio (#1638). A client
     /// ducks assistant playback on it. Never a channel error.
     UserSpeechOverAssistant,
     /// Ends a [`Self::UserSpeechOverAssistant`]: a client restores playback.

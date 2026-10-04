@@ -71,3 +71,59 @@ test("the e2e browser peer's playback gate matches the SDK gate", async () => {
   assert.equal(Number(match[2]), LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN);
   assert.equal(Number(match[3]), LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S);
 });
+
+test("live/* notifications reach onLiveNotification listeners, typed, and never a session queue", async () => {
+  const { MeerkatClient } = await import("../dist/client.js");
+  const client = new MeerkatClient();
+  const seen = [];
+  const unsubscribe = client.onLiveNotification((notification) => seen.push(notification));
+  const notify = (method, params) =>
+    client.handleLine(JSON.stringify({ jsonrpc: "2.0", method, params }));
+
+  notify("live/assistant_playback_hint", { channel_id: "ch-1", hint: "duck" });
+  notify("live/assistant_playback_hint", { channel_id: "ch-1", hint: "restore" });
+  notify("live/media_health_requested", { channel_id: "ch-1", output_id: "out-1" });
+  notify("live/assistant_output_available", {
+    channel_id: "ch-1",
+    output_id: "out-2",
+    content_index: 0,
+  });
+  // Unknown live methods and malformed payloads are ignored, not misread.
+  notify("live/some_future_notification", { channel_id: "ch-1" });
+  notify("live/assistant_playback_hint", { channel_id: "ch-1", hint: "louder" });
+  notify("live/assistant_playback_hint", { hint: "duck" });
+
+  assert.deepEqual(seen, [
+    { method: "live/assistant_playback_hint", params: { channel_id: "ch-1", hint: "duck" } },
+    { method: "live/assistant_playback_hint", params: { channel_id: "ch-1", hint: "restore" } },
+    { method: "live/media_health_requested", params: { channel_id: "ch-1", output_id: "out-1" } },
+    {
+      method: "live/assistant_output_available",
+      params: { channel_id: "ch-1", output_id: "out-2", content_index: 0 },
+    },
+  ]);
+  assert.equal(client.eventQueues.size, 0, "no session queue was touched");
+  assert.equal(client.unmatchedStreamBuffer.size, 0, "nothing buffered as a session event");
+
+  unsubscribe();
+  notify("live/assistant_playback_hint", { channel_id: "ch-1", hint: "duck" });
+  assert.equal(seen.length, 4, "an unsubscribed listener receives nothing");
+});
+
+test("a throwing live listener does not stop the next one", async () => {
+  const { MeerkatClient } = await import("../dist/client.js");
+  const client = new MeerkatClient();
+  const seen = [];
+  client.onLiveNotification(() => {
+    throw new Error("listener fault");
+  });
+  client.onLiveNotification((notification) => seen.push(notification.params.hint));
+  client.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "live/assistant_playback_hint",
+      params: { channel_id: "ch-1", hint: "duck" },
+    }),
+  );
+  assert.deepEqual(seen, ["duck"]);
+});

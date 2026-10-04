@@ -66882,15 +66882,30 @@ async fn test_stalled_member_status_reads_release_capacity_at_the_drain_ceiling(
     };
     let (handle, service) = create_test_mob(sample_definition()).await;
     let live = AgentIdentity::from("status-live");
+    // Turn-driven members: no autonomous turn runs on the runtime loops'
+    // threads, so the paused clock below cannot auto-advance past a bound
+    // while the test runtime waits on work running elsewhere.
     handle
-        .spawn(ProfileName::from("worker"), live.clone(), None)
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            live.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
         .await
         .expect("spawn live member");
     let mut stalled = Vec::new();
     for index in 0..MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS {
         let identity = AgentIdentity::from(format!("status-stalled-{index}"));
         let session_id = handle
-            .spawn(ProfileName::from("worker"), identity.clone(), None)
+            .spawn_with_options(
+                ProfileName::from("worker"),
+                identity.clone(),
+                None,
+                Some(crate::MobRuntimeMode::TurnDriven),
+                None,
+            )
             .await
             .expect("spawn stalled member")
             .bridge_session_id()

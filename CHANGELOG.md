@@ -1262,7 +1262,12 @@ them.
   request is open: one the model's output or a delegation has not answered,
   a typed broker fact that reflected-input silence does not clear (S103 r2).
   A cue that does not fit one 500-byte append (an outcome cue with an open
-  request) is split before the scope sentence.
+  request) is split before the scope sentence. A deferred cue is also no longer
+  released into the user's next question by the model's own lagging
+  transcript: an output transcript delta that started before the user's
+  utterance is the tail of the previous reply and clears neither the
+  user's floor nor the open request, and a deferred cue waits while
+  reflected input still carries the user's speech (S99 on #1630 r3).
 
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to

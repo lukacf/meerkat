@@ -2348,6 +2348,16 @@ struct SessionState {
     /// clear it: a request the user finished and nobody answered is still
     /// open (S103 r2).
     user_request_open: bool,
+    /// Session-timeline start of the utterance that opened the current
+    /// request. An output transcript delta that started before it is the
+    /// lagging tail of the model's previous reply (transcripts trail the
+    /// audio), not an answer: it clears neither the floor nor the request
+    /// (S99 #1630 r3: the tail of a long readout wiped the floor of the
+    /// user's next question and released a deferred cue into it).
+    request_utterance_start_ms: Option<f64>,
+    /// A reflected input frame has carried speech: from then on the
+    /// reflected-input silence run says whether the user is still speaking.
+    reflected_input_speech_seen: bool,
     /// Session-timeline start of the last output transcript delta.
     last_output_start_ms: Option<f64>,
     /// Audio-clock length of reflected-input silence since the user's last
@@ -2395,6 +2405,8 @@ impl Default for SessionState {
             awaiting_peer_results: HashSet::new(),
             unanswered_user_input: false,
             user_request_open: false,
+            request_utterance_start_ms: None,
+            reflected_input_speech_seen: false,
             input_silence_run_ms: 0,
             last_output_start_ms: None,
             last_delegation_offset_ms: None,
@@ -2548,6 +2560,15 @@ impl SessionState {
         self.release_deferred_result_cues_when_due();
     }
 
+    /// The user is audibly speaking: a reflected input frame carried speech
+    /// and fewer than [`USER_FLOOR_SILENCE_RELEASE_MS`] of reflected-input
+    /// silence have followed it. Read on the audio clock, so it holds even
+    /// when the transcript has not caught up.
+    fn reflected_input_speaking(&self) -> bool {
+        self.reflected_input_speech_seen
+            && self.input_silence_run_ms < USER_FLOOR_SILENCE_RELEASE_MS
+    }
+
     /// Release deferred result cues once both the model's response has ended
     /// ([`OUTPUT_SILENCE_RELEASE_MS`] of output silence) and the user does
     /// not hold the floor ([`Self::user_holds_floor`], the state that holds
@@ -2555,15 +2576,18 @@ impl SessionState {
     /// output silence alone released the cue into the middle of the user's
     /// question, and the model then delegated that question (S99 pre-merge
     /// r3 and r10: 2 of 3 such runs, against 0 of 5 where the cue landed
-    /// before the question). Called on each output frame and when the floor
-    /// ends; both are provider-clock transitions, never a timer.
+    /// before the question). Nor while the user is audibly speaking
+    /// ([`Self::reflected_input_speaking`]): the floor is read from
+    /// transcripts, which trail the audio. Called on each output frame, when
+    /// the floor ends, and when reflected input goes quiet; all are
+    /// provider-clock transitions, never a timer.
     fn release_deferred_result_cues_when_due(&mut self) {
         if self.deferred_result_cues.is_empty()
             || self.output_silence_run_ms < OUTPUT_SILENCE_RELEASE_MS
         {
             return;
         }
-        if self.user_holds_floor() {
+        if self.user_holds_floor() || self.reflected_input_speaking() {
             return;
         }
         tracing::info!(
@@ -2580,9 +2604,16 @@ impl SessionState {
         let speech = reflected_pcm16_dbfs(audio).is_some_and(|dbfs| dbfs >= USER_FLOOR_SPEECH_DBFS);
         if speech {
             self.input_silence_run_ms = 0;
+            self.reflected_input_speech_seen = true;
             return;
         }
+        let was_speaking = self.reflected_input_speaking();
         self.input_silence_run_ms = self.input_silence_run_ms.saturating_add(frame_ms);
+        if was_speaking && !self.reflected_input_speaking() {
+            // The user went quiet: a deferred cue held by their speech may
+            // go now.
+            self.release_deferred_result_cues_when_due();
+        }
         if self.unanswered_user_input && self.input_silence_run_ms >= USER_FLOOR_SILENCE_RELEASE_MS
         {
             self.unanswered_user_input = false;
@@ -2756,6 +2787,9 @@ impl SessionState {
                 if answered_through_ms.is_none_or(|answered| start_ms > answered)
                     && self.input_silence_run_ms < USER_FLOOR_SILENCE_RELEASE_MS
                 {
+                    if !self.user_request_open {
+                        self.request_utterance_start_ms = Some(start_ms);
+                    }
                     self.unanswered_user_input = true;
                     self.user_request_open = true;
                 }
@@ -2771,8 +2805,22 @@ impl SessionState {
                 self.last_output_start_ms = Some(start_ms);
                 self.last_output_end_ms = Some(end_ms);
                 self.input_since_output = false;
-                self.unanswered_user_input = false;
-                self.user_request_open = false;
+                // Output that began before the open request's utterance is
+                // the lagging transcript of the previous reply, not an
+                // answer to it.
+                let lagging_tail = self
+                    .request_utterance_start_ms
+                    .is_some_and(|utterance_start| start_ms < utterance_start);
+                if lagging_tail {
+                    tracing::debug!(
+                        start_ms,
+                        "public Live output transcript tail predates the open utterance; the user's floor stands"
+                    );
+                } else {
+                    self.unanswered_user_input = false;
+                    self.user_request_open = false;
+                    self.request_utterance_start_ms = None;
+                }
                 self.record_transcript_delta(GptLiveTurnRole::Assistant, delta);
             }
             ServerEvent::DelegationCreated {
@@ -2785,6 +2833,7 @@ impl SessionState {
                 self.last_delegation_offset_ms = Some(offset_ms);
                 self.unanswered_user_input = false;
                 self.user_request_open = false;
+                self.request_utterance_start_ms = None;
             }
             // Reflected media, mute state, accounting telemetry, telephony
             // signalling, and informational notices carry no conversational,
@@ -5770,10 +5819,13 @@ mod tests {
         assert!(state.deferred_result_cues.is_empty());
     }
 
-    /// The user speaking while the cue is deferred does not hold it: the
-    /// model's output is silent, so the response has ended.
+    /// Audible user speech holds a deferred cue even when its transcript
+    /// takes no floor (here a tail that began before the model's last
+    /// output): the floor is read from transcripts, which trail the audio,
+    /// and the model's silence while the user speaks is not the end of a
+    /// turn (S99 #1630 r3). The cue goes out once the user stops.
     #[test]
-    fn a_deferred_cue_is_released_by_model_silence_while_the_user_speaks() {
+    fn audible_user_speech_holds_a_deferred_cue() {
         let mut state = state_with_spoken_delegation();
         model_output(&mut state, true, 3);
         let result = state
@@ -5783,8 +5835,16 @@ mod tests {
             .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
             .unwrap();
         state.apply_frame(frame(input_delta("and also"))).unwrap();
+        assert!(!state.user_holds_floor(), "the transcript takes no floor");
         reflect_input(&mut state, true, 4);
         model_output(&mut state, false, 8);
+        assert!(
+            state.due_result_cues.is_empty(),
+            "held while the user is audibly speaking"
+        );
+        reflect_input(&mut state, false, 7);
+        assert!(state.due_result_cues.is_empty(), "1400 ms of quiet");
+        reflect_input(&mut state, false, 1);
         assert_eq!(state.due_result_cues, ["dlg_cue"]);
     }
 
@@ -6004,10 +6064,71 @@ mod tests {
             state.due_result_cues.is_empty(),
             "the answer is still being voiced"
         );
+        // The user is quiet while the model answers.
+        reflect_input(&mut state, false, 8);
         model_output(&mut state, false, 7);
         assert!(state.due_result_cues.is_empty(), "1400 ms after the answer");
         model_output(&mut state, false, 1);
         assert_eq!(state.due_result_cues, ["dlg_cue"]);
+    }
+
+    /// S99 on #1630, r3: the model's long readout ended on the audio clock,
+    /// the user began the next question, and the readout's transcript tail
+    /// was still arriving. Each output delta cleared the user's floor, so the
+    /// deferred cue went out mid-question and the question was delegated. A
+    /// tail that started before the user's utterance is not an answer: the
+    /// floor and the open request stand, and the cue goes out once, after
+    /// the user stops, with the question still open.
+    #[test]
+    fn a_lagging_output_tail_does_not_release_a_cue_into_the_users_question() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), 2000.0)))
+            .unwrap();
+        assert_eq!(state.deferred_result_cues, ["dlg_cue"]);
+        // The readout's audio ends; the user starts the next question.
+        model_output(&mut state, false, 2);
+        reflect_input(&mut state, true, 2);
+        state
+            .apply_frame(frame(input_delta_at(
+                " now tell me my vault phrase",
+                2600.0,
+            )))
+            .unwrap();
+        assert!(state.user_holds_floor());
+        // The readout's transcript tail arrives late: it started at 2200,
+        // before the user's utterance at 2600.
+        state
+            .apply_frame(frame(output_delta_span(" e018/_tmp", 2200.0, 2400.0)))
+            .unwrap();
+        assert!(state.user_holds_floor(), "a lagging tail is not an answer");
+        for _ in 0..10 {
+            model_output(&mut state, false, 1);
+            reflect_input(&mut state, true, 1);
+        }
+        assert!(state.output_silence_run_ms >= OUTPUT_SILENCE_RELEASE_MS);
+        assert!(
+            state.due_result_cues.is_empty(),
+            "no cue into the user's question"
+        );
+        reflect_input(&mut state, false, 7);
+        assert!(state.due_result_cues.is_empty(), "1400 ms: still the floor");
+        reflect_input(&mut state, false, 1);
+        assert_eq!(state.due_result_cues, ["dlg_cue"]);
+        drain(&mut state);
+        let (_, _, wording) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert!(
+            wording.user_request_open,
+            "the unanswered question keeps the open-request clause"
+        );
+        assert_eq!(state.reserve_due_result_cue().unwrap(), None, "exactly one");
     }
 
     /// S103 r2: the user keeps talking past `session.delegation.created`,

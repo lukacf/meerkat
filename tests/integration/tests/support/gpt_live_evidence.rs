@@ -289,6 +289,13 @@ pub enum NativeRecord {
         browser_ms: f64,
         audio: AudioEvidence,
     },
+    /// A `live/assistant_playback_hint` the peer applied to its assistant
+    /// playback gate (#1638), with the media counters at that moment.
+    PlaybackHint {
+        hint: String,
+        browser_ms: f64,
+        audio: AudioEvidence,
+    },
     Fault {
         fault: BrowserFault,
         /// Soft faults are sampled through the evidence chain and carry the

@@ -205,6 +205,9 @@ async function prepare(command) {
           gate.gain.setTargetAtTime(target, now, playbackGate.timeConstantS);
         }
         globalThis.__gptLivePeer.pushTimeline('playback_hint', { hint });
+        // Journal every applied hint, for every scenario (not only those that
+        // dump the timeline), with the media counters at that moment.
+        globalThis.__gptLivePeer.recordEvidence?.({ kind: 'playback_hint', hint, browser_ms: performance.now() });
       },
       channel,
       destination,

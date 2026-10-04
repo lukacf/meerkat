@@ -2,6 +2,31 @@
 set -euo pipefail
 
 xtask_bin="${1:?xtask binary path is required}"
+# The canonical TLC lane, split into parts so each fits a CI job limit:
+#   machine-verify  the bounded adaptive witness plus `machine-verify --all`
+#   audits-a        hand-written audit shard A
+#   audits-b        hand-written audit shard B
+#   all             every part (the default: `make machine-verify`, the
+#                   nightly bounded TLC job and the release gate)
+# Bazel runs the three parts as separate targets (machine_verify_all_tlc_test,
+# machine_verify_audits_a_tlc_test, machine_verify_audits_b_tlc_test) so the
+# BuildBuddy machine-authority lane runs them in parallel; together they are
+# exactly `all`.
+lane_part="all"
+if [[ "${2:-}" == "--part" ]]; then
+  lane_part="${3:?--part needs machine-verify, audits-a, audits-b or all}"
+fi
+case "${lane_part}" in
+  machine-verify|audits-a|audits-b|all) ;;
+  *)
+    echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a, audits-b, all)" >&2
+    exit 2
+    ;;
+esac
+# run_part <part>: whether this invocation runs <part>.
+run_part() {
+  [[ "${lane_part}" == "all" || "${lane_part}" == "$1" ]]
+}
 if [[ "${xtask_bin}" != /* ]]; then
   if [[ -x "${PWD}/${xtask_bin}" ]]; then
     xtask_bin="${PWD}/${xtask_bin}"
@@ -103,11 +128,13 @@ export JDK_JAVA_OPTIONS="${tlc_jdk_java_options}"
 # truncate the search, and every witness invariant is vacuous until the script
 # completes). `machine-verify-witness` runs it with coverage and fails unless the
 # witness's completion action fired.
-echo "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
-"${xtask_bin}" machine-verify-witness \
-  --composition adaptive_mob_bundle \
-  --witness layer_terminal_feedback \
-  --workers "${tlc_workers}"
+if run_part machine-verify; then
+  echo "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
+  "${xtask_bin}" machine-verify-witness \
+    --composition adaptive_mob_bundle \
+    --witness layer_terminal_feedback \
+    --workers "${tlc_workers}"
+fi
 
 # The canonical meerkat_machine ci.cfg sweep is structural (it stops after one
 # step), so durable in-turn Steer delivery is model-checked by a hand-written
@@ -152,8 +179,10 @@ if [[ ! -x "${live_steer_audit}" ]]; then
   echo "error: live delegation steer audit runner is missing from workspace runfiles: ${live_steer_audit}" >&2
   exit 1
 fi
-echo "running bounded live delegation steer TLC audit"
-TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS:-16}"
+if run_part audits-b; then
+  echo "running bounded live delegation steer TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_steer_audit}" "${LIVE_STEER_AUDIT_MAX_STEPS:-16}"
+fi
 
 # The run-start hold (#1500: a mob Stop holds member run starts so an input
 # admitted before the stop runs only after Resume) is model-checked by a
@@ -171,8 +200,10 @@ if [[ ! -x "${run_start_hold_audit}" ]]; then
   echo "error: run-start hold audit runner is missing from workspace runfiles: ${run_start_hold_audit}" >&2
   exit 1
 fi
-echo "running bounded run-start hold TLC audit"
-TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
+if run_part audits-a; then
+  echo "running bounded run-start hold TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
+fi
 
 # The live-context result barrier: a delegation result on a channel with a
 # late bootstrap summary is released after the summary's provider
@@ -190,8 +221,10 @@ if [[ ! -x "${live_result_barrier_audit}" ]]; then
   echo "error: live-context result barrier audit runner is missing from workspace runfiles: ${live_result_barrier_audit}" >&2
   exit 1
 fi
-echo "running bounded live-context result barrier TLC audit"
-TLC_WORKERS="${tlc_workers}" "${live_result_barrier_audit}" "${LIVE_CONTEXT_RESULT_BARRIER_AUDIT_MAX_STEPS:-21}"
+if run_part audits-a; then
+  echo "running bounded live-context result barrier TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_result_barrier_audit}" "${LIVE_CONTEXT_RESULT_BARRIER_AUDIT_MAX_STEPS:-21}"
+fi
 
 # UnregisterSession against live channels (#1476): unregister is guarded on
 # every live channel being closed and its close custody settled, and then
@@ -209,8 +242,10 @@ if [[ ! -x "${live_unregister_audit}" ]]; then
   echo "error: live unregister cleanup audit runner is missing from workspace runfiles: ${live_unregister_audit}" >&2
   exit 1
 fi
-echo "running bounded live unregister cleanup TLC audit"
-TLC_WORKERS="${tlc_workers}" "${live_unregister_audit}" "${LIVE_UNREGISTER_AUDIT_MAX_STEPS:-16}"
+if run_part audits-a; then
+  echo "running bounded live unregister cleanup TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_unregister_audit}" "${LIVE_UNREGISTER_AUDIT_MAX_STEPS:-16}"
+fi
 
 # The live media health edges (request at a channel's first output, the three
 # judgements, the per-session reopen budget) guard an Active, exactly bound
@@ -230,8 +265,10 @@ if [[ ! -x "${live_media_health_audit}" ]]; then
   echo "error: live media health audit runner is missing from workspace runfiles: ${live_media_health_audit}" >&2
   exit 1
 fi
-echo "running bounded live media health TLC audit"
-TLC_WORKERS="${tlc_workers}" "${live_media_health_audit}" "${LIVE_MEDIA_HEALTH_AUDIT_MAX_STEPS:-20}"
+if run_part audits-b; then
+  echo "running bounded live media health TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_media_health_audit}" "${LIVE_MEDIA_HEALTH_AUDIT_MAX_STEPS:-20}"
+fi
 
 # Bounded audit of a durable worker start that resolves after its channel
 # closed (Turbo S S104 R7): from an authorized worker start it explores the
@@ -245,8 +282,10 @@ if [[ ! -x "${live_worker_start_after_close_audit}" ]]; then
   echo "error: live worker start after close audit runner is missing from workspace runfiles: ${live_worker_start_after_close_audit}" >&2
   exit 1
 fi
-echo "running bounded live worker start after close TLC audit"
-TLC_WORKERS="${tlc_workers}" "${live_worker_start_after_close_audit}" "${LIVE_WORKER_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-22}"
+if run_part audits-a; then
+  echo "running bounded live worker start after close TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_worker_start_after_close_audit}" "${LIVE_WORKER_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-22}"
+fi
 
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
@@ -290,6 +329,36 @@ run_machine_verify() {
     --skip-tlc-composition meerkat_mob_seam \
     --skip-tlc-composition adaptive_mob_bundle
 }
+
+# Shard assignment balances measured audit cost (4 TLC workers, default
+# bounds): audits-a = live unregister cleanup (168 s), run-start hold (92 s),
+# live worker start after close (14 s), live-context result barrier (9 s);
+# audits-b = durable in-turn steer (113 s), live media health (84 s),
+# live-context outbox (54 s), live delegation steer (23 s). A new audit joins
+# the lighter shard. Shard of the two audits the `all` lane runs concurrently
+# with machine-verify below:
+durable_steer_shard="audits-b"
+live_context_outbox_shard="audits-b"
+
+# A single part runs on its own (Bazel gives each part its own executor):
+# machine-verify takes every worker, and an audit shard runs its scheduled
+# audits in sequence. Only `all` shares one budget below.
+if [[ "${lane_part}" != "all" ]]; then
+  if [[ "${lane_part}" == "machine-verify" ]]; then
+    TLC_WORKERS="${tlc_workers}" run_machine_verify
+    exit $?
+  fi
+  if [[ "${lane_part}" == "${durable_steer_shard}" ]]; then
+    echo "running bounded durable in-turn steer TLC audit"
+    TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}"
+  fi
+  if [[ "${lane_part}" == "${live_context_outbox_shard}" ]]; then
+    echo "running bounded live-context outbox TLC audit"
+    TLC_WORKERS="${tlc_workers}" "${live_context_outbox_audit}" "${LIVE_CONTEXT_OUTBOX_AUDIT_MAX_STEPS:-20}"
+  fi
+  echo "machine-verify lane part ${lane_part} passed"
+  exit 0
+fi
 
 total_heap_mb="${TLC_HEAP_BUDGET_MB:-}"
 if [[ -z "${total_heap_mb}" ]]; then

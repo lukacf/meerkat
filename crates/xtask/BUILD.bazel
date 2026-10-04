@@ -1141,7 +1141,7 @@ rust_test(
 sh_test(
     name = "machine_verify_all_tlc_test",
     srcs = ["tests/machine_verify_all_tlc_test.sh"],
-    args = ["$(rootpath :xtask_bin)"],
+    args = ["$(rootpath :xtask_bin)", "--part", "machine-verify"],
     data = [
         ":xtask_bin",
         "//:workspace_runfiles",
@@ -1155,6 +1155,76 @@ sh_test(
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+        "TLC_WORKERS": "16",
+        "TLC_HEAP_BUDGET_MB": "40000",
+    },
+    exec_properties = {
+        "EstimatedCPU": "16",
+        "EstimatedMemory": "48GB",
+    },
+    size = "enormous",
+    timeout = "eternal",
+    tags = [
+        "buildbuddy",
+        "required-feature",
+    ],
+)
+
+sh_test(
+    name = "machine_verify_audits_a_tlc_test",
+    srcs = ["tests/machine_verify_all_tlc_test.sh"],
+    args = ["$(rootpath :xtask_bin)", "--part", "audits-a"],
+    data = [
+        ":xtask_bin",
+        "//:workspace_runfiles",
+        "tests/rustfmt_host.sh",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+    ],
+    env = {
+        "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
+        "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
+        "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+        "TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",
+    },
+    exec_properties = {
+        "EstimatedCPU": "8",
+        "EstimatedMemory": "24GB",
+    },
+    size = "enormous",
+    timeout = "eternal",
+    tags = [
+        "buildbuddy",
+        "required-feature",
+    ],
+)
+
+sh_test(
+    name = "machine_verify_audits_b_tlc_test",
+    srcs = ["tests/machine_verify_all_tlc_test.sh"],
+    args = ["$(rootpath :xtask_bin)", "--part", "audits-b"],
+    data = [
+        ":xtask_bin",
+        "//:workspace_runfiles",
+        "tests/rustfmt_host.sh",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+    ],
+    env = {
+        "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
+        "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
+        "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+        "TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",
+    },
+    exec_properties = {
+        "EstimatedCPU": "8",
+        "EstimatedMemory": "24GB",
     },
     size = "enormous",
     timeout = "eternal",

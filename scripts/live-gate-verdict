@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Turn one live-gate Bazel run into a typed verdict.
+
+usage: scripts/live-gate-verdict <bazel-log> <bazel-exit-code>
+
+The lane runs every GPT Live scenario exactly once (no Bazel retry), with
+--test_output=errors, so each failed run prints one
+"==== Test output for //:<target>:" section ("... (run N of M):" when a
+target runs more than once). A section carrying
+the scenario's typed provider-degraded verdict (GPT_LIVE_VERDICT ...
+verdict=provider_degraded, emitted by Journal::provider_degraded_verdict when
+the provider's input transcription lagged past the measured threshold) is
+VOID: neither green nor red, it says nothing about the change. Any other
+failed section is RED.
+
+Exit codes:
+  0  GREEN: Bazel succeeded and no run failed.
+  1  RED: at least one run failed for a reason other than provider
+     degradation, or Bazel failed without any test output (a build failure).
+  3  VOID: every failed run was provider-degraded. There is no green
+     evidence, so the gate does not pass; re-run it in a healthy provider
+     window. A void never turns red into green.
+"""
+
+import re
+import sys
+
+# Bazel prints "(run N of M)" only when a target runs more than once; the
+# gate's single run prints the bare target.
+SECTION = re.compile(r"^=+ Test output for (//[^\s:]*:[^\s:]+)(?: \(run (\d+) of (\d+)\))?:\s*$")
+SECTION_END = re.compile(r"^={40,}\s*$")
+DEGRADED = re.compile(r"GPT_LIVE_VERDICT .*verdict=provider_degraded|PROVIDER_DEGRADED: ")
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print(__doc__, file=sys.stderr)
+        return 1
+    log_path, bazel_exit = sys.argv[1], int(sys.argv[2])
+    sections = []
+    current = None
+    with open(log_path, encoding="utf-8", errors="replace") as log:
+        for line in log:
+            line = line.rstrip("\n")
+            start = SECTION.match(line)
+            if start:
+                current = {"target": start.group(1), "run": start.group(2) or "1", "degraded": False}
+                sections.append(current)
+                continue
+            if current is not None:
+                if SECTION_END.match(line):
+                    current = None
+                elif DEGRADED.search(line):
+                    current["degraded"] = True
+
+    red = [s for s in sections if not s["degraded"]]
+    void = [s for s in sections if s["degraded"]]
+    for s in red:
+        print(f"RED  {s['target']} run {s['run']}")
+    for s in void:
+        print(f"VOID {s['target']} run {s['run']} (provider degraded)")
+
+    if red:
+        print(f"live gate: RED ({len(red)} failed run(s), {len(void)} void)")
+        return 1
+    if bazel_exit != 0 and not void:
+        print(f"live gate: RED (Bazel exited {bazel_exit} without test output: build or infrastructure failure)")
+        return 1
+    if void:
+        print(f"live gate: VOID ({len(void)} provider-degraded run(s), no other failure); re-run in a healthy provider window")
+        return 3
+    print("live gate: GREEN")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

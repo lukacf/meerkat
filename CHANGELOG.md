@@ -767,6 +767,8 @@ them.
   channel-scoped `live/*` ones, so a client could answer
   `live/media_health_requested` but never receive it. The generated SDK types
   gain `LiveAssistantOutputAvailableParams`.
+- **Pull requests that touch the live stack run the GPT Live scenarios before merge.** A new `Live gate` check (`.github/workflows/live-gate.yml`) classifies each PR (`scripts/live-gate-changed`: live-stack paths, or Rust changes naming live state) and runs Turbo S S97-S107 against the real provider on BuildBuddy, once each. Its verdict (`scripts/live-gate-verdict`) is GREEN, RED, or VOID when the only failures carry the scenarios' typed provider-degraded verdict; VOID is not green. PRs outside the live stack pass the check without a run, so it can be required in branch protection. The release Turbo S workflow reports the same typed verdict.
+
 - `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
   handles are the same live runtime owner (clones share it; a separately
   constructed machine over the same store does not).
@@ -2603,6 +2605,8 @@ them.
   ("model call settled"); shell tool calls log their tool call id at start and
   their exit code, timeout and duration at completion (never the command or
   its output) (#1563).
+- **Turbo S no longer retries a failed scenario.** The BuildBuddy Turbo S lane ran each failed shard a second time (`--flaky_test_attempts=2`), so a scenario that failed and then passed reported green. Every scenario now runs exactly once; a failure is classified (product bug, oracle or fixture brittleness, or provider-degraded void), never absorbed by a retry.
+
 - Generated machine TLA models lead each quantified `Next` disjunct with its
   transition's source-phase guard. The meaning is unchanged (the guard is also
   the first conjunct of the action), but TLC no longer enumerates every

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Classify a pull request for the live gate (.github/workflows/live-gate.yml).
+#
+# usage: scripts/live-gate-changed <base-rev> <head-rev>
+#
+# Prints every changed path that makes the change live-relevant, one per line,
+# and exits 0 when there is at least one; exits 1 when the change does not
+# touch the live stack; exits 2 on a usage or git error (the workflow treats
+# that as a failure, never as "not live").
+#
+# A path is live-relevant when it is a file of the live stack itself (provider
+# adapter, live host and channel code, live delegation, the GPT Live e2e
+# harness and its browser peer, the Turbo S lanes and this gate), or when it
+# is Rust source anywhere else whose changed lines name live state
+# (live_*, Live*, gpt_live, GptLive, realtime). The second rule covers shared
+# files such as the MeerkatMachine catalog or the session service, where one
+# file holds both live and unrelated state.
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: scripts/live-gate-changed <base-rev> <head-rev>" >&2
+  exit 2
+fi
+base="$1"
+head="$2"
+
+merge_base="$(git merge-base "$base" "$head")" || {
+  echo "error: no merge base between $base and $head" >&2
+  exit 2
+}
+changed="$(git diff --name-only "$merge_base" "$head")" || exit 2
+
+live_path_pattern='^(crates/meerkat-live/|crates/meerkat-openai/src/(public_live|gpt_live|live|realtime)|crates/meerkat/src/(experimental_gpt_live|live_close|surface/live_|session_runtime/live_)|crates/meerkat-mob-mcp/src/live_delegation|crates/meerkat-runtime/src/live_execution|tests/integration/tests/gpt_live_|tests/integration/tests/support/gpt_live_|tests/live_smoke/browser/|scripts/buildbuddy-(bazel-poc|ci-lane|dev|e2e-smoke-remote-test)$|scripts/live-gate-|\.github/workflows/(live-gate|release-turbo-s)\.yml$)'
+live_content_pattern='live_|Live[A-Z]|gpt_live|GptLive|realtime|Realtime'
+
+matched=0
+while IFS= read -r path; do
+  [[ -z "$path" ]] && continue
+  if [[ "$path" =~ $live_path_pattern ]]; then
+    echo "$path"
+    matched=1
+    continue
+  fi
+  # Read the whole diff before matching (grep -q under pipefail would end
+  # the pipe early and report git's SIGPIPE as "no match").
+  if [[ "$path" == *.rs ]] \
+    && git diff --unified=0 "$merge_base" "$head" -- "$path" \
+      | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -cE "$live_content_pattern" >/dev/null; then
+    echo "$path"
+    matched=1
+  fi
+done <<<"$changed"
+
+if [[ "$matched" -eq 1 ]]; then
+  exit 0
+fi
+exit 1

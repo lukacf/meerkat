@@ -2365,7 +2365,10 @@ them.
     "marker" ("the marker one file") is not a file count.
   - S97's executor is told to say whether the directory it inspects is empty
     and to name any files, so the result always states the fact the readout
-    oracle checks; the oracle stays as strict.
+    oracle checks; the oracle stays as strict. The readout is speech the
+    provider produced after the result was sent (it can start before the
+    provider's acknowledgement arrives), and "no files" states the empty
+    workspace as well as "empty" does.
   - S100 judges the barge-in reply by what the user hears: the assistant says
     "done" in speech that started after the user's barge-in speech, whether
     or not the provider closed the user's input final first. Talk-over is

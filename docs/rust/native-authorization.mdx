@@ -13,10 +13,9 @@ enabling a Cargo feature or calling `agent.run(...)` does not establish this
 integration.
 
 <Note>
-The initial in-memory composition passed its bounded native validation gate
-on tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. Published native
-`c18c619bf2d140663eb0a78d17d7122d9ac1a5ef` additionally passed completed-turn
-SQLite close/reopen and fresh governed work in actual separate processes, with
+Explicit native embedding has bounded acceptance for storeless sessions and
+completed-turn SQLite close/reopen followed by fresh governed work in actual
+separate processes, with
 current host grants, a stable configured provider binding and the real File token
 owner. Cold acceptance was run directly; publication and CI used their
 recorded test inventories. See the
@@ -27,14 +26,17 @@ Stock CLI, REST, RPC and MCP paths do not acquire governed activation from this
 API. The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
 single-connection profile; it requires `default-features = false` plus
 `local-authorization` and does not activate ordinary RPC constructors. The
-public-entry/notification fixture has focused local acceptance. It remains a
-fixed-host loopback profile; candidate publication and CI are pending.
+public-entry/notification profile has focused local and published CI acceptance.
+Its fixed-host loopback evidence does not establish ordinary-constructor activation.
 Console projection is not integrated native-plus-Console proof.
 Persistent controller administration, interrupted recovery, human consent and
 full surface/platform coverage remain separate work. The shell composition below
-covers supported macOS requirements. The measured small fixture needs performance
-investigation; representative-turn and per-operation acceptance remain open.
-Full surface coverage remains the endpoint, with no live-provider coverage claim.
+covers supported macOS requirements. Provider login and Console access
+administration do not grant native operation permission. The measured conditional
+fresh-turn means missed the cheap-default target; full-platform and per-operation
+p99 acceptance remain open. See the
+[acceptance scope](/internal/design/adr-001-implementation/acceptance-plan)
+for the required coverage. No live-provider coverage is claimed.
 </Note>
 
 ## Install the real owners before sharing the machine

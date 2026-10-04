@@ -334,6 +334,20 @@ pub(super) fn retirement_result_slot_removed_check_count(key: &RetirementOperati
         .unwrap_or_default()
 }
 
+/// The exact singleflight retirement slot's result publication, if the slot
+/// is still joinable. The slot task removes the slot and counts that check
+/// before it publishes, so a published result implies the check landed.
+#[cfg(test)]
+pub(super) fn pending_retirement_result_publication(
+    key: &RetirementOperationKey,
+) -> Option<tokio::sync::watch::Receiver<Option<Arc<Result<(), Arc<MobError>>>>>> {
+    pending_retirement_operations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .map(|pending| pending.result_rx.clone())
+}
+
 #[cfg(test)]
 fn assert_retirement_result_slot_removed_before_publication(
     key: &RetirementOperationKey,

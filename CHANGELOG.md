@@ -2311,6 +2311,17 @@ them.
     stutter, journaled as a metric. The browser peer records responses; it no longer raises
     `duplicate_readout` itself, and missing or malformed records fail the
     scenario.
+  - S101 anchors job 2's play on the quick question's delegation instead of a
+    fixed offset (with the longer quick question the two utterances ran
+    together and the provider joined them), and a number right after
+    "marker" ("the marker one file") is not a file count.
+  - S97's executor is told to say whether the directory it inspects is empty
+    and to name any files, so the result always states the fact the readout
+    oracle checks; the oracle stays as strict.
+  - S100 judges the barge-in reply by what the user hears: the assistant says
+    "done" in speech that started after the user's barge-in speech, whether
+    or not the provider closed the user's input final first. Talk-over is
+    still checked separately.
   - S101 fails when the voice declares a slow job complete (its marker file
     or ordinal with a completion word, not a promise or a status) or states
     the quick job's file count ("there are N files", "count is N") before the

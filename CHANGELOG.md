@@ -2315,7 +2315,9 @@ them.
     or ordinal with a completion word, not a promise or a status) or states
     the quick job's file count ("there are N files", "count is N") before the
     provider learned that job was complete: its "Finished" narration or its
-    result, on the sideband clock, timed at the claim's words.
+    result, on the sideband clock, timed at the claim's words. The quick
+    question now asks for "there are N files", and once its result is in, a
+    stated count other than the result's fails.
   - S102 fails when the voice attributes an answer to the peer before the
     peer's reply reached the provider conversation (a premature claim), by the
     provider's transcript timing: the peer's name or a pronoun standing for it

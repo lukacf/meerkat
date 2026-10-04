@@ -9632,6 +9632,15 @@ const S101_NUMBER_WORDS: &[&str] = &[
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
 ];
 
+fn s101_number_value(word: &str) -> Option<u64> {
+    word.parse().ok().or_else(|| {
+        S101_NUMBER_WORDS
+            .iter()
+            .position(|w| *w == word)
+            .and_then(|index| u64::try_from(index).ok())
+    })
+}
+
 fn s101_is_number(word: &str) -> bool {
     !word.is_empty()
         && (word.chars().all(|c| c.is_ascii_digit()) || S101_NUMBER_WORDS.contains(&word))
@@ -9695,6 +9704,7 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
     let mut created: BTreeMap<String, u64> = BTreeMap::new();
     let mut jobs: BTreeMap<String, S101Job> = BTreeMap::new();
     let mut known: BTreeMap<String, u64> = BTreeMap::new();
+    let mut results: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut deltas: Vec<(u64, String)> = Vec::new();
     for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
         match &line.entry {
@@ -9740,6 +9750,11 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
                     jobs.entry(id.to_owned()).or_insert(job);
                 } else if jobs.contains_key(id) {
                     known.entry(id.to_owned()).or_insert(line.elapsed_ms);
+                    if !content.starts_with("Finished voice request") {
+                        results
+                            .entry(id.to_owned())
+                            .or_insert((line.elapsed_ms, content.to_owned()));
+                    }
                 }
             }
             _ => {}
@@ -9760,6 +9775,16 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
     };
     let mut claims = Vec::new();
     let quick_window = |at: u64| created_at(S101Job::Quick) <= at && at < known_at(S101Job::Quick);
+    // The quick job's result and its count (the first number in it).
+    let quick_result = jobs
+        .iter()
+        .find(|(_, job)| **job == S101Job::Quick)
+        .and_then(|(id, _)| results.get(id).cloned());
+    let quick_value = quick_result.as_ref().and_then(|(_, text)| {
+        s101_words(text)
+            .into_iter()
+            .find_map(|(_, word)| s101_number_value(&word))
+    });
     let mut text = String::new();
     let mut times = Vec::new();
     for (at, delta) in &deltas {
@@ -9797,15 +9822,42 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
             } else {
                 None
             };
-            if let Some(number_at) = number_at
-                && tokens.get(number_at).is_some_and(|w| s101_is_number(w))
-                && let Some(when) = at(words[number_at].0)
-                && quick_window(when)
-            {
+            let Some(number_at) = number_at else { continue };
+            let Some(when) = tokens
+                .get(number_at)
+                .filter(|w| s101_is_number(w))
+                .and_then(|_| at(words[number_at].0))
+            else {
+                continue;
+            };
+            if quick_window(when) {
                 claims.push(format!(
                     "the voice stated the quick question's answer ({:?}) at {when} ms, before its result (known at {} ms)",
                     sentence.trim(),
                     known_at(S101Job::Quick)
+                ));
+                break;
+            }
+            // After the result, the asked-for answer ("there are N files",
+            // present tense, or "count is N") must state the result's count.
+            // Other mentions ("there was 1 file at the time of the check",
+            // about another job's result) are not the quick answer.
+            let answer_phrase = tokens[index..].starts_with(&["count", "is"])
+                || (tokens[index] == "there"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|w| *w == "are" || *w == "is")
+                    && tokens
+                        .get(index + 3)
+                        .is_some_and(|w| *w == "file" || *w == "files"));
+            if let (Some((result_at, result_text)), Some(value)) = (&quick_result, quick_value)
+                && answer_phrase
+                && when >= *result_at
+                && s101_number_value(tokens[number_at]) != Some(value)
+            {
+                claims.push(format!(
+                    "the voice misreported the quick question's answer at {when} ms ({:?}); the result says {result_text:?}",
+                    sentence.trim()
                 ));
                 break;
             }
@@ -12162,6 +12214,8 @@ mod config_tests {
             line(3000, delta("One.")),
             line(3200, delta(" There are two files.")),
             line(4000, append("q", "0")),
+            line(4050, delta(" There are zero files.")),
+            line(4060, delta(" Sorry, there are three files.")),
             line(4100, created("j2")),
             line(
                 4200,
@@ -12193,13 +12247,17 @@ mod config_tests {
             line(9200, delta(" Marker two dot txt is created.")),
         ];
         let claims = super::s101_premature_outcome_claims(&lines, 1);
-        assert_eq!(claims.len(), 2, "{claims:#?}");
+        assert_eq!(claims.len(), 3, "{claims:#?}");
         assert!(
             claims[0].contains("quick question's answer (\"There are two files.\") at 3200"),
             "{claims:#?}"
         );
         assert!(
-            claims[1].contains("declared Job2 complete at 5600"),
+            claims[1].contains("misreported the quick question's answer at 4060"),
+            "{claims:#?}"
+        );
+        assert!(
+            claims[2].contains("declared Job2 complete at 5600"),
             "{claims:#?}"
         );
         assert!(super::s101_premature_outcome_claims(&lines, 2).is_empty());

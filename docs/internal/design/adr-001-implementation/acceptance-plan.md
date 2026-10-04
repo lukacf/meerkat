@@ -25,9 +25,32 @@ does not make sandbox implementation optional. No design verdict counts as
 implementation acceptance, and missing coverage cannot be relabeled out of scope.
 
 The [implementation checkpoint](implementation-progress.md) records current
-execution and publication status. No native PR with green CI or accepted cost
-measurement exists for the current candidate. Measurement ordering awaits the
-owner's cost-timing clarification; the low-overhead requirement is unchanged.
+execution and publication status. Native PR1634 is published at `157`; its full
+CI remains blocked by recorded freshness failures. The four-file local `51`
+repair passed canonical example/root-lock and compiled-alphabet poster checks;
+normal successor push gates are running, with publication and fresh CI pending.
+Separately, a local tests-only successor, not yet published, based on `51` passed all 16
+default native-loop cases, including completed-turn SQLite reconstruction in a
+new process followed by fresh governed work. The six formerly ignored cases are
+ordinary only in that isolated successor; published `157` still retains its
+original opt-ins. Interrupted recovery and persistent administration remain open.
+The exact published-source optimized build and both cost correctness selectors
+passed. The first quiet small-fixture timing run is measured: whole-turn
+Local-minus-Trusted overhead was +117.33 percent at grant lineage depth 1 and
++189.37 percent at depth 3. These turns exceed 10 percent in this small fixture and require investigation;
+the representative-turn gate and individual-operation acceptance remain unproven.
+
+The accepted order is publication, exact published-source optimized-build and
+correctness qualification, then an explicitly allocated 45-minute small quiet
+window. The verified `157` binary remains qualified for local `51`'s unchanged
+benchmark/build-selection inputs; its four generated/lock files do not require a
+redundant workload rebuild. The implementation lead owns measurement and the GCP
+resource owner explicitly clears the host before START. The first small run
+completed and its lease was released. The full representative matrix still needs
+a separate estimated 6-7-hour capacity allocation. The target remains under 1 ms
+p99 added authorization per operation and at most 10 percent representative turn
+overhead, with full required coverage still open. Added whole-turn p99 is not an
+individual-operation measurement.
 
 ## Historical baselines and isolation
 

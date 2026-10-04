@@ -1,111 +1,145 @@
 # ADR-001 implementation checkpoint
 
-## Publication gate, 2026-10-03
+## Publication gate, 2026-10-04
 
-Runtime production remains frozen at `249b13147`. Main integration at
-`87dce8d2` preserved those Rust bytes. The normal push attempt failed in the
-existing Web SDK exhaustive-event test, which omitted the generated
-HookLaunchRefusedEvent. Before that failure, the Web WASM release compile took
-11m43s and the complete build/optimization took 17m00s. The test-only repair
-preserves the typed confinement cause and call reference; the existing Web SDK
-typecheck and all 96 ordinary unit tests then passed. This is SDK contract
-validation, not a new native runtime execution or performance measurement.
+Native [PR1634](https://github.com/lukacf/meerkat/pull/1634) is published at
+`157a73e75aed677c5f5a37d20cd07fe53710c216`. Its normal GCP push passed all
+required hooks in 4,726s wall time (`native-157-gcp-normal-push-green-r1.log`).
+[CI run 37170072061](https://github.com/lukacf/meerkat/actions/runs/37170072061)
+completed with 35 successful jobs. Format + governance failed because two
+standalone example locks were stale; Generation ratchets failed only poster
+freshness in two HTML outputs, after canonical coverage and typed content
+checks passed. The dependent CI gate failed too. This is a published checkpoint,
+not green whole-PR CI.
 
-The existing CI planner also rejected the actual PR diff before scheduling
-tests. Its estimate followed dependencies' dev fixtures even though Cargo does
-not build them for the runtime unit target. Reusing the existing build-graph
-calculation fixes that estimate while preserving the 16-minute budget and the
-runtime PR unit lane. Tests-first public planning failures and the repaired
-full classifier selftest are recorded. On the recorded native source, the
-runtime unit model is 15.1 minutes; this is neither a new timing measurement nor
-a guarantee that a hosted job finishes within that estimate. The classifier's
-earlier calibration figures describe historical source and closure inputs.
-One entry in the existing integration suite table now schedules the ordinary
-authorization tests for authorization/contracts, core, runtime, facade, tools,
-llm-core, Anthropic, auth-core and models changes, plus the existing machine
-schema/DSL/derive/kernel owner group. It creates an additional matrix instance
-of the existing integration job on its existing hosted runner configuration,
-without a new workflow or runner setup. Ignored acceptance and timing cases
-retain their explicit commands. Other consumer-only triggers remain a coverage
-task.
+The local repair is `51cd489916387039121e751e595670b92a0d4b65`, tree
+`f365afd3b3bc18f14c70da35db3615ce97e5fc7c`. Its only four changed files are the
+two example locks and two poster outputs. Existing dependency identities/pins
+are preserved; existing canonical metadata refresh and lock checks passed.
+The unchanged Node poster generator produced the reviewed bytes and passed
+byte idempotence. The GCP publication owner then passed the existing
+example/root-lock checks and full compiled-alphabet poster gate. Normal successor push gates started at
+03:25:27 UTC (`/tmp/rb/adr-bench/push-51.log`); publication of 51 and fresh CI
+remain pending. Rust bytes are identical to published `157`. Additional runtime
+integration remains held.
 
-SDK inspection then reproduced canonical HookFailed events being rejected by
-obsolete flat-error validation, and TypeScript's exhaustive settlement map
-omitting the two new terminal kinds. The reviewed SDK repair retains the exact
-typed reason, leaves the existing error field as a display projection and
-rejects malformed present reasons without a legacy-string fallback. Focused
-parser RED/GREEN and the existing full TypeScript suite (495 passed) and Python
-type/parser file (463 passed) qualify that compatibility repair. Raw launch
-refusal events preserve their optional call IDs; no event serializer, generated
-contract or native production source changed.
+Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published at
+`17fe7af8b2b374402d0e198f44879c2891446ac8`, an ordinary merge of published
+`fc0509cfe` and main `fa233b756`. Only Python init-timeout SDK/tests/docs and the
+changelog differ from fc0509; Console/Rust bytes and assets remain unchanged.
+The four incoming Python stand-in gateway tests passed (2.57s bodies).
+The earlier tree-qualified Console/component/build and four mock browser
+scenarios remain valid; these establish projection/access UX, not integrated
+native-plus-Console governance. The fc0509 normal push passed all 2,183
+workspace library tests (2 existing skips, 396.504s bodies). The 17 push passed
+applicable hygiene hooks; Rust/unit hooks correctly selected no files for its
+five-file Python/docs/changelog delta, rather than repeating that test result.
+Fresh [CI run 37172144001](https://github.com/lukacf/meerkat-mobkit/actions/runs/37172144001)
+passed all 11 jobs at exact 17, including the final gate at 03:24:41 UTC
+(36m53s elapsed from run creation). PR520 is mergeable with clean current-head CI.
 
-Bounded publication review found that facade/tools, model/credential and
-machine-authority changes also need the native integration row. Public planner
-assertions reproduced the missing schema and tools selections before the
-expanded trigger repair. The complete existing classifier selftest and actual
-PR plan then passed. The reviewers also found that non-exhaustive future hook
-causes were incorrectly rejected by both SDKs. Focused parser tests reproduced
-those failures; the repair preserves the entire unknown reason with neutral
-display text, validates known fields and retains canonical-present priority.
-TypeScript now preserves explicit-null HookDenied payloads too. The final
-existing TypeScript suite passed 499 tests and Python type/parser file passed
-476 tests; root verified the five source/test files match the executed bytes.
-These are SDK and CI routing repairs, with no Rust source change.
+The published SDK adapter exports known hook reasons plus an explicit unknown
+wrapper retaining the exact original reason/code. Known TypeScript variants
+keep discriminant narrowing, malformed known reasons do not fall back to legacy
+strings, and explicit-null HookDenied payloads survive. The existing TypeScript
+build/public typecheck and 500 tests, Python type/parser file (482 tests) and Web
+SDK typecheck/96 tests passed at their recorded checkpoints. These are contract
+compatibility results. The existing CI planner's 15.1-minute runtime unit model
+preserves the 16-minute budget; it is not measured authorization overhead or a
+hosted-job completion guarantee.
 
-The lead then reproduced a public TypeScript narrowing regression: the raw
-future-cause union overlapped known reason codes. Tests first reproduced the
-failure. The adapter now uses an explicit `reason_code: "unknown"` wrapper,
-retaining the exact native reason and its original code. Known native variants
-keep ordinary discriminant narrowing. Both SDKs export the reason and
-confinement types publicly. Exact display controls cover all known variants.
-The existing TypeScript build, public typecheck and 500 tests passed; the
-existing Python type/parser file passed 482 tests. Root verified all seven
-source/test files against those executed bytes. Generated wire and Rust
-runtime files are unchanged.
+The exact published `157` optimized cost binary is prepared:
+`/home/luka/src/wt/adr-native-cost-target/release/deps/native_cost-8340d2a996464c6b`,
+SHA256 `03d524567eea7aff409d228dc9e1916912536b7a97b3d8dd777cccf562a20dd3`.
+The optimized build passed in 472s (`native-157-optimized-build-correctness-r1.log`).
+`native_cost_correctness` passed 1 test in 0.04s bodies
+(`native-157-cost-correctness-r1.log`); `representative::native_representative_correctness`
+passed 1 test in 11.44s bodies (`native-157-representative-correctness-r1.log`).
+Those correctness results are separate from build duration and timing.
 
-The parallel Console candidate is committed at `42df889d` with current main,
-local-feedback documentation and a browser fixture compatibility fix. Existing
-JS/component/build checks and four mock browser scenarios passed. Production
-JS/assets remain those tested at `4d4559504`. Native hook/confinement cards have
-unit/component qualification; the browser scenarios exercise permission/audit
-feedback and access state. PR 520 still has its previous remote head, so its old
-green checks do not qualify this candidate. Its normal push now owns the local
-Rust lane. GCP accepted ownership of the native candidate's normal hook-running
-push in an isolated checkout after receiving the final SDK successor bundle.
+The first actual small timing run completed at 03:22:42 UTC: the existing test
+exited 0 with 1 case in 46.91s bodies (`native-small157-r1.log`). Its four cells
+contain 16,000 valid samples, with 100 warmup pairs and 2,000 measured matched
+pairs per cell. Independent review confirmed sample/order cardinality, effect
+and audit counts, and the arithmetic (`native-small157-r1-independent-review.log`).
+The existing analyzer's summary is `native-small157-r1-summary.json`.
+The uninstrumented `turn_only` results are:
 
-Root owns overhead measurement on meerkat-dev after the GCP lead prepares the
-exact published candidate's optimized binary and passes both existing cost
-correctness selectors. The lead marked the tentative 22:30-23:00 UTC window
-NOT_MEASURED when publication missed its 21:45 cutoff. A standard Git bundle
-let the lead prepare the exact frozen d1 candidate while normal gates ran:
-the optimized build passed in 8m41s and both existing correctness selectors
-passed. The fca successor build also passed in 7m53s; its binary was identical
-and both correctness selectors passed again (0.04s and 11.45s). These are
-preparation runs. The final SDK successor still needs exact source
-reconciliation with the published SHA before the lead schedules explicit
-quiet clearance. No accepted overhead result or green native
-implementation PR CI exists yet. Publication-only repairs continue; additional
-runtime integration remains held.
+| Grant lineage depth | Trusted p50 turn (ms) | Local p50 turn (ms) | Signed paired added-turn p99 (ms) | Turn overhead, ratio of means |
+| --- | --- | --- | --- | --- |
+| 1 | 0.919699 | 2.005658 | +1.228443 | +117.33 percent |
+| 3 | 0.797036 | 2.285658 | +1.643655 | +189.37 percent |
 
-The GCP normal push of `0576b5c6a` failed after 43.5 minutes before
-publication. Its WASM lint lane omits `sqlite-store`, leaving two acquisition
-matches with one infallible arm. The narrow repair keeps the existing SQLite
-match and directly destructures the memory owner in the other configuration.
-Locking, counters, claims and refusal behavior are unchanged. This is a Rust
-source delta and needs the normal gates and optimized-binary reconciliation;
-earlier runtime test passes remain qualified by their original checkpoint.
+Added-turn quantiles use signed Local-minus-Trusted matched samples and empirical
+nearest rank; overhead is `100 * (sum(Local) / sum(Trusted) - 1)`. These turns
+exceed 10 percent in this small fixture and require investigation; the
+representative-turn gate remains unproven. The added whole-turn p99 is not the under-1-ms per-operation
+metric. The instrumented boundary cells are diagnostics, with no individual
+full-tool timing samples. One small quiet run does not establish the full
+representative/platform budget result or full acceptance.
+
+Root owned the explicitly allocated 45-minute small quiet window. The GCP
+resource owner confirmed no build-monitor violation from START through DONE
+and released the lease at 03:24:56 UTC. Post-run observations showed 100 percent
+CPU idle, zero iowait and no swap, with writeback activity in the final sample;
+this is not an all-IO-zero claim. The full representative 6-7-hour capacity
+allocation remains separately pending. Full surface and performance acceptance
+remain open, including under 1 ms p99 added authorization per operation and at
+most 10 percent representative turn overhead.
+
+Historical failure/preparation logs remain in the existing evidence directory.
+The first Web SDK exhaustive-event check omitted HookLaunchRefused, while its
+11m43s WASM compile/17m00s complete build did not qualify overhead. The no-SQLite
+WASM push of 0576 failed after 43.5 minutes; the 9a7 Linux push failed after 34.4
+minutes on unsupported-target fields/imports and the missing E2E confinement
+field. Those narrow cfg/fixture repairs preceded published `157`; earlier failed
+pushes did not publish. Console's GH007 metadata rejection and Python 3.14
+process-fixture failure remain separate from its subsequent successful normal
+publication with installed Python 3.12. Earlier d1/fca optimized preparation and
+the 22:30-23:00 UTC NOT_MEASURED window remain historical evidence; they are not
+substitutes for the exact `157` binary or current timing.
 
 
-The successor `9a7f3b8fa` passed the actual no-SQLite WASM lint gate, but its
-normal GCP push failed after 34.4 minutes on Linux workspace Clippy. macOS-only
-sandbox launch fields and a Path import were present on unsupported targets,
-where they had no consumer. A dependent all-target diagnostic also found an
-existing real-shell E2E fixture missing the new confinement field. Publication
-repair keeps launch validation and typed unsupported-requirement refusal intact,
-retains opaque public types, and preserves the fixture's trusted-host behavior.
-The failed push log is retained separately from the earlier WASM failure.
-No native branch, implementation PR CI or benchmark acceptance follows from
-these failed pushes. Additional runtime integration remains held.
+### Local tests-only restart successor, not yet published
+
+The isolated `codex/security-restart-acceptance-r1` checkout is based on `51`
+with only fixture/catalog changes and the canonical BUILD source-list refresh.
+It promotes the six existing deterministic default-feature acceptance cases to
+ordinary tests and adds one real separate-process SQLite case. Published `157`
+still has the six original ignore annotations; this successor is not its CI
+result or an automatically governed surface profile.
+
+The first cold run failed at fixture discovery: raw SqliteSessionStore listing
+returned zero sessions before the reader started (0.62s compile, 0.66s body;
+`restart-acceptance51-cold-process-r1.log`). The fixture now discovers the real
+session through the existing public RuntimeStore catalog and typed session ID;
+it still validates the actual committed WholeBlob, input and protected audit.
+This was a fixture owner-selection error, not an established recovery defect.
+The repaired exact cold selector passed 1 test (16.84s recompile, 1.85s body;
+`restart-acceptance51-cold-process-r2.log`). The full default native_governed_loop
+target then passed all 16 tests, with 0 ignored and 0 filtered out (0.60s compile,
+4.85s bodies; `restart-acceptance51-ordinary-r2.log`). Unchanged native_cost
+debug correctness also passed both ordinary cases (6.61s compile, 159.51s bodies,
+2 timing cases ignored; `restart-acceptance51-cost-correctness-r1.log`), making
+18 ordinary cases across the two authorization integration targets.
+
+The writer and reader are actual separate processes using the real SQLite and
+File token owners. The reader starts with a cold generated credential registry,
+restores the writer's marked credential through the existing lifecycle owner,
+installs newly issued current host grants and obtains the reconstructed actor's
+current controller pin. Reconstruction performs no model/tool work. A fresh
+input/run then receives exact local delete refusal, one permitted callback read,
+two loopback model requests and same-run completion. Reader and parent verify
+the original protected row/audit and exact transcript prefix remain unchanged.
+Historical association data does not restore permission.
+
+This qualifies completed-turn reconstruction followed by new work in the
+explicit embedding fixture. The HTTP Bearer header is synthetic and independent
+of restored secret bytes; the read is a callback rather than filesystem/source
+access. It does not qualify interrupted replay, provider secret refresh/rotation,
+persistent controller/grant administration, automatic constructors, full surface
+coverage or performance. These body results do not establish wrapper/lint
+or normal checkpoint qualification. No runtime production change is included.
 
 ## Current local shell and hook checkpoint, 2026-10-03
 

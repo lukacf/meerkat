@@ -191,6 +191,9 @@ fn http_client(server: &Server) -> Arc<dyn LlmClient> {
         profile: None,
         origin: BindingOrigin::Configured,
     };
+    http_client_with_binding(server, binding)
+}
+fn http_client_with_binding(server: &Server, binding: AuthBindingRef) -> Arc<dyn LlmClient> {
     let identity = SessionLlmIdentity {
         model: E1_MODEL.into(),
         provider: Provider::Anthropic,
@@ -302,12 +305,20 @@ struct Evidence {
     directory: PathBuf,
 }
 impl Evidence {
+    #[cfg(all(target_os = "macos", feature = "integration-real-tests"))]
     fn start(session_id: &SessionId, input_id: &meerkat_core::InputId) -> Self {
         let root = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
             .or_else(|| std::env::var_os("MEERKAT_E1_EVIDENCE_DIR"))
             .filter(|path| !path.is_empty())
             .expect("E1 requires an explicit test evidence directory");
-        let directory = PathBuf::from(root).join(format!("adr-e1-{session_id}"));
+        Self::at_root(session_id, input_id, PathBuf::from(root))
+    }
+    fn ordinary(session_id: &SessionId, input_id: &meerkat_core::InputId) -> Self {
+        let root = ordinary_evidence_root("MEERKAT_E1_EVIDENCE_DIR");
+        Self::at_root(session_id, input_id, root)
+    }
+    fn at_root(session_id: &SessionId, input_id: &meerkat_core::InputId, root: PathBuf) -> Self {
+        let directory = root.join(format!("adr-e1-{session_id}"));
         std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
         std::fs::create_dir(&directory).expect("fresh invocation evidence directory");
         let evidence = Self { directory };
@@ -559,7 +570,7 @@ async fn exercise(server: &Server) {
     prompt.header.authority_association = Some(claims.clone());
     let input = Input::Prompt(prompt);
     let input_id = input.id().clone();
-    let evidence = Evidence::start(&session_id, &input_id);
+    let evidence = Evidence::ordinary(&session_id, &input_id);
     let current = NativeIngressContext::from_trusted_ingress(
         &input,
         principal("requester"),
@@ -750,7 +761,6 @@ async fn exercise(server: &Server) {
 mod a8_requester_revocation;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "E1 acceptance needs explicit evidence output and native composed authorization"]
 async fn adr_e1_policy_control_same_batch_native_run() {
     let mut server = Server::start().await;
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(

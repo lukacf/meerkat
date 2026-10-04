@@ -16,6 +16,11 @@ use meerkat_runtime::{
 
 type CleanupSlot = Mutex<Option<(Arc<MeerkatMachine>, SessionId)>>;
 
+struct StockCredentialHost {
+    client: Arc<dyn LlmClient>,
+    credential_persistence: meerkat_core::auth::ProviderAuthPersistence,
+}
+
 const REOPEN_DENIED_CALL: &str = "post-reopen-delete";
 const REOPEN_PERMITTED_CALL: &str = "post-reopen-read";
 const REOPEN_PROMPT: &str = "After SQLite reopen, attempt the two fresh record actions";
@@ -251,10 +256,14 @@ async fn exercise_stock_persistent(
     store: Arc<dyn RuntimeStore>,
     reopen_database: Option<&std::path::Path>,
     fresh_work_after_reopen: bool,
+    host: StockCredentialHost,
 ) {
+    let StockCredentialHost {
+        client,
+        credential_persistence,
+    } = host;
     let old_session_store = Arc::downgrade(&session_store);
     let old_runtime_store = Arc::downgrade(&store);
-    let client = http_client(server);
     let selected = client
         .controller_model_selection()
         .expect("actual HTTP selection");
@@ -420,10 +429,6 @@ async fn exercise_stock_persistent(
     assert!(
         pin.selection() == &selected,
         "real actor keeps the actual HTTP client"
-    );
-    let credential_persistence = meerkat_core::auth::ProviderAuthPersistence::new(
-        Arc::new(meerkat_auth_core::EphemeralTokenStore::new()),
-        Arc::new(meerkat_auth_core::InMemoryCoordinator::new()),
     );
     let published_tokens = meerkat_auth_core::save_tokens_and_publish_lifecycle(
         credential_persistence.clone(),
@@ -1097,7 +1102,7 @@ async fn run_stock_persistent_case(
         !fresh_work_after_reopen || reopen_database.is_some(),
         "fresh post-reopen work requires the actual SQLite reopen path"
     );
-    let mut server = if fresh_work_after_reopen {
+    let server = if fresh_work_after_reopen {
         Server::start_with_tool_responses(vec![
             sibling_response(),
             sibling_response_with_ids(REOPEN_DENIED_CALL, REOPEN_PERMITTED_CALL),
@@ -1106,6 +1111,33 @@ async fn run_stock_persistent_case(
     } else {
         Server::start().await
     };
+    let client = http_client(&server);
+    let credential_persistence = meerkat_core::auth::ProviderAuthPersistence::new(
+        Arc::new(meerkat_auth_core::EphemeralTokenStore::new()),
+        Arc::new(meerkat_auth_core::InMemoryCoordinator::new()),
+    );
+    run_stock_persistent_case_with_host(
+        server,
+        session_store,
+        store,
+        reopen_database,
+        fresh_work_after_reopen,
+        StockCredentialHost {
+            client,
+            credential_persistence,
+        },
+    )
+    .await;
+}
+
+async fn run_stock_persistent_case_with_host(
+    mut server: Server,
+    session_store: Arc<dyn meerkat::SessionStore>,
+    store: Arc<dyn RuntimeStore>,
+    reopen_database: Option<&std::path::Path>,
+    fresh_work_after_reopen: bool,
+    host: StockCredentialHost,
+) {
     let cleanup = CleanupSlot::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
         Duration::from_secs(60),
@@ -1116,6 +1148,7 @@ async fn run_stock_persistent_case(
             store,
             reopen_database,
             fresh_work_after_reopen,
+            host,
         ),
     ))
     .catch_unwind()
@@ -1208,3 +1241,7 @@ async fn stock_sqlite_whole_blob_reopen_runs_fresh_governed_model_tool_model_wor
 
 #[path = "stock_persistent/revalidation.rs"]
 mod revalidation;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[path = "stock_persistent/process_reopen.rs"]
+mod process_reopen;

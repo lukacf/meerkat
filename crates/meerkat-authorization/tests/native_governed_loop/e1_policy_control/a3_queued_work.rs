@@ -392,11 +392,8 @@ fn assert_queued_controller_fallback(
     refused_id.clone()
 }
 fn start_evidence(session: &SessionId) -> Evidence {
-    let root = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
-        .or_else(|| std::env::var_os("MEERKAT_A3_EVIDENCE_DIR"))
-        .filter(|path| !path.is_empty())
-        .expect("A3 requires an explicit evidence directory");
-    let directory = PathBuf::from(root).join(format!("adr-a3-{session}"));
+    let root = ordinary_evidence_root("MEERKAT_A3_EVIDENCE_DIR");
+    let directory = root.join(format!("adr-a3-{session}"));
     std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
     std::fs::create_dir(&directory).unwrap();
     Evidence { directory }
@@ -822,7 +819,6 @@ async fn exercise_queued(server: &Server, barriers: Arc<QueueBarriers>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "A3 source preparation; requires E1 green and explicit evidence output"]
 async fn adr_a3_queued_work_survives_local_permission_refusal() {
     let barriers = Arc::new(QueueBarriers::default());
     let mut server = start_server(barriers.clone()).await;

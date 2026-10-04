@@ -374,11 +374,8 @@ struct Evidence {
 }
 impl Evidence {
     fn start(session_id: &SessionId, input_id: &meerkat_core::InputId) -> Self {
-        let root = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
-            .or_else(|| std::env::var_os("MEERKAT_E3_EVIDENCE_DIR"))
-            .filter(|path| !path.is_empty())
-            .expect("E3 requires an explicit test evidence directory");
-        let directory = PathBuf::from(root).join(format!("adr-e3-{session_id}"));
+        let root = ordinary_evidence_root("MEERKAT_E3_EVIDENCE_DIR");
+        let directory = root.join(format!("adr-e3-{session_id}"));
         std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
         std::fs::create_dir(&directory).expect("fresh invocation evidence directory");
         let evidence = Self { directory };
@@ -857,7 +854,6 @@ async fn exercise(server: &Server) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "E3 settlement subcase needs explicit evidence output and native composed authorization"]
 async fn adr_e3_completed_tool_settlement_failure_preserves_effect() {
     let mut server = Server::start().await;
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(

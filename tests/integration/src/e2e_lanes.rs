@@ -5089,12 +5089,20 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             env: &[],
             cargo_bin_env: &[],
             pre_commands: &[],
-            command: CommandSpec::CargoTest {
-                package: "meerkat-authorization",
-                test_target: "native_governed_loop",
-                test_name: "adr_e1_policy_control_same_batch_native_run",
-                features: &[],
-                all_features: false,
+            command: CommandSpec::Raw {
+                argv: &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "meerkat-authorization",
+                    "--test",
+                    "native_governed_loop",
+                    "e1_policy_control::adr_e1_policy_control_same_batch_native_run",
+                    "--",
+                    "--exact",
+                    "--nocapture",
+                ],
+                output_policy: OutputPolicy::CargoTest,
             },
         }),
         "fixture-embedded-min" => Some(&Spec {
@@ -7570,7 +7578,7 @@ mod tests {
     fn adr_e1_registration_selects_exact_native_sibling_control() {
         const SUITE: &str = "adr-infrastructure-policy-control";
         const WRAPPER: &str = "e2e_smoke_adr_infrastructure_policy_control";
-        const INNER: &str = "adr_e1_policy_control_same_batch_native_run";
+        const INNER: &str = "e1_policy_control::adr_e1_policy_control_same_batch_native_run";
         let spec = suite_spec(SUITE).expect("E1-only suite must be registered");
         assert_eq!(spec.lane, Lane::Smoke);
         assert_eq!(spec.timeout_secs, 900);
@@ -7585,12 +7593,9 @@ mod tests {
         assert!(spec.cargo_bin_env.is_empty());
         assert!(matches!(
             spec.command,
-            CommandSpec::CargoTest {
-                package: "meerkat-authorization",
-                test_target: "native_governed_loop",
-                test_name: INNER,
-                features: [],
-                all_features: false,
+            CommandSpec::Raw {
+                output_policy: OutputPolicy::CargoTest,
+                ..
             }
         ));
         assert_eq!(
@@ -7621,7 +7626,7 @@ mod tests {
                 "native_governed_loop",
                 INNER,
                 "--",
-                "--ignored",
+                "--exact",
                 "--nocapture",
             ]
         );
@@ -7643,8 +7648,8 @@ mod tests {
             prebuilt.command,
             [
                 "/tmp/native_governed_loop",
-                "adr_e1_policy_control_same_batch_native_run",
-                "--ignored",
+                "e1_policy_control::adr_e1_policy_control_same_batch_native_run",
+                "--exact",
                 "--nocapture",
             ]
         );

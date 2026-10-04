@@ -262,6 +262,7 @@ rust_test(
         "tests/native_governed_loop/e1_policy_control/a8_requester_revocation.rs",
         "tests/native_governed_loop/e1_policy_control/shell_confinement.rs",
         "tests/native_governed_loop/e1_policy_control/stock_persistent.rs",
+        "tests/native_governed_loop/e1_policy_control/stock_persistent/process_reopen.rs",
         "tests/native_governed_loop/e1_policy_control/stock_persistent/revalidation.rs",
         "tests/native_governed_loop/e3_tool_settlement.rs",
         "tests/native_governed_loop/observation_deferred_siblings.rs",

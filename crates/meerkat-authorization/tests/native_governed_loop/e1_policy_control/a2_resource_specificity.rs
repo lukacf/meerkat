@@ -462,11 +462,8 @@ fn assert_feedback(body: &Value, order: Order) {
 }
 
 fn evidence_a2(session_id: &SessionId, input_id: &meerkat_core::InputId, order: Order) -> Evidence {
-    let root = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
-        .or_else(|| std::env::var_os("MEERKAT_A2_EVIDENCE_DIR"))
-        .filter(|path| !path.is_empty())
-        .expect("A2 requires an explicit evidence directory");
-    let directory = PathBuf::from(root).join(format!("adr-a2-{}-{session_id}", order.name()));
+    let root = ordinary_evidence_root("MEERKAT_A2_EVIDENCE_DIR");
+    let directory = root.join(format!("adr-a2-{}-{session_id}", order.name()));
     std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
     std::fs::create_dir(&directory).expect("fresh A2 invocation evidence");
     let evidence = Evidence { directory };
@@ -852,13 +849,11 @@ async fn run_a2(order: Order) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "A2 requires explicit evidence and the E1 native composition gate"]
 async fn adr_a2_resource_specificity_denied_first() {
     run_a2(Order::DeniedFirst).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "A2 requires explicit evidence and the E1 native composition gate"]
 async fn adr_a2_resource_specificity_denied_last() {
     run_a2(Order::DeniedLast).await;
 }

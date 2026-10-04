@@ -68,6 +68,27 @@ const ENDPOINT: &str = "https://native-loop.invalid/messages";
 const DENIED_CALL: &str = "attempt-delete";
 const PERMITTED_CALL: &str = "attempt-read";
 
+// Keep ordinary-case observations through panic and timeout cancellation.
+// Explicit roots preserve the existing no-overwrite artifact behavior.
+fn ordinary_evidence_root(checkpoint_env: &str) -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
+        .or_else(|| std::env::var_os(checkpoint_env))
+        .filter(|path| !path.is_empty())
+    {
+        return std::path::PathBuf::from(root);
+    }
+    let root = tempfile::Builder::new()
+        .prefix("native-governed-observations-")
+        .tempdir()
+        .expect("ordinary test observations")
+        .keep();
+    eprintln!(
+        "native governed observations retained at {}",
+        root.display()
+    );
+    root
+}
+
 fn id(value: &str) -> EvidenceId {
     EvidenceId::new(value).expect("bounded fixture identifier")
 }

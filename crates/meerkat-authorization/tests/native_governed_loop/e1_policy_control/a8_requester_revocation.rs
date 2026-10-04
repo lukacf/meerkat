@@ -436,11 +436,8 @@ struct A8Evidence {
 }
 impl A8Evidence {
     fn start(session_id: &SessionId, input_id: &meerkat_core::InputId) -> Self {
-        let root = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
-            .or_else(|| std::env::var_os("MEERKAT_A8_EVIDENCE_DIR"))
-            .filter(|path| !path.is_empty())
-            .expect("A8 requires explicit evidence output");
-        let directory = PathBuf::from(root).join(format!("adr-a8-{session_id}"));
+        let root = ordinary_evidence_root("MEERKAT_A8_EVIDENCE_DIR");
+        let directory = root.join(format!("adr-a8-{session_id}"));
         std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
         std::fs::create_dir(&directory).expect("fresh A8 invocation directory");
         let this = Self { directory };
@@ -1025,7 +1022,6 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "A8 requires E1 GREEN, explicit evidence output and actual native composed authorization"]
 async fn adr_a8_requester_permission_revocation_preserves_effect_and_controller() {
     let mut server = server().await;
     let barrier = Arc::new(EntryBarrier::default());

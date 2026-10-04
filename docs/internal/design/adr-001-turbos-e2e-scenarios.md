@@ -296,9 +296,13 @@ Existing anchors include the local-authorization and controller-custody tests,
 the native input audit buffer, and the `smoke_model_fallback.rs` child-process
 pattern. The four REDs recorded by the original r7 inspection are historical;
 selected repaired controls have passed, as qualified below. They do not establish
-all C1-C3 removal and race variants. C4 durable authority restoration and C7
-pre-open physical SQLite custody remain unimplemented. The prepared C7 tests are
-unexecuted; C4 still lacks its owner-backed restoration API. Copying a MemoryStore snapshot is not process recovery.
+all C1-C3 removal and race variants. Physical SQLite custody is implemented and
+locally qualified by the controls below, including real cross-process exclusion
+and holder release. Full C7 second-host governed transfer and C4 interrupted-work
+recovery remain open. The completed-turn cold reconstruction and fresh-work
+fixture has passed in a local tests-only successor, not yet published; it does not establish
+retained interrupted-operation recovery. Copying a MemoryStore snapshot is not
+process recovery.
 
 ## Story D: approve one exact action, then confine its actual process
 
@@ -423,11 +427,23 @@ host grants, original marked token vault and fresh actor pin: distinct new
 input/run/tool IDs, two additional actual HTTP requests, local refusal feedback,
 permitted sibling entry and protected terminal audit. Its initial unrelated
 empty-vault setup failed and was corrected without changing production.
-No separate process restart, admin flow, cost or CI pass is claimed.
+Those same-process results did not qualify separate-process restart, admin
+flow, cost or CI. The later local tests-only successor, not yet published, based
+on native `51`
+passed completed-turn reconstruction and fresh governed work across actual
+writer/reader processes using current host grants, marked File credential restore
+and the reconstructed actor's current controller pin. It preserves the old
+protected input/audit and exact transcript prefix. Its full default
+native_governed_loop target passed 16 tests (0 ignored/filtered, 0.60s compile,
+4.85s bodies); unchanged native_cost debug correctness passed 2 more ordinary
+cases (6.61s compile, 159.51s bodies, 2 timing cases ignored). These 18 cases are
+not published successor CI, interrupted-operation recovery,
+persistent controller/grant administration or full C7 transfer acceptance.
 
 The completed-turn close/reopen slice preserves stored input/session and audit
-with current trusted host owners. Fresh governed work after reopen now has its
-own executed test; separate process recovery needs a current custody contract.
+with current trusted host owners. Fresh governed work after reopen has its own
+executed test; cold reconstruction then fresh admission remains distinct from
+resuming an interrupted logical operation.
 The independent next slices below use existing test targets and owner fixtures.
 The identity-policy and native command-hook proposals are staged, not installed
 or accepted. Older acceptance-plan dependency/provenance workload assumptions
@@ -457,17 +473,17 @@ coverage, durable recovery and the measured cost gate remain outstanding.
 | Independent service activation and agent frontends | B7 service-lifecycle variant | PendingFix: pausing/removing an agent frontend leaves an independently active shared service available to its authorized audience; removing the service does not widen another service or release shared credential/package restrictions. Exercise actual separate owners and authorized positive controls. | PendingFix: exercise the existing separate service/frontend lifecycle owners; no frontend pause may be treated as service authority revocation or a permission grant. |
 | Separately authorized setup executor | B2/B3/D6 `find_and_install` variant | Business requester never inherits installer/shell permission; actual integration location and recipient owner are PendingFix until wired. | PendingFix: first identify the actual installed setup/recipient owner, then prove business shell/install zero entry and a separate permitted setup effect; an unwired external flow stays open. |
 | Credential/controller admission and all removal APIs | C1-C3 | Selected controller/custody controls passed; full removal-API and clear/status/acquire/storage race acceptance remains pending. | Gap: execute existing account/auth owner revoke/clear/status/acquire fixtures under governed admission, with real entry barriers and allowed unrelated continuation; no successful persisted turn proves these races. |
-| Persistent/detached operation and actual process recovery | C4-C7, D5/D6 monitor | Physical SQLite custody, same-process completed-turn close/reopen and fresh post-reopen work passed locally. Separate process restart, durable current controller restoration and detached revocation remain open. | Next: a separate real-process reopen/refusal test. Later governed restoration and detached revocation need current owners. |
+| Persistent/detached operation and actual process recovery | C4-C7, D5/D6 monitor | Physical SQLite custody, same-process completed-turn close/reopen and fresh post-reopen work passed locally. Separate-process completed-turn reconstruction and fresh governed work also passed in a local tests-only successor, not yet published. Interrupted replay, persistent controller/grant administration, full C7 host transfer and detached revocation remain open. | Next: qualify and integrate the existing tests-only successor through normal gates; then exercise interrupted work, pending audit and host transfer through their actual owners. |
 | Approval freshness, authenticated decision, late delivery, one-use | D1-D3/D8-D9 | Positive approved sink and concurrent consumption, pending host restart, late typed input/next request, current eligibility and relevant/unrelated change; physical integration remains outstanding. | Gap: reuse approval/action_tests.rs and actual sink owner for exact approved entry, late authenticated decision and consume race; shell confinement alone is not consent integration. |
 | macOS/Linux confinement, non-userns/container modes | D4-D7 platform/configuration variants | Actual capabilities, bootstrap integrity and all launch families must pass; Required cannot silently downgrade. | Partial prerequisites: macOS shell owner green; native command-hook ownership/confinement integration is staged. Linux/container positive capability profiles remain separate open cells, not inferred from macOS. |
 | Windows/remote/browser unsupported OS requirements | D6 capability-negative variant | Explicit unsupported is correct only for unadvertised/unsupported profile; never a positive isolation claim. | Gap: select Required through each actual configuration owner and assert exact UnsupportedRequirement/no target entry; keep a later permitted operation and no empty platform filter pass. |
 | Required audit vs optional exporter, outcome/uncertainty | C5, E2-E6 | Native audited row and error foundations exist; durable/live recovery gaps explicit. | PendingFix: protect exact refused pre-tool hook association through existing input/audit owner, then inject required append failure with no body entry and successful sibling. Existing core HookDenied transport null retention does not prove durable hook audit. |
 | Rust embedding, CLI, REST, RPC, MCP protocol | A1/A2/C6/E5 surface variants | Reuse S16/S23/S25/S26/S27/S31/S49-S53 and Rust SDK suites; assert governance is actually installed. | Gap: first register the explicit macOS native-shell E1 in existing catalog/wrapper/Bazel owners; then add governed overlays to listed surface fixtures with real installed policy and negative physical-entry oracles. |
-| Python and TypeScript packaged SDKs | C6/E5 | Native packaged S38/S39 and S43/S44 remain required. MobKit DurableAgentSpec/AgentBuildDraft policy carriers currently drop fields; exact native-type transport proposal and existing-target REDs are staged. No integrated issue 1618 pass. | PendingFix: execute MobKit identity models/customize_build retention RED/GREEN using existing SDK tests; native runtime enforcement stays separate. Then native packaged SDK C6/E5 handoffs with decoded typed feedback and observer auth. |
+| Python and TypeScript packaged SDKs | C6/E5 | Published native hook feedback transport passed TypeScript build/public typecheck and 500 tests, Python type/parser file 482 tests, and Web SDK typecheck/96 tests. Known reasons retain typed narrowing; explicit unknown wrappers retain raw reasons, and null denial payloads survive. Native packaged S38/S39 and S43/S44 handoffs remain required. Staged MobKit identity-carrier SDK controls (8 Python, 4 TypeScript) are separate from pending Rust carrier/runtime enforcement; no integrated issue 1618 pass. | Gap: integrate the staged MobKit identity-carrier owner and exercise native enforcement separately; then native packaged SDK C6/E5 handoffs with decoded typed feedback and observer auth. |
 | Browser/raw WASM vs hosted browser client | A1/A6/B5/B7/E5 | Separate S47/S48 raw exports and packaged SDK variants; server-only enforcement does not prove browser execution. Browser fetch controls/capabilities remain explicit. | Gap: reuse S47/S48 exports and hosted client tests independently, asserting actual policy owner/capability and typed local feedback; server tests do not establish raw browser execution. |
 | Live text/audio, interruption, backend switch and playback | A6/B5/B7/E4/E5 overlays on S71/S72 and S97-S107 | Reuse prerecorded audio and existing calls; observe real live send/tool boundary and typed lifecycle. Text fixture is not audio evidence. | Gap: extend existing S71/S72/S97-S107 prerecorded fixtures at the actual live send/tool boundary; retain independent text/audio interruption, backend and audience controls. |
-| MobKit console and domain policy | E5/E6, B3/D1 controls | Mock-browser feedback/checked-save controls and qualified real Console checked-save evidence exist; full E5/E6/B3/D1 decoded-event and authenticated-action variants remain pending. Rendering is projection only. | Gap: project the actual native typed tool result/event through existing Console/gateway tests; current checked-save/browser mocks do not prove identity tool enforcement or authenticated operator mutation. |
-| Default/trusted mode, mandatory gate, cheap checks | B2/B3, D6, cost gate below | Explicit profile inventory and measured costs remain pending; no accepted overhead benchmark. No semantic provenance tests. | PendingFix: complete host/default and mandatory-prerequisite functional controls, then existing native_cost timing matrices in a reserved quiet window. Report actual operation overhead; compilation and test duration are not measurements. |
+| MobKit console and domain policy | E5/E6, B3/D1 controls | Console PR520 at 17fe7af8 passed all 11 fresh CI jobs. Typed local hook feedback, access refresh and four mock-browser scenarios are source-qualified Console projection controls; earlier qualified real checked-save evidence remains separate. Full E5/E6/B3/D1 decoded-event and authenticated-action variants remain pending. | Gap: exercise actual native typed feedback through Console/gateway owners and authenticated operator actions; current projection/browser controls do not prove integrated native identity enforcement, grant administration or revocation. |
+| Default/trusted mode, mandatory gate, cheap checks | B2/B3, D6, cost gate below | The exact published native157 optimized small fixture measured +117.33/+189.37 percent turn overhead at grant lineage depths 1/3, with signed paired added-turn p99 +1.228443/+1.643655 ms. This needs investigation; it does not measure individual-operation p99 or the representative-turn gate. Full profile inventory and performance acceptance remain open. No semantic provenance tests. | Next: investigate the small-fixture signal without weakening canonical authority/currentness/audit, then qualify the remaining existing native_cost timing matrix in reserved quiet capacity. Compilation and correctness-test duration are not overhead measurements. |
 
 Before running, enumerate the advertised profile from real provider capabilities,
 enabled tool/launch inventory and registered surfaces. Map every entry to a row

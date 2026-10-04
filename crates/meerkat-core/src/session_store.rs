@@ -2412,6 +2412,54 @@ impl SessionHead {
         })
     }
 
+    /// Begin cold row replay from a rotated anchor written before 0.8.51.
+    ///
+    /// Those releases minted a rotated anchor over the whole head, including
+    /// the live tail the rotating rewrite mutation persisted after its last
+    /// edge's result. The graph bases the next edge on that result, so cold
+    /// replay cannot advance from the anchor. The anchor's operation lineage
+    /// at the result is the sealed edge's own result witness: the edge at
+    /// generation `anchor.rewrite_count`, whose row such releases never
+    /// retire. The repaired origin is accepted only when that witness,
+    /// extended by the anchor's own tail rows, reproduces the anchor's
+    /// lineage accumulator exactly.
+    #[doc(hidden)]
+    pub fn begin_row_lineage_replay_from_released_rotated_anchor(
+        &self,
+        sealed_edge: &TranscriptRevisionEdge,
+        sealed_edge_strand: &TranscriptStrandId,
+        anchor_tail_rows: &[Vec<u8>],
+    ) -> Result<SessionRowLineageReplay, SessionStoreError> {
+        validate_session_head_storage_representation(self)?;
+        let anchor = self
+            .row_lineage_anchor
+            .as_ref()
+            .ok_or_else(|| SessionStoreError::Corrupted(self.id.clone()))?;
+        let result_prefix = sealed_edge.result_witness().row_prefix();
+        let result_count = u64::try_from(sealed_edge.messages_after())
+            .map_err(|_| SessionStoreError::Corrupted(self.id.clone()))?;
+        let tail_count = u64::try_from(anchor_tail_rows.len())
+            .map_err(|_| SessionStoreError::Corrupted(self.id.clone()))?;
+        if anchor.rewrite_count == 0
+            || sealed_edge.rewrite_generation() != anchor.rewrite_count
+            || sealed_edge.rewrite_prefix() != &anchor.rewrite_prefix
+            || sealed_edge_strand != &anchor.strand
+            || result_prefix.row_count() != result_count
+            || tail_count == 0
+            || result_count.checked_add(tail_count) != Some(anchor.message_count)
+            || result_prefix.extend_serialized_rows(anchor_tail_rows)? != anchor.prefix
+        {
+            return Err(SessionStoreError::Corrupted(self.id.clone()));
+        }
+        Ok(SessionRowLineageReplay {
+            session_id: self.id.clone(),
+            rewrite_count: anchor.rewrite_count,
+            strand: anchor.strand.clone(),
+            message_count: result_count,
+            prefix: result_prefix.clone(),
+        })
+    }
+
     /// Pair this exact current physical head with a fully hydrated `Session`.
     ///
     /// The supplied session must have been materialized from the durable rows
@@ -4749,20 +4797,54 @@ impl PreparedHeadCanonicalRewriteMutation {
         // A row-lineage anchor older than the retention cut would make cold
         // row replay read rewrite rows the store retires, so the successor
         // rotates to a new anchor (a compaction successor: small).
+        //
+        // An anchor written before 0.8.51 may seal a live tail past its edge's
+        // result; it loads only through the released-anchor repair, so it is
+        // never preserved: a rotation re-mints it at the edge result.
+        let anchor_seals_its_edge_result = |anchor: &SessionRowLineageAnchor| {
+            anchor.rewrite_count() == 0
+                || usize::try_from(anchor.rewrite_count() - 1)
+                    .ok()
+                    .and_then(|index| history.state().commit(index))
+                    .is_some_and(|commit| {
+                        u64::try_from(commit.messages_after).ok() == Some(anchor.message_count())
+                    })
+        };
         let preserved_row_lineage_anchor =
             observed_head.row_lineage_anchor.clone().filter(|anchor| {
                 anchor.rewrite_count() >= transcript_retired_count
                     && successor_rewrite_count
                         .checked_sub(anchor.rewrite_count())
                         .is_some_and(|delta| delta < SESSION_ROW_LINEAGE_REBASE_INTERVAL)
+                    && anchor_seals_its_edge_result(anchor)
             });
+        // A rotated anchor seals the last edge's result, the transcript the
+        // graph bases its next edge on. The live tail this mutation persists
+        // after that result stays post-anchor rows: an anchor that sealed it
+        // would sit past the next edge's base, and cold row replay can only
+        // advance from its anchor.
+        let row_lineage_anchor = match preserved_row_lineage_anchor {
+            Some(anchor) => anchor,
+            None => SessionRowLineageAnchor::current(
+                successor_rewrite_count,
+                history.rewrite_prefix().clone(),
+                current_strand.clone(),
+                SessionMessageRowPrefixAccumulator::from_messages(
+                    session
+                        .messages()
+                        .get(..current_len)
+                        .ok_or_else(|| SessionStoreError::Corrupted(session.id().clone()))?,
+                )?,
+                current_prefix,
+            ),
+        };
         let successor_head = SessionHead::from_session_with_message_row_prefix(
             session,
             current_strand,
             successor_rewrite_count,
             successor_message_row_prefix,
             Some(history.rewrite_prefix().clone()),
-            preserved_row_lineage_anchor,
+            Some(row_lineage_anchor),
             true,
         )?;
         if successor_head.realtime_event_prefix.as_ref() != Some(&successor_realtime) {

@@ -726,6 +726,11 @@ them.
 
 ### Added
 
+- `meerkat::experimental_gpt_live::LivePostCloseWorkSource`: host source of
+  delegated work that outlived its voice channel, bound on a public Live open
+  authority with `ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source`;
+  a reopened channel's startup instructions then say the work is still
+  finishing (`LIVE_POST_CLOSE_WORK_PENDING`).
 - Barge-in playback hint for Public Live (#1638). When the user's speech and
   audible assistant audio overlap (the user speaking over the assistant, or
   the assistant starting while the user keeps talking; a reply after the user

@@ -41,10 +41,14 @@ example/root-lock checks and full compiled-alphabet poster gate before the
 normal successor publication. Published `51` has identical Rust bytes to `157`.
 Additional runtime production integration remains held.
 
-Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published at
-`17fe7af8b2b374402d0e198f44879c2891446ac8`, an ordinary merge of published
-`fc0509cfe` and main `fa233b756`. Only Python init-timeout SDK/tests/docs and the
-changelog differ from fc0509; Console/Rust bytes and assets remain unchanged.
+Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is now published
+at docs-only successor `37ca84df0fb3b6c956501374183b3e0866880db6`. Its normal
+push passed, and [CI run 37188101522](https://github.com/lukacf/meerkat-mobkit/actions/runs/37188101522)
+was still in progress at this checkpoint. Only the Console guide and changelog
+differ from `17`; Console/Rust bytes and assets remain unchanged. The preceding
+`17fe7af8b2b374402d0e198f44879c2891446ac8` is the ordinary merge of published
+`fc0509cfe` and main `fa233b756`, whose five-file delta added Python init-timeout
+SDK/tests/docs and retained both changelog entries.
 The four incoming Python stand-in gateway tests passed (2.57s bodies).
 The earlier tree-qualified Console/component/build and four mock browser
 scenarios remain valid; these establish projection/access UX, not integrated
@@ -54,7 +58,8 @@ applicable hygiene hooks; Rust/unit hooks correctly selected no files for its
 five-file Python/docs/changelog delta, rather than repeating that test result.
 Fresh [CI run 37172144001](https://github.com/lukacf/meerkat-mobkit/actions/runs/37172144001)
 passed all 11 jobs at exact 17, including the final gate at 03:24:41 UTC
-(36m53s elapsed from run creation). PR520 is mergeable with clean current-head CI.
+(36m53s elapsed from run creation). This remains the predecessor's CI result,
+not a completed current-head result for `37ca84df0`.
 
 The published SDK adapter exports known hook reasons plus an explicit unknown
 wrapper retaining the exact original reason/code. Known TypeScript variants
@@ -131,6 +136,15 @@ The separate exact-byte hex production candidate is committed at
 encoding change. Seven input-authority tests, the canonical encoding control
 and both native cost correctness selectors passed. This is correctness evidence,
 not a measured performance gain, and it is separate from published c18.
+The fixed-mean harness is committed locally at
+`761ce0d1b25454daf49bfbafb59d85d5f3c66f8b`: four deadline/profile controls
+failed behaviorally before repair (9m21s compile, 0.28s bodies) and then passed
+(6.51s compile, 0.05s bodies). Its full ordinary target passed six cases with
+two intentional ignored timing matrices (0.45s compile, 216.25s debug bodies;
+`native-fixed-mean-harness-all-ordinary-r1.log`). The repository-owned analyzer's
+fixed-profile extension passed 20 pure-Python tests. These qualify the harness
+and analysis contract; neither ignored matrix ran, and there is still no
+candidate timing gain or representative measurement.
 
 The approved next order is a quiet matched comparison of preserved `157` and
 that hex candidate first. Only a material improvement permits the representative
@@ -175,8 +189,8 @@ session through the existing public RuntimeStore catalog and typed session ID;
 it still validates the actual committed WholeBlob, input and protected audit.
 This was a fixture owner-selection error, not an established recovery defect.
 The repaired exact cold selector passed 1 test (16.84s recompile, 1.85s body;
-`restart-acceptance51-cold-process-r2.log`). The full default native_governed_loop
-target then passed all 16 tests, with 0 ignored and 0 filtered out (0.60s compile,
+`restart-acceptance51-cold-process-r2.log`). The directly executed default
+native_governed_loop target then passed all 16 tests, with 0 ignored and 0 filtered out (0.60s compile,
 4.85s bodies; `restart-acceptance51-ordinary-r2.log`). Unchanged native_cost
 debug correctness also passed both ordinary cases (6.61s compile, 159.51s bodies,
 2 timing cases ignored; `restart-acceptance51-cost-correctness-r1.log`), making
@@ -228,9 +242,11 @@ access. It does not qualify interrupted replay, provider secret refresh/rotation
 persistent controller/grant administration, automatic constructors, full surface
 coverage or performance. The changed-path governance/Clippy and selected outer
 wrapper results are qualified separately above. Normal c18 publication and
-exact-head CI are green; the earlier failed full Make invocation remains
-historical. No runtime production change is included in this restart delta.
-The separate public-entry/notification candidate is committed at
+exact-head CI are green; these recorded unit/integration and CI inventories do
+not supply an independently verified native_governed_loop exact-selector count.
+The earlier failed full Make invocation remains historical. No runtime production
+change is included in this restart delta.
+The earlier separate public-entry/notification candidate was committed at
 `c9361659b3e09a147eba0e3b863550b2d9952521`, tree
 `8053319b92ba75913e3c761d615965c8a392ce57`. The first execution on `643` passed
 two cases and failed the new public case: its fixture read the durable accepted
@@ -243,9 +259,16 @@ executes exported JSONL setup/serve, two actual model requests, zero denied
 delete callbacks, one permitted read callback, same-run feedback/completion,
 protected native audit and ordered public event notifications. The negative
 unsupported/ungoverned entry and existing refusal case passed too. Normal commit
-hooks passed; the candidate is not published and has no candidate CI result.
-These results do not extend c18's two-selector CI evidence or establish
-integrated native-plus-Console acceptance.
+hooks passed. The current source-reviewed local successor is
+`f687e95d6c2611491e102a192429e7c8558b2c6a`, tree
+`da4bce4bddba21698fbce883aae9cb0d556e3ba1`. Its same three cases passed with
+0 failed, 0 ignored and 553 filtered in 0.04s bodies after a 9m06s release build
+(`publicf687-governed-jsonl-r1.log`, SHA256
+`4298fa4acb389ccf1f7631370ae3885e2996aeaae4392dab479a8108e04cc1fd`).
+This includes the source-reviewed cross-operation model-tool-model audit ordering,
+without imposing serial order on siblings. The candidate remains unpublished
+with no exact-candidate CI result. These local results do not extend c18's
+two-selector CI evidence or establish integrated native-plus-Console acceptance.
 
 ## Current local shell and hook checkpoint, 2026-10-03
 

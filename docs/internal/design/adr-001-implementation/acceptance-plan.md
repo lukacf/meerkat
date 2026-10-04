@@ -31,9 +31,12 @@ required hooks in 4,078s and completed at 06:17:43 UTC. Fresh CI run 37182383940
 passed on exact c18 with 38 successful jobs and 4 intentional skips in 21m42s;
 its exact-head semver run passed too. The preceding `51` repair/CI success and
 `157` freshness failures remain separately source-qualified historical evidence.
-The published tests-only restart delta passed all 16 default native-loop cases,
-including completed-turn SQLite reconstruction in a new process followed by
-fresh governed work. Its six formerly ignored deterministic cases are ordinary;
+The published tests-only restart delta has direct acceptance evidence for all
+16 default native-loop cases, including completed-turn SQLite reconstruction in
+a new process followed by fresh governed work. Normal publication's recorded
+unit/integration selection and exact-head CI do not establish an independently
+verified CI native-loop exact-selector count. Its six formerly ignored
+deterministic cases are ordinary;
 published `157` retains its historical opt-ins. Interrupted recovery and
 persistent administration remain open.
 The revised restart case also proves current ingress accepts historical claims
@@ -43,11 +46,16 @@ smoke-wrapper controls passed separately. The selected changed-path governance
 and Clippy checks and actual prebuilt outer E1 wrapper also passed. The failed
 Make agent gate and deliberately stopped first Make smoke materializer remain
 recorded separately; normal c18 publication and exact-head CI are now green.
-The separate public-entry/notification candidate at `c9361659b` passed all three
-existing-target RPC cases with no ignores in the no-default/local-authorization
-profile. A fixture-only repair reads in-flight audit from the actual native
-adapter while retaining the final durable audit checks. These local results do
-not establish candidate publication, CI or integrated native-plus-Console acceptance.
+The current separate public-entry/notification candidate `f687e95d6` passed
+all three existing-target RPC cases with no ignores in the
+no-default/local-authorization profile (9m06s release build, 0.04s bodies).
+The earlier `c936` fixture repair reads in-flight audit from the actual native
+adapter while retaining final durable audit checks; its failed first execution
+and subsequent three-case pass remain historical evidence. The current local
+pass and source review do not establish candidate publication, exact-head CI or
+integrated native-plus-Console acceptance. Console's docs-only published
+`37ca84df0` has fresh CI in progress; the 11-job green result belongs to its
+source-compatible predecessor `17`.
 The exact published `157` optimized build and both cost correctness selectors
 passed. The first quiet small-fixture timing run is measured: whole-turn
 Local-minus-Trusted overhead was +117.33 percent at grant lineage depth 1 and
@@ -59,8 +67,13 @@ evidence. The verified `157` binary remains qualified for published `51`'s
 unchanged benchmark/build-selection inputs; those four generated/lock files do
 not require a redundant workload rebuild. The separate committed `f467` exact-byte
 hex candidate has passed compatibility and both cost correctness selectors, with
-no timing gain measured yet. The next cost step requires an explicitly cleared
-quiet START for a matched preserved-157/hex-candidate comparison. Only material
+no timing gain measured yet. The local `761ce0d1b` fixed-mean harness has four
+controls that failed before repair and then passed, followed by all six ordinary
+cases, leaving its
+two timing matrices ignored; the analyzer extension passed 20 pure-Python tests.
+These are correctness/contract results, not measurements. The next cost step
+requires an explicitly cleared quiet START for a matched preserved-157/hex-candidate
+comparison. Only material
 improvement permits the representative attempt.
 
 Luka rejected the former 6-7-hour representative allocation. Every benchmark

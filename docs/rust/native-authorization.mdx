@@ -18,7 +18,8 @@ on tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. Published native
 `c18c619bf2d140663eb0a78d17d7122d9ac1a5ef` additionally passed completed-turn
 SQLite close/reopen and fresh governed work in actual separate processes, with
 current host grants, a stable configured provider binding and the real File token
-owner. Its normal publication and exact-head CI passed. See the
+owner. Cold acceptance was run directly; publication and CI used their
+recorded test inventories. See the
 [implementation checkpoint](/internal/design/adr-001-implementation/implementation-progress)
 for exact source and evidence scope.
 
@@ -26,9 +27,9 @@ Stock CLI, REST, RPC and MCP paths do not acquire governed activation from this
 API. The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
 single-connection profile; it requires `default-features = false` plus
 `local-authorization` and does not activate ordinary RPC constructors. The
-separately tested public-entry/notification fixture on candidate `c9361659b`
-remains a fixed-host loopback profile. Console projection is not integrated
-native-plus-Console proof.
+public-entry/notification fixture has focused local acceptance. It remains a
+fixed-host loopback profile; candidate publication and CI are pending.
+Console projection is not integrated native-plus-Console proof.
 Persistent controller administration, interrupted recovery, human consent and
 full surface/platform coverage remain separate work. The shell composition below
 covers supported macOS requirements. The measured small fixture needs performance

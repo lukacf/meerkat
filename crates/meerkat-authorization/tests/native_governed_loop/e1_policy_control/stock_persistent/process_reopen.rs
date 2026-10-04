@@ -76,6 +76,9 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
     let original_input_id = original.state.input_id.clone();
     let original_run_id = original.seed.last_run_id.clone().unwrap();
     let frozen_original = serde_json::to_value(original).unwrap();
+    let original_claims = original.state.authority_contributors[0]
+        .association()
+        .clone();
     assert_stock_turn_audit(
         &stored_audit(original),
         &session_id,
@@ -133,17 +136,29 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
     let ingress_controller = controller.clone();
     let ingress_operation = operation.clone();
     let ingress_selection = selected.clone();
+    let ingress_original = original_claims.clone();
+    let original_ingress_accepted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_original_ingress = original_ingress_accepted.clone();
     let ingress: Arc<NativeIngressCheck> = Arc::new(move |runtime, _, current, claimed| {
         if current.requester() != &principal("requester")
             || current.ingress_actor() != &principal("ingress")
             || current.realm() != &RealmId::parse("native-loop").unwrap()
-            || claimed
-                != &association(
-                    runtime,
-                    ingress_controller.clone(),
-                    ingress_operation.clone(),
-                    ingress_selection.clone(),
-                )
+        {
+            return Err(denied().into());
+        }
+        if claimed == &ingress_original {
+            // Authentication accepts this exact historical claim so only the
+            // current grant owner can refuse its missing controller lineage.
+            observed_original_ingress.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        if claimed
+            != &association(
+                runtime,
+                ingress_controller.clone(),
+                ingress_operation.clone(),
+                ingress_selection.clone(),
+            )
         {
             return Err(denied().into());
         }
@@ -246,9 +261,14 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
     );
     assert_eq!(
         serde_json::to_value(reconstructed_document.session().messages()).unwrap(),
-        serde_json::to_value(original_document.session().messages()).unwrap(),
+        frozen_original_messages,
     );
-    assert_eq!(original_document.bytes(), frozen_bytes.as_slice());
+    let reconstructed =
+        Session::decode_whole_blob_document(reconstructed_document.bytes()).unwrap();
+    assert_eq!(
+        reconstructed.row_sha256_token(),
+        reconstructed_document.authority().blob_sha256(),
+    );
 
     let persistence = file_credentials(root);
     let token_store = persistence.token_store();
@@ -305,6 +325,88 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
         Some(stored_tokens)
     );
 
+    assert_eq!(
+        original_claims.candidate().controller_model.as_ref(),
+        Some(pin.selection()),
+        "the stale-grant attempt uses the actual fresh pinned client",
+    );
+    let mut stale_prompt = PromptInput::new("Attempt work with the writer's old grants", None);
+    stale_prompt.header.authority_association = Some(original_claims.clone());
+    let stale_input = Input::Prompt(stale_prompt);
+    let stale_input_id = stale_input.id().clone();
+    assert_ne!(stale_input_id, original_input_id);
+    let stale_current = NativeIngressContext::from_trusted_ingress(
+        &stale_input,
+        principal("requester"),
+        principal("ingress"),
+        RealmId::parse("native-loop").unwrap(),
+        super::super::super::evidence("stock-cold-old-claims-current-authentication"),
+    )
+    .unwrap()
+    .with_controller_client(&stale_input, pin.clone())
+    .unwrap();
+    let refused = machine
+        .accept_input_with_completion(
+            &session_id,
+            stale_input.with_ingress_context(stale_current).unwrap(),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(meerkat_runtime::traits::RuntimeDriverError::InputRefused { refusal })
+            if refusal.kind() == OperationRefusalKind::Denied),
+        "current grant authority must refuse historical permission: {refused:?}",
+    );
+    assert!(
+        original_ingress_accepted.load(Ordering::SeqCst),
+        "fresh authentication must accept the old claims before current grant denial",
+    );
+    assert!(server.receiver.bodies.lock().unwrap().is_empty());
+    assert_eq!(
+        server.receiver.authorized_requests.load(Ordering::SeqCst),
+        0
+    );
+    assert!(tools.0.lock().unwrap().is_empty());
+    assert!(
+        machine
+            .input_state(&session_id, &stale_input_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .load_input_state(&runtime, &stale_input_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let rows_after_refusal = store.load_input_states_strict(&runtime).await.unwrap();
+    assert_eq!(
+        rows_after_refusal.len(),
+        1,
+        "pre-admission denial cannot add a durable row"
+    );
+    assert_eq!(
+        serde_json::to_value(&rows_after_refusal[0]).unwrap(),
+        frozen_original
+    );
+    let document_after_refusal = store
+        .load_committed_whole_blob_snapshot(&runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    let decoded_after_refusal =
+        Session::decode_whole_blob_document(document_after_refusal.bytes()).unwrap();
+    assert_eq!(
+        decoded_after_refusal.row_sha256_token(),
+        document_after_refusal.authority().blob_sha256(),
+    );
+    assert_eq!(
+        serde_json::to_value(document_after_refusal.session().messages()).unwrap(),
+        frozen_original_messages,
+        "a refused old-grant input cannot enter the committed transcript",
+    );
+
     let claims = association(&runtime, controller, operation, selected);
     assert_ne!(
         &claims,
@@ -315,6 +417,7 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
     let input = Input::Prompt(prompt);
     let input_id = input.id().clone();
     assert_ne!(input_id, original_input_id);
+    assert_ne!(input_id, stale_input_id);
     let current = NativeIngressContext::from_trusted_ingress(
         &input,
         principal("requester"),

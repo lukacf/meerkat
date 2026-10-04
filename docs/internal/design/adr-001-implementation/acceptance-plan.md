@@ -25,15 +25,21 @@ does not make sandbox implementation optional. No design verdict counts as
 implementation acceptance, and missing coverage cannot be relabeled out of scope.
 
 The [implementation checkpoint](implementation-progress.md) records current
-execution and publication status. Native PR1634 is published at `157`; its full
-CI remains blocked by recorded freshness failures. The four-file local `51`
-repair passed canonical example/root-lock and compiled-alphabet poster checks;
-normal successor push gates are running, with publication and fresh CI pending.
+execution and publication status. Native PR1634 is published at `51`; its
+normal GCP push passed all required hooks in 3,833s. The four-file repair passed
+canonical example/root-lock and compiled-alphabet poster checks. Fresh CI run
+37177141203 passed at exact `51` with 38 successful jobs and 4 intentional skips;
+the earlier `157` freshness failures remain historical evidence.
 Separately, a local tests-only successor, not yet published, based on `51` passed all 16
 default native-loop cases, including completed-turn SQLite reconstruction in a
 new process followed by fresh governed work. The six formerly ignored cases are
 ordinary only in that isolated successor; published `157` still retains its
 original opt-ins. Interrupted recovery and persistent administration remain open.
+The revised restart case also proves current ingress accepts historical claims
+before current grant authority refuses them, with no effect or durable input
+entry. The full revised native target passed 16 cases with no ignores; three
+smoke-wrapper controls passed separately. Normal successor gates/publication
+remain open.
 The exact published-source optimized build and both cost correctness selectors
 passed. The first quiet small-fixture timing run is measured: whole-turn
 Local-minus-Trusted overhead was +117.33 percent at grant lineage depth 1 and

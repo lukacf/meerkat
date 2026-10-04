@@ -6411,10 +6411,10 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 mod tests {
     use super::{
         ArtifactManifest, ArtifactRequirement, CommandLockMode, CommandSpec, E2ePlan, E2eSelection,
-        ExecutionMode, Lane, NodeSetup, SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler,
-        bazel_build_event_provenance, build_commands_for_mode, inherited_cargo_build_context,
-        normalize_command_with_env, order_smoke_specs_for_runtime, parse_cargo_build_requirement,
-        plan_for_selection, pre_command_lock_mode, repo_cargo,
+        ExecutionMode, Lane, NodeSetup, OutputPolicy, SMOKE_ENTRIES, SmokeRuntimeClass,
+        SmokeScheduler, bazel_build_event_provenance, build_commands_for_mode,
+        inherited_cargo_build_context, normalize_command_with_env, order_smoke_specs_for_runtime,
+        parse_cargo_build_requirement, plan_for_selection, pre_command_lock_mode, repo_cargo,
         require_built_by_recorded_invocation, run_command, sanitize_artifact_key, scenario_env,
         scenario_spec, smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key,
         suite_spec, workspace_root,

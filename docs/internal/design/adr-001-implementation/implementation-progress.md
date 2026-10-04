@@ -3,25 +3,31 @@
 ## Publication gate, 2026-10-04
 
 Native [PR1634](https://github.com/lukacf/meerkat/pull/1634) is published at
-`157a73e75aed677c5f5a37d20cd07fe53710c216`. Its normal GCP push passed all
-required hooks in 4,726s wall time (`native-157-gcp-normal-push-green-r1.log`).
+`51cd489916387039121e751e595670b92a0d4b65`. Its normal GCP push passed all
+required hooks in 3,833s wall time (`push-51.log`). Fresh
+[CI run 37177141203](https://github.com/lukacf/meerkat/actions/runs/37177141203)
+was created at 04:29:24 UTC and completed successfully at the exact published
+head: 38 successful jobs and 4 intentional skips. The current implementation
+PR is CI green; no merge or release is recorded.
+
+The previous `157a73e75aed677c5f5a37d20cd07fe53710c216` publication passed normal
+hooks in 4,726s (`native-157-gcp-normal-push-green-r1.log`). Its
 [CI run 37170072061](https://github.com/lukacf/meerkat/actions/runs/37170072061)
 completed with 35 successful jobs. Format + governance failed because two
 standalone example locks were stale; Generation ratchets failed only poster
 freshness in two HTML outputs, after canonical coverage and typed content
-checks passed. The dependent CI gate failed too. This is a published checkpoint,
-not green whole-PR CI.
+checks passed. The dependent CI gate failed too. Those results remain historical
+for the previous head; they do not describe the current CI-green publication.
 
-The local repair is `51cd489916387039121e751e595670b92a0d4b65`, tree
+The published repair is `51cd489916387039121e751e595670b92a0d4b65`, tree
 `f365afd3b3bc18f14c70da35db3615ce97e5fc7c`. Its only four changed files are the
 two example locks and two poster outputs. Existing dependency identities/pins
 are preserved; existing canonical metadata refresh and lock checks passed.
 The unchanged Node poster generator produced the reviewed bytes and passed
 byte idempotence. The GCP publication owner then passed the existing
-example/root-lock checks and full compiled-alphabet poster gate. Normal successor push gates started at
-03:25:27 UTC (`/tmp/rb/adr-bench/push-51.log`); publication of 51 and fresh CI
-remain pending. Rust bytes are identical to published `157`. Additional runtime
-integration remains held.
+example/root-lock checks and full compiled-alphabet poster gate before the
+normal successor publication. Published `51` has identical Rust bytes to `157`.
+Additional runtime production integration remains held.
 
 Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published at
 `17fe7af8b2b374402d0e198f44879c2891446ac8`, an ordinary merge of published
@@ -49,7 +55,7 @@ preserves the 16-minute budget; it is not measured authorization overhead or a
 hosted-job completion guarantee.
 
 The exact published `157` optimized cost binary is prepared:
-`/home/luka/src/wt/adr-native-cost-target/release/deps/native_cost-8340d2a996464c6b`,
+`native_cost-8340d2a996464c6b`,
 SHA256 `03d524567eea7aff409d228dc9e1916912536b7a97b3d8dd777cccf562a20dd3`.
 The optimized build passed in 472s (`native-157-optimized-build-correctness-r1.log`).
 `native_cost_correctness` passed 1 test in 0.04s bodies
@@ -86,6 +92,16 @@ this is not an all-IO-zero claim. The full representative 6-7-hour capacity
 allocation remains separately pending. Full surface and performance acceptance
 remain open, including under 1 ms p99 added authorization per operation and at
 most 10 percent representative turn overhead.
+
+The attribution-only profile completed at 04:41:19 UTC within the explicitly
+reserved five-minute quiet window. The existing optimized small fixture passed
+1 case in 48.41s; perf captured 5,109 CPU-clock samples with zero lost samples
+(`native-small157-profile-r1.log`, `perf157-native-small-r1.data`). The resource
+owner confirmed no build-monitor violation through DONE and released the host.
+Allocation, copying and formatting appear in the self samples, but application
+call stacks are incomplete and both execution modes plus setup were profiled.
+This cannot assign the governed delta to an owner or qualify the performance
+budget. Profile-perturbed timings do not replace the uninstrumented results.
 
 Historical failure/preparation logs remain in the existing evidence directory.
 The first Web SDK exhaustive-event check omitted HookLaunchRefused, while its
@@ -131,7 +147,25 @@ current controller pin. Reconstruction performs no model/tool work. A fresh
 input/run then receives exact local delete refusal, one permitted callback read,
 two loopback model requests and same-run completion. Reader and parent verify
 the original protected row/audit and exact transcript prefix remain unchanged.
-Historical association data does not restore permission.
+The strengthened negative control explicitly lets current authentication accept
+an attempt carrying the writer's historical association and the reader's actual
+fresh controller pin. Current grant authority must then return typed Denied,
+with zero HTTP/tool entry and no accepted native or durable input row. Independent
+document loads verify transcript preservation and stored hash/authority agreement.
+The revised full target passed all 16 tests with no ignored or filtered cases
+(14.87s compile, 2.05s bodies;
+`restart-acceptance51-ordinary-antifallback-r1.log`).
+
+The three existing E1 smoke-wrapper controls passed (7.06s warm compile, 0.00s
+bodies; `restart-acceptance51-wrapper-controls-r2.log`) after a missing test-only
+OutputPolicy import was fixed. The initial broader dependency build consumed
+about 39 minutes before that compile error. These controls are not the execution
+of the outer smoke wrapper. Documentation checks passed after the status edits.
+The Make agent gate stopped before Clippy on two existing lane-doctor failures:
+archive-mode nextest workflow scanning and the Rust selector module parser
+selftest. Its shell also cannot source the Bash backend helper under /bin/sh.
+The documented Cargo changed-path gate is running separately with all selected
+governance and Clippy checks; the Make gate is not recorded as green.
 
 This qualifies completed-turn reconstruction followed by new work in the
 explicit embedding fixture. The HTTP Bearer header is synthetic and independent

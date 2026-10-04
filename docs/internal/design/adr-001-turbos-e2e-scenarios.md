@@ -390,8 +390,12 @@ current coverage. Implementation records should use the existing
 Covered only with an exact executed test, PendingFix with a blocker,
 Gap with a reason, and Impossible only for a justified contract exclusion.
 
-Recorded evidence as of 2026-10-03 remains prerequisite coverage. The repair
-later committed as native `141aad15` passed 49 selected integration tests and
+Recorded evidence as of 2026-10-03 remains prerequisite coverage. Native PR1634
+is now published at `51` after all normal GCP hooks passed in 3,833s; fresh CI
+37177141203, created at 04:29:24 UTC, remains pending. The later local tests-only
+restart successor is separate from that publication, as detailed in the
+[implementation checkpoint](adr-001-implementation/implementation-progress.md).
+The repair later committed as native `141aad15` passed 49 selected integration tests and
 six library controls: `oauth_resolve`, machine/metadata/ordinal contracts,
 `core_apply_terminal_truth`, selected `cross_host_flows` and `fork_off_surface`
 cases, `b1_live_join_*`, and `detached_delivery_follows_runtime_presence`.
@@ -439,6 +443,13 @@ native_governed_loop target passed 16 tests (0 ignored/filtered, 0.60s compile,
 cases (6.61s compile, 159.51s bodies, 2 timing cases ignored). These 18 cases are
 not published successor CI, interrupted-operation recovery,
 persistent controller/grant administration or full C7 transfer acceptance.
+The revised cold test then passed within the full 16-case target (14.87s compile,
+2.05s bodies, no ignores). Its negative attempt uses the fresh actual controller
+pin and historical association: current ingress explicitly accepts it, then
+current grant authority must refuse with typed Denied, zero model/tool entry and
+no durable input row. Independent document reloads preserve the transcript and
+validate the stored hash against its authority. Three E1 wrapper controls passed
+separately; outer smoke execution and normal successor publication remain open.
 
 The completed-turn close/reopen slice preserves stored input/session and audit
 with current trusted host owners. Fresh governed work after reopen has its own

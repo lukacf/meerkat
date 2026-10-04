@@ -28,6 +28,15 @@ pub(super) const VOICE_WORK_LABEL: &str = "voice";
 
 const WORK_TITLE_CHARS: usize = 200;
 const NARRATION_TITLE_CHARS: usize = 120;
+
+/// Carried by the Completed narration, which travels in the result's own
+/// commentary event ahead of the result text, so it is in context before the
+/// model's first readout (a result cue is skipped once the model has voiced
+/// the result). Turbo S S104 R1: the user's request said "read it back to
+/// me", the result carried the ode's last line, and the voice summarized it
+/// away.
+const RESULT_READ_BACK: &str =
+    "If the user asked to have it read back, read it back word for word.";
 const EVIDENCE_SUMMARY_CHARS: usize = 1024;
 const RESULT_CONTEXT_CHARS: usize = 8 * 1024;
 const RESULT_EVIDENCE_DIGEST_DOMAIN: &[u8] = b"meerkat.live-delegation-work-result.v1\0";
@@ -159,7 +168,7 @@ pub(super) fn narration_text(
             }
         }
         LiveDelegationNarrationKind::Completed => {
-            format!("Finished voice request: \"{title}\". The result follows.")
+            format!("Finished voice request: \"{title}\". The result follows. {RESULT_READ_BACK}")
         }
         LiveDelegationNarrationKind::SourceBusy => format!(
             "Voice request \"{title}\" is waiting for the assistant to finish its current turn before it starts."
@@ -628,7 +637,7 @@ mod tests {
         );
         assert_eq!(
             narration_text(LiveDelegationNarrationKind::Completed, title, 0, &[], false),
-            "Finished voice request: \"book the \"late\" flight\". The result follows."
+            "Finished voice request: \"book the \"late\" flight\". The result follows. If the user asked to have it read back, read it back word for word."
         );
         assert_eq!(
             narration_text(
@@ -644,6 +653,34 @@ mod tests {
             narration_text(LiveDelegationNarrationKind::Failed, title, 0, &[], false),
             "Voice request \"book the \"late\" flight\" could not be completed."
         );
+    }
+
+    /// Only the Completed narration, which precedes the result text, asks
+    /// for a word-for-word read-back when the user asked for one; it stays
+    /// on the announcement line, ahead of the newline the result follows.
+    #[test]
+    fn only_the_completed_narration_carries_the_read_back_clause() {
+        let title = "write the ode";
+        for kind in [
+            LiveDelegationNarrationKind::Queued,
+            LiveDelegationNarrationKind::Claimed,
+            LiveDelegationNarrationKind::Blocked,
+            LiveDelegationNarrationKind::Completed,
+            LiveDelegationNarrationKind::SourceBusy,
+            LiveDelegationNarrationKind::Failed,
+        ] {
+            let text = narration_text(kind, title, 0, &[], false);
+            assert_eq!(
+                text.contains(RESULT_READ_BACK),
+                kind == LiveDelegationNarrationKind::Completed,
+                "{kind:?}: {text}"
+            );
+            assert!(!text.contains('\n'), "{kind:?} stays one line");
+            assert!(
+                !text.to_lowercase().contains("delegat"),
+                "{kind:?} names no delegate"
+            );
+        }
     }
 
     fn row(text: &str) -> meerkat_core::RepresentedLiveUserRow {

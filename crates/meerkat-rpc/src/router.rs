@@ -1459,6 +1459,10 @@ impl MethodRouter {
         let live_host = Arc::new(live_host);
         #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
         if let Some(authority) = self.experimental_live_open_authority.as_ref() {
+            authority.bind_post_close_work_source(Arc::clone(
+                &self.experimental_live_delegation_coordinator,
+            )
+                as Arc<dyn meerkat::experimental_gpt_live::LivePostCloseWorkSource>);
             let context_host = meerkat::surface::ExperimentalGptLiveContextMirrorHost::new(
                 Arc::clone(&self.runtime_adapter),
                 Arc::clone(&live_host),

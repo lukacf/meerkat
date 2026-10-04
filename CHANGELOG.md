@@ -726,6 +726,11 @@ them.
 
 ### Added
 
+- `meerkat::experimental_gpt_live::LivePostCloseWorkSource`: host source of
+  delegated work that outlived its voice channel, bound on a public Live open
+  authority with `ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source`;
+  a reopened channel's startup instructions then say the work is still
+  finishing (`LIVE_POST_CLOSE_WORK_PENDING`).
 - Barge-in playback hint for Public Live (#1638). When the user's speech and
   audible assistant audio overlap (the user speaking over the assistant, or
   the assistant starting while the user keeps talking; a reply after the user
@@ -1317,6 +1322,32 @@ them.
   for it, it is never named as still running, and the channel stays up for
   the user's next utterance. Other unsupported provider events still end
   the call.
+- GPT Live runtime work replayed on a reopened channel (a job that finished
+  while the channel was closed) is now framed as the answer to questions
+  about that work or about what happened while the user was away, to be
+  given from it directly and read back when the user asks or asked for it,
+  and still never read out unprompted (Turbo S S104 R1: "what happened while
+  I was gone" was delegated and the finished work never read back).
+  - A channel opened while delegated work from an earlier channel of the
+    same session is still finishing (its worker outlived the channel, or its
+    result is being merged and has not committed) now says so in its startup
+    session instructions: "Work started before this call is still
+    finishing, and its result will arrive here as context data. Do not say
+    it is done until it arrives." The model decides how to answer before the
+    finished work's replay reaches it, which waits for the user's turn to
+    end. Released at the first words instead, the replay made the model talk
+    over the user. The source is new
+    `meerkat::experimental_gpt_live::LivePostCloseWorkSource`, bound with
+    `ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source` (a
+    defaulted method). The JSON-RPC router binds its live delegation
+    coordinator, which tracks owned workers running at their channel's close
+    until their custody ends and post-close merges until their turn reaches
+    its terminal. Opens with no such work are unchanged.
+  - The "Finished voice request" narration that travels with a result now
+    adds "If the user asked to have it read back, read it back word for
+    word." It precedes the result text in the same event, so it is in
+    context before the model's own readout. In S104 R1 the result carried
+    the requested ode, and the voice summarized it away.
 - GPT Live no longer gives the voice a "Finished voice request: ... The
   result follows." announcement without the result behind it. The Completed
   narration was its own provider event, acknowledged before the result was
@@ -1364,6 +1395,11 @@ them.
     the model read the details out). A cue owed because the user spoke
     first adds "The user has spoken since this result arrived: if they said
     how to report it, do that."
+  - A new response whose first transcript delta arrives after the result
+    was sent, before any user utterance takes the floor, also counts as the
+    readout, even when its quantized provider start precedes the result's
+    acknowledgement (Turbo S S97 R2: "It's empty." at 24400 ms, the
+    acknowledgement at 24600-24800 ms, then a cue and a second readout).
   - Every in-progress notice and every result cue names the other
     delegations still running, by the user's words for them: "Still
     running: "X". Do not say it is done until its result arrives." (S101:

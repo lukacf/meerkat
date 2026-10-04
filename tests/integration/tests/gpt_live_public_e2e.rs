@@ -1484,6 +1484,9 @@ async fn open_public_live_with(
             mobs.clone(),
             execution_policy,
         );
+        // As the RPC router does: the coordinator tells later opens about work
+        // that outlived its channel.
+        open_authority.bind_post_close_work_source(coordinator.clone());
         let context_host = ExperimentalGptLiveContextMirrorHost::new(
             runtime.runtime_adapter(),
             member_host.clone(),

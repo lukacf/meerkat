@@ -2135,6 +2135,10 @@ struct MockSessionService {
     /// This remains independent of the machine queue gate: the exact run is
     /// already admitted when this mock-only delivery gap opens.
     pending_runtime_interrupts: RwLock<HashSet<(SessionId, meerkat_core::RunId)>>,
+    /// Exact-run boundary cancels the runtime delivered for a run, latched so
+    /// a keep-alive turn that has not parked yet still sees its cancel (the
+    /// agent reads the machine-owned flag at its boundary the same way).
+    pending_runtime_boundary_cancels: RwLock<HashSet<(SessionId, meerkat_core::RunId)>>,
     inject_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
@@ -2301,6 +2305,7 @@ impl MockSessionService {
             start_turn_interrupts: RwLock::new(HashMap::new()),
             runtime_apply_runs: RwLock::new(HashMap::new()),
             pending_runtime_interrupts: RwLock::new(HashSet::new()),
+            pending_runtime_boundary_cancels: RwLock::new(HashSet::new()),
             inject_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
@@ -4048,26 +4053,43 @@ impl SessionService for MockSessionService {
                     .store(true, Ordering::Release);
                 self.keep_alive_before_wait_release.notified().await;
             }
+            // Register for the wake before consulting the exact-run boundary
+            // cancel latch: a cancel latched before this point is seen below,
+            // and one delivered after it reaches this waiter.
+            let woken = notifier.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            let active_runtime_run = self.runtime_apply_runs.read().await.get(id).cloned();
+            let boundary_cancelled = match active_runtime_run {
+                Some(run_id) => self
+                    .pending_runtime_boundary_cancels
+                    .write()
+                    .await
+                    .remove(&(id.clone(), run_id)),
+                None => false,
+            };
             self.keep_alive_turns_entered.send_modify(|entered| {
                 entered.insert(id.clone());
             });
-            match interrupt_rx.as_mut() {
-                Some(interrupt_rx) => {
-                    // A hard interrupt also wakes the keep-alive notifier;
-                    // it cancels the turn, as the agent loop does.
-                    tokio::select! {
-                        biased;
-                        changed = interrupt_rx.changed() => {
-                            if changed.is_ok() {
-                                return Err(SessionError::Agent(
-                                    meerkat_core::error::AgentError::Cancelled,
-                                ));
+            if !boundary_cancelled {
+                match interrupt_rx.as_mut() {
+                    Some(interrupt_rx) => {
+                        // A hard interrupt also wakes the keep-alive notifier;
+                        // it cancels the turn, as the agent loop does.
+                        tokio::select! {
+                            biased;
+                            changed = interrupt_rx.changed() => {
+                                if changed.is_ok() {
+                                    return Err(SessionError::Agent(
+                                        meerkat_core::error::AgentError::Cancelled,
+                                    ));
+                                }
                             }
+                            () = woken.as_mut() => {}
                         }
-                        () = notifier.notified() => {}
                     }
+                    None => woken.await,
                 }
-                None => notifier.notified().await,
             }
             return Ok(mock_run_result(
                 id.clone(),
@@ -5199,6 +5221,13 @@ impl MobSessionService for MockSessionService {
             barrier.record_boundary_call();
             barrier.wait_for_release().await;
         }
+        // The runtime delivers this only for its exact current run, which may
+        // not have reached this service yet: latch it for that run before
+        // the ambient delivery below can miss a turn that has not parked.
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .insert((session_id.clone(), expected_run_id.clone()));
         let active_runs = self.runtime_apply_runs.read().await;
         if active_runs.get(session_id) != Some(expected_run_id) {
             return Err(SessionError::NotRunning {
@@ -5490,6 +5519,10 @@ impl MobSessionService for MockSessionService {
             .write()
             .await
             .remove(&(session_id.clone(), run_id.clone()));
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .remove(&(session_id.clone(), run_id.clone()));
         turn_result?;
         let receipt = meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
             run_id,
@@ -5585,6 +5618,10 @@ impl MobSessionService for MockSessionService {
             .write()
             .await
             .retain(|(candidate, _)| candidate != session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.external_tools_by_session
             .write()
@@ -5639,6 +5676,10 @@ impl MobSessionService for MockSessionService {
         self.start_turn_interrupts.write().await.remove(session_id);
         self.runtime_apply_runs.write().await.remove(session_id);
         self.pending_runtime_interrupts
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
+        self.pending_runtime_boundary_cancels
             .write()
             .await
             .retain(|(candidate, _)| candidate != session_id);
@@ -59352,6 +59393,9 @@ struct RuntimeBackedRealCommsSessionService {
     /// the call waits on the gate.
     turn_finalization_guard_requests: tokio::sync::watch::Sender<u64>,
     active_runtime_runs: RwLock<HashMap<SessionId, meerkat_core::RunId>>,
+    /// Exact-run boundary cancels, latched for their run (see
+    /// `MockSessionService::pending_runtime_boundary_cancels`).
+    pending_runtime_boundary_cancels: RwLock<HashSet<(SessionId, meerkat_core::RunId)>>,
 }
 
 impl RuntimeBackedRealCommsSessionService {
@@ -59394,6 +59438,7 @@ impl RuntimeBackedRealCommsSessionService {
             session_turn_finalization_gates: std::sync::RwLock::new(HashMap::new()),
             turn_finalization_guard_requests: tokio::sync::watch::channel(0).0,
             active_runtime_runs: RwLock::new(HashMap::new()),
+            pending_runtime_boundary_cancels: RwLock::new(HashSet::new()),
         }
     }
 
@@ -59516,6 +59561,10 @@ impl RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.runtime_turn_content_barriers
             .write()
             .await
@@ -60243,6 +60292,12 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         expected_run_id: &meerkat_core::RunId,
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
+        // Latch the exact-run cancel for a run that has not reached this
+        // service yet (see `MockSessionService`).
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .insert((session_id.clone(), expected_run_id.clone()));
         let active_runs = self.active_runtime_runs.read().await;
         if active_runs.get(session_id) != Some(expected_run_id) {
             return Err(SessionError::NotRunning {
@@ -60453,14 +60508,20 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         }
 
         let block_all_runtime_turns = self.block_runtime_turns.load(Ordering::Relaxed);
-        if block_all_runtime_turns {
-            self.runtime_turn_started.notify_waiters();
-        }
-        if let Some(barrier) = &content_barrier {
-            barrier.entered.notify_one();
-        }
         if block_all_runtime_turns || content_barrier.is_some() {
-            self.release_runtime_turns.notified().await;
+            // Register for the release before announcing the turn: a test
+            // that releases as soon as it sees the announcement must reach
+            // this waiter. `notify_waiters` wakes only registered waiters.
+            let release = self.release_runtime_turns.notified();
+            tokio::pin!(release);
+            release.as_mut().enable();
+            if block_all_runtime_turns {
+                self.runtime_turn_started.notify_waiters();
+            }
+            if let Some(barrier) = &content_barrier {
+                barrier.entered.notify_one();
+            }
+            release.await;
         }
 
         if self.fail_runtime_turns.load(Ordering::Relaxed) {
@@ -60481,10 +60542,27 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 .keep_alive_turns_complete_immediately
                 .load(Ordering::Relaxed)
         {
-            notifier.notified().await;
+            // Register before consulting this run's boundary cancel latch: a
+            // cancel latched before this point is seen here, and one
+            // delivered after it reaches this waiter.
+            let woken = notifier.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            let boundary_cancelled = self
+                .pending_runtime_boundary_cancels
+                .write()
+                .await
+                .remove(&(session_id.clone(), run_id.clone()));
+            if !boundary_cancelled {
+                woken.await;
+            }
         }
 
         self.active_runtime_runs.write().await.remove(session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .remove(&(session_id.clone(), run_id.clone()));
 
         let inject_boundary_acknowledgement_failure = self
             .fail_runtime_boundary_acknowledgement
@@ -60573,6 +60651,10 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.runtime_turn_content_barriers
             .write()
             .await

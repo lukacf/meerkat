@@ -3368,6 +3368,16 @@ impl LiveDelegationNarrationAuthority {
                 }
             ),
         )
+        .map(|authority| {
+            // A Failed narration is the delegation's last word: it ends
+            // without a result, so the provider session stops naming it as
+            // still running.
+            if self.kind == LiveDelegationNarrationKind::Failed {
+                authority.__ending_the_delegation()
+            } else {
+                authority
+            }
+        })
         .ok_or(LiveExecutionAuthorityError::CorrelationMismatch)
     }
 }

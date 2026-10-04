@@ -1283,6 +1283,15 @@ them.
     cue is still owed. Both are provider-timeline starts. The cue has one
     wording per kind, with no "unless you have already told the user"
     exception.
+  - Every in-progress notice and every result cue names the other
+    delegations still running, by the user's words for them: "Still
+    running: "X". Do not say it is done until its result arrives." (S101:
+    the voice claimed a job done 10-14 s before its result existed, right
+    after the cues of the jobs that had finished, in 5 of 5 runs.) A
+    delegation is running from `session.delegation.created` until its
+    result is acknowledged or a Failed narration ends it; the narration
+    authority carries that as a typed flag (`ends_delegation`) to the
+    provider session.
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to
   acquire the boundary, so a caller that dropped its last service handle while

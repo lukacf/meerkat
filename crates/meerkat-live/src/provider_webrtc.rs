@@ -688,6 +688,10 @@ pub struct LiveSidebandNarrationAuthority {
     binding: ProviderWebrtcBinding,
     attempt: LiveSidebandAppendAttempt,
     consumed: Arc<AtomicBool>,
+    /// The narration ends its delegation without a result (its work failed
+    /// or could not start): the provider session stops naming the
+    /// delegation as still running.
+    ends_delegation: bool,
 }
 
 impl fmt::Debug for LiveSidebandNarrationAuthority {
@@ -715,7 +719,17 @@ impl LiveSidebandNarrationAuthority {
                 "narration:{narration_id}"
             ))?,
             consumed: Arc::new(AtomicBool::new(false)),
+            ends_delegation: false,
         })
+    }
+
+    /// Mark the narration as ending its delegation without a result. Set
+    /// only by the generated narration authority, from its typed kind.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __ending_the_delegation(mut self) -> Self {
+        self.ends_delegation = true;
+        self
     }
 
     fn consume_once(&self) -> Result<(), LiveSidebandCommandError> {
@@ -765,6 +779,7 @@ enum LiveSidebandCommandKind {
         attempt: LiveSidebandAppendAttempt,
         delegation: LiveSidebandDelegationRef,
         text: String,
+        ends_delegation: bool,
     },
 }
 
@@ -819,6 +834,8 @@ pub enum LiveSidebandProviderCommand {
         attempt: LiveSidebandAppendAttempt,
         delegation: LiveSidebandDelegationRef,
         text: String,
+        /// The narration ends the delegation without a result.
+        ends_delegation: bool,
     },
 }
 
@@ -974,6 +991,7 @@ impl LiveSidebandCommand {
             binding,
             attempt,
             consumed: _,
+            ends_delegation,
         } = authority;
         Ok(Self {
             kind: LiveSidebandCommandKind::NarrateDelegation {
@@ -981,6 +999,7 @@ impl LiveSidebandCommand {
                 attempt,
                 delegation,
                 text,
+                ends_delegation,
             },
         })
     }
@@ -1089,11 +1108,13 @@ impl LiveSidebandCommand {
                 attempt,
                 delegation,
                 text,
+                ends_delegation,
             } => LiveSidebandProviderCommand::NarrateDelegationContext {
                 binding,
                 attempt,
                 delegation,
                 text,
+                ends_delegation,
             },
         }
     }
@@ -1643,6 +1664,41 @@ mod tests {
                 ..
             } if awaiting_peer_replies == ["analyst-pemberton"]
         ));
+    }
+
+    /// A narration authority marked as ending its delegation (the runtime
+    /// marks a Failed narration) carries that through the command to the
+    /// provider session; an ordinary narration does not.
+    #[test]
+    fn a_narration_that_ends_its_delegation_says_so_to_the_provider_session() {
+        for ends in [true, false] {
+            let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation:4".to_string(),
+                "provider-delegation-secret".to_string(),
+            )
+            .expect("opaque provider delegation");
+            let authority = LiveSidebandNarrationAuthority::__from_generated_narration_authority(
+                binding(),
+                "operation-4:failed".to_string(),
+            )
+            .expect("narration authority");
+            let authority = if ends {
+                authority.__ending_the_delegation()
+            } else {
+                authority
+            };
+            let command = LiveSidebandCommand::narrate_delegation(
+                authority,
+                delegation,
+                "Voice request \"x\" could not be completed.",
+            )
+            .expect("one narration");
+            assert!(matches!(
+                command.__into_provider_command(),
+                LiveSidebandProviderCommand::NarrateDelegationContext { ends_delegation, .. }
+                    if ends_delegation == ends
+            ));
+        }
     }
 
     /// Only a result release is marked as one: its acknowledgement is the

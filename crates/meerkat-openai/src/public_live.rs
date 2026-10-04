@@ -1610,6 +1610,23 @@ impl PublicLiveBrokerSession {
             .await
     }
 
+    /// Append the narration that ends a delegation without a result (its
+    /// work failed or could not start), exactly like
+    /// [`Self::append_delegation_context`], and stop naming it as still
+    /// running in later in-progress notices and result cues.
+    pub async fn append_terminal_delegation_narration(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: impl Into<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.state
+            .lock()
+            .await
+            .end_outstanding_delegation(&delegation.0);
+        self.append_delegation_commentary(delegation, text, None)
+            .await
+    }
+
     /// Append an executor result to an observed client delegation, as
     /// commentary exactly like [`Self::append_delegation_context`].
     ///
@@ -1742,20 +1759,26 @@ impl PublicLiveBrokerSession {
     /// bound to its delegation ([`LIVE_DELEGATION_IN_PROGRESS`]).
     async fn send_due_progress_notices(&self) -> Result<(), GptLiveBrokerError> {
         loop {
-            let Some((token, delegation_id)) =
+            let Some((token, delegation_id, fragments)) =
                 self.state.lock().await.reserve_due_progress_notice()?
             else {
                 return Ok(());
             };
-            let event = ClientEvent {
-                event_id: Field::Value(instructions_event_id(token, 0)),
-                command: Command::InstructionsAppend {
-                    content: LIVE_DELEGATION_IN_PROGRESS.to_owned(),
-                    delegation_id: Nullable(Some(delegation_id)),
-                },
-            };
-            self.deliver_append(token, event).await?;
-            tracing::info!("public Live delegation in-progress notice sent");
+            let names_outstanding = fragments.len() > 1;
+            for (index, content) in fragments.into_iter().enumerate() {
+                let event = ClientEvent {
+                    event_id: Field::Value(instructions_event_id(token, index)),
+                    command: Command::InstructionsAppend {
+                        content,
+                        delegation_id: Nullable(Some(delegation_id.clone())),
+                    },
+                };
+                self.deliver_append(token, event).await?;
+            }
+            tracing::info!(
+                names_outstanding,
+                "public Live delegation in-progress notice sent"
+            );
         }
     }
 
@@ -1767,7 +1790,7 @@ impl PublicLiveBrokerSession {
             else {
                 return Ok(());
             };
-            for (index, content) in result_cue_fragments(wording).into_iter().enumerate() {
+            for (index, content) in result_cue_fragments(&wording).into_iter().enumerate() {
                 let event = ClientEvent {
                     event_id: Field::Value(thinking_event_id(token, index)),
                     command: Command::ThinkingAppend {
@@ -1780,6 +1803,7 @@ impl PublicLiveBrokerSession {
             tracing::info!(
                 awaiting_peer_replies = wording.awaiting_peer_replies,
                 user_request_open = wording.user_request_open,
+                names_outstanding = wording.outstanding.is_some(),
                 "public Live result cue sent"
             );
         }
@@ -2363,6 +2387,12 @@ struct SessionState {
     /// Per result awaiting its cue: the earliest session-timeline start of a
     /// floor-taking user utterance at or after the end of its insertion.
     result_first_utterance_ms: HashMap<String, f64>,
+    /// Client delegations created on this channel whose outcome the model
+    /// has not received (no acknowledged result, no terminal narration), in
+    /// creation order, each with the user's words for it: the label its
+    /// "Started voice request" narration quotes (the user's last turn
+    /// before the delegation).
+    outstanding_delegations: Vec<(String, String)>,
     /// A reflected input frame has carried speech: from then on the
     /// reflected-input silence run says whether the user is still speaking.
     reflected_input_speech_seen: bool,
@@ -2416,6 +2446,7 @@ impl Default for SessionState {
             request_utterance_start_ms: None,
             result_first_output_ms: HashMap::new(),
             result_first_utterance_ms: HashMap::new(),
+            outstanding_delegations: Vec::new(),
             reflected_input_speech_seen: false,
             input_silence_run_ms: 0,
             last_output_start_ms: None,
@@ -2469,11 +2500,17 @@ impl SessionState {
     /// instructions append.
     fn reserve_due_progress_notice(
         &mut self,
-    ) -> Result<Option<(GptLiveAppendToken, String)>, GptLiveBrokerError> {
+    ) -> Result<Option<(GptLiveAppendToken, String, Vec<String>)>, GptLiveBrokerError> {
         let Some(delegation_id) = self.due_progress_notices.pop_front() else {
             return Ok(None);
         };
-        let token = match self.reserve_instructions_append(1) {
+        // The notice names the other delegations still running: the model
+        // claimed an earlier job done right after a later job's notice, from
+        // nothing but notices and narrations (S101 r3 on 37b1cebb9).
+        let mut sections = vec![LIVE_DELEGATION_IN_PROGRESS.to_owned()];
+        sections.extend(self.outstanding_line_except(&delegation_id));
+        let fragments = pack_sections(sections);
+        let token = match self.reserve_instructions_append(fragments.len()) {
             Ok(token) => token,
             Err(error) => {
                 self.due_progress_notices.push_front(delegation_id);
@@ -2483,7 +2520,26 @@ impl SessionState {
         if let Some(pending) = self.pending_appends.back_mut() {
             pending.internal = Some(InternalAppend::ProgressNotice);
         }
-        Ok(Some((token, delegation_id)))
+        Ok(Some((token, delegation_id, fragments)))
+    }
+
+    /// The delegation's outcome reached the model (its result was
+    /// acknowledged) or it ended without one (a terminal narration).
+    fn end_outstanding_delegation(&mut self, delegation_id: &str) {
+        self.outstanding_delegations
+            .retain(|(outstanding, _)| outstanding != delegation_id);
+    }
+
+    /// The still-running line for a notice or cue about `delegation_id`,
+    /// naming every other outstanding delegation.
+    fn outstanding_line_except(&self, delegation_id: &str) -> Option<String> {
+        let labels: Vec<&str> = self
+            .outstanding_delegations
+            .iter()
+            .filter(|(outstanding, _)| outstanding != delegation_id)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        outstanding_delegations_line(&labels)
     }
 
     /// Record `start_ms` against every result awaiting its cue whose
@@ -2550,13 +2606,14 @@ impl SessionState {
             let wording = ResultCueWording {
                 awaiting_peer_replies: self.awaiting_peer_results.contains(&delegation_id),
                 user_request_open: self.user_request_open,
+                outstanding: self.outstanding_line_except(&delegation_id),
             };
             // The thinking lane, not the instructions lane: instructions
             // persist as standing session instructions, and a persisted
             // cue's delegation framing carried into the next question (S99
             // A/B: recall delegated 0/10 without the deferred cue, 3-5/10
             // with it on the instructions lane).
-            let token = match self.reserve_thinking_append(result_cue_fragments(wording).len()) {
+            let token = match self.reserve_thinking_append(result_cue_fragments(&wording).len()) {
                 Ok(token) => token,
                 Err(error) => {
                     self.due_result_cues.push_front(delegation_id);
@@ -3108,6 +3165,8 @@ impl SessionState {
     /// Either way the result gets exactly one cue, phrased to be safe if the
     /// model already read it ([`result_cue_text`]).
     fn cue_acknowledged_result(&mut self, delegation_id: String) {
+        // The model now holds this delegation's outcome.
+        self.end_outstanding_delegation(&delegation_id);
         let ack_start_ms = self.commentary_ack_start_ms;
         if let Some(inserted_through) = self.commentary_ack_end_ms {
             self.result_inserted_through_ms
@@ -3429,6 +3488,15 @@ impl SessionState {
             },
         });
         self.last_request = Some(request_transcript.clone());
+        let label = self
+            .last_user_turn
+            .as_ref()
+            .and_then(|turn| turn.rows.last())
+            .map(|row| row.transcript.trim().to_owned())
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| request_transcript.trim().to_owned());
+        self.outstanding_delegations
+            .push((reference.0.clone(), label));
         self.due_progress_notices.push_back(reference.0.clone());
         self.queued_observations
             .push_back(GptLiveBrokerObservation::ClientDelegationFinal {
@@ -3626,20 +3694,31 @@ const LIVE_RESULT_CUE_SCOPE: &str =
     "Only this result: answer questions about this conversation yourself.";
 
 /// What a result's cue must say, read from broker state when it is sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ResultCueWording {
     /// Its delegated work still awaits members' answers.
     awaiting_peer_replies: bool,
     /// The user's latest request is open: neither the model's output nor a
     /// delegation has answered it.
     user_request_open: bool,
+    /// The other delegations still running ([`outstanding_delegations_line`]),
+    /// when there are any.
+    outstanding: Option<String>,
 }
 
 /// The cue for an acknowledged result the model has not spoken since: the
 /// awaiting-peer form when its delegated work still awaits members'
 /// answers, the open-request clause only while a request is open, and the
 /// scope sentence always.
-fn result_cue_text(wording: ResultCueWording) -> String {
+#[cfg(test)]
+fn result_cue_text(wording: &ResultCueWording) -> String {
+    result_cue_sections(wording).join(" ")
+}
+
+/// The sentences of a result cue in order: its body, the delegations still
+/// running (when any), and the scope sentence last. No fragment boundary
+/// ever falls inside one.
+fn result_cue_sections(wording: &ResultCueWording) -> Vec<String> {
     let (head, action, tail) = if wording.awaiting_peer_replies {
         (
             LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE_HEAD,
@@ -3653,38 +3732,93 @@ fn result_cue_text(wording: ResultCueWording) -> String {
             Some(LIVE_RESULT_CUE_TAIL),
         )
     };
-    let mut text = String::from(head);
+    let mut body = String::from(head);
     if wording.user_request_open {
-        text.push(' ');
-        text.push_str(LIVE_RESULT_CUE_OPEN_REQUEST);
-        text.push_str(" Then tell ");
+        body.push(' ');
+        body.push_str(LIVE_RESULT_CUE_OPEN_REQUEST);
+        body.push_str(" Then tell ");
     } else {
-        text.push_str(" Tell ");
+        body.push_str(" Tell ");
     }
-    text.push_str(action);
+    body.push_str(action);
     if let Some(tail) = tail {
-        text.push(' ');
-        text.push_str(tail);
+        body.push(' ');
+        body.push_str(tail);
     }
-    text.push(' ');
-    text.push_str(LIVE_RESULT_CUE_SCOPE);
-    text
+    let mut sections = vec![body];
+    sections.extend(wording.outstanding.clone());
+    sections.push(LIVE_RESULT_CUE_SCOPE.to_owned());
+    sections
 }
 
-/// The append fragments of a result cue: one when the whole cue fits
-/// [`CONTEXT_FRAGMENT_MAX_BYTES`], otherwise the cue body and the scope
-/// sentence as two fragments, split at that sentence boundary (never
-/// mid-sentence: a mid-word seam halves recall on gpt-live-1).
-fn result_cue_fragments(wording: ResultCueWording) -> Vec<String> {
-    let text = result_cue_text(wording);
-    if text.len() <= CONTEXT_FRAGMENT_MAX_BYTES {
-        return vec![text];
+/// The append fragments of a result cue: its sentences packed in order into
+/// fragments of at most [`CONTEXT_FRAGMENT_MAX_BYTES`], splitting only
+/// between sentences (a mid-word seam halves recall on gpt-live-1).
+fn result_cue_fragments(wording: &ResultCueWording) -> Vec<String> {
+    pack_sections(result_cue_sections(wording))
+}
+
+/// Pack whole sections, in order, into fragments of at most
+/// [`CONTEXT_FRAGMENT_MAX_BYTES`] joined by a space. Each section is itself
+/// within the bound.
+fn pack_sections(sections: Vec<String>) -> Vec<String> {
+    let mut fragments: Vec<String> = Vec::new();
+    for section in sections {
+        match fragments.last_mut() {
+            Some(last) if last.len() + 1 + section.len() <= CONTEXT_FRAGMENT_MAX_BYTES => {
+                last.push(' ');
+                last.push_str(&section);
+            }
+            _ => fragments.push(section),
+        }
     }
-    let body_len = text.len() - LIVE_RESULT_CUE_SCOPE.len() - 1;
-    vec![
-        text[..body_len].to_owned(),
-        LIVE_RESULT_CUE_SCOPE.to_owned(),
-    ]
+    fragments
+}
+
+/// Labels named in [`outstanding_delegations_line`]; further delegations are
+/// counted, not named, so the line stays within one fragment.
+const OUTSTANDING_MAX_NAMES: usize = 3;
+/// Characters kept of each label in [`outstanding_delegations_line`].
+const OUTSTANDING_LABEL_CHARS: usize = 60;
+
+/// The delegations still running, by the user's words for them, and the
+/// rule that goes with them: none of them is done until its result arrives
+/// (S101 on 37b1cebb9: the model said "the second one is also done" 10-14 s
+/// before that job's result existed, in 5 of 5 runs, right after the cues
+/// of the two jobs that had finished).
+fn outstanding_delegations_line(labels: &[&str]) -> Option<String> {
+    if labels.is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = labels
+        .iter()
+        .take(OUTSTANDING_MAX_NAMES)
+        .map(|label| {
+            let label = label.trim();
+            if label.chars().count() > OUTSTANDING_LABEL_CHARS {
+                let kept: String = label.chars().take(OUTSTANDING_LABEL_CHARS - 3).collect();
+                format!("\"{}...\"", kept.trim_end())
+            } else {
+                format!("\"{label}\"")
+            }
+        })
+        .collect();
+    let unnamed = labels.len().saturating_sub(names.len());
+    if unnamed > 0 {
+        names.push(format!("{unnamed} other request(s)"));
+    }
+    let listed = match names.as_slice() {
+        [one] => one.clone(),
+        [init @ .., last] => format!("{}; {last}", init.join("; ")),
+        [] => return None,
+    };
+    Some(if labels.len() == 1 {
+        format!("Still running: {listed}. Do not say it is done until its result arrives.")
+    } else {
+        format!(
+            "Still running: {listed}. Do not say any of them is done until its own result arrives."
+        )
+    })
 }
 
 /// Labels named in [`peer_reply_pending_notice`]; further members are
@@ -5493,6 +5627,181 @@ mod tests {
         state
     }
 
+    /// Three client delegations in turn, as S101 creates them: the user's
+    /// words, the delegation, and the model's acknowledgement.
+    fn state_with_three_running_delegations() -> SessionState {
+        let mut state = SessionState::default();
+        for (index, (words, id)) in [
+            ("what is two minus two", "dlg_quick"),
+            ("create marker one dot txt", "dlg_job1"),
+            ("create marker two dot txt", "dlg_job2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = 3000.0 * index as f64;
+            state.apply_frame(frame(input_delta_at(words, at))).unwrap();
+            state
+                .apply_frame(frame(delegation_created_at(id, "client", at + 500.0)))
+                .unwrap();
+            state
+                .apply_frame(frame(output_delta_span("on it", at + 1000.0, at + 1400.0)))
+                .unwrap();
+        }
+        drain(&mut state);
+        state
+    }
+
+    fn acknowledge_result(state: &mut SessionState, delegation: &str, at: f64) {
+        let result = state
+            .reserve_delegation_commentary(Some(delegation.to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_at(&pending_event_id(result), at)))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_outstanding_line_names_up_to_three_and_counts_the_rest() {
+        assert_eq!(outstanding_delegations_line(&[]), None);
+        assert_eq!(
+            outstanding_delegations_line(&["create marker two dot txt"]).as_deref(),
+            Some(
+                "Still running: \"create marker two dot txt\". Do not say it is done until its result arrives."
+            )
+        );
+        let five = ["a", "b", "c", "d", "e"];
+        let line = outstanding_delegations_line(&five).unwrap();
+        assert_eq!(
+            line,
+            "Still running: \"a\"; \"b\"; \"c\"; 2 other request(s). Do not say any of them is done until its own result arrives."
+        );
+        let long = "word ".repeat(40);
+        let line =
+            outstanding_delegations_line(&[long.as_str(), long.as_str(), long.as_str(), "x"])
+                .unwrap();
+        assert!(
+            line.contains("...\""),
+            "a long label is cut to its first characters"
+        );
+        assert!(line.len() <= CONTEXT_FRAGMENT_MAX_BYTES, "one fragment");
+    }
+
+    /// S101 on 37b1cebb9 (5/5): right after the cues of the quick job and
+    /// job1, the model said "the second one is done too", 10-14 s before
+    /// job2's result existed. Each cue now names the delegations still
+    /// running, never the one it is about or one already reported.
+    #[test]
+    fn each_result_cue_names_the_delegations_still_running() {
+        let mut state = state_with_three_running_delegations();
+        assert_eq!(state.outstanding_delegations.len(), 3);
+        acknowledge_result(&mut state, "dlg_quick", 9000.0);
+        drain(&mut state);
+        let (_, delegation, wording) = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("the quick job's cue");
+        assert_eq!(delegation, "dlg_quick");
+        let outstanding = wording.outstanding.clone().expect("two still running");
+        assert!(outstanding.contains("\"create marker one dot txt\""));
+        assert!(outstanding.contains("\"create marker two dot txt\""));
+        assert!(
+            !outstanding.contains("two minus two"),
+            "not the cue's own job"
+        );
+        let cue = result_cue_text(&wording);
+        assert!(
+            cue.ends_with(&format!("{outstanding} {LIVE_RESULT_CUE_SCOPE}")),
+            "the still-running line comes before the scope sentence"
+        );
+        drain(&mut state);
+        acknowledge_result(&mut state, "dlg_job1", 9600.0);
+        drain(&mut state);
+        let (_, _, wording) = state.reserve_due_result_cue().unwrap().expect("job1's cue");
+        assert_eq!(
+            wording.outstanding.as_deref(),
+            Some(
+                "Still running: \"create marker two dot txt\". Do not say it is done until its result arrives."
+            ),
+            "job2 is still running; the quick job and job1 are not named"
+        );
+        let fragments = result_cue_fragments(&wording);
+        assert!(
+            fragments
+                .iter()
+                .all(|fragment| fragment.len() <= CONTEXT_FRAGMENT_MAX_BYTES)
+        );
+        assert_eq!(fragments.join(" "), result_cue_text(&wording));
+        drain(&mut state);
+        acknowledge_result(&mut state, "dlg_job2", 12000.0);
+        drain(&mut state);
+        let (_, _, wording) = state.reserve_due_result_cue().unwrap().expect("job2's cue");
+        assert_eq!(wording.outstanding, None, "nothing left running");
+        assert!(state.outstanding_delegations.is_empty());
+    }
+
+    /// The in-progress notice of a new delegation names the earlier ones
+    /// still running (S101 r3: "the first one is done" right after job2's
+    /// notice, before any result), in a second fragment so the notice
+    /// itself stays intact.
+    #[test]
+    fn an_in_progress_notice_names_the_other_delegations_still_running() {
+        let mut state = SessionState::default();
+        let mut notices = Vec::new();
+        for (index, (words, id)) in [
+            ("create marker one dot txt", "dlg_job1"),
+            ("create marker two dot txt", "dlg_job2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = 3000.0 * index as f64;
+            state.apply_frame(frame(input_delta_at(words, at))).unwrap();
+            state
+                .apply_frame(frame(delegation_created_at(id, "client", at + 500.0)))
+                .unwrap();
+            drain(&mut state);
+            let (_, delegation, fragments) = state
+                .reserve_due_progress_notice()
+                .unwrap()
+                .expect("notice due");
+            assert_eq!(delegation, id);
+            notices.push(fragments);
+            drain(&mut state);
+        }
+        assert_eq!(
+            notices[0],
+            [LIVE_DELEGATION_IN_PROGRESS],
+            "nothing else running: the notice alone, one fragment"
+        );
+        assert_eq!(
+            notices[1],
+            [
+                LIVE_DELEGATION_IN_PROGRESS.to_owned(),
+                "Still running: \"create marker one dot txt\". Do not say it is done until its result arrives."
+                    .to_owned(),
+            ]
+        );
+    }
+
+    /// A delegation that ends without a result (its Failed narration) is no
+    /// longer named as running.
+    #[test]
+    fn a_delegation_ended_without_a_result_is_no_longer_named() {
+        let mut state = state_with_three_running_delegations();
+        state.end_outstanding_delegation("dlg_job2");
+        acknowledge_result(&mut state, "dlg_job1", 9000.0);
+        drain(&mut state);
+        let (_, _, wording) = state.reserve_due_result_cue().unwrap().expect("job1's cue");
+        assert_eq!(
+            wording.outstanding.as_deref(),
+            Some(
+                "Still running: \"what is two minus two\". Do not say it is done until its result arrives."
+            ),
+            "the failed job2 is not named"
+        );
+    }
+
     #[test]
     fn a_result_landing_well_after_the_last_word_gets_one_broker_owned_speak_cue() {
         let mut state = state_with_spoken_delegation();
@@ -5689,7 +5998,7 @@ mod tests {
             .unwrap()
             .expect("one cue due");
         assert_eq!(delegation_id, "dlg_cue");
-        assert!(result_cue_text(wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
+        assert!(result_cue_text(&wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
     }
 
     /// Output starting at or after the end of the insertion (a folded-in
@@ -5752,7 +6061,7 @@ mod tests {
                 let (_, _, wording) = reserved.expect("not spoken after: the awaiting cue");
                 assert!(wording.awaiting_peer_replies);
                 assert!(
-                    result_cue_text(wording)
+                    result_cue_text(&wording)
                         .starts_with(LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE_HEAD)
                 );
             }
@@ -5844,7 +6153,7 @@ mod tests {
             .expect("one cue due");
         assert_eq!(delegation_id, "dlg_cue");
         assert!(
-            result_cue_text(wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD),
+            result_cue_text(&wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD),
             "a delta that started inside the insertion span is pre-insertion speech"
         );
     }
@@ -5895,7 +6204,7 @@ mod tests {
             .reserve_due_result_cue()
             .unwrap()
             .expect("one cue due");
-        assert!(result_cue_text(wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
+        assert!(result_cue_text(&wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
     }
 
     /// A result acknowledged within the release window after the model's last
@@ -6195,7 +6504,7 @@ mod tests {
             .unwrap()
             .expect("the answer to the user does not report the result");
         assert_eq!(delegation_id, "dlg_cue");
-        assert!(result_cue_text(wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
+        assert!(result_cue_text(&wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
     }
 
     /// S99 on #1630, r3: the model's long readout ended on the audio clock,
@@ -6538,9 +6847,10 @@ mod tests {
     /// exception (a cue is only sent when nothing was said since the result).
     #[test]
     fn the_result_cue_anchors_to_the_delivery() {
-        let cue = result_cue_text(ResultCueWording {
+        let cue = result_cue_text(&ResultCueWording {
             awaiting_peer_replies: false,
             user_request_open: true,
+            outstanding: None,
         });
         assert!(
             cue.contains(
@@ -6583,7 +6893,7 @@ mod tests {
             .due_progress_notices
             .push_back("dlg_notice".to_owned());
         let (cue, _, _) = state.reserve_due_result_cue().unwrap().expect("cue due");
-        let (notice, _) = state
+        let (notice, _, _) = state
             .reserve_due_progress_notice()
             .unwrap()
             .expect("notice due");
@@ -6656,11 +6966,12 @@ mod tests {
         let wording = |awaiting_peer_replies| ResultCueWording {
             awaiting_peer_replies,
             user_request_open: true,
+            outstanding: None,
         };
-        assert!(result_cue_text(wording(false)).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
-        let awaiting = result_cue_text(wording(true));
+        assert!(result_cue_text(&wording(false)).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
+        let awaiting = result_cue_text(&wording(true));
         assert!(awaiting.starts_with(LIVE_RESULT_AWAITING_PEER_UNREPORTED_CUE_HEAD));
-        for cue in [result_cue_text(wording(false)), awaiting.clone()] {
+        for cue in [result_cue_text(&wording(false)), awaiting.clone()] {
             assert!(
                 !cue.contains("unless"),
                 "a result the model has not spoken since gets no exception"
@@ -6714,8 +7025,9 @@ mod tests {
                 let wording = ResultCueWording {
                     awaiting_peer_replies,
                     user_request_open,
+                    outstanding: None,
                 };
-                let cue = result_cue_text(wording);
+                let cue = result_cue_text(&wording);
                 let open = if user_request_open {
                     format!("{LIVE_RESULT_CUE_OPEN_REQUEST} Then tell")
                 } else {
@@ -6734,7 +7046,7 @@ mod tests {
                 );
                 // One append fragment, except the outcome cue with an open
                 // request, which splits before the scope sentence.
-                let fragments = result_cue_fragments(wording);
+                let fragments = result_cue_fragments(&wording);
                 let split = !awaiting_peer_replies && user_request_open;
                 assert_eq!(fragments.len(), if split { 2 } else { 1 });
                 assert_eq!(fragments.join(" "), cue, "fragments rejoin to the cue");
@@ -6876,7 +7188,7 @@ mod tests {
             .apply_frame(frame(delegation_created("dlg_friday", "client")))
             .unwrap();
         assert_eq!(state.due_progress_notices, ["dlg_friday"]);
-        let (token, delegation) = state
+        let (token, delegation, _) = state
             .reserve_due_progress_notice()
             .unwrap()
             .expect("notice due");
@@ -7688,9 +8000,10 @@ mod tests {
                 // cue carries no "already said so" exception.
                 assert_eq!(
                     cue["content"],
-                    result_cue_text(ResultCueWording {
+                    result_cue_text(&ResultCueWording {
                         awaiting_peer_replies: true,
                         user_request_open: false,
+                        outstanding: None,
                     })
                 );
                 let mut cue_ack = ack(cue["event_id"].as_str());

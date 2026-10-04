@@ -43,25 +43,40 @@ smoke-wrapper controls passed separately. The selected changed-path governance
 and Clippy checks and actual prebuilt outer E1 wrapper also passed. The failed
 Make agent gate and deliberately stopped first Make smoke materializer remain
 recorded separately; normal c18 publication and exact-head CI are now green.
-The separate public-entry/notification additions remain source-only and
-unexecuted, with no integrated native-plus-Console acceptance claim.
-The exact published-source optimized build and both cost correctness selectors
+The separate public-entry/notification candidate at `c9361659b` passed all three
+existing-target RPC cases with no ignores in the no-default/local-authorization
+profile. A fixture-only repair reads in-flight audit from the actual native
+adapter while retaining the final durable audit checks. These local results do
+not establish candidate publication, CI or integrated native-plus-Console acceptance.
+The exact published `157` optimized build and both cost correctness selectors
 passed. The first quiet small-fixture timing run is measured: whole-turn
 Local-minus-Trusted overhead was +117.33 percent at grant lineage depth 1 and
 +189.37 percent at depth 3. These turns exceed 10 percent in this small fixture and require investigation;
 the representative-turn gate and individual-operation acceptance remain unproven.
 
-The accepted order is publication, exact published-source optimized-build and
-correctness qualification, then an explicitly allocated 45-minute small quiet
-window. The verified `157` binary remains qualified for published `51`'s unchanged
-benchmark/build-selection inputs; its four generated/lock files do not require a
-redundant workload rebuild. The implementation lead owns measurement and the GCP
-resource owner explicitly clears the host before START. The first small run
-completed and its lease was released. The full representative matrix still needs
-a separate estimated 6-7-hour capacity allocation. The target remains under 1 ms
-p99 added authorization per operation and at most 10 percent representative turn
-overhead, with full required coverage still open. Added whole-turn p99 is not an
-individual-operation measurement. A second unchanged-157-binary CPU capture
+The first small run and its 45-minute allocation are completed historical
+evidence. The verified `157` binary remains qualified for published `51`'s
+unchanged benchmark/build-selection inputs; those four generated/lock files do
+not require a redundant workload rebuild. The separate committed `f467` exact-byte
+hex candidate has passed compatibility and both cost correctness selectors, with
+no timing gain measured yet. The next cost step requires an explicitly cleared
+quiet START for a matched preserved-157/hex-candidate comparison. Only material
+improvement permits the representative attempt.
+
+Luka rejected the former 6-7-hour representative allocation. Every benchmark
+attempt must finish in less than 20 minutes total, including setup, warmup,
+measured work, all oracles, cleanup and output. The approved representative
+profile is fixed W20/N32 in all six existing depth/workload cells, with no interim
+analysis. Six simultaneous paired Fieller mean-ratio intervals use family alpha
+.05, conditional on stationary, independent, approximately bivariate-normal
+opposite-order blocks; exhausted or incomplete attempts are UNCERTAIN.
+Fresh-admission cells measure whole turns; continuing intervals and summed direct
+calls remain separate units. This mean-only profile supplies no small-N p99
+acceptance. The implementation lead owns measurement and the GCP resource owner
+explicitly clears the host before START. The under-1-ms p99 added authorization
+per-operation and at-most-10-percent representative-turn targets remain open with
+full required coverage. Added whole-turn p99 is not an individual-operation
+measurement. A second unchanged-157-binary CPU capture
 passed the small fixture in 51.24s with 5,447 samples and zero reported loss;
 increasing the DWARF user-stack capture to 32,768 bytes did not establish useful
 application-owner attribution improvement. Mixed-mode/setup/capture samples

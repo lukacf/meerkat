@@ -100,10 +100,12 @@ Root owned the explicitly allocated 45-minute small quiet window. The GCP
 resource owner confirmed no build-monitor violation from START through DONE
 and released the lease at 03:24:56 UTC. Post-run observations showed 100 percent
 CPU idle, zero iowait and no swap, with writeback activity in the final sample;
-this is not an all-IO-zero claim. The full representative 6-7-hour capacity
-allocation remains separately pending. Full surface and performance acceptance
-remain open, including under 1 ms p99 added authorization per operation and at
-most 10 percent representative turn overhead.
+this is not an all-IO-zero claim. That 45-minute allocation is historical.
+Luka rejected the former 6-7-hour representative allocation: every future
+benchmark attempt must finish in less than 20 minutes total, including setup,
+warmup, measured work, all oracles, cleanup and output. Full surface and
+performance acceptance remain open, including under 1 ms p99 added authorization
+per operation and at most 10 percent representative turn overhead.
 
 The first attribution-only profile completed at 04:41:19 UTC within the explicitly
 reserved five-minute quiet window. The existing optimized small fixture passed
@@ -124,8 +126,25 @@ resource owner's external monitor confirmed no build violation from START at
 did not establish useful application-owner attribution improvement: major
 allocation caller trees still stop in libc. Both modes, setup and capture costs
 remain mixed, so this is not an incremental governed-cost or optimization result.
-The separate exact-byte hex candidate is tests-only; no production repair or
-performance gain is included in this publication.
+The separate exact-byte hex production candidate is committed at
+`f4671b7c5f190d0a165cffe87e43f86845a6c718`, with only the reviewed 4-line/3-line
+encoding change. Seven input-authority tests, the canonical encoding control
+and both native cost correctness selectors passed. This is correctness evidence,
+not a measured performance gain, and it is separate from published c18.
+
+The approved next order is a quiet matched comparison of preserved `157` and
+that hex candidate first. Only a material improvement permits the representative
+attempt. The approved representative profile is fixed W20/N32 in all six
+existing depth/workload cells, with no interim analysis. Its 624 fresh fixtures
+must fit the less-than-20-minute total budget; budget exhaustion or incomplete
+cells yield UNCERTAIN. Six paired Fieller mean-ratio intervals use family alpha
+.05 and 16 adjacent opposite-order blocks per cell, conditional on stationary,
+independent, approximately bivariate-normal blocks. Fresh-admission cells measure
+whole turns; continuing intervals and summed direct calls remain separate
+units. This mean-only profile cannot establish p99 or full performance acceptance.
+The implementation lead and GCP resource owner must explicitly clear the quiet
+host and issue START before either measurement; no candidate gain or fixed-profile
+representative result is recorded yet.
 
 Historical failure/preparation logs remain in the existing evidence directory.
 The first Web SDK exhaustive-event check omitted HookLaunchRefused, while its
@@ -211,8 +230,22 @@ coverage or performance. The changed-path governance/Clippy and selected outer
 wrapper results are qualified separately above. Normal c18 publication and
 exact-head CI are green; the earlier failed full Make invocation remains
 historical. No runtime production change is included in this restart delta.
-The separate public-entry/notification test additions remain source-qualified
-and unexecuted; they are not part of c18's existing Governed JSONL CI result.
+The separate public-entry/notification candidate is committed at
+`c9361659b3e09a147eba0e3b863550b2d9952521`, tree
+`8053319b92ba75913e3c761d615965c8a392ce57`. The first execution on `643` passed
+two cases and failed the new public case: its fixture read the durable accepted
+row while in-flight audit was still held by the actual native owner. The normal
+fixture-only repair reads that audit through the existing runtime adapter and
+retains final durable audit assertions. The same three no-default/local-authorization
+RPC cases then passed, with no ignores, 553 filtered cases and 0.03s bodies after
+a 9m18s optimized rebuild (`publicc936-governed-jsonl-r2.log`). The new case
+executes exported JSONL setup/serve, two actual model requests, zero denied
+delete callbacks, one permitted read callback, same-run feedback/completion,
+protected native audit and ordered public event notifications. The negative
+unsupported/ungoverned entry and existing refusal case passed too. Normal commit
+hooks passed; the candidate is not published and has no candidate CI result.
+These results do not extend c18's two-selector CI evidence or establish
+integrated native-plus-Console acceptance.
 
 ## Current local shell and hook checkpoint, 2026-10-03
 

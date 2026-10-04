@@ -8407,6 +8407,7 @@ mod tests {
         provider_binding: ProviderWebrtcBinding,
     }
 
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
     async fn held_result_fixture(channel: &str) -> HeldResultFixture {
         use meerkat_core::service::{
             CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
@@ -8707,6 +8708,7 @@ mod tests {
     /// authorization) ends as `ClosedBeforeDispatch` when the channel
     /// closes, the close completes at once, and the result merges into the
     /// source member with its exact text.
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
     #[tokio::test]
     async fn closing_the_channel_never_waits_on_an_undispatched_result() {
         let HeldResultFixture {
@@ -8769,6 +8771,7 @@ mod tests {
     /// owned worker still running when its channel closes is reported to
     /// later opens of its session until its custody ends; a merge that could
     /// not be admitted leaves nothing on its way.
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
     #[tokio::test]
     async fn an_owned_worker_running_at_close_is_reported_until_its_custody_ends() {
         use meerkat::experimental_gpt_live::LivePostCloseWorkSource as _;
@@ -8817,6 +8820,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
     #[tokio::test]
     async fn a_result_interrupted_by_close_merges_into_the_source_member()
     -> Result<(), Box<dyn std::error::Error>> {

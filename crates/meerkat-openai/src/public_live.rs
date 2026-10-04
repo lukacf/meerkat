@@ -5884,6 +5884,45 @@ mod tests {
         );
     }
 
+    /// S104 R1: a delegation with no actionable input (a reopened channel
+    /// delegating before any user speech) is refused without ever entering
+    /// the outstanding list, so no later notice or cue names it as still
+    /// running.
+    #[test]
+    fn a_refused_stray_delegation_is_never_named_as_running() {
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(delegation_created_at("dlg_stray", "client", 1350.0)))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation }]
+                if delegation.__opaque_provider_id() == "dlg_stray"
+        ));
+        assert!(state.outstanding_delegations.is_empty());
+        assert!(
+            state.reserve_due_progress_notice().unwrap().is_none(),
+            "no in-progress notice for the refused stray"
+        );
+        state
+            .apply_frame(frame(input_delta_at("create marker one dot txt", 3000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created_at("dlg_job1", "client", 3500.0)))
+            .unwrap();
+        drain(&mut state);
+        let (_, delegation, fragments) = state
+            .reserve_due_progress_notice()
+            .unwrap()
+            .expect("the real delegation's notice");
+        assert_eq!(delegation, "dlg_job1");
+        assert_eq!(
+            fragments,
+            [LIVE_DELEGATION_IN_PROGRESS],
+            "no still-running line names the refused stray"
+        );
+    }
+
     /// A delegation that ends without a result (its Failed narration) is no
     /// longer named as running.
     #[test]

@@ -1261,6 +1261,14 @@ them.
   fix, the oracle anchors such a result on the first acknowledgement of an
   unrecorded append after the delegation was created.
 
+- A GPT Live call no longer ends when the provider emits a delegation that
+  has nothing to act on (Turbo S S104 R1: a reopened channel delegated from
+  its seeded history 1.35 s in, before any user speech, and the call was
+  muted and closed). Such a delegation (no user request on the channel to
+  re-present, or a non-client target) is refused and ignored: nothing runs
+  for it, it is never named as still running, and the channel stays up for
+  the user's next utterance. Other unsupported provider events still end
+  the call.
 - GPT Live no longer gives the voice a "Finished voice request: ... The
   result follows." announcement without the result behind it. The Completed
   narration was its own provider event, acknowledged before the result was

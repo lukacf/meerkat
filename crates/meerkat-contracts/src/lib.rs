@@ -177,6 +177,8 @@ pub use wire::{
     ListSchedulesParams,
     ListSessionTranscriptRevisionsParams,
     LiveAssistantOutputAvailableParams,
+    LiveAssistantPlaybackHint,
+    LiveAssistantPlaybackHintParams,
     LiveChannelParams,
     LiveCloseResult,
     LiveCloseStatus,

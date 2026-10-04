@@ -164,6 +164,17 @@ impl GptLiveTurnRole {
 #[derive(Clone, PartialEq, Eq)]
 pub enum GptLiveBrokerObservation {
     SessionReady,
+    /// The user's speech and audible assistant audio overlap (a barge-in),
+    /// whichever started first: a reflected input frame over the floor
+    /// guard's speech threshold within the assistant's output-silence
+    /// window. A client
+    /// ducks assistant playback on it, so the user's floor wins at the
+    /// overlap instead of when the provider yields.
+    UserSpeechOverAssistant,
+    /// Ends a [`Self::UserSpeechOverAssistant`]: the user's speech or the
+    /// assistant's output has gone quiet for its release length on the
+    /// provider audio clock. A client restores assistant playback.
+    AssistantPlaybackRestorable,
     SessionContextAppendAcknowledged {
         token: GptLiveAppendToken,
     },
@@ -286,6 +297,8 @@ impl std::fmt::Debug for GptLiveBrokerObservation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self {
             Self::SessionReady => "session_ready",
+            Self::UserSpeechOverAssistant => "user_speech_over_assistant",
+            Self::AssistantPlaybackRestorable => "assistant_playback_restorable",
             Self::SessionContextAppendAcknowledged { .. } => "session_context_append_acknowledged",
             Self::SessionContextAppendRejected { .. } => "session_context_append_rejected",
             Self::ThinkingContextAppendAcknowledged { .. } => {

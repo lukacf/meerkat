@@ -18,6 +18,11 @@ const manifest = JSON.parse(fs.readFileSync(path.join(fixtureRoot, 'manifest.jso
 const PROTOCOLS = new Set(['experimental', 'public']);
 const protocol = parseProtocol(process.argv.slice(2));
 const captureEvidence = process.argv.includes('--capture-evidence');
+// The client's assistant playback gate (#1638): the policy of the TS SDK's
+// `applyLiveAssistantPlaybackHint` (sdks/typescript/src/live_webrtc.ts),
+// kept equal to its constants by a parity test. A `duck` hint silences the
+// assistant's remote audio at the user's speech onset; `restore` returns it.
+const ASSISTANT_PLAYBACK_GATE = { duckedGain: 0, unityGain: 1, timeConstantS: 0.01 };
 let browser;
 let page;
 
@@ -63,7 +68,7 @@ async function prepare(command) {
     // the end of the spoken part of a fixture (100/32768).
     fixture_silence: 0.0031,
   };
-  const offerSdp = await page.evaluate(async ({ fixtures, protocol, captureEvidence, energyConfig }) => {
+  const offerSdp = await page.evaluate(async ({ fixtures, protocol, captureEvidence, energyConfig, playbackGate }) => {
     const t0 = performance.now();
     const nowMs = () => Math.round(performance.now() - t0);
     const audioContext = new AudioContext({ sampleRate: 24_000 });
@@ -107,6 +112,11 @@ async function prepare(command) {
       nonSilentFrames: 0,
       maxRms: 0,
       sources: [],
+      // One gate per remote track, ahead of its playback output and every
+      // level measurement, so what the timeline calls audible is what the
+      // user hears through the gate.
+      gates: [],
+      playbackHint: 'restore',
     };
     // One shared analyser for the 100 ms energy windows; every remote track
     // feeds it so the timeline sees the assistant regardless of renegotiation.
@@ -118,14 +128,21 @@ async function prepare(command) {
       const stream = new MediaStream([event.track]);
       const playback = document.createElement('audio');
       playback.autoplay = true;
+      // The element keeps the remote track flowing; what is heard is the
+      // gated Web Audio path below.
+      playback.muted = true;
       playback.srcObject = event.streams[0] || stream;
       document.body.append(playback);
       playback.play().catch(() => {});
       const source = audioContext.createMediaStreamSource(stream);
+      const gate = audioContext.createGain();
+      gate.gain.value = remoteAudio.playbackHint === 'duck' ? playbackGate.duckedGain : playbackGate.unityGain;
+      source.connect(gate);
+      remoteAudio.gates.push(gate);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
-      source.connect(analyser);
-      source.connect(energyAnalyser);
+      gate.connect(analyser);
+      gate.connect(energyAnalyser);
       analyser.connect(audioContext.destination);
       const samples = new Float32Array(analyser.fftSize);
       const timer = setInterval(() => {
@@ -176,6 +193,22 @@ async function prepare(command) {
     });
     globalThis.__gptLivePeer = {
       audioContext,
+      // Apply one `live/assistant_playback_hint` to every remote track's
+      // gate, exactly as the SDK's applyLiveAssistantPlaybackHint does.
+      setAssistantPlaybackHint(hint) {
+        if (hint !== 'duck' && hint !== 'restore') return;
+        remoteAudio.playbackHint = hint;
+        const target = hint === 'duck' ? playbackGate.duckedGain : playbackGate.unityGain;
+        const now = audioContext.currentTime;
+        for (const gate of remoteAudio.gates) {
+          gate.gain.cancelScheduledValues(now);
+          gate.gain.setTargetAtTime(target, now, playbackGate.timeConstantS);
+        }
+        globalThis.__gptLivePeer.pushTimeline('playback_hint', { hint });
+        // Journal every applied hint, for every scenario (not only those that
+        // dump the timeline), with the media counters at that moment.
+        globalThis.__gptLivePeer.recordEvidence?.({ kind: 'playback_hint', hint, browser_ms: performance.now() });
+      },
       channel,
       destination,
       events: [],
@@ -768,7 +801,7 @@ async function prepare(command) {
       ]);
     }
     return peer.localDescription?.sdp;
-  }, { fixtures, protocol, captureEvidence, energyConfig });
+  }, { fixtures, protocol, captureEvidence, energyConfig, playbackGate: ASSISTANT_PLAYBACK_GATE });
   return { offer_sdp: offerSdp, protocol, fixtures: Object.keys(fixtures) };
 }
 
@@ -1062,6 +1095,16 @@ for await (const line of lines) {
   let command;
   try {
     command = JSON.parse(line);
+    // A playback hint (#1638) is fire-and-forget: applied at once and never
+    // answered, so it cannot disturb the request/response commands.
+    if (command?.type === 'playback_hint' && command.id === undefined) {
+      if (page) {
+        await page
+          .evaluate((hint) => globalThis.__gptLivePeer?.setAssistantPlaybackHint(hint), command.hint)
+          .catch(() => {});
+      }
+      continue;
+    }
     const result = await handle(command);
     process.stdout.write(`${JSON.stringify({ id: command.id, result })}\n`);
   } catch (error) {

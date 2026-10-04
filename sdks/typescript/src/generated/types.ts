@@ -5312,9 +5312,22 @@ export interface LiveStatusResult {
   status: WireLiveAdapterStatus;
 }
 
+export interface LiveAssistantOutputAvailableParams {
+  channel_id: string;
+  content_index: number;
+  output_id: string;
+}
+
 export interface LiveMediaHealthRequestedParams {
   channel_id: string;
   output_id: string;
+}
+
+export type LiveAssistantPlaybackHint = "duck" | "restore";
+
+export interface LiveAssistantPlaybackHintParams {
+  channel_id: string;
+  hint: "duck" | "restore";
 }
 
 export interface LiveMediaHealthParams {

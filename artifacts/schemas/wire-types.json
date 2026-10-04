@@ -98824,6 +98824,82 @@
     "title": "ListSessionsResult",
     "type": "object"
   },
+  "LiveAssistantOutputAvailableParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Ephemeral control notification emitted after the server has admitted one\nexact assistant playback target.\n\nThe opaque `output_id` is the only client control handle. Provider turn,\nresponse, item, delta, and interaction identities remain server-internal.\nA surface publishes this payload only after the canonical live host has\napplied the corresponding provider observation.",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "content_index": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "output_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "output_id",
+      "content_index"
+    ],
+    "title": "LiveAssistantOutputAvailableParams",
+    "type": "object"
+  },
+  "LiveAssistantPlaybackHint": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The playback a `live/assistant_playback_hint` asks the client for.",
+    "oneOf": [
+      {
+        "const": "duck",
+        "description": "The user's speech and audible assistant audio overlap (a barge-in,\neither side starting): silence assistant playback now.",
+        "type": "string"
+      },
+      {
+        "const": "restore",
+        "description": "The user's speech or the assistant's output has gone quiet: play\nassistant audio normally again.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveAssistantPlaybackHint"
+  },
+  "LiveAssistantPlaybackHintParams": {
+    "$defs": {
+      "LiveAssistantPlaybackHint": {
+        "description": "The playback a `live/assistant_playback_hint` asks the client for.",
+        "oneOf": [
+          {
+            "const": "duck",
+            "description": "The user's speech and audible assistant audio overlap (a barge-in,\neither side starting): silence assistant playback now.",
+            "type": "string"
+          },
+          {
+            "const": "restore",
+            "description": "The user's speech or the assistant's output has gone quiet: play\nassistant audio normally again.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Runtime notification `live/assistant_playback_hint`: a barge-in playback\nhint for the channel's assistant audio. The user hears the assistant until\nthe provider stops sending audio and the client drains what is already in\nflight; a client that applies `duck` silences it as soon as the user's\nspeech and assistant audio overlap instead, and `restore` ends the duck. The runtime derives both from\nthe provider's reflected input and output audio on the provider's audio\nclock; a client that ignores them plays as before.",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "hint": {
+        "$ref": "#/$defs/LiveAssistantPlaybackHint"
+      }
+    },
+    "required": [
+      "channel_id",
+      "hint"
+    ],
+    "title": "LiveAssistantPlaybackHintParams",
+    "type": "object"
+  },
   "LiveChannelParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `live/status`, `live/close`, and `live/interrupt`.\nThey all take the same `{channel_id}` shape; this struct is the typed\nname for it.\n\n`live/commit_input` no longer uses this shape — it carries an optional\n`response_modality` override (G9) so callers can request a text-only\nresponse on an audio-first channel without flipping the channel\nmodality. See [`LiveCommitInputParams`].",

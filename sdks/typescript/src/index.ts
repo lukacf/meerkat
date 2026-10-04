@@ -46,11 +46,22 @@ export { LiveChannel } from "./live.js";
 export type { LiveChannelOptions } from "./live.js";
 export {
   answerLiveWebrtcOffer,
+  applyLiveAssistantPlaybackHint,
   isLiveWebrtcBootstrap,
+  parseLiveNotification,
+  LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN,
+  LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S,
+  LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN,
   liveWebrtcAudioConstraints,
   liveWebrtcMediaConstraints,
 } from "./live_webrtc.js";
 export type {
+  LiveAssistantPlaybackGateOptions,
+  LiveAssistantPlaybackHint,
+  LiveAudioParamLike,
+  LiveGainNodeLike,
+  LiveNotification,
+  LiveNotificationListener,
   LiveWebrtcAnswerClient,
   LiveWebrtcAudioConstraintOptions,
   LiveWebrtcOfferDescription,

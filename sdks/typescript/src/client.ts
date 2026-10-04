@@ -151,6 +151,10 @@ import {
   type ToolsRegisterResult,
   SkillListResponse,
 } from "./generated/types.js";
+import {
+  parseLiveNotification,
+  type LiveNotificationListener,
+} from "./live_webrtc.js";
 import type {
   ApprovalDecideParams as RpcApprovalDecideParams,
   ApprovalGetParams as RpcApprovalGetParams,
@@ -879,6 +883,7 @@ export class MeerkatClient {
     { resolve: (value: Record<string, unknown>) => void; reject: (reason: unknown) => void }
   >();
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
+  private liveNotificationListeners = new Set<LiveNotificationListener>();
   private streamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
   // Per-request_id stream subscriptions for createSessionStreaming calls whose
   // session_id is not yet bound. Keyed by the JSON-RPC request id so concurrent
@@ -4212,6 +4217,35 @@ export class MeerkatClient {
   }
 
   /**
+   * Receive the server's channel-scoped `live/*` notifications
+   * (`live/assistant_output_available`, `live/media_health_requested`,
+   * `live/assistant_playback_hint`). Returns an unsubscribe function.
+   * Notifications that arrive with no listener are dropped; a method this
+   * SDK build does not know is ignored. A throwing listener does not stop
+   * the others or the transport.
+   */
+  onLiveNotification(listener: LiveNotificationListener): () => void {
+    this.liveNotificationListeners.add(listener);
+    return () => {
+      this.liveNotificationListeners.delete(listener);
+    };
+  }
+
+  private dispatchLiveNotification(method: string, params: unknown): void {
+    const notification = parseLiveNotification(method, params);
+    if (notification === undefined) {
+      return;
+    }
+    for (const listener of [...this.liveNotificationListeners]) {
+      try {
+        listener(notification);
+      } catch {
+        // A listener fault is the listener's own; the transport goes on.
+      }
+    }
+  }
+
+  /**
    * Answer a `live/media_health_requested` notification with raw
    * decoded-audio counters (channel media start to now). The runtime judges
    * them; on `media_fault` it has already closed the channel, and
@@ -4592,6 +4626,12 @@ export class MeerkatClient {
     } else if ("method" in data) {
       const method = String(data.method ?? "");
       const params = (data.params ?? {}) as Record<string, unknown>;
+      if (method.startsWith("live/")) {
+        // Channel-scoped live notifications carry no session_id: they go to
+        // onLiveNotification listeners, never into a session event queue.
+        this.dispatchLiveNotification(method, params);
+        return;
+      }
       if (method === "session/stream_event" || method === "mob/stream_event") {
         const streamId = String(params.stream_id ?? "");
         const queue = this.streamQueues.get(streamId);

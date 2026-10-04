@@ -2419,6 +2419,10 @@ struct SessionState {
     /// A reflected input frame has carried speech: from then on the
     /// reflected-input silence run says whether the user is still speaking.
     reflected_input_speech_seen: bool,
+    /// A [`GptLiveBrokerObservation::UserSpeechOverAssistant`] is open: the
+    /// user started speaking while the assistant was audible and neither has
+    /// gone quiet for its release length since.
+    assistant_playback_ducked: bool,
     /// Session-timeline start of the last output transcript delta.
     last_output_start_ms: Option<f64>,
     /// Audio-clock length of reflected-input silence since the user's last
@@ -2473,6 +2477,7 @@ impl Default for SessionState {
             recent_output_spans: VecDeque::new(),
             outstanding_delegations: Vec::new(),
             reflected_input_speech_seen: false,
+            assistant_playback_ducked: false,
             input_silence_run_ms: 0,
             last_output_start_ms: None,
             last_delegation_offset_ms: None,
@@ -2716,7 +2721,25 @@ impl SessionState {
             return;
         }
         self.output_silence_run_ms = self.output_silence_run_ms.saturating_add(frame_ms);
+        if self.output_silence_run_ms >= OUTPUT_SILENCE_RELEASE_MS {
+            self.restore_assistant_playback();
+        }
         self.release_deferred_result_cues_when_due();
+    }
+
+    /// Whether the assistant is audible: its last voiced output frame is
+    /// within [`OUTPUT_SILENCE_RELEASE_MS`] on the provider audio clock.
+    fn assistant_audible(&self) -> bool {
+        self.output_silence_run_ms < OUTPUT_SILENCE_RELEASE_MS
+    }
+
+    /// Close an open barge-in duck, once.
+    fn restore_assistant_playback(&mut self) {
+        if self.assistant_playback_ducked {
+            self.assistant_playback_ducked = false;
+            self.queued_observations
+                .push_back(GptLiveBrokerObservation::AssistantPlaybackRestorable);
+        }
     }
 
     /// The user is audibly speaking: a reflected input frame carried speech
@@ -2764,10 +2787,27 @@ impl SessionState {
         if speech {
             self.input_silence_run_ms = 0;
             self.reflected_input_speech_seen = true;
+            // Barge-in: a voiced user frame while the assistant is audible,
+            // whichever started first. Every voiced frame is checked, so
+            // assistant audio that starts into the user's utterance ducks at
+            // the user's next voiced frame. It is not checked on the output
+            // side: the floor guard's 1600 ms release would then duck (and
+            // clip) every ordinary reply that starts within 1.6 s of the
+            // user's last word. Same speech threshold as the floor guard,
+            // on the provider's reflected input; no new timer or level.
+            if !self.assistant_playback_ducked && self.assistant_audible() {
+                self.assistant_playback_ducked = true;
+                self.queued_observations
+                    .push_back(GptLiveBrokerObservation::UserSpeechOverAssistant);
+            }
             return;
         }
         let was_speaking = self.reflected_input_speaking();
         self.input_silence_run_ms = self.input_silence_run_ms.saturating_add(frame_ms);
+        if !self.reflected_input_speaking() {
+            // The user went quiet (or a noise blip ended): playback returns.
+            self.restore_assistant_playback();
+        }
         if was_speaking && !self.reflected_input_speaking() {
             // The user went quiet: a deferred cue held by their speech may
             // go now.
@@ -6654,16 +6694,16 @@ mod tests {
     /// One 200 ms reflected input frame (PCM16, 24 kHz): a -12 dBFS tone for
     /// speech, digital zero for silence.
     fn input_audio(speech: bool) -> Value {
+        input_audio_at(if speech { 8_000.0 } else { 0.0 })
+    }
+
+    /// One 200 ms reflected input frame: a sine of peak `amplitude` (0 is
+    /// digital silence; 60 is a faint blip near -58 dBFS RMS, under the
+    /// floor guard's -50 dBFS speech threshold).
+    fn input_audio_at(amplitude: f64) -> Value {
         use base64::Engine as _;
         let samples: Vec<u8> = (0..4_800_u32)
-            .flat_map(|index| {
-                let value = if speech {
-                    (8_000.0 * (f64::from(index) * 0.13).sin()) as i16
-                } else {
-                    0
-                };
-                value.to_le_bytes()
-            })
+            .flat_map(|index| ((amplitude * (f64::from(index) * 0.13).sin()) as i16).to_le_bytes())
             .collect();
         json!({"type":"session.input_audio.append",
             "audio": base64::engine::general_purpose::STANDARD.encode(samples)})
@@ -6673,6 +6713,252 @@ mod tests {
         for _ in 0..frames {
             state.apply_frame(frame(input_audio(speech))).unwrap();
         }
+    }
+
+    fn playback_observations(state: &mut SessionState) -> Vec<GptLiveBrokerObservation> {
+        drain(state)
+            .into_iter()
+            .filter(|observation| {
+                matches!(
+                    observation,
+                    GptLiveBrokerObservation::UserSpeechOverAssistant
+                        | GptLiveBrokerObservation::AssistantPlaybackRestorable
+                )
+            })
+            .collect()
+    }
+
+    /// #1638: user speech that starts while the assistant is audible opens
+    /// exactly one barge-in duck at the first voiced input frame; it closes
+    /// once the user's reflected input has been quiet for the floor guard's
+    /// release length, all on the provider audio clock.
+    #[test]
+    fn user_speech_over_the_assistant_ducks_once_and_restores_on_input_silence() {
+        let mut state = SessionState::default();
+        model_output(&mut state, true, 3);
+        reflect_input(&mut state, true, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+        // Still speaking, assistant still voiced: no second duck.
+        model_output(&mut state, true, 2);
+        reflect_input(&mut state, true, 4);
+        assert!(playback_observations(&mut state).is_empty());
+        // 1400 ms of input silence: not yet the release length.
+        reflect_input(&mut state, false, 7);
+        assert!(playback_observations(&mut state).is_empty());
+        reflect_input(&mut state, false, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::AssistantPlaybackRestorable]
+        );
+    }
+
+    /// The duck also closes when the assistant's output goes quiet for its
+    /// release length while the user is still talking.
+    #[test]
+    fn a_barge_in_duck_restores_when_the_assistant_output_goes_quiet() {
+        let mut state = SessionState::default();
+        model_output(&mut state, true, 2);
+        reflect_input(&mut state, true, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+        for _ in 0..8 {
+            model_output(&mut state, false, 1);
+            reflect_input(&mut state, true, 1);
+        }
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::AssistantPlaybackRestorable]
+        );
+    }
+
+    /// A false trigger (a cough or a short "mm" over the assistant, the user
+    /// never takes the turn) restores on reflected-input silence and leaves
+    /// no stuck mute: the guard re-arms, so a later barge-in over the same
+    /// still-audible assistant ducks again.
+    #[test]
+    fn a_false_trigger_restores_and_the_next_barge_in_ducks_again() {
+        let mut state = SessionState::default();
+        model_output(&mut state, true, 3);
+        reflect_input(&mut state, true, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+        // The user goes quiet while the assistant keeps talking.
+        for _ in 0..8 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, false, 1);
+        }
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::AssistantPlaybackRestorable]
+        );
+        assert!(!state.assistant_playback_ducked, "no stuck mute");
+        // More assistant audio with the user silent: nothing to say.
+        model_output(&mut state, true, 3);
+        reflect_input(&mut state, false, 3);
+        assert!(playback_observations(&mut state).is_empty());
+        // A real barge-in later on the same response ducks again.
+        reflect_input(&mut state, true, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+    }
+
+    /// The assistant's response ends while the duck is open: the restore
+    /// still fires, exactly once (the user's own silence afterwards adds no
+    /// second restore), and the next assistant turn starts audible with no
+    /// hint. A barge-in over that next turn ducks it as usual.
+    #[test]
+    fn a_response_that_ends_while_ducked_restores_once_and_the_next_turn_is_audible() {
+        let mut state = SessionState::default();
+        model_output(&mut state, true, 2);
+        reflect_input(&mut state, true, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+        // The response ends while the user is still talking.
+        for _ in 0..8 {
+            model_output(&mut state, false, 1);
+            reflect_input(&mut state, true, 1);
+        }
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::AssistantPlaybackRestorable]
+        );
+        // The user finishes; the floor's end is no second restore.
+        reflect_input(&mut state, false, 8);
+        model_output(&mut state, false, 2);
+        assert!(playback_observations(&mut state).is_empty());
+        assert!(!state.assistant_playback_ducked);
+        // The next assistant turn plays at full gain: no hint at all.
+        model_output(&mut state, true, 3);
+        assert!(playback_observations(&mut state).is_empty());
+        assert!(!state.assistant_playback_ducked);
+        // A barge-in over that turn ducks it.
+        reflect_input(&mut state, true, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+    }
+
+    /// Backchannels during a long readout (#1651 review): a faint "mm-hmm"
+    /// under the floor guard's speech threshold never ducks. One loud enough
+    /// to cross it ducks like any overlap, restores on the user's input
+    /// silence, and the rest of the readout plays with no further hint.
+    #[test]
+    fn a_backchannel_under_the_speech_threshold_never_ducks_and_one_over_it_restores() {
+        let mut state = SessionState::default();
+        model_output(&mut state, true, 3);
+        // A faint backchannel, 400 ms, inside the readout.
+        for _ in 0..2 {
+            model_output(&mut state, true, 1);
+            state.apply_frame(frame(input_audio_at(60.0))).unwrap();
+        }
+        for _ in 0..4 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, false, 1);
+        }
+        assert!(playback_observations(&mut state).is_empty(), "no duck");
+        assert!(!state.assistant_playback_ducked);
+        // A clear "okay", 400 ms, over the same readout.
+        for _ in 0..2 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, true, 1);
+        }
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+        // The user goes quiet; the readout continues.
+        for _ in 0..8 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, false, 1);
+        }
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::AssistantPlaybackRestorable]
+        );
+        // The rest of the readout plays at full gain: no further hint.
+        for _ in 0..10 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, false, 1);
+        }
+        assert!(playback_observations(&mut state).is_empty());
+        assert!(!state.assistant_playback_ducked);
+    }
+
+    /// An ordinary reply that starts within the floor guard's 1600 ms release
+    /// after the user's last word (the user is silent, the provider took the
+    /// turn) is never ducked: its first words play.
+    #[test]
+    fn a_reply_that_starts_soon_after_the_user_stops_is_not_ducked() {
+        let mut state = SessionState::default();
+        reflect_input(&mut state, true, 5);
+        // 600 ms after the user's last voiced frame the reply starts.
+        reflect_input(&mut state, false, 3);
+        for _ in 0..10 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, false, 1);
+        }
+        assert!(playback_observations(&mut state).is_empty());
+        assert!(!state.assistant_playback_ducked);
+    }
+
+    /// User speech while the assistant is quiet (or before it ever spoke) is
+    /// an ordinary turn, never a barge-in.
+    #[test]
+    fn user_speech_while_the_assistant_is_quiet_is_not_a_barge_in() {
+        let mut state = SessionState::default();
+        reflect_input(&mut state, true, 3);
+        assert!(playback_observations(&mut state).is_empty());
+        // The user finishes, then the assistant answers and finishes.
+        reflect_input(&mut state, false, 8);
+        model_output(&mut state, true, 2);
+        model_output(&mut state, false, 8);
+        reflect_input(&mut state, true, 3);
+        assert!(playback_observations(&mut state).is_empty());
+    }
+
+    /// S103 r1 (#1651 soak): the provider began a response ("I'm working on
+    /// it") 900 ms into the user's utterance. Assistant audio that starts
+    /// while the user keeps talking ducks at the user's next voiced frame
+    /// and restores once the user goes quiet.
+    #[test]
+    fn assistant_audio_that_starts_into_the_users_speech_ducks() {
+        let mut state = SessionState::default();
+        reflect_input(&mut state, true, 4);
+        assert!(playback_observations(&mut state).is_empty());
+        model_output(&mut state, true, 1);
+        reflect_input(&mut state, true, 1);
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::UserSpeechOverAssistant]
+        );
+        // Both keep going: still one duck.
+        for _ in 0..3 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, true, 1);
+        }
+        assert!(playback_observations(&mut state).is_empty());
+        // The user stops; the assistant now holds the floor and plays.
+        for _ in 0..8 {
+            model_output(&mut state, true, 1);
+            reflect_input(&mut state, false, 1);
+        }
+        assert_eq!(
+            playback_observations(&mut state),
+            vec![GptLiveBrokerObservation::AssistantPlaybackRestorable]
+        );
+        assert!(!state.assistant_playback_ducked);
     }
 
     /// S99 pre-merge r3: a cue deferred during the model's response; the

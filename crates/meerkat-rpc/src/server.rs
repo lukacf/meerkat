@@ -107,6 +107,54 @@ impl meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher
             ),
         }
         .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.deliver(binding, notification).await
+    }
+
+    /// `live/assistant_playback_hint {channel_id, hint}` (#1638), written
+    /// under the same binding-fenced custody as every live notification.
+    async fn publish_playback_hint(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        hint: meerkat::experimental_gpt_live::ExperimentalLivePlaybackHint,
+    ) -> Result<(), meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError>
+    {
+        use meerkat::experimental_gpt_live::{
+            ExperimentalLivePlaybackHint, ExperimentalLivePublicObservationDeliveryError,
+        };
+
+        let hint = match hint {
+            ExperimentalLivePlaybackHint::Duck => {
+                meerkat_contracts::LiveAssistantPlaybackHint::Duck
+            }
+            ExperimentalLivePlaybackHint::Restore => {
+                meerkat_contracts::LiveAssistantPlaybackHint::Restore
+            }
+            _ => return Err(ExperimentalLivePublicObservationDeliveryError::Rejected),
+        };
+        let notification = RpcNotification::try_new(
+            "live/assistant_playback_hint",
+            &meerkat_contracts::LiveAssistantPlaybackHintParams {
+                channel_id: binding.channel_id().to_string(),
+                hint,
+            },
+        )
+        .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.deliver(binding, notification).await
+    }
+}
+
+#[cfg(feature = "openai-live")]
+impl ExperimentalLiveRpcObservationPublisher {
+    /// Queue one live notification for the connection writer and wait until
+    /// it is written (or refused for a stale binding).
+    async fn deliver(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        notification: RpcNotification,
+    ) -> Result<(), meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError>
+    {
+        use meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError;
+
         let (delivery_tx, delivery_rx) = oneshot::channel();
         self.tx
             .send(ExperimentalLiveRpcNotification::new(
@@ -2486,6 +2534,49 @@ mod tests {
             ExperimentalLiveRpcNotification::new(binding, notification, delivery_tx),
             delivery_rx,
         )
+    }
+
+    /// #1638: a barge-in hint becomes `live/assistant_playback_hint` under
+    /// the channel's binding, and is delivered only once the writer settles
+    /// it; a refused write reports `Rejected`, never success.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn playback_hints_publish_as_live_assistant_playback_hint_notifications() {
+        use meerkat::experimental_gpt_live::{
+            ExperimentalLivePlaybackHint, ExperimentalLivePublicObservationDeliveryError,
+            ExperimentalLivePublicObservationPublisher,
+        };
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let publisher = Arc::new(ExperimentalLiveRpcObservationPublisher { tx });
+        for (hint, wire, delivered) in [
+            (ExperimentalLivePlaybackHint::Duck, "duck", true),
+            (ExperimentalLivePlaybackHint::Restore, "restore", false),
+        ] {
+            let binding = test_experimental_live_binding("barge-in", 2, 5);
+            let publish = tokio::spawn({
+                let publisher = Arc::clone(&publisher);
+                let binding = binding.clone();
+                async move { publisher.publish_playback_hint(binding, hint).await }
+            });
+            let mut queued = rx.recv().await.expect("hint queued for the writer");
+            assert_eq!(queued.binding, binding);
+            assert_eq!(queued.notification.method, "live/assistant_playback_hint");
+            assert_eq!(
+                queued.notification.params_value().expect("params"),
+                serde_json::json!({"channel_id": "barge-in", "hint": wire})
+            );
+            queued.settle(delivered);
+            let outcome = publish.await.expect("publish task");
+            if delivered {
+                assert_eq!(outcome, Ok(()));
+            } else {
+                assert_eq!(
+                    outcome,
+                    Err(ExperimentalLivePublicObservationDeliveryError::Rejected)
+                );
+            }
+        }
     }
 
     #[cfg(feature = "live-webrtc")]

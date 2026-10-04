@@ -660,6 +660,13 @@ them.
   empty-text rows (see Fixed). Opening a store migrates it forward once.
   Binaries from before this release refuse a v3 file, as they refuse any
   newer schema.
+- Barge-in playback hint (#1638, see Added): new enum variants
+  `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::UserSpeechOverAssistant`,
+  `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::AssistantPlaybackRestorable`,
+  `meerkat_live::LiveSidebandObservationKind::UserSpeechOverAssistant` and
+  `meerkat_live::LiveSidebandObservationKind::AssistantPlaybackRestorable`;
+  exhaustive matches must handle them. Later discriminants move in
+  `GptLiveBrokerObservation::*` and `LiveSidebandObservationKind::*`.
 
 ### Security
 
@@ -719,6 +726,38 @@ them.
 
 ### Added
 
+- Barge-in playback hint for Public Live (#1638). When the user's speech and
+  audible assistant audio overlap (the user speaking over the assistant, or
+  the assistant starting while the user keeps talking; a reply after the user
+  has stopped never ducks), the broker's floor guard
+  publishes the RPC notification `live/assistant_playback_hint` with
+  `{channel_id, hint: "duck"}`, and `{hint: "restore"}` once the user's input
+  goes quiet or the assistant output does. The gpt-live protocol has no
+  client command that cancels or clears provider output, so the duck is the
+  client's local playback gate. The hint is purely additive: a client that
+  ignores it behaves as before. New wire types
+  `meerkat_contracts::LiveAssistantPlaybackHint` and
+  `LiveAssistantPlaybackHintParams`; hosts receive hints through the new
+  defaulted method
+  `meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher::publish_playback_hint`
+  (with `ExperimentalLivePlaybackHint`), which drops them unless overridden,
+  so a publisher that forwards every observation as a playback handle never
+  sees one. In the TypeScript SDK, `applyLiveAssistantPlaybackHint(gainNode,
+  hint, currentTime, options?)` (`LiveAssistantPlaybackGateOptions.duckedGain`
+  for partial attenuation instead of silence) with the gain constants
+  `LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN`, `LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN`
+  and `LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S`.
+- The TypeScript and Python SDKs deliver `live/*` notifications
+  (`live/assistant_output_available`, `live/media_health_requested`,
+  `live/assistant_playback_hint`) to application code:
+  `MeerkatClient.onLiveNotification(listener)` (TypeScript, typed
+  `LiveNotification` union, `parseLiveNotification`) and
+  `MeerkatClient.on_live_notification(callback)` (Python, `LiveNotification`,
+  `parse_live_notification`), each returning an unsubscribe function. Before,
+  both SDKs routed every notification by `session_id` and silently dropped the
+  channel-scoped `live/*` ones, so a client could answer
+  `live/media_health_requested` but never receive it. The generated SDK types
+  gain `LiveAssistantOutputAvailableParams`.
 - `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
   handles are the same live runtime owner (clones share it; a separately
   constructed machine over the same store does not).
@@ -1252,6 +1291,11 @@ them.
 
 ### Fixed
 
+- Public Live talk-over (#1638): assistant audio that kept playing after the
+  user started speaking (a provider tail of up to several seconds), or that
+  started while the user was still talking, now ducks as soon as it overlaps
+  the user's speech in clients that apply `live/assistant_playback_hint`,
+  including the e2e browser peer.
 - GPT Live provider-stream recordings (`test-realtime-fixtures`) now keep
   delegation commentary that was held behind the user's unanswered
   utterance and released later. The release path sent it without

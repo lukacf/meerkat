@@ -333,10 +333,11 @@ pub(crate) fn unavailable() -> RuntimeDriverError {
 /// Lossless bytes as an opaque String in the generated map. No identity or
 /// authority is inferred from a prefix or parsed back out of this encoding.
 fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
+    for &byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     out
 }

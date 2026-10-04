@@ -9604,6 +9604,245 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
 }
 
 // ===========================================================================
+/// The three S101 jobs, told apart by their "Started voice request"
+/// narration (the user's transcribed request).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum S101Job {
+    Job1,
+    Quick,
+    Job2,
+}
+
+/// Words that state a job is complete, and words that make a sentence about
+/// it a promise or a status instead ("I'll tell you when it's done", "the
+/// second one is running").
+const S101_DONE_WORDS: &[&str] = &[
+    "created",
+    "done",
+    "finished",
+    "complete",
+    "completed",
+    "ready",
+];
+const S101_HEDGE_WORDS: &[&str] = &[
+    "when", "once", "will", "ll", "until", "soon", "running", "started", "starting", "start",
+    "kicked", "handed", "going", "watching", "checking",
+];
+const S101_NUMBER_WORDS: &[&str] = &[
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+
+fn s101_is_number(word: &str) -> bool {
+    !word.is_empty()
+        && (word.chars().all(|c| c.is_ascii_digit()) || S101_NUMBER_WORDS.contains(&word))
+}
+
+/// The references to a job a sentence can make: its marker file (as the
+/// recognizer renders it) or its ordinal.
+fn s101_job_refs(job: S101Job) -> &'static [&'static [&'static str]] {
+    match job {
+        S101Job::Job1 => &[
+            &["marker1"],
+            &["marker", "1"],
+            &["marker", "one"],
+            &["first", "one"],
+            &["first", "job"],
+            &["first", "slow", "job"],
+        ],
+        S101Job::Job2 => &[
+            &["marker2"],
+            &["marker", "2"],
+            &["marker", "two"],
+            &["second", "one"],
+            &["second", "job"],
+            &["second", "slow", "job"],
+        ],
+        S101Job::Quick => &[],
+    }
+}
+
+/// Lowercased alphanumeric words of `text` with each word's char offset.
+fn s101_words(text: &str) -> Vec<(usize, String)> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut start = 0;
+    for (index, c) in text.chars().enumerate() {
+        if c.is_alphanumeric() {
+            if current.is_empty() {
+                start = index;
+            }
+            current.extend(c.to_lowercase());
+        } else if !current.is_empty() {
+            words.push((start, std::mem::take(&mut current)));
+        }
+    }
+    if !current.is_empty() {
+        words.push((start, current));
+    }
+    words
+}
+
+/// Outcome claims spoken (provider output transcript, sideband clock) before
+/// the provider learned the job was complete: the job's first commentary
+/// append after its "Started" narration, i.e. its "Finished" narration or
+/// its result. Two claim shapes the fixture identifies deterministically:
+/// - a job's marker file or ordinal with a completion word and no hedge,
+///   timed at the later of the two words;
+/// - the quick question's value as "count is N", "there are N" or "N
+///   files", timed at the number, after the quick delegation was created. A
+///   bare number is not a claim: it can be a filler or an ordinal.
+fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u32) -> Vec<String> {
+    let mut created: BTreeMap<String, u64> = BTreeMap::new();
+    let mut jobs: BTreeMap<String, S101Job> = BTreeMap::new();
+    let mut known: BTreeMap<String, u64> = BTreeMap::new();
+    let mut deltas: Vec<(u64, String)> = Vec::new();
+    for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
+        match &line.entry {
+            provider_recording::Entry::ServerFrame { raw } => match raw["type"].as_str() {
+                Some("session.delegation.created") => {
+                    if let Some(id) = raw["delegation"]["id"].as_str() {
+                        created.entry(id.to_owned()).or_insert(line.elapsed_ms);
+                    }
+                }
+                Some("session.output_transcript.delta") => {
+                    if let Some(delta) = raw["delta"].as_str() {
+                        deltas.push((line.elapsed_ms, delta.to_owned()));
+                    }
+                }
+                _ => {}
+            },
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append" =>
+            {
+                let (Some(id), Some(content)) =
+                    (event["delegation_id"].as_str(), event["content"].as_str())
+                else {
+                    continue;
+                };
+                if content.starts_with("Started voice request") {
+                    let request = format!(" {} ", normalize_words(content));
+                    let job = if request.contains(" how many files ") {
+                        S101Job::Quick
+                    } else if [
+                        " marker2 ",
+                        " marker 2 ",
+                        " marker two ",
+                        " second slow job ",
+                        " second job ",
+                    ]
+                    .iter()
+                    .any(|needle| request.contains(needle))
+                    {
+                        S101Job::Job2
+                    } else {
+                        S101Job::Job1
+                    };
+                    jobs.entry(id.to_owned()).or_insert(job);
+                } else if jobs.contains_key(id) {
+                    known.entry(id.to_owned()).or_insert(line.elapsed_ms);
+                }
+            }
+            _ => {}
+        }
+    }
+    let known_at = |job: S101Job| {
+        jobs.iter()
+            .find(|(_, j)| **j == job)
+            .map_or(u64::MAX, |(id, _)| {
+                known.get(id).copied().unwrap_or(u64::MAX)
+            })
+    };
+    let created_at = |job: S101Job| {
+        jobs.iter()
+            .find(|(_, j)| **j == job)
+            .and_then(|(id, _)| created.get(id).copied())
+            .unwrap_or(0)
+    };
+    let mut claims = Vec::new();
+    let quick_window = |at: u64| created_at(S101Job::Quick) <= at && at < known_at(S101Job::Quick);
+    let mut text = String::new();
+    let mut times = Vec::new();
+    for (at, delta) in &deltas {
+        for c in delta.chars() {
+            text.push(c);
+            times.push(*at);
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0;
+    while start < chars.len() {
+        let end = chars[start..]
+            .iter()
+            .position(|c| matches!(c, '.' | '!' | '?'))
+            .map_or(chars.len(), |offset| start + offset + 1);
+        let sentence: String = chars[start..end].iter().collect();
+        let words = s101_words(&sentence);
+        let at = |offset: usize| times.get(start + offset).copied();
+        let tokens: Vec<&str> = words.iter().map(|(_, w)| w.as_str()).collect();
+        // The quick question's value as a phrase.
+        for index in 0..tokens.len() {
+            let number_at = if tokens[index..].starts_with(&["count", "is"])
+                || (tokens[index] == "there"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|w| ["is", "are", "was", "were"].contains(w)))
+            {
+                Some(index + 2)
+            } else if s101_is_number(tokens[index])
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|w| *w == "file" || *w == "files")
+            {
+                Some(index)
+            } else {
+                None
+            };
+            if let Some(number_at) = number_at
+                && tokens.get(number_at).is_some_and(|w| s101_is_number(w))
+                && let Some(when) = at(words[number_at].0)
+                && quick_window(when)
+            {
+                claims.push(format!(
+                    "the voice stated the quick question's answer ({:?}) at {when} ms, before its result (known at {} ms)",
+                    sentence.trim(),
+                    known_at(S101Job::Quick)
+                ));
+                break;
+            }
+        }
+        // A slow job declared complete.
+        let done = tokens.iter().position(|w| S101_DONE_WORDS.contains(w));
+        let hedged = tokens.iter().any(|w| S101_HEDGE_WORDS.contains(w));
+        if let Some(done) = done
+            && !hedged
+        {
+            for job in [S101Job::Job1, S101Job::Job2] {
+                let reference = s101_job_refs(job).iter().find_map(|reference| {
+                    (0..tokens.len()).find_map(|index| {
+                        tokens[index..]
+                            .starts_with(reference)
+                            .then(|| index + reference.len() - 1)
+                    })
+                });
+                if let Some(reference) = reference {
+                    let when = at(words[reference].0.max(words[done].0));
+                    if let Some(when) = when
+                        && when < known_at(job)
+                    {
+                        claims.push(format!(
+                            "the voice declared {job:?} complete at {when} ms ({:?}), before the provider knew it was (at {} ms)",
+                            sentence.trim(),
+                            known_at(job)
+                        ));
+                    }
+                }
+            }
+        }
+        start = end;
+    }
+    claims
+}
+
 // Scenario 101: busy backend (slow job, quick question, second slow job)
 // ===========================================================================
 
@@ -9918,6 +10157,12 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S101").await?;
         let close = close_or_record(&mut live, &evidence, channel, "S101", &mut deterministic_failures).await?;
+        // No job's outcome is spoken before the provider learns that job is
+        // complete (verdict aba5e15b: "and the second one is also done:
+        // marker2.txt is created" 10-14 s before job 2 finished, 5/5 runs).
+        for claim in s101_premature_outcome_claims(&evidence.provider_stream_lines()?, channel) {
+            deterministic_failures.push(claim);
+        }
 
         let history = live
             .rpc
@@ -11869,6 +12114,113 @@ mod config_tests {
         lines.push(ack(4, "meerkat-thinking-7-1"));
         assert!(super::thinking_tokens(&lines, 1)[0].acknowledged);
         assert!(super::thinking_tokens(&lines, 2).is_empty());
+    }
+
+    /// A job declared complete before the provider learned it was is a
+    /// premature outcome claim (verdict aba5e15b S101, 5/5 runs); a claim
+    /// after the job's "Finished" narration, a hedged promise, and a status
+    /// are not. The quick question's value counts only before its result.
+    #[test]
+    fn s101_flags_outcomes_spoken_before_the_job_completed() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append", "delegation_id": id, "content": content}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let lines = vec![
+            line(1000, created("j1")),
+            line(
+                1100,
+                append(
+                    "j1",
+                    "Started voice request: \"Start a slow job: sleep 25 seconds, then create marker1 dot txt\".",
+                ),
+            ),
+            line(2000, created("q")),
+            line(
+                2100,
+                append(
+                    "q",
+                    "Started voice request: \"How many files are in the workspace? Just the number\".",
+                ),
+            ),
+            line(2500, delta(" I'll let you know when marker one is done.")),
+            line(3000, delta("One.")),
+            line(3200, delta(" There are two files.")),
+            line(4000, append("q", "0")),
+            line(4100, created("j2")),
+            line(
+                4200,
+                append(
+                    "j2",
+                    "Started voice request: \"Hand the executor a second slow job: create marker2 dot txt\".",
+                ),
+            ),
+            line(4500, delta(" The second one is running.")),
+            line(
+                5000,
+                append(
+                    "j1",
+                    "Finished voice request: \"Start a slow job ...\". The result follows.",
+                ),
+            ),
+            line(5300, delta(" The first one is done.")),
+            line(
+                5600,
+                delta(" And the second one is done too: marker two dot txt is created."),
+            ),
+            line(
+                9000,
+                append(
+                    "j2",
+                    "Finished voice request: \"Hand the executor ...\". The result follows.",
+                ),
+            ),
+            line(9200, delta(" Marker two dot txt is created.")),
+        ];
+        let claims = super::s101_premature_outcome_claims(&lines, 1);
+        assert_eq!(claims.len(), 2, "{claims:#?}");
+        assert!(
+            claims[0].contains("quick question's answer (\"There are two files.\") at 3200"),
+            "{claims:#?}"
+        );
+        assert!(
+            claims[1].contains("declared Job2 complete at 5600"),
+            "{claims:#?}"
+        );
+        assert!(super::s101_premature_outcome_claims(&lines, 2).is_empty());
+    }
+
+    /// Local only: replay the oracle against recorded S101 provider streams
+    /// (S101_REPLAY = colon-separated run directories).
+    #[test]
+    #[ignore = "local replay against recordings"]
+    fn s101_premature_outcome_replay() {
+        let dirs = std::env::var("S101_REPLAY").unwrap_or_default();
+        for dir in dirs.split(':').filter(|d| !d.is_empty()) {
+            let lines = super::provider_recording::read(
+                &std::path::Path::new(dir).join("provider-stream.jsonl"),
+            )
+            .unwrap();
+            println!(
+                "REPLAY {dir} {:?}",
+                super::s101_premature_outcome_claims(&lines, 1)
+            );
+        }
     }
 
     /// The vault phrase has five words and never repeats a word back to

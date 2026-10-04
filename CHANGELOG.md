@@ -2311,6 +2311,11 @@ them.
     stutter, journaled as a metric. The browser peer records responses; it no longer raises
     `duplicate_readout` itself, and missing or malformed records fail the
     scenario.
+  - S101 fails when the voice declares a slow job complete (its marker file
+    or ordinal with a completion word, not a promise or a status) or states
+    the quick job's file count ("there are N files", "count is N") before the
+    provider learned that job was complete: its "Finished" narration or its
+    result, on the sideband clock, timed at the claim's words.
   - S102 fails when the voice attributes an answer to the peer before the
     peer's reply reached the provider conversation (a premature claim), by the
     provider's transcript timing: the peer's name or a pronoun standing for it

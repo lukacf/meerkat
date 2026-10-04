@@ -1,6 +1,6 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 16:59 UTC
+## Current delivery status, 2026-10-04 at 17:10 UTC
 
 The native governed-flow checkpoint is published and CI-green at `00b0cab3`.
 Its allocation/benchmark successor `b12d81e7` is still running normal push
@@ -14,7 +14,8 @@ tree `7daa82d6f0a359fdc7af52b0734c85c0e268a744`. It adds explicit access
 inspection from group membership and refreshes the required embedded assets.
 The initial CI attempt failed asset freshness; the successor passes that step.
 [CI run 37217158682](https://github.com/lukacf/meerkat-mobkit/actions/runs/37217158682)
-is still running. The focused access-view tests passed 19 cases, and the
+passed all 11 jobs, including browser and audio checks, in 37m19s. The focused
+access-view tests passed 19 cases, and the
 existing adapter suite passed 313. These remain Console projection tests;
 MobKit's native dependency is still 0.8.50.
 

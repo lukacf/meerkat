@@ -23,7 +23,7 @@ name: CI
 #                     nextest --lib --bins --profile ci-pr (ci-pr = fast),
 #                     plus the feature-gated suites of those packages
 #                     (FEATURE_UNIT_SUITES in scripts/ci-cargo-lanes.mjs)
-#   governed-jsonl  - exact two non-MCP native-authorized JSONL tests on Rust changes
+#   governed-jsonl  - exact three non-MCP native-authorized JSONL tests on Rust changes
 #   integration     - (xN) the tests/*.rs binaries of each integration
 #                     suite whose trigger packages or paths changed
 #                     (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs):
@@ -685,7 +685,7 @@ jobs:
   governed-jsonl:
     name: Governed JSONL
     needs: changes
-    # Default RPC features enable MCP and compile these two cases away.
+    # Default RPC features enable MCP and compile these three cases away.
     # Native dependency changes must retain this positive non-MCP profile.
     if: ${{ needs.changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest

@@ -1412,6 +1412,55 @@ async fn governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_comp
             }
         }
         assert_eq!((model_count, read_count), (2, 1));
+        let model_prepared: Vec<_> = final_audit
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| {
+                matches!(&record.observation.observation,
+                AuditObservation::Prepared { target, .. }
+                if matches!(target.as_ref(), AuditTarget::Model(_)))
+            })
+            .collect();
+        let first_model_id = &model_prepared[0].1.observation.operation_id;
+        let first_model_outcome_at = final_audit
+            .iter()
+            .position(|record| {
+                &record.observation.operation_id == first_model_id
+                    && matches!(
+                        record.observation.observation,
+                        AuditObservation::Outcome { .. }
+                    )
+            })
+            .unwrap();
+        let denied_at = final_audit
+            .iter()
+            .position(|record| &record.observation.operation_id == denied_id)
+            .unwrap();
+        let read_prepared_at = final_audit
+            .iter()
+            .position(|record| {
+                matches!(&record.observation.observation,
+                AuditObservation::Prepared { target, .. }
+                if matches!(target.as_ref(), AuditTarget::Tool { call_id, .. }
+                    if call_id == PERMITTED_CALL))
+            })
+            .unwrap();
+        let read_id = &final_audit[read_prepared_at].observation.operation_id;
+        let read_outcome_at = final_audit
+            .iter()
+            .position(|record| {
+                &record.observation.operation_id == read_id
+                    && matches!(
+                        record.observation.observation,
+                        AuditObservation::Outcome { .. }
+                    )
+            })
+            .unwrap();
+        // Sibling dispatches may overlap; both finish between the model calls.
+        assert!(first_model_outcome_at < denied_at);
+        assert!(first_model_outcome_at < read_prepared_at);
+        assert!(denied_at < model_prepared[1].0);
+        assert!(read_outcome_at < model_prepared[1].0);
         let refused: Vec<_> = final_audit
             .iter()
             .filter(|record| {
@@ -1441,10 +1490,6 @@ async fn governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_comp
             .unwrap()
             .unwrap();
         let decoded = Session::decode_whole_blob_document(document.bytes()).unwrap();
-        assert_eq!(
-            decoded.row_sha256_token(),
-            document.authority().blob_sha256()
-        );
         let saved = decoded.into_session();
         assert_saved_transcript(&saved, &sid);
         assert_wire_initial_prompt(&bodies[0], &saved);

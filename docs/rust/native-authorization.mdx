@@ -13,21 +13,27 @@ enabling a Cargo feature or calling `agent.run(...)` does not establish this
 integration.
 
 <Note>
-The in-memory persistence composition passed a bounded native validation gate
-on tested tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. This is evidence for
-that source snapshot, not a released support claim. Stock CLI, REST, RPC and
-MCP paths do not acquire governed activation from this API. Further SQLite qualification,
-restart and recovery, full surface coverage, human consent and broader OS confinement remain
-separate integration work. The native shell composition below covers supported
-macOS requirements. The additive `meerkat_rpc::governed_jsonl` entry provides a
-fixed-host, single-connection profile. It requires `default-features = false`
-plus `local-authorization` and does not activate ordinary RPC constructors.
-The stock SQLite WholeBlob path passed local same-process close/reopen and
-fresh authenticated work with retained current host authority. Separate process
-restart and controller restoration, sandbox enforcement across supported
-platforms, and accepted low-overhead benchmarks remain required completion
-gates. Full surface coverage remains the endpoint. This page makes
-no performance or live-provider coverage claim.
+The initial in-memory composition passed its bounded native validation gate
+on tree `f68f905ad37ddc2dca7af84ca7921c7d64bed04d`. Published native
+`c18c619bf2d140663eb0a78d17d7122d9ac1a5ef` additionally passed completed-turn
+SQLite close/reopen and fresh governed work in actual separate processes, with
+current host grants, a stable configured provider binding and the real File token
+owner. Its normal publication and exact-head CI passed. See the
+[implementation checkpoint](/internal/design/adr-001-implementation/implementation-progress)
+for exact source and evidence scope.
+
+Stock CLI, REST, RPC and MCP paths do not acquire governed activation from this
+API. The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
+single-connection profile; it requires `default-features = false` plus
+`local-authorization` and does not activate ordinary RPC constructors. The
+separately tested public-entry/notification fixture on candidate `c9361659b`
+remains a fixed-host loopback profile. Console projection is not integrated
+native-plus-Console proof.
+Persistent controller administration, interrupted recovery, human consent and
+full surface/platform coverage remain separate work. The shell composition below
+covers supported macOS requirements. The measured small fixture needs performance
+investigation; representative-turn and per-operation acceptance remain open.
+Full surface coverage remains the endpoint, with no live-provider coverage claim.
 </Note>
 
 ## Install the real owners before sharing the machine
@@ -223,8 +229,10 @@ reconstruction also passed, retaining the current trusted host owners and
 proving that stored effects were not replayed. Fresh authenticated work after
 reopen also passed with distinct input/run/tool IDs, local denial feedback,
 a permitted sibling and protected terminal audit. These results qualify this local
-source on the executed filesystem. Separate process restart, other platforms,
-publication, CI and performance remain separate gates.
+source on the executed filesystem. Published c18 also passed the bounded
+separate-process completed-turn case described below and exact-head CI. Other
+platforms, interrupted recovery, persistent administration and performance remain
+separate gates.
 </Note>
 
 The facade's `session-store` feature already enables its built-in SQLite stores;
@@ -292,8 +300,17 @@ status owner. Creating an unrelated empty vault requests credential release;
 it does not reconstruct the current provider authority. The new input uses
 current host grants, ingress authentication and a fresh actor pin, then completes
 the native model-tool-model flow with exact audit and no replay of the old work.
-That tested same-process reconstruction does not establish a separate process
-restart, performance acceptance or full surface coverage.
+The later completed-turn cold-process case uses separate writer and reader
+processes with the same SQLite database, a real File token store and stable
+host-configured provider binding. The reader restores the marked credential
+through the existing lifecycle owner, issues new current grants and pins the
+reconstructed actor's actual client before fresh authenticated work. An attempt
+carrying the writer's old grant association passes current ingress authentication
+but is refused by current grant authority before model/tool or durable input
+entry. Reader and parent independently verify the original transcript prefix,
+input row and protected audit remain unchanged. This qualifies that fixed-bearer,
+callback fixture, not interrupted recovery, every credential refresh flow,
+persistent administration, performance acceptance or full surface coverage.
 
 The low-level equivalent is
 `MeerkatMachine::persistent_with_local_grant_authorization(runtime_store, Some(blob_store), owners)?`.
@@ -348,6 +365,42 @@ actor with `live_session_actor_witness` and its real client with
 submission. A copied model name is not a pinned client.
 The selected credential must be usable in this machine's generated auth owner;
 use the normal credential lifecycle, not a fabricated Ready flag.
+
+## Remove a permission without removing the controller
+
+For a storeless machine, use the existing native custody accessor before grant
+revocation. This excerpt assumes the same actual `machine` and `grants` owner,
+an authenticated administrative `PrincipalRef` named `administrator`, and the
+exact issued `GrantLineageRef` named `grant_to_remove`. Propagate both typed
+custody and grant errors:
+
+```rust
+let mut custody = machine.try_controller_grant_mutation()?;
+grants.revoke(&administrator, &grant_to_remove, &mut custody)?;
+```
+
+Keep the guard through this synchronous mutation. The accessor tries the actual
+machine locks once; ordinary operation checks do not use this administration
+path. `GrantRefusal::ControllerInUse` means an unfinished controller retains the
+grant or one of its ancestors. Separate controller and operation permissions
+into appropriately narrowed leaves so removing an operation permission need not
+remove the controller. A terminal input can still belong to an unfinished run;
+its original contributor continues to protect that controller.
+
+Busy or unsupported custody is public `ControllerCustodyRefusal::Unavailable`,
+without a permission verdict. Persistent machines, including SQLite, are
+currently unsupported by this accessor. Completed-turn reopen and exclusive
+execution custody do not provide persistent grant-administration authority.
+Do not replace the guard with a catalog listing, serialized association or a
+caller-owned assertion of no unfinished work. A host sharing grants with another
+machine or detached owner must include that additional scope in actual custody.
+
+The Console Access panel changes MobKit's console ABAC rules; it is not a native
+grant editor. Native permission repair belongs to the embedding's authorized
+grant/resource owners. Keep local refusals as affected-call feedback while
+permitted work continues; audit availability and launch failures require their
+own infrastructure repair. No CLI grant command or universal Console permission
+control is supplied by this API.
 
 ## Bind the final input to authenticated ingress
 

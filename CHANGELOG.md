@@ -1260,7 +1260,6 @@ them.
   before its result (93b6aaec S101 R2). For recordings made before this
   fix, the oracle anchors such a result on the first acknowledgement of an
   unrecorded append after the delegation was created.
-
 - A GPT Live call no longer ends when the provider emits a delegation that
   has nothing to act on (Turbo S S104 R1: a reopened channel delegated from
   its seeded history 1.35 s in, before any user speech, and the call was
@@ -1278,7 +1277,6 @@ them.
   still machine-authorized, but it now travels inside the result's release
   and reaches the provider in the result's own commentary event, ahead of
   the result text.
-
 - A GPT Live result cue no longer carries delegation framing into the user's
   next question (Turbo S S99: recall questions were delegated after a cue)
   (#1630).
@@ -1421,16 +1419,13 @@ them.
   holds nothing a close waits on. A deferred cue also waits while the user
   holds the floor: the model's output is silent while the user speaks, so
   output silence alone released the cue into the middle of the user's next
-  question, and the model then delegated that question (S99). When the
-  provider timeline shows no model output starting at or after the end of
-  the result's insertion, the cue no
-  longer offers an "unless you have already reported it" exception, which the
-  model took a greeting for (S97 v3 r4). The tail of a reply already under
-  way when the result landed does not count as output since the result, even
+  question, and the model then delegated that question (S99). No cue offers
+  an "unless you have already reported it" exception any more, which the
+  model took a greeting for (S97 v3 r4); since #1635 a result the model has
+  already read out gets no cue at all. The tail of a reply already under way
+  when the result landed does not count as output since the result, even
   when its transcript frame arrives after the result's acknowledgement (S97
-  r3: " ready." spanning the insertion itself). Where the model did speak
-  after the result, the exception now excludes greetings and
-  acknowledgements.
+  r3: " ready." spanning the insertion itself).
 - GPT Live Turbo S S102 no longer fails a run whose member answered
   correctly. The oracle looked for the text "Peer response from" in the
   executor's history, which appears only when `send_response` carries no
@@ -1764,11 +1759,9 @@ them.
   suppressed when the gap was under 1000 ms. A result that landed 400 ms
   after the last word was never read out (S106), while voiced results land
   from -200 to +400 ms after it, so no gap can separate the two cases.
-  Every acknowledged result now gets one cue, bound to the result's
-  `delegation_id` (a thinking append since #1630). It is phrased to be safe either way: tell the
-  user the outcome unless it was already reported since the result arrived.
-  Speech before the delivery (an intention such as "I'll use Friday") does
-  not count as a report.
+  Every acknowledged result now gets at most one cue, bound to the result's
+  `delegation_id`: a thinking append since #1630, and skipped since #1635
+  when the model has already read the result out.
 - Opening or refreshing a live channel on a member whose turn is in flight no
   longer waits for the turn to end.
   - The realtime open and refresh projections took the session's turn

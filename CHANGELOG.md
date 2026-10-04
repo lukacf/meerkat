@@ -1311,6 +1311,20 @@ them.
   typed turn's reply, which is never a request, no longer is (the voice
   answered that clause aloud with only the corrected value, "Got it:
   Cobalt.", then dropped the rest of the typed update).
+- GPT Live Turbo S S103 no longer fails a correct run on its readout rule or
+  its close.
+  - A readout the user cut off and the model then read again from the top
+    (S103 R5 on 7b17b1c85: "Wait, stop. Make it Thursday" after the brief's
+    first line) is one reading. A response resumes the interrupted readout
+    when the user's speech closed the earlier response, every response
+    since was opened by the user's speech, and no broker append that can
+    prompt speech (commentary, thinking, instructions) was sent in between.
+    A re-read after a cue or a narration is still a duplicate readout.
+  - The scenario's settle step waits until every completed delegation's
+    result delivery has resolved, and restarts its quiet window at every
+    delegation state change. It closed 0.5 s after the correction's result
+    was released (S103 R6 on b187df1e0, provider
+    `context_injection_incomplete`), so the result was never read.
 - Shell tool commands and background jobs no longer inherit the host's
   stdin. In a stdio JSON-RPC host (`rkat-rpc`) stdin is the protocol
   transport, so a command that read stdin (`cat`, `head`, a prompt) could

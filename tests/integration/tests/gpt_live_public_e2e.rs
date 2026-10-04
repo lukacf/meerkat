@@ -4966,6 +4966,70 @@ fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> 
         .collect()
 }
 
+/// Sideband send times of every broker append on `channel` that can prompt
+/// the model to speak: delegation commentary (results and narrations),
+/// thinking appends (result cues, runtime work, context) and instruction
+/// appends (in-progress notices).
+fn broker_prompt_elapsed(lines: &[provider_recording::Line], channel: u32) -> Vec<u64> {
+    lines
+        .iter()
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ClientEvent { event }
+                if line.channel_ordinal == channel
+                    && matches!(
+                        event["type"].as_str(),
+                        Some(
+                            "session.commentary.append"
+                                | "session.thinking.append"
+                                | "session.instructions.append"
+                        )
+                    ) =>
+            {
+                Some(line.elapsed_ms)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The peer's response boundary for a user transcript delta.
+const USER_SPEECH_BOUNDARY: &str = "session.input_transcript.delta";
+
+/// `current` resumes the readout `previous` was voicing when the user cut it
+/// off: `previous` was closed by the user's speech, every response from there
+/// through `current` was opened by the user's speech (no commentary append or
+/// delegation between them), and no broker append that can prompt speech was
+/// sent from that interruption until `current` closed. A model restarting a
+/// requested readout after the user interrupts it to correct a detail is
+/// still reading it once (S103 R5 on 7b17b1c85: "- The" | "client is the
+/// Marigold account.", cut off by "Wait, stop. Make it Thursday", then read
+/// again from the top). Each interruption admits one resumption, since a
+/// resumption needs its own user utterance closing the previous voicing.
+fn resumes_interrupted_readout(
+    previous: &support::ReadoutRecord,
+    current: &support::ReadoutRecord,
+    records: &[support::ReadoutRecord],
+    prompts_ms: &[i64],
+) -> bool {
+    let (Some(USER_SPEECH_BOUNDARY), Some(interrupted_ms)) =
+        (previous.closed_by.as_deref(), previous.closed_ms)
+    else {
+        return false;
+    };
+    let opened_by_user = records
+        .iter()
+        .filter(|record| record.index > previous.index && record.index <= current.index)
+        .all(|record| record.opened_by == USER_SPEECH_BOUNDARY);
+    let interrupted_ms = interrupted_ms as i64;
+    let prompted = prompts_ms.iter().any(|sent| {
+        *sent > interrupted_ms
+            && current
+                .closed_ms
+                .is_none_or(|closed| *sent <= closed as i64)
+    });
+    opened_by_user && !prompted
+}
+
 /// Sentences of 3 or more normalized words (the peer's stutter rule uses the
 /// same split).
 fn readout_sentences(text: &str) -> Vec<String> {
@@ -5051,14 +5115,19 @@ enum ReadoutFault {
 /// journaled as delivered after the close request. Deliveries are counted over
 /// every channel; voicing is checked for the deliveries on `channel`, the
 /// channel of the browser peer whose records these are (a reopen starts a
-/// fresh peer). `offset` maps sideband time to that peer's clock.
+/// fresh peer). `offset` maps sideband time to that peer's clock. A response
+/// that resumes a readout the user cut off ([`resumes_interrupted_readout`],
+/// judged against `prompts`, the sideband send times of the channel's broker
+/// appends) needs no delivery of its own.
 fn readout_faults(
     deliveries: &[ResultDelivery],
     channel: u32,
     records: &[support::ReadoutRecord],
+    prompts: &[u64],
     offset: i64,
     close_request_ms: Option<i64>,
 ) -> Vec<ReadoutFault> {
+    let prompts_ms: Vec<i64> = prompts.iter().map(|sent| *sent as i64 - offset).collect();
     let mut faults = Vec::new();
     let mut per_delegation: std::collections::BTreeMap<&str, usize> = Default::default();
     for delivery in deliveries {
@@ -5124,7 +5193,17 @@ fn readout_faults(
         sends.sort_unstable();
         let mut used = 0usize;
         let mut unaccounted = false;
-        for response in &responses {
+        for (position, response) in responses.iter().enumerate() {
+            if position > 0
+                && resumes_interrupted_readout(
+                    responses[position - 1],
+                    response,
+                    records,
+                    &prompts_ms,
+                )
+            {
+                continue;
+            }
             let available = sends
                 .iter()
                 .filter(|t| response.closed_ms.is_none_or(|closed| **t <= closed as i64))
@@ -5247,10 +5326,12 @@ async fn readout_contract(
             )?;
         }
     }
+    let prompts = broker_prompt_elapsed(&lines, channel);
     let faults = readout_faults(
         &deliveries,
         channel,
         &snapshot.records,
+        &prompts,
         offset,
         close_request_ms,
     );
@@ -7817,10 +7898,12 @@ async fn wait_for_settled(
     quiet: Duration,
     bound: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_runtime::live_execution::LiveDelegationWorkerTerminalKind;
     let runtime = live.shared()?.0.runtime.clone();
     let deadline = Instant::now() + bound;
     let mut last_len = live.peer.events().await?.len();
     let mut quiet_since = Instant::now();
+    let mut last_states = Vec::new();
     loop {
         let events = live.peer.events().await?;
         if events.len() != last_len {
@@ -7831,12 +7914,40 @@ async fn wait_for_settled(
             .live_delegation_recovery_snapshots(&live.session_id)
             .await?;
         let all_terminal = snapshots.iter().all(|s| s.terminal().is_some());
-        if all_terminal && quiet_since.elapsed() >= quiet {
+        // A completed result still on its way to the channel (released, its
+        // append not yet resolved) is not settled: closing then cuts off its
+        // injection before the model can read it (S103 R6 on b187df1e0: the
+        // correction's result was released 0.5 s before the close, after 6 s
+        // of quiet, and the provider reported context_injection_incomplete).
+        // The quiet window restarts at every delegation state transition (a
+        // terminal, a delivery resolved), so it covers the readout that
+        // follows the last one.
+        let results_resolved = snapshots.iter().all(|s| {
+            s.terminal() != Some(LiveDelegationWorkerTerminalKind::Completed)
+                || !s.result_eligible()
+                || s.result_delivery().is_some()
+        });
+        let states: Vec<String> = snapshots
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}:{:?}:{:?}",
+                    s.operation_id(),
+                    s.terminal(),
+                    s.result_delivery()
+                )
+            })
+            .collect();
+        if states != last_states {
+            last_states = states;
+            quiet_since = Instant::now();
+        }
+        if all_terminal && results_resolved && quiet_since.elapsed() >= quiet {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "session did not settle within {} s (all_terminal={all_terminal}, quiet_for_ms={})",
+                "session did not settle within {} s (all_terminal={all_terminal}, results_resolved={results_resolved}, quiet_for_ms={})",
                 bound.as_secs(),
                 quiet_since.elapsed().as_millis()
             )
@@ -12077,7 +12188,7 @@ mod config_tests {
             "Here it is. The client is the Marigold account.",
         )];
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &records, 0, None),
+            super::readout_faults(&deliveries, 1, &records, &[], 0, None),
             vec![super::ReadoutFault::DuplicateDelivery {
                 delegation_id: "item_a".to_owned(),
                 deliveries: 2,
@@ -12086,7 +12197,7 @@ mod config_tests {
     }
 
     /// A result delivered once, read in one response and read again in a
-    /// later response (after user speech) is a duplicate readout.
+    /// later response opened by a commentary append is a duplicate readout.
     #[test]
     fn a_result_voiced_in_two_responses_is_a_duplicate_readout() {
         let deliveries = [result_delivery("item_a", 1000, BRIEF)];
@@ -12100,10 +12211,140 @@ mod config_tests {
             readout(2, Some(9000), "Sure. The kickoff is Tuesday afternoon."),
         ];
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &records, 0, None),
+            super::readout_faults(&deliveries, 1, &records, &[], 0, None),
             vec![super::ReadoutFault::DuplicateReadout {
                 sentence: "the kickoff is tuesday afternoon".to_owned(),
                 responses: vec![1, 2],
+            }]
+        );
+    }
+
+    /// A response with explicit boundaries, for the resumption rule.
+    fn bounded_readout(
+        index: u64,
+        opened_by: &str,
+        closed: Option<(&str, u64)>,
+        text: &str,
+    ) -> super::support::ReadoutRecord {
+        super::support::ReadoutRecord {
+            index,
+            opened_by: opened_by.to_owned(),
+            opened_ms: Some(index * 1000),
+            closed_by: closed.map(|(by, _)| by.to_owned()),
+            closed_ms: closed.map(|(_, at)| at),
+            last_output_ms: Some(closed.map_or(index * 1000 + 500, |(_, at)| at)),
+            text: text.to_owned(),
+            stutters: Vec::new(),
+        }
+    }
+
+    const USER: &str = super::USER_SPEECH_BOUNDARY;
+    const COMMENTARY: &str = "session.commentary.appended";
+
+    /// S103 R5 on 7b17b1c85: the brief's readout ("- The" | "client is the
+    /// Marigold account.", split by the result's commentary.appended) is cut
+    /// off by "Wait, stop. Make it Thursday", restarted from the top ("- The"
+    /// | "client is the Marigold account.", split by the late "instead"),
+    /// cut off again by "Actually, Friday", then read in full with the
+    /// correction. No broker append follows the result. Each restart resumes
+    /// the readout the user interrupted: one reading, no fault.
+    fn s103_r5_records() -> Vec<super::support::ReadoutRecord> {
+        vec![
+            bounded_readout(
+                2,
+                "session.delegation.created",
+                Some((COMMENTARY, 2900)),
+                "Okay. On it, working on it. - The",
+            ),
+            bounded_readout(
+                3,
+                COMMENTARY,
+                Some((USER, 4000)),
+                "client is the Marigold account.",
+            ),
+            bounded_readout(4, USER, Some((USER, 5000)), "- The"),
+            bounded_readout(
+                5,
+                USER,
+                Some((USER, 6000)),
+                "client is the Marigold account.",
+            ),
+            bounded_readout(
+                6,
+                USER,
+                None,
+                "- The client is the Marigold account. - The kickoff is Friday afternoon. - The deck code name is Pelican.",
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_readout_restarted_after_the_user_cuts_it_off_is_one_reading() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        // The result itself is the only broker append, sent before the
+        // interruption.
+        let prompts = [2900];
+        assert!(
+            super::readout_faults(&deliveries, 1, &s103_r5_records(), &prompts, 0, None).is_empty()
+        );
+    }
+
+    /// The same restart with a result cue sent after the interruption is a
+    /// cue-driven re-read: still a duplicate readout.
+    #[test]
+    fn a_re_read_after_a_cue_still_fails_after_an_interruption() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        let prompts = [2900, 4500];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &s103_r5_records(), &prompts, 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "client is the marigold account".to_owned(),
+                responses: vec![3, 5],
+            }]
+        );
+    }
+
+    /// A re-read opened by a commentary append (a narration) after the
+    /// interruption is not a resumption: still a duplicate readout.
+    #[test]
+    fn a_re_read_opened_by_commentary_still_fails_after_an_interruption() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        let mut records = s103_r5_records();
+        records[2].opened_by = COMMENTARY.to_owned();
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &records, &[2900], 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "client is the marigold account".to_owned(),
+                responses: vec![3, 5],
+            }]
+        );
+    }
+
+    /// A readout that ended on its own (not cut off by the user) and is read
+    /// again after the user speaks is a second reading: still a duplicate.
+    #[test]
+    fn a_re_read_after_a_readout_that_was_not_cut_off_still_fails() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        let records = [
+            bounded_readout(
+                3,
+                COMMENTARY,
+                Some(("session.delegation.created", 4000)),
+                "client is the Marigold account.",
+            ),
+            bounded_readout(
+                4,
+                "session.delegation.created",
+                Some((USER, 5000)),
+                "One moment.",
+            ),
+            bounded_readout(5, USER, None, "client is the Marigold account."),
+        ];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &records, &[2900], 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "client is the marigold account".to_owned(),
+                responses: vec![3, 5],
             }]
         );
     }
@@ -12118,7 +12359,7 @@ mod config_tests {
             None,
             "Line five. The deck code name is Pelican. Line five. The deck code name is Pelican.",
         )];
-        assert!(super::readout_faults(&deliveries, 1, &records, 0, None).is_empty());
+        assert!(super::readout_faults(&deliveries, 1, &records, &[], 0, None).is_empty());
     }
 
     /// The brief and its corrected copy share lines; each delivery accounts
@@ -12142,11 +12383,12 @@ mod config_tests {
             "The client is the Marigold account. The kickoff is Friday afternoon.",
         );
         assert!(
-            super::readout_faults(&deliveries, 1, &[first.clone(), corrected], 0, None).is_empty()
+            super::readout_faults(&deliveries, 1, &[first.clone(), corrected], &[], 0, None)
+                .is_empty()
         );
         let early = readout(2, Some(7000), "The client is the Marigold account.");
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &[first, early], 0, None),
+            super::readout_faults(&deliveries, 1, &[first, early], &[], 0, None),
             vec![
                 super::ReadoutFault::MissedReadout {
                     delegation_id: "item_b".to_owned()
@@ -12171,7 +12413,7 @@ mod config_tests {
         )];
         let before_only = [readout(4, Some(4900), "Okay, changing the day.")];
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &before_only, 0, None),
+            super::readout_faults(&deliveries, 1, &before_only, &[], 0, None),
             vec![super::ReadoutFault::MissedReadout {
                 delegation_id: "item_a".to_owned()
             }]
@@ -12180,7 +12422,7 @@ mod config_tests {
             readout(4, Some(4900), "Okay, changing the day."),
             readout(6, None, "Thursday afternoon."),
         ];
-        assert!(super::readout_faults(&deliveries, 1, &paraphrased, 0, None).is_empty());
+        assert!(super::readout_faults(&deliveries, 1, &paraphrased, &[], 0, None).is_empty());
     }
 
     /// Ordered against the close request: a result delivered before it and
@@ -12195,7 +12437,7 @@ mod config_tests {
             "Updated the kickoff to Friday.",
         )];
         assert_eq!(
-            super::readout_faults(&before, 1, &records, 0, Some(9000)),
+            super::readout_faults(&before, 1, &records, &[], 0, Some(9000)),
             vec![super::ReadoutFault::MissedReadout {
                 delegation_id: "item_a".to_owned()
             }]
@@ -12205,7 +12447,7 @@ mod config_tests {
             9500,
             "Updated the kickoff to Friday.",
         )];
-        assert!(super::readout_faults(&after, 1, &records, 0, Some(9000)).is_empty());
+        assert!(super::readout_faults(&after, 1, &records, &[], 0, Some(9000)).is_empty());
         assert_eq!(
             super::deliveries_before_close_request(&after, 1, 0, Some(9000)).count(),
             0
@@ -12432,10 +12674,12 @@ mod config_tests {
         let mut spanning = readout(0, Some(1400), "Here's what they said:");
         spanning.opened_ms = Some(999);
         spanning.last_output_ms = Some(1300);
-        assert!(super::readout_faults(&deliveries, 1, &[spanning.clone()], 0, None).is_empty());
+        assert!(
+            super::readout_faults(&deliveries, 1, &[spanning.clone()], &[], 0, None).is_empty()
+        );
         spanning.last_output_ms = Some(999);
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &[spanning], 0, None),
+            super::readout_faults(&deliveries, 1, &[spanning], &[], 0, None),
             vec![super::ReadoutFault::MissedReadout {
                 delegation_id: "item_a".to_owned()
             }]

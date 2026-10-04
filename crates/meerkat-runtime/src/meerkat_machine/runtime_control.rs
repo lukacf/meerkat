@@ -67,6 +67,55 @@ fn live_delegation_worker_binding_matches(
             == Some(worker_identity)
 }
 
+/// Whether a worker-start resolution is admitted for this exact worker:
+/// under the channel's current exact binding, or (mirroring the generated
+/// `ResolveLiveDelegationWorkerStart` guards) once the operation's own channel
+/// carries no runtime, fence, or generation binding at all, because it closed
+/// after the start was authorized (Turbo S S104 R7). Every open mints a fresh
+/// channel id, so a retired channel id never aliases a later incarnation; a
+/// still-bound channel with a different fence or generation is refused as
+/// before.
+fn live_delegation_worker_start_binding_admits(
+    state: &crate::meerkat_machine::dsl::MeerkatMachineState,
+    runtime_id: &crate::identifiers::LogicalRuntimeId,
+    fence_token: u64,
+    generation: u64,
+    operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+        meerkat_core::LiveUserTurnCorrelation,
+    >,
+    worker_identity: &str,
+) -> bool {
+    if live_delegation_worker_binding_matches(
+        state,
+        runtime_id,
+        fence_token,
+        generation,
+        operation,
+        worker_identity,
+    ) {
+        return true;
+    }
+    let channel = operation.domain_correlation().channel_id().to_string();
+    let operation_id =
+        crate::meerkat_machine::dsl::OperationId::from_domain(operation.operation_id());
+    !state
+        .live_execution_runtime_id_by_channel
+        .contains_key(&channel)
+        && !state.live_execution_fence_by_channel.contains_key(&channel)
+        && !state
+            .live_execution_generation_by_channel
+            .contains_key(&channel)
+        && state
+            .live_delegation_channel_by_operation
+            .get(&operation_id)
+            == Some(&channel)
+        && state
+            .live_delegation_worker_identity_by_operation
+            .get(&operation_id)
+            .map(String::as_str)
+            == Some(worker_identity)
+}
+
 #[cfg(feature = "live")]
 fn live_context_execution_binding_is_complete(
     state: &crate::meerkat_machine::dsl::MeerkatMachineState,
@@ -10158,7 +10207,7 @@ impl MeerkatMachine {
                 reason: reason.to_string(),
             }
         })?;
-        if !live_delegation_worker_binding_matches(
+        if !live_delegation_worker_start_binding_admits(
             &state,
             runtime_id,
             fence_token,

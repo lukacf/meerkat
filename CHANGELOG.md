@@ -1300,6 +1300,19 @@ them.
 
 ### Fixed
 
+- A durable voice job delegated just before its call closed could be lost
+  (Turbo S S104, about 1 run in 10): the worker accepted its turn after the
+  close, and publishing its start was refused because the closed channel's
+  runtime binding was gone. The job never ran, and the cleanup retried the
+  refused start forever, so the session never settled. The generated
+  `ResolveLiveDelegationWorkerStart` guards (and the runtime's pre-check)
+  now also admit a start once the operation's own channel carries no
+  runtime, fence, or generation binding, on the exact worker authority; every
+  open mints a fresh channel id, so a retired channel never aliases a later
+  one. The worker then runs and settles through the revoked-worker
+  reconciliation like a worker already running at the close. A cleanup step
+  the generated state refuses outright now ends with a typed refusal instead
+  of retrying.
 - A GPT Live typed update that later speech corrected only in part keeps
   its other values (Turbo S S99, #1629: after a typed "code word Violet,
   favorite flower Marigold" and a spoken "code word Cobalt", the voice

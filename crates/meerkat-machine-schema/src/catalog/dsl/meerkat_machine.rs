@@ -26969,6 +26969,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A worker start authorized under the channel's exact binding may
+        // resolve after that channel closed (Turbo S S104 R7: a durable
+        // worker accepted its turn 86 ms after the close). Close unbinds the
+        // channel, so the start resolves either under the current exact
+        // binding or, once the operation's own channel carries no runtime,
+        // fence, or generation binding at all (as the revoked-worker
+        // reconciliation requires), on the exact worker authority alone. No aliasing:
+        // every open mints a fresh channel id, so a later incarnation never
+        // reuses a retired channel's id, and a still-bound channel with a
+        // different fence or generation is refused as before.
         transition ResolveLiveDelegationWorkerStart {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveDelegationWorkerStart {
@@ -26977,12 +26987,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_worker_start_authority" {
                 self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)

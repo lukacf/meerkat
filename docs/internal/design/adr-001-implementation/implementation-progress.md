@@ -3,12 +3,24 @@
 ## Publication gate, 2026-10-04
 
 Native [PR1634](https://github.com/lukacf/meerkat/pull/1634) is published at
-`51cd489916387039121e751e595670b92a0d4b65`. Its normal GCP push passed all
-required hooks in 3,833s wall time (`push-51.log`). Fresh
+`c18c619bf2d140663eb0a78d17d7122d9ac1a5ef`, tree
+`f81231a73c2f4ba5befa1cf2575fe1834016c77f`. Its normal GCP push passed all
+required hooks in 4,078s wall time and completed at 06:17:43 UTC
+(`native-c18-gcp-normal-push-green-r1.log`). Fresh
+[CI run 37182383940](https://github.com/lukacf/meerkat/actions/runs/37182383940)
+completed successfully on exact c18: 38 successful jobs and 4 intentional skips,
+with its final gate at 06:39:26 UTC, 21m42s from creation. The exact-head
+[semver run 37182383935](https://github.com/lukacf/meerkat/actions/runs/37182383935)
+also passed. Independent PR readback confirmed exact c18 and clean merge state.
+The final API record is `native-c18-ci-37182383940-final.json`, SHA256
+`8577ababd8d3d8d40a7b2aeec66960f672c642d27c5a635c2487115822eb20a8`.
+No merge or release is recorded.
+
+The preceding `51cd489916387039121e751e595670b92a0d4b65` publication passed all
+required hooks in 3,833s (`push-51.log`). Its
 [CI run 37177141203](https://github.com/lukacf/meerkat/actions/runs/37177141203)
-was created at 04:29:24 UTC and completed successfully at the exact published
-head: 38 successful jobs and 4 intentional skips. The current implementation
-PR is CI green; no merge or release is recorded.
+also passed with 38 successful jobs and 4 intentional skips. These remain the
+source-qualified predecessor results, rather than the current head's evidence.
 
 The previous `157a73e75aed677c5f5a37d20cd07fe53710c216` publication passed normal
 hooks in 4,726s (`native-157-gcp-normal-push-green-r1.log`). Its
@@ -19,7 +31,7 @@ freshness in two HTML outputs, after canonical coverage and typed content
 checks passed. The dependent CI gate failed too. Those results remain historical
 for the previous head; they do not describe the current CI-green publication.
 
-The published repair is `51cd489916387039121e751e595670b92a0d4b65`, tree
+The preceding repair is `51cd489916387039121e751e595670b92a0d4b65`, tree
 `f365afd3b3bc18f14c70da35db3615ce97e5fc7c`. Its only four changed files are the
 two example locks and two poster outputs. Existing dependency identities/pins
 are preserved; existing canonical metadata refresh and lock checks passed.
@@ -93,7 +105,7 @@ allocation remains separately pending. Full surface and performance acceptance
 remain open, including under 1 ms p99 added authorization per operation and at
 most 10 percent representative turn overhead.
 
-The attribution-only profile completed at 04:41:19 UTC within the explicitly
+The first attribution-only profile completed at 04:41:19 UTC within the explicitly
 reserved five-minute quiet window. The existing optimized small fixture passed
 1 case in 48.41s; perf captured 5,109 CPU-clock samples with zero lost samples
 (`native-small157-profile-r1.log`, `perf157-native-small-r1.data`). The resource
@@ -102,6 +114,18 @@ Allocation, copying and formatting appear in the self samples, but application
 call stacks are incomplete and both execution modes plus setup were profiled.
 This cannot assign the governed delta to an owner or qualify the performance
 budget. Profile-perturbed timings do not replace the uninstrumented results.
+
+The second attribution-only capture completed at 06:31:32 UTC using the same
+verified `157` binary; only the DWARF user-stack capture changed from 8,192 to
+32,768 bytes. The existing small test passed 1 case in 51.24s; perf recorded
+5,447 samples and zero reported loss (`native-small157-profile-r2.log`). The
+resource owner's external monitor confirmed no build violation from START at
+06:26:50 through DONE, and the lease was released at 06:34:11. The larger stack
+did not establish useful application-owner attribution improvement: major
+allocation caller trees still stop in libc. Both modes, setup and capture costs
+remain mixed, so this is not an incremental governed-cost or optimization result.
+The separate exact-byte hex candidate is tests-only; no production repair or
+performance gain is included in this publication.
 
 Historical failure/preparation logs remain in the existing evidence directory.
 The first Web SDK exhaustive-event check omitted HookLaunchRefused, while its
@@ -116,14 +140,14 @@ the 22:30-23:00 UTC NOT_MEASURED window remain historical evidence; they are not
 substitutes for the exact `157` binary or current timing.
 
 
-### Local tests-only restart successor, not yet published
+### Published tests-only restart checkpoint
 
-The isolated `codex/security-restart-acceptance-r1` checkout is based on `51`
-with only fixture/catalog changes and the canonical BUILD source-list refresh.
-It promotes the six existing deterministic default-feature acceptance cases to
-ordinary tests and adds one real separate-process SQLite case. Published `157`
-still has the six original ignore annotations; this successor is not its CI
-result or an automatically governed surface profile.
+Published c18 is based on `51` with fixture/catalog changes, the canonical BUILD
+source-list refresh and checkpoint documentation. It promotes the six existing
+deterministic default-feature acceptance cases to ordinary tests and adds one
+real separate-process SQLite case. Published `157` retains its historical six
+ignore annotations; c18's results are separate and do not establish an
+automatically governed surface profile.
 
 The first cold run failed at fixture discovery: raw SqliteSessionStore listing
 returned zero sessions before the reader started (0.62s compile, 0.66s body;
@@ -184,8 +208,11 @@ of restored secret bytes; the read is a callback rather than filesystem/source
 access. It does not qualify interrupted replay, provider secret refresh/rotation,
 persistent controller/grant administration, automatic constructors, full surface
 coverage or performance. The changed-path governance/Clippy and selected outer
-wrapper results are qualified separately above; full Make-gate and normal
-successor publication/CI remain open. No runtime production change is included.
+wrapper results are qualified separately above. Normal c18 publication and
+exact-head CI are green; the earlier failed full Make invocation remains
+historical. No runtime production change is included in this restart delta.
+The separate public-entry/notification test additions remain source-qualified
+and unexecuted; they are not part of c18's existing Governed JSONL CI result.
 
 ## Current local shell and hook checkpoint, 2026-10-03
 

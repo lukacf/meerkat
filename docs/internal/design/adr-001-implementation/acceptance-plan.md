@@ -25,23 +25,26 @@ does not make sandbox implementation optional. No design verdict counts as
 implementation acceptance, and missing coverage cannot be relabeled out of scope.
 
 The [implementation checkpoint](implementation-progress.md) records current
-execution and publication status. Native PR1634 is published at `51`; its
-normal GCP push passed all required hooks in 3,833s. The four-file repair passed
-canonical example/root-lock and compiled-alphabet poster checks. Fresh CI run
-37177141203 passed at exact `51` with 38 successful jobs and 4 intentional skips;
-the earlier `157` freshness failures remain historical evidence.
-Separately, a local tests-only successor, not yet published, based on `51` passed all 16
-default native-loop cases, including completed-turn SQLite reconstruction in a
-new process followed by fresh governed work. The six formerly ignored cases are
-ordinary only in that isolated successor; published `157` still retains its
-original opt-ins. Interrupted recovery and persistent administration remain open.
+execution and publication status. Native PR1634 is published at
+`c18c619bf2d140663eb0a78d17d7122d9ac1a5ef`; its normal GCP push passed all
+required hooks in 4,078s and completed at 06:17:43 UTC. Fresh CI run 37182383940
+passed on exact c18 with 38 successful jobs and 4 intentional skips in 21m42s;
+its exact-head semver run passed too. The preceding `51` repair/CI success and
+`157` freshness failures remain separately source-qualified historical evidence.
+The published tests-only restart delta passed all 16 default native-loop cases,
+including completed-turn SQLite reconstruction in a new process followed by
+fresh governed work. Its six formerly ignored deterministic cases are ordinary;
+published `157` retains its historical opt-ins. Interrupted recovery and
+persistent administration remain open.
 The revised restart case also proves current ingress accepts historical claims
 before current grant authority refuses them, with no effect or durable input
 entry. The full revised native target passed 16 cases with no ignores; three
 smoke-wrapper controls passed separately. The selected changed-path governance
 and Clippy checks and actual prebuilt outer E1 wrapper also passed. The failed
 Make agent gate and deliberately stopped first Make smoke materializer remain
-recorded separately; normal successor publication/CI are pending.
+recorded separately; normal c18 publication and exact-head CI are now green.
+The separate public-entry/notification additions remain source-only and
+unexecuted, with no integrated native-plus-Console acceptance claim.
 The exact published-source optimized build and both cost correctness selectors
 passed. The first quiet small-fixture timing run is measured: whole-turn
 Local-minus-Trusted overhead was +117.33 percent at grant lineage depth 1 and
@@ -58,7 +61,11 @@ completed and its lease was released. The full representative matrix still needs
 a separate estimated 6-7-hour capacity allocation. The target remains under 1 ms
 p99 added authorization per operation and at most 10 percent representative turn
 overhead, with full required coverage still open. Added whole-turn p99 is not an
-individual-operation measurement.
+individual-operation measurement. A second unchanged-157-binary CPU capture
+passed the small fixture in 51.24s with 5,447 samples and zero reported loss;
+increasing the DWARF user-stack capture to 32,768 bytes did not establish useful
+application-owner attribution improvement. Mixed-mode/setup/capture samples
+are diagnostics, not an optimization result or a performance gate pass.
 
 ## Historical baselines and isolation
 

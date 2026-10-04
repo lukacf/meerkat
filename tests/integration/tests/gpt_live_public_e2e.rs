@@ -9767,6 +9767,26 @@ fn s101_job_refs(job: S101Job) -> &'static [&'static [&'static str]] {
     }
 }
 
+/// File counts `text` states in the quick question's answer shape:
+/// "there are N files" / "there is N file" or "count is N".
+fn s101_stated_counts(text: &str) -> Vec<u64> {
+    let words = s101_words(text);
+    let tokens: Vec<&str> = words.iter().map(|(_, word)| word.as_str()).collect();
+    (0..tokens.len())
+        .filter(|&index| {
+            tokens[index..].starts_with(&["count", "is"])
+                || (tokens[index] == "there"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|w| *w == "are" || *w == "is")
+                    && tokens
+                        .get(index + 3)
+                        .is_some_and(|w| *w == "file" || *w == "files"))
+        })
+        .filter_map(|index| tokens.get(index + 2).and_then(|w| s101_number_value(w)))
+        .collect()
+}
+
 /// Lowercased alphanumeric words of `text` with each word's char offset.
 fn s101_words(text: &str) -> Vec<(usize, String)> {
     let mut words = Vec::new();
@@ -9913,6 +9933,18 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
             .into_iter()
             .find_map(|(_, word)| s101_number_value(&word))
     });
+    // Every count a delivered result states, with the instant the provider
+    // had it: the voice reading another job's result ("Marker two.txt is
+    // created ... There are 1 files.") repeats that result, it does not
+    // answer the quick question.
+    let result_counts: Vec<(u64, u64)> = results
+        .values()
+        .flat_map(|(at, text)| {
+            s101_stated_counts(text)
+                .into_iter()
+                .map(move |value| (*at, value))
+        })
+        .collect();
     let mut text = String::new();
     let mut times = Vec::new();
     for (at, delta) in &deltas {
@@ -9984,6 +10016,9 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
                 && answer_phrase
                 && when >= *result_at
                 && s101_number_value(tokens[number_at]) != Some(value)
+                && !result_counts.iter().any(|(at, stated)| {
+                    *at <= when && s101_number_value(tokens[number_at]) == Some(*stated)
+                })
             {
                 claims.push(format!(
                     "the voice misreported the quick question's answer at {when} ms ({:?}); the result says {result_text:?}",
@@ -12395,6 +12430,95 @@ mod config_tests {
             "{claims:#?}"
         );
         assert!(super::s101_premature_outcome_claims(&lines, 2).is_empty());
+    }
+
+    /// A count read out from another job's result is that result, not the
+    /// quick answer (rv1644 S101 R4: job 2's result said "There are 1
+    /// files." and the voice read it verbatim after the quick result's
+    /// "there are 0 files"). A count no delivered result states still fails.
+    #[test]
+    fn s101_a_count_read_from_another_result_is_not_a_misreport() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append",
+                "delegation_id": id, "content": content}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let lines = vec![
+            line(500, created("j1")),
+            line(
+                600,
+                append(
+                    "j1",
+                    "Started voice request: \"Start a slow job for me in the shell, sleep for twenty-five seconds, and then create a file called marker one dot txt\".",
+                ),
+            ),
+            line(1000, created("q")),
+            line(
+                1100,
+                append(
+                    "q",
+                    "Started voice request: \"While that runs, how many files are in your working directory right now? Answer as \"there are N files\".",
+                ),
+            ),
+            line(
+                2000,
+                append(
+                    "q",
+                    "Finished voice request: \"While that runs, how many files ...\". The result follows.\nthere are 0 files",
+                ),
+            ),
+            line(2200, delta(" The count is 0.")),
+            line(
+                2600,
+                append(
+                    "j1",
+                    "Finished voice request: \"Start a slow job ...\". The result follows.\nThe file `marker1.txt` is created.",
+                ),
+            ),
+            line(3000, created("j2")),
+            line(
+                3100,
+                append(
+                    "j2",
+                    "Started voice request: \"And hand the executor a second slow job right away. Sleep twenty seconds and create marker2 dot txt\".",
+                ),
+            ),
+            line(
+                9000,
+                append(
+                    "j2",
+                    "Finished voice request: \"And hand the executor a second slow job ...\". The result follows.\nMarker two.txt is created. Marker one.txt is created. There are 1 files.",
+                ),
+            ),
+            line(
+                9200,
+                delta(
+                    " Marker two.txt is created, marker one.txt is created, and there are 1 files.",
+                ),
+            ),
+            line(9900, delta(" So there are 2 files.")),
+        ];
+        let claims = super::s101_premature_outcome_claims(&lines, 1);
+        assert_eq!(claims.len(), 1, "{claims:#?}");
+        assert!(
+            claims[0].contains("misreported the quick question's answer at 9900"),
+            "{claims:#?}"
+        );
     }
 
     /// A quick result the recording lacks (held behind the user's floor and

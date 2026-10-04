@@ -22,10 +22,10 @@ use meerkat_core::live_adapter::{
 };
 use meerkat_core::{Provider, StopReason, TurnUsage, Usage};
 use meerkat_live::{
-    LiveSidebandAppendAttempt, LiveSidebandCommand, LiveSidebandCommandDelivery,
-    LiveSidebandDelegationRef, LiveSidebandObservation, LiveSidebandObservationKind,
-    LiveSidebandProviderCommand, LiveSidebandTranscriptItemRef, LiveSidebandTurnRef,
-    LiveSidebandTurnRole, LiveWebrtcAdmittedOffer, LiveWebrtcAnswerAccepted,
+    LiveSidebandAnnouncement, LiveSidebandAppendAttempt, LiveSidebandCommand,
+    LiveSidebandCommandDelivery, LiveSidebandDelegationRef, LiveSidebandObservation,
+    LiveSidebandObservationKind, LiveSidebandProviderCommand, LiveSidebandTranscriptItemRef,
+    LiveSidebandTurnRef, LiveSidebandTurnRole, LiveWebrtcAdmittedOffer, LiveWebrtcAnswerAccepted,
     LiveWebrtcAnswerTransport, LiveWebrtcBindingRequest, LiveWebrtcError, ProviderWebrtcBinding,
     ProviderWebrtcBroker, ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError,
     ProviderWebrtcOffer, ProviderWebrtcPendingBoundReadyResolver, ProviderWebrtcSidebandSession,
@@ -1734,16 +1734,19 @@ pub trait ExperimentalGptLiveControlPlane: Send + Sync {
 
     /// [`Self::release_delegation_context`] for a result whose delegated
     /// work asked other members (`peers`, display labels) whose answers have
-    /// not arrived. Compositions without a pending-answer notice release it
-    /// as an ordinary result.
+    /// not arrived, or that is introduced by an `announcement` released in
+    /// the result's own provider event. Compositions without a pending-answer
+    /// notice or announcement support release it as an ordinary result; an
+    /// unsupported announcement is dropped, never sent ahead of the result.
     async fn release_delegation_context_awaiting_peer_replies(
         &self,
         authority: LiveDelegationResultDeliveryAuthority,
         delegation: LiveSidebandDelegationRef,
         text: String,
         peers: Vec<String>,
+        announcement: Option<LiveDelegationResultAnnouncement>,
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
-        let _ = peers;
+        let _ = (peers, announcement);
         self.release_delegation_context(authority, delegation, text)
             .await
     }
@@ -2403,6 +2406,47 @@ impl ExperimentalGptLiveResultDeliveryWaiter {
         self.resolution_rx
             .await
             .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)
+    }
+}
+
+/// A machine-authorized narration that introduces a delegation result and is
+/// released with it: the provider receives the narration and the result in
+/// the result's single delegation event, the narration first. A narration
+/// released on its own ahead of its result sat committed at the provider for
+/// its acknowledgement round trip, and the voice answered from it with an
+/// invented outcome before the result existed.
+#[derive(Debug)]
+pub struct LiveDelegationResultAnnouncement {
+    authority: LiveDelegationNarrationAuthority,
+    text: String,
+}
+
+impl LiveDelegationResultAnnouncement {
+    #[must_use]
+    pub fn new(authority: LiveDelegationNarrationAuthority, text: impl Into<String>) -> Self {
+        Self {
+            authority,
+            text: text.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &LiveDelegationNarrationAuthority {
+        &self.authority
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// The text of a result's single delegation event: its announcing narration,
+/// when it has one, then the exact result text.
+fn announced_result_text(announcement: Option<&str>, result: String) -> String {
+    match announcement {
+        Some(announcement) => format!("{announcement}\n{result}"),
+        None => result,
     }
 }
 
@@ -6231,6 +6275,7 @@ impl ExperimentalGptLiveWebrtcTransport {
             delegation,
             text,
             Vec::new(),
+            None,
         )
         .await
     }
@@ -6245,6 +6290,7 @@ impl ExperimentalGptLiveWebrtcTransport {
         delegation: LiveSidebandDelegationRef,
         text: impl Into<String>,
         peers: Vec<String>,
+        announcement: Option<LiveDelegationResultAnnouncement>,
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
         let text = require_context_text(text)?;
         let binding = self
@@ -6254,12 +6300,35 @@ impl ExperimentalGptLiveWebrtcTransport {
                 binding.channel_id() == authority.operation().domain_correlation().channel_id()
             })
             .ok_or(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)?;
+        // The announcement consumes its narration authority against the same
+        // binding and delegation as the result. One that cannot is dropped:
+        // the result still goes out, and nothing goes out ahead of it.
+        let announcement = announcement.and_then(|announcement| {
+            let LiveDelegationResultAnnouncement { authority, text } = announcement;
+            match authority
+                .into_sideband_narration_authority(binding.clone(), &delegation)
+                .ok()
+                .map(|sideband| LiveSidebandAnnouncement::from_narration(sideband, text))
+            {
+                Some(Ok(announcement)) => Some(announcement),
+                _ => {
+                    tracing::debug!(
+                        "live delegation result announcement was not authorized; releasing the result without it"
+                    );
+                    None
+                }
+            }
+        });
         let (authority, sideband) = authority
             .into_sideband_release_authority(binding, &delegation, &text)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
-        let command = LiveSidebandCommand::release_delegation_context(sideband, delegation, text)
-            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?
-            .awaiting_peer_replies(peers);
+        let mut command =
+            LiveSidebandCommand::release_delegation_context(sideband, delegation, text)
+                .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?
+                .awaiting_peer_replies(peers);
+        if let Some(announcement) = announcement {
+            command = command.announced_by(announcement);
+        }
         self.dispatch_delegation_result(authority, command).await
     }
 
@@ -7128,9 +7197,15 @@ impl ExperimentalGptLiveControlPlane for ExperimentalGptLiveWebrtcTransport {
         delegation: LiveSidebandDelegationRef,
         text: String,
         peers: Vec<String>,
+        announcement: Option<LiveDelegationResultAnnouncement>,
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
         ExperimentalGptLiveWebrtcTransport::release_delegation_context_awaiting_peer_replies(
-            self, authority, delegation, text, peers,
+            self,
+            authority,
+            delegation,
+            text,
+            peers,
+            announcement,
         )
         .await
     }
@@ -8707,8 +8782,13 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                 delegation,
                 text,
                 awaiting_peer_replies,
+                announcement,
                 ..
             } => {
+                // An announcing narration rides in the result's own event,
+                // ahead of the result text: the provider never holds the
+                // announcement without the result it announces.
+                let text = announced_result_text(announcement.as_deref(), text);
                 let provider_delegation = self
                     .correlations
                     .lock()
@@ -12795,8 +12875,12 @@ mod tests {
     #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_defers_a_frontier_result_cue_until_the_response_ends_end_to_end() {
-        run_public_broker_seed_end_to_end_with(PublicSeedCase::Canonical, false, true).await;
+        run_public_broker_seed_end_to_end_with(PublicSeedCase::Canonical, false, true, false).await;
     }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    const PUBLIC_COMPLETED_ANNOUNCEMENT: &str =
+        "Finished voice request: \"book a table\". The result follows.";
 
     #[cfg(feature = "test-realtime-fixtures")]
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13163,13 +13247,26 @@ mod tests {
 
     #[cfg(feature = "test-realtime-fixtures")]
     async fn run_public_broker_seed_end_to_end(seed_case: PublicSeedCase, late_tail: bool) {
-        run_public_broker_seed_end_to_end_with(seed_case, late_tail, false).await;
+        run_public_broker_seed_end_to_end_with(seed_case, late_tail, false, false).await;
+    }
+
+    /// The Completed narration that introduces a result reaches the provider
+    /// inside the result's own commentary event, ahead of the result text:
+    /// the provider never receives "Finished ..." without the result in the
+    /// same event (Turbo S S101: sent as its own event and acknowledged
+    /// first, it sat at the provider without the result and the voice
+    /// answered "Two." for a "0" result).
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_releases_an_announced_result_as_one_event() {
+        run_public_broker_seed_end_to_end_with(PublicSeedCase::Canonical, false, false, true).await;
     }
 
     async fn run_public_broker_seed_end_to_end_with(
         seed_case: PublicSeedCase,
         late_tail: bool,
         frontier_result: bool,
+        announced: bool,
     ) {
         let summarized = seed_case != PublicSeedCase::Canonical;
         let (base_url, capture, server) =
@@ -13526,12 +13623,24 @@ mod tests {
                 "content-digest".to_string(),
             )
             .expect("generated release authority");
-        let command = LiveSidebandCommand::release_delegation_context(
+        let mut command = LiveSidebandCommand::release_delegation_context(
             release,
             delegation,
             "Table booked for two.",
         )
         .expect("release command");
+        if announced {
+            let narration =
+                meerkat_live::LiveSidebandNarrationAuthority::__from_generated_narration_authority(
+                    binding.clone(),
+                    "public-live-completed".to_string(),
+                )
+                .expect("generated narration authority");
+            command = command.announced_by(
+                LiveSidebandAnnouncement::from_narration(narration, PUBLIC_COMPLETED_ANNOUNCEMENT)
+                    .expect("announcement"),
+            );
+        }
         let attempt = command.attempt();
         assert_eq!(
             sideband
@@ -13618,7 +13727,24 @@ mod tests {
         assert_eq!(events[0]["delegation_id"], public_wire::DELEGATION_ID);
         assert_eq!(events[1]["type"], "session.commentary.append");
         assert_eq!(events[1]["delegation_id"], public_wire::DELEGATION_ID);
-        assert_eq!(events[1]["content"], "Table booked for two.");
+        if announced {
+            // One event: the announcement, then the exact result.
+            assert_eq!(
+                events[1]["content"],
+                format!("{PUBLIC_COMPLETED_ANNOUNCEMENT}\nTable booked for two.")
+            );
+            let announcing: Vec<_> = events
+                .iter()
+                .filter(|event| event.to_string().contains("Finished voice request"))
+                .collect();
+            assert_eq!(
+                announcing.len(),
+                1,
+                "the announcement reaches the provider only inside its result's event: {events:?}"
+            );
+        } else {
+            assert_eq!(events[1]["content"], "Table booked for two.");
+        }
         assert_eq!(events[2]["type"], "session.thinking.append");
         assert_eq!(events[2]["delegation_id"], public_wire::DELEGATION_ID);
         assert_eq!(events[3]["type"], "session.input_audio.mute");

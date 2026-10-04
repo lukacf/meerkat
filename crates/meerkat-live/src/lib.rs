@@ -28,16 +28,17 @@ pub use host::{
 };
 pub use provider_webrtc::{
     LiveProviderInputLatency, LiveRuntimeBindingFence, LiveRuntimeBindingGeneration,
-    LiveSidebandAppendAttempt, LiveSidebandAppendAuthority, LiveSidebandCommand,
-    LiveSidebandCommandDelivery, LiveSidebandCommandError, LiveSidebandDelegationRef,
-    LiveSidebandNarrationAuthority, LiveSidebandObservation, LiveSidebandObservationKind,
-    LiveSidebandProviderCommand, LiveSidebandReleaseAuthority, LiveSidebandTranscriptItemRef,
-    LiveSidebandTurnRef, LiveSidebandTurnRole, LiveWebrtcAdmissionSealError,
-    LiveWebrtcAnswerAdmissionSeal, LiveWebrtcRuntimeBinding, ProviderWebrtcBinding,
-    ProviderWebrtcBoundReadyReceipt, ProviderWebrtcBroker, ProviderWebrtcBrokerAnswer,
-    ProviderWebrtcBrokerError, ProviderWebrtcEofEvidence, ProviderWebrtcOffer,
-    ProviderWebrtcPendingBoundReadyResolver, ProviderWebrtcPendingBoundReadySeal,
-    ProviderWebrtcSidebandSession, ProviderWebrtcSignalingError,
+    LiveSidebandAnnouncement, LiveSidebandAppendAttempt, LiveSidebandAppendAuthority,
+    LiveSidebandCommand, LiveSidebandCommandDelivery, LiveSidebandCommandError,
+    LiveSidebandDelegationRef, LiveSidebandNarrationAuthority, LiveSidebandObservation,
+    LiveSidebandObservationKind, LiveSidebandProviderCommand, LiveSidebandReleaseAuthority,
+    LiveSidebandTranscriptItemRef, LiveSidebandTurnRef, LiveSidebandTurnRole,
+    LiveWebrtcAdmissionSealError, LiveWebrtcAnswerAdmissionSeal, LiveWebrtcRuntimeBinding,
+    ProviderWebrtcBinding, ProviderWebrtcBoundReadyReceipt, ProviderWebrtcBroker,
+    ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError, ProviderWebrtcEofEvidence,
+    ProviderWebrtcOffer, ProviderWebrtcPendingBoundReadyResolver,
+    ProviderWebrtcPendingBoundReadySeal, ProviderWebrtcSidebandSession,
+    ProviderWebrtcSignalingError,
 };
 pub use transport::{
     LIVE_WS_PATH, LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString,

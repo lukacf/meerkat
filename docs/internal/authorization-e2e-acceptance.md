@@ -48,19 +48,27 @@ Harness anchors: `crates/meerkat-authorization/src/work/tests.rs` and
 
 ## 3. Restart preserves evidence, not authority
 
-Process A commits the real input/audit persistence record and exits. Process B
-reloads it and verifies contributor identities, audit ordering, and history.
-The runnable controller client and ingress context are absent. Governed
-reconstruction without current controller custody must refuse before model or
-tool entry. Include an ungoverned persistent-session control to prove the
-fresh-process harness itself works.
+The completed-turn SQLite case now runs in two actual child processes. Process
+A commits a governed turn and exits. Process B reopens the same database and
+checks the original input, audit and transcript. Its trusted host reconstructs
+and pins the controller using the configured provider binding and File token
+owner, issues current grants and authenticates each fresh submission.
 
-This accepts the current refusal boundary; it does not claim successful
-governed-session restoration.
+First submit a historical association through current ingress: the current
+grant owner must refuse its old lineage before model or tool entry, with no
+new durable input. Then submit fresh governed work. Its denied operation must
+return feedback, its permitted sibling must execute once, and the new run must
+complete while preserving the exact original transcript prefix and audit.
+These are completed-turn recovery assertions, not resumption of interrupted
+work or persistent controller administration. Missing current controller
+custody still refuses reconstruction; serialized history cannot supply it.
 
-Harness anchors: `crates/meerkat-runtime/src/input_audit/tests.rs`,
-`crates/meerkat-runtime/src/meerkat_machine/local_authorization.rs`, and the
-fresh-process fixture pattern in `tests/integration/tests/smoke_model_fallback.rs`.
+Harness anchors:
+`crates/meerkat-authorization/tests/native_governed_loop/e1_policy_control/stock_persistent/process_reopen.rs`,
+`crates/meerkat-authorization/tests/native_governed_loop/e1_policy_control/stock_persistent/revalidation.rs`,
+and `crates/meerkat-runtime/src/input_audit/tests.rs`. The
+[implementation checkpoint](design/adr-001-implementation/implementation-progress.md)
+records executed source and CI scope separately.
 
 ## 4. Mutable executable inside an immutable sandbox
 
@@ -111,8 +119,8 @@ Register Turbo S cases in the authoritative catalog in
 `tests/integration/src/e2e_lanes.rs`. Keep platform-specific coverage in an
 explicit macOS lane. Missing setup is a failure, not a skip. Report source and
 publication coverage as incomplete until their production adapters exist, and
-keep successful governed restart out of acceptance until controller custody
-has a defined persistence protocol.
+keep interrupted recovery and persistent controller administration open.
+The completed-turn SQLite case above does not accept either of those paths.
 
 Use the existing repository commands from the root for this native checkpoint:
 
@@ -133,11 +141,12 @@ complete in the same run. This case does not bind durable process custody or
 accept restart and other protected surfaces.
 
 The broader `make e2e-fast`, `make e2e-system`, and normal CI gates remain
-necessary for integrated delivery. Passing the focused native tests is not
-successful governed restart, full E2E registration, or CI acceptance.
+necessary for integrated delivery. The completed-turn SQLite result does not
+establish interrupted recovery, full E2E registration, or CI acceptance.
 
-The existing `native_cost` integration target includes two ordinary correctness
-tests and two ignored timing matrices. Run the correctness tests with:
+The existing `native_cost` integration target includes two workload correctness
+tests, profile/deadline controls, and two ignored timing matrices. Run the
+correctness tests with:
 
 ```bash
 ./scripts/repo-cargo test --locked -p meerkat-authorization --test native_cost -- --test-threads=1

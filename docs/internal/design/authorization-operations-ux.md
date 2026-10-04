@@ -138,8 +138,8 @@ fn confined_shell_config(
     .try_into()?;
     Ok(ShellConfig {
         enabled: true,
-        shell: "sh".into(),
-        shell_path: Some("/bin/sh".into()),
+        shell: "bash".into(),
+        shell_path: Some("/bin/bash".into()),
         project_root: work,
         env_vars: [("PATH".into(), "/usr/bin:/bin".into())].into(),
         confinement: ShellConfinement::Required { requirement },
@@ -147,6 +147,10 @@ fn confined_shell_config(
     })
 }
 ```
+
+The example selects `/bin/bash` directly, matching the native embedding guide.
+On macOS, `/bin/sh` can consult a mutable shell selector outside this workspace
+grant. That selector is not part of `CommandRuntimeV1`.
 
 `CommandRuntimeV1` also grants its enumerated system runtime resources, such
 as loaders, libraries, and null/random devices. It does not grant ambient home,

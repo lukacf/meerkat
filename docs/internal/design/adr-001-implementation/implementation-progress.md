@@ -903,7 +903,12 @@ requester propagation, live authority, audience authorization or helper history
 durability across restart. The old manifest that selected identity-key paths is
 retained privately for audit and must not be used for packaging.
 
-## Next acceptance boundary
+## Historical next acceptance boundary (2026-10-01)
+
+This section records the plan at that date. See the current checkpoint above
+for completed acceptance and remaining work, and [Native authorization](/rust/native-authorization)
+for the supported local profile. The earlier independent-witness proposal below
+is not a requirement of the local default.
 
 The first governed vertical slice still must compose authenticated ingress and
 durable work association, canonical grant/policy/resource generations, physical

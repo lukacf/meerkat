@@ -2861,6 +2861,7 @@ live transport's realtime observations. See
 | `provider_cache_breakpoints_discarded` | Cache evidence no longer binds to the committed transcript; cache reuse is reduced without itself failing the turn |
 | `boundary_append_applied` | A durable steer's typed appends were written into the running turn at a model boundary; carries `run_id`, `input_id`, model-projected `content`, `append_count`, optional canonical `notices`, and optional application-time `transcript_start` offset |
 | `boundary_appends_discarded` | Exact discarded application facts (`session_id`, `run_id`, `input_ids`), published after any required requeue persistence succeeds |
+| `live_channel_closed` | One of the session's live channels closed; published after every committed close with `session_id`, `channel_id`, a typed `reason` (`LiveChannelCloseReason`) and `reopen_recommended` |
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_callback_pending` | Interaction reached a callback boundary and is waiting for tool results |
 | `interaction_failed` | Interaction-scoped stream failed |
@@ -2871,6 +2872,22 @@ the same session, run, and input, and against canonical transcript history.
 A run terminal alone does not prove that an append was discarded. A discard
 does not terminalize the input or invalidate its later application in another
 run; canonical retained history remains authoritative.
+
+`live_channel_closed` tells every session observer why a live channel closed
+without polling `live/status`. `reason` is one of:
+
+| Reason | Meaning |
+|--------|---------|
+| `client_requested` | A caller asked to close the channel (`live/close`, a member host close, or the client's own close request on the channel transport) |
+| `client_disconnected` | The client's transport went away (socket or peer connection lost) |
+| `provider_closed` | The provider ended the session |
+| `error` | A terminal adapter, provider or transport protocol error, including a configuration the provider rejected |
+| `media_fault` | The channel's first assistant output had a non-empty transcript but the client decoded no audible audio for it |
+| `replaced` | The runtime retired the channel for a replacement (context or result recovery reopens the session on a fresh channel) |
+| `open_abandoned` | The channel's open was abandoned before it activated |
+
+`reopen_recommended` is true only for a `media_fault` while the session's one
+reopen is still available; the reopened channel keeps its retained context.
 
 `stream_truncated` is subscriber-local. It reports UI-ring lag, not an
 EventStore projection result. Use `events/list_since` or `events/snapshot`

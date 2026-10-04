@@ -37,6 +37,10 @@ them.
 
 ### Breaking
 
+- `meerkat_runtime::live_execution::superseded_typed_row_context` takes a
+  `SupersededTypedRowRole` (`UserInput` or `Reply`, new) after the typed
+  row: only a typed user input carries the open-request clause (#1629). See
+  Fixed.
 - `meerkat_runtime::live_execution::LiveContextAppendKind` gains
   `TextChatReplay`, the quiet text-chat append of a host-typed turn's rows
   (#1614); `HistoryBootstrap`'s discriminant shifts. Exhaustive matches must
@@ -1296,6 +1300,17 @@ them.
 
 ### Fixed
 
+- A GPT Live typed update that later speech corrected only in part keeps
+  its other values (Turbo S S99, #1629: after a typed "code word Violet,
+  favorite flower Marigold" and a spoken "code word Cobalt", the voice
+  answered the pre-typed flower, Daffodil). The superseded typed row's
+  framing now leads with the row staying the current source for everything
+  the later speech does not change, and the append ends by restating that
+  after the correction instead of ending on the correction. Only a typed
+  user input is still told that an unreplaced request needs a response; a
+  typed turn's reply, which is never a request, no longer is (the voice
+  answered that clause aloud with only the corrected value, "Got it:
+  Cobalt.", then dropped the rest of the typed update).
 - Shell tool commands and background jobs no longer inherit the host's
   stdin. In a stdio JSON-RPC host (`rkat-rpc`) stdin is the protocol
   transport, so a command that read stdin (`cat`, `head`, a prompt) could

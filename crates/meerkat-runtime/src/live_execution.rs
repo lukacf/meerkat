@@ -4008,8 +4008,35 @@ pub struct LiveContextAppendAuthority {
 pub const LIVE_SUPERSEDING_SPEECH_HEADING: &str =
     "Said aloud later in this call, superseding it where they conflict:";
 
+/// Line after the superseding speech: it reasserts the typed row's content
+/// that the speech did not change. Ending on the correction alone, gpt-live-1
+/// dropped the whole typed update (Turbo S S99: only the code word was
+/// corrected aloud, and the model answered the pre-typed favourite flower;
+/// s99re R1 and the 0.8.51 live gate, #1629).
+pub const LIVE_SUPERSEDED_TYPED_STILL_CURRENT: &str =
+    "Everything in the typed text above that this later speech does not change is still current.";
+
+/// Line after [`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`] on a superseded typed
+/// user input only: a typed request the later speech did not replace still
+/// needs a response. A typed turn's reply is never a request, so its append
+/// does not invite one (the model answered the reply's clause aloud with only
+/// the corrected value, then dropped the rest of the typed update; S99, #1629).
+pub const LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN: &str = "If the typed text is a user request that this later speech did not replace, it still needs a response.";
+
+/// Who wrote a superseded typed row, from the committed row's typed author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupersededTypedRowRole {
+    /// The user's typed input: it may be a request that still needs a
+    /// response.
+    UserInput,
+    /// The reply to a typed turn: context, never a request.
+    Reply,
+}
+
 /// Payload of a superseded typed row: the row, then every later heard user
-/// speech row still queued behind it, in canonical order. `None` when no
+/// speech row still queued behind it, in canonical order, then
+/// [`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`], then, for a user input only,
+/// [`LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN`]. `None` when no
 /// superseding row is given: the generated edge only supersedes a row with at
 /// least one later heard-speech row queued, and sending the typed row without
 /// its correction is the failure this bundling exists to prevent (S99), so a
@@ -4017,6 +4044,7 @@ pub const LIVE_SUPERSEDING_SPEECH_HEADING: &str =
 #[must_use]
 pub fn superseded_typed_row_context<'a>(
     typed: &str,
+    role: SupersededTypedRowRole,
     superseding_speech: impl IntoIterator<Item = &'a str>,
 ) -> Option<String> {
     let mut speech = superseding_speech.into_iter().peekable();
@@ -4027,6 +4055,12 @@ pub fn superseded_typed_row_context<'a>(
     for row in speech {
         context.push('\n');
         context.push_str(row);
+    }
+    context.push('\n');
+    context.push_str(LIVE_SUPERSEDED_TYPED_STILL_CURRENT);
+    if role == SupersededTypedRowRole::UserInput {
+        context.push(' ');
+        context.push_str(LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN);
     }
     Some(context)
 }
@@ -5421,20 +5455,50 @@ mod tests {
     /// empty set is typed as `None` so the drain fails closed.
     #[test]
     fn superseded_typed_row_context_requires_superseding_speech() {
+        use super::SupersededTypedRowRole::{Reply, UserInput};
         assert_eq!(
-            super::superseded_typed_row_context("typed", std::iter::empty()),
+            super::superseded_typed_row_context("typed", UserInput, std::iter::empty()),
             None
         );
-        let composed =
-            super::superseded_typed_row_context("typed", ["first spoken", "second spoken"])
-                .expect("superseding speech present");
+        let composed = super::superseded_typed_row_context(
+            "typed",
+            UserInput,
+            ["first spoken", "second spoken"],
+        )
+        .expect("superseding speech present");
         let typed_at = composed.find("typed").expect("typed row");
         let heading_at = composed
             .find(super::LIVE_SUPERSEDING_SPEECH_HEADING)
             .expect("heading");
         let first_at = composed.find("first spoken").expect("first");
         let second_at = composed.find("second spoken").expect("second");
+        let still_current_at = composed
+            .find(super::LIVE_SUPERSEDED_TYPED_STILL_CURRENT)
+            .expect("the unchanged typed content is reasserted");
         assert!(typed_at < heading_at && heading_at < first_at && first_at < second_at);
+        assert!(
+            second_at < still_current_at,
+            "the reassertion comes after the correction"
+        );
+        assert!(
+            composed.ends_with(super::LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN),
+            "a typed user input may still be an open request"
+        );
+    }
+
+    /// #1629: a typed turn's reply is never a request, so its superseded
+    /// append ends on the reassertion and invites no response.
+    #[test]
+    fn a_superseded_typed_reply_invites_no_response() {
+        let composed = super::superseded_typed_row_context(
+            "Acknowledged: Violet and Marigold.",
+            super::SupersededTypedRowRole::Reply,
+            ["Correction: the code word is Cobalt."],
+        )
+        .expect("superseding speech present");
+        assert!(composed.ends_with(super::LIVE_SUPERSEDED_TYPED_STILL_CURRENT));
+        assert!(!composed.contains(super::LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN));
+        assert!(!composed.contains("needs a response"));
     }
 
     use super::*;

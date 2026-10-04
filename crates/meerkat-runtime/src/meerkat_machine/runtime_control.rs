@@ -12357,8 +12357,18 @@ impl MeerkatMachine {
                 // row; an empty set means runtime custody diverged from it.
                 // Fail closed rather than send the typed row without its
                 // correction (the S99 failure mode).
+                // The typed author decides whether the row may still be an
+                // open request: a typed turn's reply never is (#1629).
+                let role = if queued.row().author()
+                    == crate::meerkat_machine::dsl::LiveContextRowAuthor::User
+                {
+                    crate::live_execution::SupersededTypedRowRole::UserInput
+                } else {
+                    crate::live_execution::SupersededTypedRowRole::Reply
+                };
                 crate::live_execution::superseded_typed_row_context(
                     &context,
+                    role,
                     superseding.iter().map(|(_, text)| text.as_str()),
                 )
                 .ok_or_else(|| {

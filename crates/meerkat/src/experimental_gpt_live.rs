@@ -755,12 +755,19 @@ unprompted. Where the user has said something different aloud since, the later s
 /// something newer aloud. It does not claim the row was heard or answered.
 /// The machine cannot tell a correction from an unrelated remark, but the
 /// model can: the framing orders the row before the newer speech and leaves
-/// whether a typed request still needs a response to the model.
+/// whether a typed request still needs a response to the model (the runtime
+/// adds that clause to a typed user input only, never to a typed turn's
+/// reply: `LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN`). It leads with
+/// the row staying the current source for everything the later speech does
+/// not change, and the runtime ends the append on the same reassertion
+/// (`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`): framed override-first and ending
+/// on the correction, gpt-live-1 dropped the whole typed update, answering the
+/// pre-typed favourite flower when only the code word was corrected aloud
+/// (Turbo S S99, #1629).
 pub const LIVE_SUPERSEDED_TYPED_PREFIX: &str = "From the text chat, typed before the spoken turns you have \
-already heard in this call and delivered late (context data): whatever the user has said aloud since supersedes it \
-only where they conflict, so never restate a value that later speech replaced as current; everything else it states \
-still holds and is current. If it is a user request that the later speech did not replace, it still needs a \
-response.";
+already heard in this call and delivered late (context data). It stays the current source for everything that the \
+later speech below does not change. Where they conflict, the later speech wins, so never restate a value it replaced \
+as current.";
 
 /// Provider lane and wire text of one generated context append.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9546,16 +9553,25 @@ fn map_broker_error(error: GptLiveBrokerError) -> ProviderWebrtcBrokerError {
 #[cfg(test)]
 mod tests {
     /// A superseded text-chat row never claims to be heard or answered and
-    /// never tells the model to ignore it: a typed request the newer speech
-    /// did not replace (typed "book a table for 7", then spoken "what's the
-    /// weather?") must still get a response.
+    /// never tells the model to ignore it. Whether a typed request the newer
+    /// speech did not replace (typed "book a table for 7", then spoken
+    /// "what's the weather?") still needs a response is the runtime's clause,
+    /// added to typed user input only.
     #[test]
     fn superseded_typed_framing_leaves_the_response_decision_to_the_model() {
         let framing = super::LIVE_SUPERSEDED_TYPED_PREFIX;
         assert!(framing.contains("typed before the spoken turns"));
-        assert!(framing.contains("supersedes it only where they conflict"));
-        assert!(framing.contains("everything else it states still holds"));
-        assert!(framing.contains("still needs a response"));
+        assert!(framing.contains(
+            "It stays the current source for everything that the later speech below does not change"
+        ));
+        assert!(
+            framing.find("stays the current source") < framing.find("later speech wins"),
+            "the typed row's standing comes before the override (#1629)"
+        );
+        assert!(framing.contains("Where they conflict, the later speech wins"));
+        // The open-request clause is the runtime's, for typed user input
+        // only (a typed reply is never a request, #1629).
+        assert!(!framing.contains("needs a response"));
         // The spoken turns were heard; the row itself never claims to be.
         for false_claim in [
             "already heard and answered",

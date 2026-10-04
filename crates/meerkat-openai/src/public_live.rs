@@ -1804,6 +1804,7 @@ impl PublicLiveBrokerSession {
                 awaiting_peer_replies = wording.awaiting_peer_replies,
                 user_request_open = wording.user_request_open,
                 names_outstanding = wording.outstanding.is_some(),
+                user_spoke_first = wording.user_spoke_first,
                 "public Live result cue sent"
             );
         }
@@ -2387,6 +2388,14 @@ struct SessionState {
     /// Per result awaiting its cue: the earliest session-timeline start of a
     /// floor-taking user utterance at or after the end of its insertion.
     result_first_utterance_ms: HashMap<String, f64>,
+    /// Session-timeline start of each acknowledged result's insertion
+    /// (`session.commentary.appended.start_ms`) whose cue is not yet sent.
+    result_inserted_from_ms: HashMap<String, f64>,
+    /// The latest output transcript spans (`start_ms`, `end_ms`) in arrival
+    /// order, bounded by [`RECENT_OUTPUT_SPANS_MAX`]: a result acknowledged
+    /// after the model already began speaking over its insertion (the
+    /// sideband can deliver the delta first) is judged against them.
+    recent_output_spans: VecDeque<(f64, f64)>,
     /// Client delegations created on this channel whose outcome the model
     /// has not received (no acknowledged result, no terminal narration), in
     /// creation order, each with the user's words for it: the label its
@@ -2446,6 +2455,8 @@ impl Default for SessionState {
             request_utterance_start_ms: None,
             result_first_output_ms: HashMap::new(),
             result_first_utterance_ms: HashMap::new(),
+            result_inserted_from_ms: HashMap::new(),
+            recent_output_spans: VecDeque::new(),
             outstanding_delegations: Vec::new(),
             reflected_input_speech_seen: false,
             input_silence_run_ms: 0,
@@ -2542,6 +2553,27 @@ impl SessionState {
         outstanding_delegations_line(&labels)
     }
 
+    /// Record an output delta against every result awaiting its cue that it
+    /// voices ([`output_voices_result`]), keeping the earliest start.
+    fn note_output_voicing_results(&mut self, start_ms: f64, previous_output_end_ms: Option<f64>) {
+        for (delegation_id, inserted_through) in &self.result_inserted_through_ms {
+            let Some(inserted_from) = self.result_inserted_from_ms.get(delegation_id) else {
+                continue;
+            };
+            if output_voices_result(
+                start_ms,
+                previous_output_end_ms,
+                *inserted_from,
+                *inserted_through,
+            ) {
+                self.result_first_output_ms
+                    .entry(delegation_id.clone())
+                    .and_modify(|first| *first = first.min(start_ms))
+                    .or_insert(start_ms);
+            }
+        }
+    }
+
     /// Record `start_ms` against every result awaiting its cue whose
     /// insertion ended at or before it, keeping the earliest.
     fn note_earliest_after_insertion(
@@ -2591,9 +2623,11 @@ impl SessionState {
             let first_utterance = self.result_first_utterance_ms.remove(&delegation_id);
             // The model spoke with the result in context before any user
             // turn: its own continuation, which voiced the result.
-            let voiced_since_result = first_output.is_some_and(|output_start| {
-                !first_utterance.is_some_and(|utterance_start| utterance_start < output_start)
+            let user_spoke_first = first_output.is_some_and(|output_start| {
+                first_utterance.is_some_and(|utterance_start| utterance_start < output_start)
             });
+            let voiced_since_result = first_output.is_some() && !user_spoke_first;
+            self.result_inserted_from_ms.remove(&delegation_id);
             if voiced_since_result {
                 self.awaiting_peer_results.remove(&delegation_id);
                 self.result_inserted_through_ms.remove(&delegation_id);
@@ -2607,6 +2641,7 @@ impl SessionState {
                 awaiting_peer_replies: self.awaiting_peer_results.contains(&delegation_id),
                 user_request_open: self.user_request_open,
                 outstanding: self.outstanding_line_except(&delegation_id),
+                user_spoke_first,
             };
             // The thinking lane, not the instructions lane: instructions
             // persist as standing session instructions, and a persisted
@@ -2917,14 +2952,15 @@ impl SessionState {
                 end_ms,
                 ..
             } => {
+                let previous_output_end_ms = self.recent_output_spans.back().map(|span| span.1);
                 self.last_output_start_ms = Some(start_ms);
                 self.last_output_end_ms = Some(end_ms);
                 self.input_since_output = false;
-                Self::note_earliest_after_insertion(
-                    &self.result_inserted_through_ms,
-                    &mut self.result_first_output_ms,
-                    start_ms,
-                );
+                self.note_output_voicing_results(start_ms, previous_output_end_ms);
+                if self.recent_output_spans.len() == RECENT_OUTPUT_SPANS_MAX {
+                    self.recent_output_spans.pop_front();
+                }
+                self.recent_output_spans.push_back((start_ms, end_ms));
                 // Output that began before the open request's utterance is
                 // the lagging transcript of the previous reply, not an
                 // answer to it.
@@ -3168,9 +3204,29 @@ impl SessionState {
         // The model now holds this delegation's outcome.
         self.end_outstanding_delegation(&delegation_id);
         let ack_start_ms = self.commentary_ack_start_ms;
-        if let Some(inserted_through) = self.commentary_ack_end_ms {
+        if let (Some(inserted_from), Some(inserted_through)) =
+            (ack_start_ms, self.commentary_ack_end_ms)
+        {
             self.result_inserted_through_ms
                 .insert(delegation_id.clone(), inserted_through);
+            self.result_inserted_from_ms
+                .insert(delegation_id.clone(), inserted_from);
+            // Output the sideband delivered before this acknowledgement may
+            // already voice the result: the model starts answering as the
+            // result lands (S100 r1 on 93b6aaec: " Done." over the
+            // insertion's own span, its delta ahead of the receipt).
+            let mut previous_end = None;
+            let mut first_voicing = None::<f64>;
+            for (start, end) in &self.recent_output_spans {
+                if output_voices_result(*start, previous_end, inserted_from, inserted_through) {
+                    first_voicing = Some(first_voicing.map_or(*start, |first| first.min(*start)));
+                }
+                previous_end = Some(*end);
+            }
+            if let Some(first) = first_voicing {
+                self.result_first_output_ms
+                    .insert(delegation_id.clone(), first);
+            }
         }
         let gap_ms = match (ack_start_ms, self.last_output_end_ms) {
             (Some(ack_start_ms), Some(end)) => ack_start_ms - end,
@@ -3704,6 +3760,12 @@ struct ResultCueWording {
     /// The other delegations still running ([`outstanding_delegations_line`]),
     /// when there are any.
     outstanding: Option<String>,
+    /// The cue is owed because a user turn came after the result and before
+    /// the model's first output since: that output answered the user. The
+    /// user may have said how to report the result ("skip the details, just
+    /// say done", S100 r1 on 93b6aaec), which no typed fact can tell, so the
+    /// cue defers to it ([`LIVE_RESULT_CUE_USER_SPOKE_FIRST`]).
+    user_spoke_first: bool,
 }
 
 /// The cue for an acknowledged result the model has not spoken since: the
@@ -3746,6 +3808,9 @@ fn result_cue_sections(wording: &ResultCueWording) -> Vec<String> {
         body.push_str(tail);
     }
     let mut sections = vec![body];
+    if wording.user_spoke_first {
+        sections.push(LIVE_RESULT_CUE_USER_SPOKE_FIRST.to_owned());
+    }
     sections.extend(wording.outstanding.clone());
     sections.push(LIVE_RESULT_CUE_SCOPE.to_owned());
     sections
@@ -3774,6 +3839,36 @@ fn pack_sections(sections: Vec<String>) -> Vec<String> {
     }
     fragments
 }
+
+/// Sent on a cue owed through a user turn that came after the result and
+/// before the model's next output: the user may have said how to report it.
+const LIVE_RESULT_CUE_USER_SPOKE_FIRST: &str =
+    "The user has spoken since this result arrived: if they said how to report it, do that.";
+
+/// Output that voices a result awaiting its cue: it starts at or after the
+/// end of the result's insertion, or it starts at or after the insertion's
+/// start and opens a new response (the previous output ended at least
+/// [`OUTPUT_SILENCE_RELEASE_MS`] earlier on the transcript timeline). The
+/// model often begins answering exactly as the result lands (S100 r1 on
+/// 93b6aaec: " Done." over the insertion's own span, after 3000 ms of
+/// silence), while output that started inside the span as the continuation
+/// of a sentence already under way is not a readout (S97 r3: " ready." over
+/// 23800-24000, the tail of "Voice channel").
+fn output_voices_result(
+    start_ms: f64,
+    previous_output_end_ms: Option<f64>,
+    inserted_from_ms: f64,
+    inserted_through_ms: f64,
+) -> bool {
+    #[allow(clippy::cast_precision_loss)]
+    let response_gap_ms = OUTPUT_SILENCE_RELEASE_MS as f64;
+    start_ms >= inserted_through_ms
+        || (start_ms >= inserted_from_ms
+            && previous_output_end_ms.is_none_or(|end| start_ms - end >= response_gap_ms))
+}
+
+/// Bound on [`SessionState::recent_output_spans`].
+const RECENT_OUTPUT_SPANS_MAX: usize = 64;
 
 /// Labels named in [`outstanding_delegations_line`]; further delegations are
 /// counted, not named, so the line stays within one fragment.
@@ -6116,6 +6211,129 @@ mod tests {
         assert_eq!(state.outstanding_receipt_count(), 0);
     }
 
+    /// S100 r1 on 93b6aaec: the model began a fresh response (" Done.",
+    /// 3000 ms after its previous output) over the combined result's own
+    /// insertion span, its delta ahead of the receipt; the user's barge-in
+    /// came next. That " Done." is the readout: no cue, whichever of the
+    /// delta and the receipt arrives first.
+    #[test]
+    fn a_fresh_response_over_the_insertion_span_voices_the_result() {
+        for delta_first in [true, false] {
+            let mut state = state_with_spoken_delegation();
+            model_output(&mut state, true, 3);
+            let result = state
+                .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+                .unwrap();
+            let done = output_delta_span(" Done.", 41000.0, 41200.0);
+            let receipt = ack_span(&pending_event_id(result), 41000.0, 41200.0);
+            if delta_first {
+                state.apply_frame(frame(done)).unwrap();
+                state.apply_frame(frame(receipt)).unwrap();
+            } else {
+                state.apply_frame(frame(receipt)).unwrap();
+                state.apply_frame(frame(done)).unwrap();
+            }
+            model_output(&mut state, true, 2);
+            // The barge-in, then the model's answer to it.
+            reflect_input(&mut state, true, 3);
+            state
+                .apply_frame(frame(input_delta_at(
+                    " skip the details, just say done",
+                    43400.0,
+                )))
+                .unwrap();
+            state
+                .apply_frame(frame(output_delta_span(" Done.", 46200.0, 46400.0)))
+                .unwrap();
+            reflect_input(&mut state, false, 8);
+            model_output(&mut state, false, 8);
+            drain(&mut state);
+            assert_eq!(
+                state.reserve_due_result_cue().unwrap(),
+                None,
+                "the fresh response over the insertion span was the readout (delta first: {delta_first})"
+            );
+        }
+    }
+
+    /// S97 R5: a sentence the model began before the insertion started
+    /// ("I'm done. There's nothing") and finished after it ended. Unchanged
+    /// by the frontier rule: only the continuation past the insertion end
+    /// counts, and it voices the result, so no cue.
+    #[test]
+    fn a_sentence_begun_before_the_insertion_counts_only_from_its_end() {
+        let mut state = state_with_spoken_delegation();
+        model_output(&mut state, true, 3);
+        for (text, start, end) in [
+            (" I'm done", 24200.0, 24400.0),
+            (". There's", 24400.0, 24600.0),
+            (" nothing", 24600.0, 24800.0),
+        ] {
+            state
+                .apply_frame(frame(output_delta_span(text, start, end)))
+                .unwrap();
+        }
+        let result = state
+            .reserve_delegation_commentary(Some("dlg_cue".to_owned()))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_span(&pending_event_id(result), 24800.0, 25000.0)))
+            .unwrap();
+        assert!(
+            !state.result_first_output_ms.contains_key("dlg_cue"),
+            "nothing before the insertion start counts"
+        );
+        state
+            .apply_frame(frame(output_delta_span(
+                " in the current directory.",
+                25200.0,
+                26000.0,
+            )))
+            .unwrap();
+        assert_eq!(state.result_first_output_ms.get("dlg_cue"), Some(&25200.0));
+        model_output(&mut state, false, 8);
+        drain(&mut state);
+        assert_eq!(state.reserve_due_result_cue().unwrap(), None);
+    }
+
+    /// The frontier rule itself: inside the insertion span only a new
+    /// response counts; at or after the insertion end anything does.
+    #[test]
+    fn output_voices_a_result_from_its_end_or_as_a_new_response_inside_it() {
+        // S97 r3: the contiguous tail of a sentence under way.
+        assert!(!output_voices_result(
+            23800.0,
+            Some(23600.0),
+            23800.0,
+            24000.0
+        ));
+        // S100 r1: a fresh response after 3000 ms of silence.
+        assert!(output_voices_result(
+            41000.0,
+            Some(38000.0),
+            41000.0,
+            41200.0
+        ));
+        // Silence just short of the response boundary: still the same response.
+        assert!(!output_voices_result(
+            41000.0,
+            Some(39500.0),
+            41000.0,
+            41200.0
+        ));
+        // No earlier output at all.
+        assert!(output_voices_result(41000.0, None, 41000.0, 41200.0));
+        // Before the insertion start: never.
+        assert!(!output_voices_result(40800.0, None, 41000.0, 41200.0));
+        // At or after the insertion end: always.
+        assert!(output_voices_result(
+            41200.0,
+            Some(41100.0),
+            41000.0,
+            41200.0
+        ));
+    }
+
     fn ack_span(client_event_id: &str, start_ms: f64, end_ms: f64) -> Value {
         let mut value = ack(Some(client_event_id));
         value["start_ms"] = json!(start_ms);
@@ -6505,6 +6723,11 @@ mod tests {
             .expect("the answer to the user does not report the result");
         assert_eq!(delegation_id, "dlg_cue");
         assert!(result_cue_text(&wording).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
+        assert!(wording.user_spoke_first, "owed through the user's turn");
+        assert!(
+            result_cue_text(&wording).contains(LIVE_RESULT_CUE_USER_SPOKE_FIRST),
+            "the cue defers to how the user asked for it to be reported"
+        );
     }
 
     /// S99 on #1630, r3: the model's long readout ended on the audio clock,
@@ -6851,6 +7074,7 @@ mod tests {
             awaiting_peer_replies: false,
             user_request_open: true,
             outstanding: None,
+            user_spoke_first: false,
         });
         assert!(
             cue.contains(
@@ -6967,6 +7191,7 @@ mod tests {
             awaiting_peer_replies,
             user_request_open: true,
             outstanding: None,
+            user_spoke_first: false,
         };
         assert!(result_cue_text(&wording(false)).starts_with(LIVE_RESULT_UNREPORTED_CUE_HEAD));
         let awaiting = result_cue_text(&wording(true));
@@ -7026,6 +7251,7 @@ mod tests {
                     awaiting_peer_replies,
                     user_request_open,
                     outstanding: None,
+                    user_spoke_first: false,
                 };
                 let cue = result_cue_text(&wording);
                 let open = if user_request_open {
@@ -8004,6 +8230,7 @@ mod tests {
                         awaiting_peer_replies: true,
                         user_request_open: false,
                         outstanding: None,
+                        user_spoke_first: false,
                     })
                 );
                 let mut cue_ack = ack(cue["event_id"].as_str());

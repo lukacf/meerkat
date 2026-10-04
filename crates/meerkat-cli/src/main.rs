@@ -26344,7 +26344,9 @@ capabilities = ["rpc"]
         let scope_for_deploy = scope.clone();
         let pack_for_deploy = pack_out.clone();
         let mut deploy_task = tokio::spawn(async move {
-            Box::pin(execute_mob_deploy_internal(
+            let deployment: std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + '_>,
+            > = Box::pin(execute_mob_deploy_internal(
                 &scope_for_deploy,
                 &pack_for_deploy,
                 "hello",
@@ -26356,8 +26358,8 @@ capabilities = ["rpc"]
                     rpc_io: Some((Box::new(BufReader::new(server_in)), Box::new(server_out))),
                     config_observer: None,
                 },
-            ))
-            .await
+            ));
+            deployment.await
         });
 
         let output =

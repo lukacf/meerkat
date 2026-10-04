@@ -1,6 +1,6 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 18:36 UTC
+## Current delivery status, 2026-10-04 at 19:38 UTC
 
 Native PR1634 is published at `b12d81e71e57bfeb2c3bc677c21c782f57cc3df6`,
 tree `1f9553187e12d0a7f91ac0cdd0ff54e56e658c77`. All normal push hooks,
@@ -19,15 +19,16 @@ still unacceptable: the latest six-cell study missed every conditional mean
 threshold, with fresh-turn overhead of 137.01 and 145.20 percent at grant
 depths 1 and 3. Individual-operation p99 and full coverage remain open.
 
-Console PR520 has advanced to `127331ff51605136da5264fe680cb9868b015bf2`,
-tree `7daa82d6f0a359fdc7af52b0734c85c0e268a744`. It adds explicit access
-inspection from group membership and refreshes the required embedded assets.
-The initial CI attempt failed asset freshness; the successor passes that step.
-[CI run 37217158682](https://github.com/lukacf/meerkat-mobkit/actions/runs/37217158682)
-passed all 11 jobs, including browser and audio checks, in 37m19s. The focused
-access-view tests passed 19 cases, and the
-existing adapter suite passed 313. These remain Console projection tests;
-MobKit's native dependency is still 0.8.50.
+Console PR520 is published at `86e0cdf0a17d9727c90ba036a8b9dbca97c521b8`,
+tree `509ffe7e9bd7606b80349120f381d1518dfab891`. Its refused-send handling
+now derives busy state from retained owner events, so rejecting a steer does
+not clear an already active run. The regression failed before the repair;
+the existing queue and send-attempt suites passed all 98 cases after it.
+Normal commit, embedded-asset freshness and the applicable push hooks passed.
+[Fresh CI37226632903](https://github.com/lukacf/meerkat-mobkit/actions/runs/37226632903)
+is still pending. Predecessor `127331ff` passed all 11 CI jobs in 37m19s,
+19 access-view tests and 313 adapter tests. These remain Console projection
+results; MobKit's native dependency is still 0.8.50.
 
 The preview safety baseline is committed at
 `64b44ff9d0fb6d3118c324b20e0bcc4449ac6659`, tree
@@ -52,23 +53,37 @@ passed, with test bodies reported as 0.00s. Raw logs use the
 native-workload correctness tests then passed with zero failures or ignores in
 8.05s, after a 6m18s rebuild. These eight controls cover local refusal feedback,
 permitted effects, revocation, queued-work cancellation, isolation and cleanup.
-Ordinary publication hooks and fresh CI remain pending. No new performance
-result is claimed; timing requires fresh GCP clearance after both active release
-tags.
+Candidate `4cffdf3752574a886a0024bfe70f59dde3b5d254` failed its normal
+push after 41m26s in Clippy. E0275 occurred while proving that the existing
+CLI RPC-deployment test future is Send; later test gates and fresh CI were
+not reached. A reviewed test-only explicit Send boundary then passed the
+same workspace, all-target, all-feature Clippy command in 7.58s using the
+retained warm target. The existing CLI RPC-deployment scenario then passed
+with zero failures in 0.158s after a 9m24s compile, finishing at 19:37:46 UTC.
+The test-only repair awaits commit and ordinary publication retry. No
+production allocation or recursion-limit change is part of that repair. Toolkit's bounded preview source review found no
+blocker; it does not supply missing execution or performance evidence.
+Raw logs are `public4cff-normal-push-r1.log` and
+`native4cff-cli-send-clippy-r1.log` and `native4cff-cli-send-scenario-r1.log`
+in the retained evidence directory.
+No new performance result is claimed; timing requires fresh GCP clearance
+after both active release tags.
 
-The separate push-range workflow fix `5ecab297` remains unpublished. Its
-70m13s normal push passed Clippy, machine and hook checks, then failed one of
-12,155 executed unit tests (17 skipped). The unchanged interrupted-harness
-cleanup test observed FIFO closure before its immediate process-state check
-reported exit. A bounded process-exit check with a still-running negative is
-prepared; the cause is not yet proven. Its first focused test attempt exhausted
-600 seconds rebuilding a different dependency feature graph, before any test
-body ran. A second attempt using the existing workspace unit graph reached its
-840-second limit at 18:27:08 UTC, also before any test body ran. An unrelated
-Mac gateway build overlapped that second attempt. The owned build lane was
-released and the repair remains unapplied. These are compile-only timeouts,
-not observed failures of the new assertions. Integration and E2E gates were
-not reached. These attempts are validation time, not delivered feature coverage.
+The separate push-range workflow repair is committed at
+`032547f2ab26462842fb1d113bd73eb5d510d0b1` and its normal push is running.
+It follows `5ecab297`, whose 70m13s push passed Clippy and machine checks,
+then failed one of 12,155 unit tests (17 skipped). Two new controls reproduced
+the cleanup observer's assumption that FIFO closure implies process exit.
+Both passed after a bounded exit-observation repair; the two original real
+process timeout/interruption controls also passed in 5.015s. The repair
+changes test observation, not production cleanup. Normal commit hooks passed.
+Two earlier 600s and 840s attempts expired during compilation before tests
+ran; the completed baseline then took 8m47s to compile and the repair 1.91s.
+Raw results are retained under
+`/private/tmp/adr-001-cargo-push-range-r1/cleanup-oracle-r1`.
+The current first-branch push conservatively validates the whole tree because
+its source ref was `HEAD`; future first pushes will name the source branch
+explicitly so the existing dispatcher can select its proven comparison base.
 
 The representative benchmark now defaults to the approved fixed W20/N32
 profile and rejects the withdrawn tail profile or conflicting count overrides.

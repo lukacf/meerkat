@@ -1844,17 +1844,18 @@ impl PublicLiveBrokerSession {
         }
     }
 
-    async fn deliver_append(
-        &self,
-        token: GptLiveAppendToken,
-        event: ClientEvent,
-    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+    /// Test evidence for an outgoing append: the wire capture's attempt
+    /// record and the provider-stream line. Every append send goes through
+    /// it, including held commentary released later (soak 93b6aaec S101 R2:
+    /// a held result went out unrecorded, so the stream showed no delivery).
+    #[cfg_attr(not(feature = "test-realtime-fixtures"), allow(unused_variables))]
+    fn instrument_outgoing_append(&self, event: &ClientEvent) {
         #[cfg(feature = "test-realtime-fixtures")]
         if let Some(capture) = &self.thinking_capture
             && let ClientEvent {
                 event_id: Field::Value(client_event_id),
                 command: Command::ThinkingAppend { content, .. },
-            } = &event
+            } = event
         {
             capture.record(thinking_capture::EventKind::ThinkingAppendAttempt {
                 client_event_id: client_event_id.clone(),
@@ -1866,7 +1867,7 @@ impl PublicLiveBrokerSession {
             && let ClientEvent {
                 event_id: Field::Value(client_event_id),
                 command: Command::InstructionsAppend { content, .. },
-            } = &event
+            } = event
         {
             capture.record(thinking_capture::EventKind::InstructionsAppendAttempt {
                 client_event_id: client_event_id.clone(),
@@ -1882,7 +1883,7 @@ impl PublicLiveBrokerSession {
                         content,
                         delegation_id,
                     },
-            } = &event
+            } = event
         {
             let mut end = content.len().min(thinking_capture::Capture::MAX_TEXT_BYTES);
             while !content.is_char_boundary(end) {
@@ -1896,7 +1897,15 @@ impl PublicLiveBrokerSession {
             });
         }
         #[cfg(feature = "test-realtime-fixtures")]
-        self.record_client_event(&event);
+        self.record_client_event(event);
+    }
+
+    async fn deliver_append(
+        &self,
+        token: GptLiveAppendToken,
+        event: ClientEvent,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.instrument_outgoing_append(&event);
         if self.sender.send(event).await.is_err() {
             self.state.lock().await.append_delivery_ambiguous = true;
             return Err(GptLiveBrokerError::AppendDeliveryAmbiguous { token });
@@ -2046,11 +2055,11 @@ impl PublicLiveBrokerSession {
             // held while they are sent, so a result appended concurrently
             // cannot overtake them.
             for (token, event) in state.take_releasable_held_commentary() {
-                // Recorded like every other client event (`deliver_append`):
-                // a held result released here is a real provider append,
-                // and replay and the result-timing oracles key on it.
-                #[cfg(feature = "test-realtime-fixtures")]
-                self.record_client_event(&event);
+                // Captured and recorded like every other append
+                // (`deliver_append`): a held result released here is a real
+                // provider append, and replay and the result-timing oracles
+                // key on it.
+                self.instrument_outgoing_append(&event);
                 if self.sender.send(event).await.is_err() {
                     state.append_delivery_ambiguous = true;
                     tracing::warn!(

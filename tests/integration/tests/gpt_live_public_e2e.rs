@@ -4811,6 +4811,22 @@ struct ResultDelivery {
 }
 
 /// Every result delivery on the sideband, all channels, in send order.
+/// The result text a delegation-lane commentary append carries: a plain
+/// result, or the result after its "Finished ... The result follows."
+/// announcement, which travels in the same append since #1637 (separated by
+/// a newline). Narration alone carries no result.
+fn announced_result_text(content: &str) -> Option<&str> {
+    if content.starts_with("Finished voice request: \"") {
+        let (_, result) = content.split_once('\n')?;
+        let result = result.trim();
+        return (!result.is_empty()).then_some(result);
+    }
+    (!NARRATION_STARTS
+        .iter()
+        .any(|start| content.starts_with(start)))
+    .then_some(content)
+}
+
 fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> {
     lines
         .iter()
@@ -4819,14 +4835,13 @@ fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> 
                 if event["type"] == "session.commentary.append" =>
             {
                 let delegation_id = event["delegation_id"].as_str()?;
-                let text = event["content"].as_str()?;
-                (!NARRATION_STARTS.iter().any(|start| text.starts_with(start))).then(|| {
-                    ResultDelivery {
-                        delegation_id: delegation_id.to_owned(),
-                        channel: line.channel_ordinal,
-                        elapsed_ms: line.elapsed_ms,
-                        text: text.to_owned(),
-                    }
+                let content = event["content"].as_str()?;
+                let text = announced_result_text(content)?;
+                Some(ResultDelivery {
+                    delegation_id: delegation_id.to_owned(),
+                    channel: line.channel_ordinal,
+                    elapsed_ms: line.elapsed_ms,
+                    text: text.to_owned(),
                 })
             }
             _ => None,
@@ -7292,21 +7307,32 @@ async fn s100_wait_barge_in_reply(
 }
 
 /// Whether an assistant output delta saying "done" started (provider audio
-/// clock) at or after the user's first barge-in input delta.
+/// clock) at or after the user's first barge-in input delta. The barge-in's
+/// first input delta is the first user input event after the last provider
+/// event the peer logged at or before the barge-in onset (the timeline's
+/// `first_input_delta` is recorded once per session, not per utterance: soak
+/// 93b6aaec S100 R1).
 fn s100_barge_in_answered(
     timeline: &[TimelineEntry],
     events: &[Value],
     barge_in_start_ms: u64,
 ) -> bool {
-    let heard_index = timeline
+    let onset_index = timeline
         .iter()
-        .find(|e| e.kind == TimelineKind::FirstInputDelta && e.t_ms >= barge_in_start_ms)
-        .and_then(|e| e.detail_u64("event_index"))
+        .filter(|e| e.kind == TimelineKind::ProviderEvent && e.t_ms <= barge_in_start_ms)
+        .filter_map(|e| e.detail_u64("event_index"))
+        .max()
         .and_then(|index| usize::try_from(index).ok());
-    let Some(heard_index) = heard_index else {
+    let first_after = onset_index.map_or(0, |index| index + 1);
+    let Some((heard_index, heard)) = events
+        .iter()
+        .enumerate()
+        .skip(first_after)
+        .find(|(_, e)| is_user_input(e))
+    else {
         return false;
     };
-    let Some(heard_start) = events.get(heard_index).and_then(|e| e["start_ms"].as_f64()) else {
+    let Some(heard_start) = heard["start_ms"].as_f64() else {
         return false;
     };
     events.iter().skip(heard_index).any(|e| {
@@ -9837,10 +9863,10 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
                     jobs.entry(id.to_owned()).or_insert(job);
                 } else if jobs.contains_key(id) {
                     known.entry(id.to_owned()).or_insert(line.elapsed_ms);
-                    if !content.starts_with("Finished voice request") {
+                    if let Some(result) = announced_result_text(content) {
                         results
                             .entry(id.to_owned())
-                            .or_insert((line.elapsed_ms, content.to_owned()));
+                            .or_insert((line.elapsed_ms, result.to_owned()));
                     }
                 }
             }
@@ -12508,12 +12534,18 @@ mod config_tests {
     #[test]
     fn s100_barge_in_reply_is_judged_by_content_after_the_barge_in() {
         use super::support::{TimelineEntry, TimelineKind};
-        let first_delta = |t_ms: u64, index: u64| TimelineEntry {
+        // The session's only first_input_delta is the earlier request's
+        // (soak 93b6aaec R1); the barge-in is located by the provider events
+        // the peer logged before its onset at 400.
+        let entry = |t_ms: u64, kind: TimelineKind, index: u64| TimelineEntry {
             t_ms,
-            kind: TimelineKind::FirstInputDelta,
+            kind,
             detail: serde_json::json!({"event_index": index}),
         };
-        let timeline = vec![first_delta(100, 0), first_delta(500, 2)];
+        let timeline = vec![
+            entry(100, TimelineKind::FirstInputDelta, 0),
+            entry(300, TimelineKind::ProviderEvent, 1),
+        ];
         let input = |text: &str, start: f64| serde_json::json!({"type": "session.input_transcript.delta", "delta": text, "start_ms": start});
         let output = |text: &str, start: f64| serde_json::json!({"type": "session.output_transcript.delta", "delta": text, "start_ms": start});
         let answered = vec![
@@ -12607,6 +12639,34 @@ mod config_tests {
             super::peer_claims_in_speech_before(&lines, 1, None, "pemberton").len(),
             4,
             "with no reply ever sent, the voiced reply is invented too"
+        );
+    }
+
+    /// Since #1637 the "Finished ... The result follows." announcement and
+    /// the result travel in one append; the result after the newline is the
+    /// delivery, and an announcement with nothing after it is not (re-verdict
+    /// 93b6aaec: S97 and S99 found no delivery at all).
+    #[test]
+    fn an_announced_result_is_the_result_after_its_announcement() {
+        assert_eq!(
+            super::announced_result_text(
+                "Finished voice request: \"inspect the directory\". The result follows.\nThe current working directory is empty."
+            ),
+            Some("The current working directory is empty.")
+        );
+        assert_eq!(
+            super::announced_result_text(
+                "Finished voice request: \"inspect\". The result follows."
+            ),
+            None
+        );
+        assert_eq!(
+            super::announced_result_text("Started voice request: \"inspect\"."),
+            None
+        );
+        assert_eq!(
+            super::announced_result_text("The number is 47."),
+            Some("The number is 47.")
         );
     }
 

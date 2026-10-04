@@ -1907,7 +1907,7 @@ async fn dsl_preview_preserves_full_history_and_publishes_no_effects() {
             mm_dsl::MeerkatMachineInput::BindInputAuthority {
                 input_id: tracked_ids[0].to_string(),
                 authority_binding: "different-association".into(),
-                authority_batch_key: batch,
+                authority_batch_key: batch.clone(),
             },
             "BindInputAuthority(conflicting preview)",
         )
@@ -1926,6 +1926,64 @@ async fn dsl_preview_preserves_full_history_and_publishes_no_effects() {
         before
     );
     assert!(signal_surface.log.lock().await.is_empty());
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("actual live session authority");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = authority.lock().expect("healthy fixture mutex");
+        panic!("deliberate valid-state session preview fixture poison");
+    }));
+    assert!(result.is_err());
+    assert!(authority.is_poisoned());
+    let epoch = registered_runtime_epoch_id(&machine, &session_id).await;
+    let effects = machine
+        .preview_session_dsl_input(
+            &session_id,
+            prepare_bindings_input(&session_id, "poisoned-preview-runtime", 7, epoch),
+            "PrepareBindings(poisoned preview isolation)",
+        )
+        .await
+        .expect("valid poisoned snapshot remains recoverable");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, mm_dsl::MeerkatMachineEffect::RuntimeBound { .. }))
+    );
+    assert_eq!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("live state"),
+        before
+    );
+    assert!(signal_surface.log.lock().await.is_empty());
+    let error = machine
+        .preview_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                input_id: tracked_ids[0].to_string(),
+                authority_binding: "different-association".into(),
+                authority_batch_key: batch,
+            },
+            "BindInputAuthority(poisoned conflicting preview)",
+        )
+        .await
+        .expect_err("poison does not bypass the immutable binding guard");
+    assert!(
+        error.contains("BindInputAuthority(poisoned conflicting preview)"),
+        "{error}"
+    );
+    assert!(error.contains("guard rejected"), "{error}");
+    assert_eq!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("live state"),
+        before
+    );
+    assert!(signal_surface.log.lock().await.is_empty());
+    assert!(authority.is_poisoned(), "preview cannot clear poison");
     machine
         .unregister_session(&session_id)
         .await

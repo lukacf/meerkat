@@ -6572,6 +6572,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dsl_preview_preserves_poisoned_live_authority_and_generated_guards() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("poisoned-preview"));
+        driver
+            .ensure_contract_session_authority()
+            .expect("actual generated contract-session registration");
+        let input = prompt_input("retain the actual queued input");
+        let input_id = input.id().clone();
+        driver
+            .accept_input(input)
+            .await
+            .expect("actual tracked input");
+        let binding = "exact-original-association".repeat(256);
+        let batch = "exact-original-participants".repeat(256);
+        // Opaque equality facts confer no authentication or permission.
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                    input_id: input_id.to_string(),
+                    authority_binding: binding.clone(),
+                    authority_batch_key: batch.clone(),
+                },
+                "BindInputAuthority(poisoned preview fixture)",
+            )
+            .expect("bind the actual tracked input");
+        // Consume the original admission signal through the actual loop seam.
+        // A later preview must return its effect without publishing that signal.
+        let _ = driver.take_post_admission_signal();
+        let before = driver.with_dsl_state(Clone::clone);
+        let signal_before = driver.post_admission_signal();
+        assert_eq!(signal_before, super::PostAdmissionSignal::None);
+        let authority = driver.shared_dsl_authority();
+        for poison in [false, true] {
+            if poison {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = authority.lock().expect("healthy fixture mutex");
+                    panic!("deliberate valid-state preview fixture poison");
+                }));
+                assert!(result.is_err());
+                assert!(authority.is_poisoned());
+            }
+            let effects = driver
+                .dsl_preview(
+                    mm_dsl::MeerkatMachineInput::AcceptWithCompletion {
+                        input_id: mm_dsl::InputId::from_domain(&input_id),
+                        request_immediate_processing: true,
+                        interrupt_yielding: false,
+                        wake_if_idle: false,
+                    },
+                    "AcceptWithCompletion(valid live preview)",
+                )
+                .expect("valid healthy or poisoned preview");
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                mm_dsl::MeerkatMachineEffect::PostAdmissionSignal {
+                    signal: mm_dsl::PostAdmissionSignalKind::RequestImmediateProcessing,
+                }
+            )));
+            assert_eq!(driver.with_dsl_state(Clone::clone), before);
+            assert_eq!(driver.post_admission_signal(), signal_before);
+            let error = driver
+                .dsl_preview(
+                    mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                        input_id: input_id.to_string(),
+                        authority_binding: "different-association".into(),
+                        authority_batch_key: batch.clone(),
+                    },
+                    "BindInputAuthority(conflicting live preview)",
+                )
+                .expect_err("the retained exact binding cannot change in preview");
+            assert!(matches!(error, RuntimeDriverError::Internal(detail)
+                if detail.contains("BindInputAuthority(conflicting live preview)")
+                    && detail.contains("GuardRejected")));
+            assert_eq!(driver.with_dsl_state(Clone::clone), before);
+            assert_eq!(driver.post_admission_signal(), signal_before);
+            if poison {
+                assert!(authority.is_poisoned(), "preview cannot clear poison");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn terminal_archive_removes_both_native_authority_bindings() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("authority-archive"));
         let input = prompt_input("archive exact input");

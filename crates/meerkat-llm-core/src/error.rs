@@ -143,6 +143,13 @@ pub enum LlmError {
     #[error("Stream parsing error: {message}")]
     StreamParseError { message: String },
 
+    /// The provider's response ended before its terminal event: a stream
+    /// that stopped without `Done` (`ensure_terminal_done`), an SSE buffer cut
+    /// mid-event, or a terminal response the provider marked incomplete for a
+    /// reason with no stop-reason mapping. Retryable: nothing of the attempt
+    /// is committed (the adapter returns the error before assembling a
+    /// result), and the agent loop's bounded retry policy replays the turn
+    /// under the same assistant message id.
     #[error("Incomplete response: {message}")]
     IncompleteResponse { message: String },
 
@@ -516,6 +523,7 @@ impl LlmError {
             | Self::NetworkTimeout { .. }
             | Self::ConnectionReset
             | Self::AuthorizationRouteChanged { .. }
+            | Self::IncompleteResponse { .. }
             | Self::Unknown { .. } => true,
             Self::ServerError { status, .. } => *status >= 500,
             _ => false,
@@ -737,8 +745,11 @@ impl LlmError {
                     }),
                 ))
             }
+            // A truncated provider response is transport-shaped: the turn is
+            // retried, never committed partially (S103 R1 on 850a38699: the
+            // executor's stream ended without Done and the turn failed).
             Self::IncompleteResponse { message } => {
-                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmFailureReason::ProviderError(LlmProviderError::retryable(
                     LlmProviderErrorKind::IncompleteResponse,
                     json!({
                         "message": message,
@@ -892,6 +903,24 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    /// A provider stream that ends without its terminal event is retried
+    /// through the typed retry metadata, like a connection reset.
+    #[test]
+    fn a_truncated_response_is_a_retryable_provider_error() {
+        let error = LlmError::IncompleteResponse {
+            message: "Stream ended without Done event".to_string(),
+        };
+        assert!(error.is_retryable());
+        let LlmFailureReason::ProviderError(provider_error) = error.failure_reason() else {
+            panic!("a truncated response is a provider error");
+        };
+        assert_eq!(
+            provider_error.kind,
+            LlmProviderErrorKind::IncompleteResponse
+        );
+        assert!(provider_error.is_retryable());
     }
 
     #[test]

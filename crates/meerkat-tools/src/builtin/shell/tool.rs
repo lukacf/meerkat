@@ -1904,6 +1904,45 @@ mod tests {
         })
     }
 
+    /// A tool's child never reads the host's stdin: in a stdio JSON-RPC host
+    /// (`rkat-rpc`) stdin is the protocol transport, and a command that reads
+    /// it consumed protocol frames. With the host's stdin a pipe holding a
+    /// frame, a command that reads stdin gets EOF at once and the frame is
+    /// still there afterwards.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_command_never_reads_the_host_stdin() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        const FRAME: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1}\n";
+
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(FRAME).unwrap();
+        // Swap the process's stdin for the socket holding the frame, keeping
+        // the original to restore. nextest runs each test in its own process.
+        let saved = nix::unistd::dup(0).unwrap();
+        nix::unistd::dup2(reader.as_raw_fd(), 0).unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let tool = sh_tool_with_cap(temp_dir.path(), 1_000);
+        let output = tool
+            .execute_command("head -c 1; echo exit=$?", None, 10)
+            .await;
+
+        nix::unistd::dup2(saved, 0).unwrap();
+        nix::unistd::close(saved).unwrap();
+        let output = output.unwrap();
+        assert!(!output.timed_out, "reading stdin must not block");
+        assert_eq!(
+            output.stdout, "exit=0\n",
+            "the command reads EOF from stdin, never the host's frame"
+        );
+        drop(writer);
+        let mut left = Vec::new();
+        reader.read_to_end(&mut left).unwrap();
+        assert_eq!(left, FRAME, "the host's stdin frame was not consumed");
+    }
+
     /// The number after `prefix` in `text`.
     #[cfg(unix)]
     fn number_after(text: &str, prefix: &str) -> usize {

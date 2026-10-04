@@ -703,9 +703,14 @@ pub const LIVE_CAUSAL_REPLAY_PREFIX: &str = "Earlier in this call, replayed afte
 /// Prefix of runtime work output replayed on the quiet thinking lane: the
 /// result of background work that finished while the model was away (a
 /// voice job that completed after its channel closed). It is new to the
-/// model, so it is never described as heard or answered.
+/// model, so it is never described as heard or answered. It is the answer to
+/// "what happened while I was away": the model answers from it rather than
+/// handing the question to the executor, and reads the work back when the
+/// user asked for that (S104 r1 on 746845a3 delegated the question and never
+/// read the finished work back).
 pub const LIVE_RUNTIME_WORK_PREFIX: &str = "Result of background work that finished while you were away \
-(context data, not a new request): use it when the user asks about that work, and do not read it out \
+(context data, not a new request): answer questions about it, or about what happened while the user was \
+away, from it directly; read it back when the user asks or asked for that, and do not read it out \
 unprompted.";
 
 /// Prefix of a text-chat row (a host-typed input or its reply) mirrored into
@@ -9498,6 +9503,22 @@ mod tests {
         let runtime_work = super::LIVE_RUNTIME_WORK_PREFIX;
         assert!(runtime_work.contains("background work"));
         assert!(!runtime_work.contains("already heard"));
+    }
+
+    /// S104 r1 on 746845a3: "what happened while I was gone" was delegated
+    /// and the finished work never read back. The runtime-work framing makes
+    /// it the native answer to that question and to a pending read-back,
+    /// while still never voicing it unprompted.
+    #[test]
+    fn runtime_work_framing_answers_questions_about_the_absence_directly() {
+        let runtime_work = super::LIVE_RUNTIME_WORK_PREFIX;
+        assert!(runtime_work.contains("what happened while the user was away, from it directly"));
+        assert!(runtime_work.contains("read it back when the user asks or asked for that"));
+        assert!(runtime_work.contains("do not read it out unprompted"));
+        assert!(
+            !runtime_work.to_lowercase().contains("executor") && !runtime_work.contains("delegat"),
+            "the framing never names a delegate: naming one primes delegation (S99)"
+        );
     }
 
     #[test]

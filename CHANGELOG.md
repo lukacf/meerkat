@@ -1312,6 +1312,12 @@ them.
   for it, it is never named as still running, and the channel stays up for
   the user's next utterance. Other unsupported provider events still end
   the call.
+- GPT Live runtime work replayed on a reopened channel (a job that finished
+  while the channel was closed) is now framed as the answer to questions
+  about that work or about what happened while the user was away, to be
+  given from it directly and read back when the user asks or asked for it,
+  and still never read out unprompted (Turbo S S104 R1: "what happened while
+  I was gone" was delegated and the finished work never read back).
 - GPT Live no longer gives the voice a "Finished voice request: ... The
   result follows." announcement without the result behind it. The Completed
   narration was its own provider event, acknowledged before the result was
@@ -1359,6 +1365,11 @@ them.
     the model read the details out). A cue owed because the user spoke
     first adds "The user has spoken since this result arrived: if they said
     how to report it, do that."
+  - A new response whose first transcript delta arrives after the result
+    was sent, before any user utterance takes the floor, also counts as the
+    readout, even when its quantized provider start precedes the result's
+    acknowledgement (Turbo S S97 R2: "It's empty." at 24400 ms, the
+    acknowledgement at 24600-24800 ms, then a cue and a second readout).
   - Every in-progress notice and every result cue names the other
     delegations still running, by the user's words for them: "Still
     running: "X". Do not say it is done until its result arrives." (S101:

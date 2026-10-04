@@ -5741,6 +5741,72 @@ mod tests {
         ));
     }
 
+    /// A Failed narration is a delegation's last word: its sideband
+    /// authority, and so the provider command it authorizes, says the
+    /// delegation ended without a result, which stops the provider session
+    /// naming it as still running. Every other narration kind leaves it
+    /// running.
+    #[cfg(feature = "live")]
+    #[test]
+    fn only_a_failed_narration_ends_its_delegation_at_the_provider() {
+        use meerkat_live::{LiveSidebandCommand, LiveSidebandProviderCommand};
+        for kind in [
+            LiveDelegationNarrationKind::Queued,
+            LiveDelegationNarrationKind::Claimed,
+            LiveDelegationNarrationKind::Blocked,
+            LiveDelegationNarrationKind::Completed,
+            LiveDelegationNarrationKind::SourceBusy,
+            LiveDelegationNarrationKind::Failed,
+        ] {
+            let session_id = session(1);
+            let operation = exact_operation("channel-a", "provider-turn-secret", 11);
+            let correlation = operation.domain_correlation();
+            let effect = MeerkatMachineEffect::LiveDelegationNarrationAuthorized {
+                channel_id: correlation.channel_id().to_string(),
+                interaction_id: correlation.interaction_id().to_string(),
+                operation_id: DslOperationId::from_domain(operation.operation_id()),
+                provider_turn_correlation: correlation.provider().user_turn_id().to_owned(),
+                kind,
+            };
+            let authority = LiveDelegationNarrationAuthority::from_generated_effect(
+                &session_id,
+                &operation,
+                kind,
+                &effect,
+            )
+            .expect("narration effect")
+            .expect("matching narration effect");
+            let binding = ProviderWebrtcBinding::new(
+                correlation.channel_id().clone(),
+                session_id,
+                meerkat_live::LiveRuntimeBindingGeneration::new(7),
+                meerkat_live::LiveRuntimeBindingFence::new(9),
+            );
+            let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation-secret".to_string(),
+                "private-provider-delegation-id".to_string(),
+            )
+            .expect("delegation");
+            let sideband = authority
+                .into_sideband_narration_authority(binding, &delegation)
+                .expect("narration conversion");
+            let command =
+                LiveSidebandCommand::narrate_delegation(sideband, delegation, "narration")
+                    .expect("narration command");
+            let LiveSidebandProviderCommand::NarrateDelegationContext {
+                ends_delegation, ..
+            } = command.__into_provider_command()
+            else {
+                panic!("a narration lowers to a narration command");
+            };
+            assert_eq!(
+                ends_delegation,
+                kind == LiveDelegationNarrationKind::Failed,
+                "{kind:?}"
+            );
+        }
+    }
+
     #[cfg(feature = "live")]
     #[test]
     fn generated_append_conversion_is_exact_and_one_use_across_clones() {

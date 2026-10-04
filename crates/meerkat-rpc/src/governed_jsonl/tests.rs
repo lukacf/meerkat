@@ -1279,7 +1279,8 @@ async fn governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_comp
         let live_rows = store.load_input_states_strict(&rid).await.unwrap();
         assert_eq!(live_rows.len(), 1);
         let input_id = live_rows[0].state.input_id.clone();
-        let live_audit = audit(&live_rows[0]);
+        let live = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
+        let live_audit = audit(&live);
         assert!(!live_audit.is_empty());
         let run_id = live_audit[0].observation.run_id.clone().unwrap();
         let bodies = http.receiver.bodies.lock().unwrap().clone();

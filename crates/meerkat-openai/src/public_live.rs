@@ -2410,6 +2410,16 @@ struct SessionState {
     /// after the model already began speaking over its insertion (the
     /// sideband can deliver the delta first) is judged against them.
     recent_output_spans: VecDeque<(f64, f64)>,
+    /// Result appends sent and not yet acknowledged, each with the
+    /// session-timeline start of the first new response (an output delta
+    /// [`OUTPUT_SILENCE_RELEASE_MS`] or more after the previous output) whose
+    /// first delta arrived after the send and before any floor-taking user
+    /// utterance. Arrival order is causal where the 200 ms quantized starts
+    /// are not: a fresh response that follows the send is the readout even
+    /// when its provider start precedes the acknowledgement (S97 R2: "It's
+    /// empty." at 24400 after the send, the acknowledgement at 24600-24800,
+    /// the previous output 6 s earlier).
+    result_sent_fresh_response_ms: HashMap<GptLiveAppendToken, Option<f64>>,
     /// Client delegations created on this channel whose outcome the model
     /// has not received (no acknowledged result, no terminal narration), in
     /// creation order, each with the user's words for it: the label its
@@ -2475,6 +2485,7 @@ impl Default for SessionState {
             result_first_utterance_ms: HashMap::new(),
             result_inserted_from_ms: HashMap::new(),
             recent_output_spans: VecDeque::new(),
+            result_sent_fresh_response_ms: HashMap::new(),
             outstanding_delegations: Vec::new(),
             reflected_input_speech_seen: false,
             assistant_playback_ducked: false,
@@ -2837,6 +2848,7 @@ impl SessionState {
         if self.close_requested || self.closed_observed {
             // Never held past a close: sent (or refused) now, and settled
             // by the close like any in-flight append.
+            self.note_result_sent(token);
             return Some(event);
         }
         if self.user_holds_floor() || !self.held_commentary.is_empty() {
@@ -2847,7 +2859,16 @@ impl SessionState {
             self.held_commentary.push_back((token, event));
             return None;
         }
+        self.note_result_sent(token);
         Some(event)
+    }
+
+    /// A result append is handed to the sender: from here a fresh response
+    /// arriving on the sideband follows it ([`Self::result_sent_fresh_response_ms`]).
+    fn note_result_sent(&mut self, token: GptLiveAppendToken) {
+        if self.result_cue_candidates.contains_key(&token) {
+            self.result_sent_fresh_response_ms.insert(token, None);
+        }
     }
 
     /// The held commentary provider ordering has released: all of it, in
@@ -2856,7 +2877,11 @@ impl SessionState {
         if self.user_holds_floor() || self.close_requested || self.closed_observed {
             return Vec::new();
         }
-        self.held_commentary.drain(..).collect()
+        let released: Vec<_> = self.held_commentary.drain(..).collect();
+        for (token, _) in &released {
+            self.note_result_sent(*token);
+        }
+        released
     }
 
     /// A close leaves held commentary unsent. Each reservation stays
@@ -2986,6 +3011,10 @@ impl SessionState {
                 if answered_through_ms.is_none_or(|answered| start_ms > answered)
                     && self.input_silence_run_ms < USER_FLOOR_SILENCE_RELEASE_MS
                 {
+                    // A fresh response after this utterance answers the user,
+                    // not a result sent before it.
+                    self.result_sent_fresh_response_ms
+                        .retain(|_, fresh_response| fresh_response.is_some());
                     if !self.user_request_open {
                         self.request_utterance_start_ms = Some(start_ms);
                         Self::note_earliest_after_insertion(
@@ -3011,6 +3040,11 @@ impl SessionState {
                 self.last_output_end_ms = Some(end_ms);
                 self.input_since_output = false;
                 self.note_output_voicing_results(start_ms, previous_output_end_ms);
+                if opens_new_response(start_ms, previous_output_end_ms) {
+                    for fresh_response in self.result_sent_fresh_response_ms.values_mut() {
+                        fresh_response.get_or_insert(start_ms);
+                    }
+                }
                 if self.recent_output_spans.len() == RECENT_OUTPUT_SPANS_MAX {
                     self.recent_output_spans.pop_front();
                 }
@@ -3142,6 +3176,7 @@ impl SessionState {
                     if pending.outstanding_receipts.is_empty() {
                         let token = pending.token;
                         self.pending_appends.remove(append_index.0);
+                        self.result_sent_fresh_response_ms.remove(&token);
                         if let Some(delegation_id) = self.result_cue_candidates.remove(&token) {
                             self.awaiting_peer_results.remove(&delegation_id);
                         }
@@ -3225,10 +3260,21 @@ impl SessionState {
                     .push_back(pending.lane.acknowledged(token));
             }
             self.pending_appends.remove(append_index.0);
+            let fresh_response_since_send =
+                self.result_sent_fresh_response_ms.remove(&token).flatten();
             if let Some(delegation_id) = self.result_cue_candidates.remove(&token) {
                 if rejected {
                     self.awaiting_peer_results.remove(&delegation_id);
                 } else {
+                    if let Some(start_ms) = fresh_response_since_send {
+                        // The causal order the quantized starts can hide: a
+                        // new response that began arriving after the result
+                        // was sent is its readout.
+                        self.result_first_output_ms
+                            .entry(delegation_id.clone())
+                            .and_modify(|first| *first = first.min(start_ms))
+                            .or_insert(start_ms);
+                    }
                     self.cue_acknowledged_result(delegation_id);
                 }
             }
@@ -3914,11 +3960,17 @@ fn output_voices_result(
     inserted_from_ms: f64,
     inserted_through_ms: f64,
 ) -> bool {
+    start_ms >= inserted_through_ms
+        || (start_ms >= inserted_from_ms && opens_new_response(start_ms, previous_output_end_ms))
+}
+
+/// An output delta opens a new response: no output before it, or the
+/// previous output ended at least [`OUTPUT_SILENCE_RELEASE_MS`] earlier on
+/// the transcript timeline.
+fn opens_new_response(start_ms: f64, previous_output_end_ms: Option<f64>) -> bool {
     #[allow(clippy::cast_precision_loss)]
     let response_gap_ms = OUTPUT_SILENCE_RELEASE_MS as f64;
-    start_ms >= inserted_through_ms
-        || (start_ms >= inserted_from_ms
-            && previous_output_end_ms.is_none_or(|end| start_ms - end >= response_gap_ms))
+    previous_output_end_ms.is_none_or(|end| start_ms - end >= response_gap_ms)
 }
 
 /// Bound on [`SessionState::recent_output_spans`].
@@ -6387,6 +6439,83 @@ mod tests {
         model_output(&mut state, false, 8);
         drain(&mut state);
         assert_eq!(state.reserve_due_result_cue().unwrap(), None);
+    }
+
+    /// S97 R2: the result is sent into 6 s of model silence; the readout
+    /// "It's empty." arrives after the send, its quantized start (24400)
+    /// ahead of the acknowledgement (24600-24800). Arrival order says the
+    /// fresh response followed the send: it is the readout, so no cue.
+    #[test]
+    fn a_fresh_response_arriving_after_the_send_voices_the_result() {
+        let mut state = state_with_spoken_delegation();
+        state
+            .apply_frame(frame(output_delta_span(" Let me check.", 17800.0, 18400.0)))
+            .unwrap();
+        model_output(&mut state, false, 8);
+        let (result, event) = result_append(&mut state, "dlg_cue");
+        assert!(state.hold_or_send_commentary(result, event).is_some());
+        model_output(&mut state, true, 3);
+        state
+            .apply_frame(frame(output_delta_span(" It's empty.", 24400.0, 24600.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(ack_span(&pending_event_id(result), 24600.0, 24800.0)))
+            .unwrap();
+        assert_eq!(state.result_first_output_ms.get("dlg_cue"), Some(&24400.0));
+        assert!(state.result_sent_fresh_response_ms.is_empty());
+        model_output(&mut state, false, 8);
+        drain(&mut state);
+        assert_eq!(state.reserve_due_result_cue().unwrap(), None, "no cue");
+    }
+
+    /// The causal-order rule is narrow: the same fresh response does not
+    /// count when it arrived before the send (it cannot follow from the
+    /// result), when it continues output under way (no new response), or
+    /// when a user utterance took the floor between the send and it (it
+    /// answers the user).
+    #[test]
+    fn the_causal_order_rule_needs_a_fresh_response_after_the_send_and_no_user_turn() {
+        for shape in ["before_send", "continuation", "user_spoke"] {
+            let mut state = state_with_spoken_delegation();
+            let previous_end = if shape == "continuation" {
+                24200.0
+            } else {
+                18400.0
+            };
+            state
+                .apply_frame(frame(output_delta_span(
+                    " Let me check.",
+                    previous_end - 600.0,
+                    previous_end,
+                )))
+                .unwrap();
+            if shape != "continuation" {
+                model_output(&mut state, false, 8);
+            }
+            let (result, event) = result_append(&mut state, "dlg_cue");
+            let fresh = output_delta_span(" It's empty.", 24400.0, 24600.0);
+            if shape == "before_send" {
+                state.apply_frame(frame(fresh.clone())).unwrap();
+            }
+            assert!(state.hold_or_send_commentary(result, event).is_some());
+            if shape == "user_spoke" {
+                reflect_input(&mut state, true, 3);
+                state
+                    .apply_frame(frame(input_delta_at(" is it empty", 22000.0)))
+                    .unwrap();
+            }
+            if shape != "before_send" {
+                state.apply_frame(frame(fresh)).unwrap();
+            }
+            state
+                .apply_frame(frame(ack_span(&pending_event_id(result), 24600.0, 24800.0)))
+                .unwrap();
+            assert!(
+                !state.result_first_output_ms.contains_key("dlg_cue"),
+                "no readout credit ({shape})"
+            );
+            assert!(state.result_sent_fresh_response_ms.is_empty());
+        }
     }
 
     /// The frontier rule itself: inside the insertion span only a new

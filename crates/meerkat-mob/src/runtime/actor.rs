@@ -8206,6 +8206,7 @@ impl MobActor {
         SupervisorTrustInstaller {
             definition: Arc::clone(&self.definition),
             supervisor_bridge: Arc::clone(&self.supervisor_bridge),
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter: self.runtime_adapter.clone(),
             owner_token: self.dsl_authority.generated_authority_owner_token(),
         }
@@ -60117,6 +60118,7 @@ mod bridge_rejection_tests {
 pub(super) struct SupervisorTrustInstaller {
     definition: Arc<MobDefinition>,
     supervisor_bridge: Arc<super::MobSupervisorBridge>,
+    #[cfg(feature = "runtime-adapter")]
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     owner_token: Arc<dyn std::any::Any + Send + Sync>,
 }

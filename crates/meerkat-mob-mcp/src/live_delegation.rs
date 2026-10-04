@@ -6170,6 +6170,48 @@ impl meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator
     }
 }
 
+/// A reconciled cleanup step the generated state refused outright: a
+/// `ValidationFailed` is the machine's answer for this exact binding and
+/// worker, and asking again cannot change it.
+#[derive(Debug)]
+struct CleanupStepRefused {
+    step: &'static str,
+    reason: String,
+}
+
+/// Like [`retry_reconciled_cleanup_step`], but a deterministic refusal
+/// (`RuntimeDriverError::ValidationFailed`) ends the step with
+/// [`CleanupStepRefused`] instead of being retried; only mechanical failures
+/// are offered again.
+async fn reconciled_cleanup_step_or_refused<T, F, Fut>(
+    label: &'static str,
+    mut step: F,
+) -> Result<T, CleanupStepRefused>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, meerkat_runtime::RuntimeDriverError>>,
+{
+    let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+    loop {
+        match step().await {
+            Ok(value) => return Ok(value),
+            Err(meerkat_runtime::RuntimeDriverError::ValidationFailed { reason }) => {
+                return Err(CleanupStepRefused {
+                    step: label,
+                    reason,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, cleanup_step = label, "live delegation cleanup remains pending");
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+            }
+        }
+    }
+}
+
 /// Retry an operation whose runtime entrypoint first reconciles exact generated
 /// state. Callers must not use this for raw generated transitions.
 async fn retry_reconciled_cleanup_step<T, E, F, Fut>(label: &'static str, mut step: F) -> T
@@ -6258,7 +6300,18 @@ async fn cleanup_started_execution_after_publication_failure(
     let runtime = coordinator.runtime.as_ref();
     let binding = &retained.runtime_binding;
     let admission = &retained.admission;
-    retry_reconciled_cleanup_step("successful-start-report", || {
+    let refused = |refusal: CleanupStepRefused| {
+        // The generated state refused this exact worker for good (for
+        // example its binding is stale): asking again would loop forever
+        // (Turbo S S104 R7). The worker's own terminal still settles it.
+        tracing::warn!(
+            operation_id = %retained.operation.operation_id(),
+            cleanup_step = refusal.step,
+            reason = %refusal.reason,
+            "live delegation cleanup refused by the generated state; the worker settles at its terminal"
+        );
+    };
+    let directive = match reconciled_cleanup_step_or_refused("successful-start-report", || {
         runtime.resolve_live_delegation_worker_start(
             binding.runtime_id(),
             binding.fence_token(),
@@ -6267,17 +6320,31 @@ async fn cleanup_started_execution_after_publication_failure(
             true,
         )
     })
-    .await;
-    let directive = retry_reconciled_cleanup_step("unpublished-start-abandonment", || {
-        runtime.abandon_live_delegation(
-            binding.runtime_id(),
-            binding.fence_token(),
-            binding.generation(),
-            admission,
-        )
-    })
-    .await;
-    if let LiveDelegationCancellationDirective::CancellationAuthorized(authority) = directive {
+    .await
+    {
+        Ok(()) => match reconciled_cleanup_step_or_refused("unpublished-start-abandonment", || {
+            runtime.abandon_live_delegation(
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                admission,
+            )
+        })
+        .await
+        {
+            Ok(directive) => Some(directive),
+            Err(refusal) => {
+                refused(refusal);
+                None
+            }
+        },
+        Err(refusal) => {
+            refused(refusal);
+            None
+        }
+    };
+    if let Some(LiveDelegationCancellationDirective::CancellationAuthorized(authority)) = directive
+    {
         let outcome =
             retry_reconciled_cleanup_step("unpublished-start-physical-cancellation", || async {
                 match cancellation.cancel(&authority).await {
@@ -6996,6 +7063,158 @@ mod tests {
         .await
         .expect("text completes on retained source");
         mob.shutdown().await.expect("shutdown");
+    }
+
+    /// Turbo S S104 R7: the voice channel closed after the worker start was
+    /// authorized but before the worker accepted its turn and published its
+    /// start. The start still publishes under the closed channel's exact
+    /// worker authority, the job runs to its terminal, and the session
+    /// settles through the revoked-worker reconciliation instead of a cleanup
+    /// that retried the refused start forever.
+    #[tokio::test]
+    async fn a_worker_start_published_after_its_channel_closed_runs_and_settles() {
+        let mut sessions = crate::LocalSessionService::new();
+        sessions.runtime_adapter =
+            Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            ));
+        let runtime = Arc::clone(&sessions.runtime_adapter);
+        let sessions = Arc::new(sessions);
+        let mobs = Arc::new(crate::MobMcpState::new(
+            sessions.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
+        let mob = meerkat_mob::MobBuilder::new(
+            meerkat_mob::MobDefinition::implicit("start-after-close", "claude-sonnet-4-5"),
+            meerkat_mob::MobStorage::in_memory(),
+        )
+        .with_session_service(sessions)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("mob");
+        let identity = AgentIdentity::from("start-after-close-agent");
+        let mut spec = meerkat_mob::SpawnMemberSpec::new("delegate", identity.as_str());
+        spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        mob.spawn_spec(spec).await.expect("source member");
+        let session_id = mob
+            .resolve_bridge_session_id(&identity)
+            .await
+            .expect("source session");
+        let admission = runtime
+            .__test_admit_confirmed_live_delegation(
+                &session_id,
+                identity.as_str(),
+                meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember,
+                "write the ode",
+            )
+            .await
+            .expect("generated worker-start authority");
+        let binding = runtime
+            .live_delegation_runtime_binding(
+                &session_id,
+                admission.operation().domain_correlation().channel_id(),
+            )
+            .await
+            .expect("binding");
+
+        // The close completes first: the channel's provider binding is gone.
+        runtime
+            .abandon_live_open_admission(&session_id, binding.channel_id())
+            .await
+            .expect("close the voice channel");
+
+        // Only then does the worker accept its turn and publish its start.
+        let execution = DelegationExecutionService::new(mob.clone())
+            .start(
+                DelegationExecutionRequest::new_live(
+                    identity.clone(),
+                    "write the ode",
+                    BoundedResultSpec::new("voice", 256).expect("bound"),
+                    admission.clone(),
+                )
+                .with_existing_member(),
+            )
+            .await
+            .expect("worker accepts its turn after the close");
+        runtime
+            .resolve_live_delegation_worker_start(
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &admission,
+                true,
+            )
+            .await
+            .expect("the start publishes under the closed channel's exact worker authority");
+        assert!(
+            matches!(
+                execution.await_terminal().await.terminal(),
+                DelegationTurnTerminal::Completed(_)
+            ),
+            "the job runs"
+        );
+
+        // The session settles: the worker's terminal converges through the
+        // revoked-worker reconciliation.
+        let snapshot = runtime
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("recovery snapshot")
+            .remove(0);
+        let coordinator = ExperimentalLiveDelegationCoordinator::new(Arc::clone(&runtime), mobs);
+        let disposition = coordinator
+            .reconcile_one_client_context_snapshot(
+                &mob,
+                &snapshot,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await;
+        assert!(
+            matches!(
+                disposition,
+                ExperimentalClientContextRestartDisposition::Reconciled { completed: true }
+            ),
+            "{disposition:?}"
+        );
+        mob.shutdown().await.expect("shutdown");
+    }
+
+    /// A deterministic refusal ends a reconciled cleanup step at once with a
+    /// typed refusal; only mechanical failures are offered again.
+    #[tokio::test]
+    async fn a_refused_cleanup_step_ends_without_retrying() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let refused =
+            reconciled_cleanup_step_or_refused::<(), _, _>("successful-start-report", || {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                async {
+                    Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                        reason: "worker start resolution has a stale exact binding".to_string(),
+                    })
+                }
+            })
+            .await
+            .expect_err("a refusal is not retried");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert_eq!(refused.step, "successful-start-report");
+
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        reconciled_cleanup_step_or_refused("mechanical", || {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            async move {
+                if attempt == 0 {
+                    Err(meerkat_runtime::RuntimeDriverError::Internal(
+                        "transient store contention".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .expect("a mechanical failure is offered again and succeeds");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

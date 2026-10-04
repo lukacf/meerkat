@@ -316,6 +316,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # firing run, so the fake prints one trace state.
 # run_start_hold_audit.sh requires each of its seven reachability witnesses
 # to be reported violated.
+# live_delegation_worker_start_after_close_audit.sh requires its two goals to
+# be reported violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -342,6 +344,8 @@ printf '%s\n' \
   'echo "Error: Invariant AuditNeverCancelsRecovery is violated."' \
   'prev=""; for a in "$@"; do if [ "$prev" = "dot" ]; then printf "%s\n" "1 [label=\"\\n/\\\\ session_id = [tag |-> \\\"none\\\"]\"]" > "$a.dot"; fi; prev="$a"; done' \
   'echo "Error: Invariant NotGoalAudible is violated."' \
+  'echo "Error: Invariant AuditNeverResolvedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverSettledAfterClose is violated."' \
   'echo "Error: Invariant NotGoalSilentReopen is violated."' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \

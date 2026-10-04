@@ -1291,6 +1291,11 @@ them.
 
 ### Fixed
 
+- Shell tool commands and background jobs no longer inherit the host's
+  stdin. In a stdio JSON-RPC host (`rkat-rpc`) stdin is the protocol
+  transport, so a command that read stdin (`cat`, `head`, a prompt) could
+  consume protocol frames. Every tool-spawned child now gets `/dev/null` as
+  stdin and reads EOF at once.
 - Public Live talk-over (#1638): assistant audio that kept playing after the
   user started speaking (a provider tail of up to several seconds), or that
   started while the user was still talking, now ducks as soon as it overlaps

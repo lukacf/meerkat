@@ -73,8 +73,11 @@ pub(super) struct SpawnedInCustody {
 
 /// Spawn `program args...` in a fresh process group under `binding`.
 ///
-/// `configure` sets the working directory, environment and stdio, and must
-/// keep the process in its own group; `make_group` builds the group guard,
+/// Stdin is always `/dev/null`: a tool's child never shares the host's
+/// stdin, which in a stdio JSON-RPC host (`rkat-rpc`) is the protocol
+/// transport, so a command that reads stdin would consume protocol frames.
+/// `configure` sets the working directory, environment and stdout/stderr,
+/// and must keep the process in its own group; `make_group` builds the group guard,
 /// which exists before the command may run. A custody failure is reported
 /// as an I/O error before the command ever runs.
 #[cfg_attr(
@@ -101,6 +104,7 @@ pub(super) async fn spawn_in_custody(
             )
             .await
             .map_err(std::io::Error::other)?;
+        command.stdin(std::process::Stdio::null());
         configure(&mut command);
         // A spawn failure drops the preparation, which removes the
         // reservation: nothing was released.
@@ -122,6 +126,7 @@ pub(super) async fn spawn_in_custody(
     }
     let mut command = Command::new(program);
     command.args(args);
+    command.stdin(std::process::Stdio::null());
     configure(&mut command);
     let child = command.spawn()?;
     let process_group = make_group(&child);

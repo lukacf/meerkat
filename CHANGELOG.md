@@ -1252,6 +1252,14 @@ them.
 
 ### Fixed
 
+- The GPT Live voice no longer promises work it never handed off. Twice the
+  voice answered a request natively with a false promise and never created
+  the delegation: "I'll let you know when that's complete" (Turbo S S101)
+  and "I'm checking with Analyst Pemberton" (S102), with nothing sent by
+  Meerkat in between. The voice session instructions now say not to claim
+  it is doing, checking or asking about something, or to promise to report
+  back, unless it handed that request to the executor first.
+
 - GPT Live provider-stream recordings (`test-realtime-fixtures`) now keep
   delegation commentary that was held behind the user's unanswered
   utterance and released later. The release path sent it without

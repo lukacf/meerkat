@@ -741,6 +741,38 @@ impl LiveSidebandNarrationAuthority {
     }
 }
 
+/// A templated narration sentence that introduces a delegation's result and
+/// travels inside that result's release instead of as its own append
+/// ([`LiveSidebandCommand::announced_by`]). Sent separately, "Finished ...
+/// The result follows." sat committed at the provider for the round trip of
+/// its own acknowledgement before the result was released, and the voice
+/// answered in that gap with an invented value (Turbo S S101: "Two." for a
+/// "0" result). Built only by consuming a generated narration authority, so
+/// the sentence is still machine-authorized narration, never result text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveSidebandAnnouncement {
+    text: String,
+}
+
+impl LiveSidebandAnnouncement {
+    /// Consume `authority` (one-shot, exactly as
+    /// [`LiveSidebandCommand::narrate_delegation`] would) for an announcement
+    /// carried by a result release.
+    pub fn from_narration(
+        authority: LiveSidebandNarrationAuthority,
+        text: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let text = require_sideband_text(text)?;
+        authority.consume_once()?;
+        Ok(Self { text })
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum LiveSidebandCommandKind {
     AppendThinking {
@@ -774,6 +806,8 @@ enum LiveSidebandCommandKind {
         text: String,
         /// See [`LiveSidebandCommand::awaiting_peer_replies`].
         awaiting_peer_replies: Vec<String>,
+        /// See [`LiveSidebandCommand::announced_by`].
+        announcement: Option<String>,
     },
     NarrateDelegation {
         binding: ProviderWebrtcBinding,
@@ -826,6 +860,10 @@ pub enum LiveSidebandProviderCommand {
         /// Members the delegated work asked and whose answers have not
         /// arrived (see [`LiveSidebandCommand::awaiting_peer_replies`]).
         awaiting_peer_replies: Vec<String>,
+        /// Narration that introduces the result, delivered in the result's
+        /// own provider event, ahead of the result text (see
+        /// [`LiveSidebandCommand::announced_by`]).
+        announcement: Option<String>,
     },
     /// Templated executor-state narration for one exact delegation. It is
     /// lowered like a delegation-scoped commentary append and never carries
@@ -957,6 +995,7 @@ impl LiveSidebandCommand {
                 disposition,
                 text,
                 awaiting_peer_replies: Vec::new(),
+                announcement: None,
             },
         })
     }
@@ -975,6 +1014,21 @@ impl LiveSidebandCommand {
         } = &mut self.kind
         {
             *awaiting_peer_replies = peers;
+        }
+        self
+    }
+
+    /// Carry the narration that introduces this result inside the result's
+    /// release, so the provider receives the announcement and the result in
+    /// one event and never holds the announcement without its result. A
+    /// non-release command is returned unchanged.
+    #[must_use]
+    pub fn announced_by(mut self, announcement: LiveSidebandAnnouncement) -> Self {
+        if let LiveSidebandCommandKind::ReleaseDelegation {
+            announcement: slot, ..
+        } = &mut self.kind
+        {
+            *slot = Some(announcement.text);
         }
         self
     }
@@ -1096,6 +1150,7 @@ impl LiveSidebandCommand {
                 disposition,
                 text,
                 awaiting_peer_replies,
+                announcement,
             } => LiveSidebandProviderCommand::ReleaseDelegationContext {
                 binding,
                 attempt,
@@ -1103,6 +1158,7 @@ impl LiveSidebandCommand {
                 disposition,
                 text,
                 awaiting_peer_replies,
+                announcement,
             },
             LiveSidebandCommandKind::NarrateDelegation {
                 binding,
@@ -1696,6 +1752,69 @@ mod tests {
                     if ends_delegation == ends
             ));
         }
+    }
+
+    /// An announcement built from a narration authority rides inside the
+    /// result release it introduces (one provider command, so one provider
+    /// event), consumes that authority exactly once, and is ignored by any
+    /// command that is not a result release.
+    #[test]
+    fn result_release_carries_its_announcement_in_the_same_command() {
+        let narration = |attempt: &str| LiveSidebandNarrationAuthority {
+            binding: binding(),
+            attempt: LiveSidebandAppendAttempt(attempt.to_string()),
+            ends_delegation: false,
+            consumed: Arc::new(AtomicBool::new(false)),
+        };
+        let delegation = || {
+            LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation:4".to_string(),
+                "provider-delegation-secret".to_string(),
+            )
+            .expect("opaque provider delegation")
+        };
+        let authority = narration("narration:completed");
+        let announcement = LiveSidebandAnnouncement::from_narration(
+            authority.clone(),
+            "Finished voice request: \"count the files\". The result follows.",
+        )
+        .expect("announcement");
+        assert_eq!(
+            LiveSidebandAnnouncement::from_narration(authority, "again").err(),
+            Some(LiveSidebandCommandError::AuthorityAlreadyConsumed),
+            "the narration authority is one-shot"
+        );
+        let command = LiveSidebandCommand::release_delegation_context(
+            LiveSidebandReleaseAuthority::from_test_machine(
+                binding(),
+                41,
+                LiveResultDisposition::DeferredContext,
+            ),
+            delegation(),
+            "0",
+        )
+        .expect("one result-context delivery")
+        .announced_by(announcement.clone());
+        assert!(matches!(
+            command.__into_provider_command(),
+            LiveSidebandProviderCommand::ReleaseDelegationContext {
+                text,
+                announcement: Some(announced),
+                ..
+            } if text == "0"
+                && announced == "Finished voice request: \"count the files\". The result follows."
+        ));
+        let narration_command = LiveSidebandCommand::narrate_delegation(
+            narration("narration:other"),
+            delegation(),
+            "x",
+        )
+        .expect("narration")
+        .announced_by(announcement);
+        assert!(matches!(
+            narration_command.__into_provider_command(),
+            LiveSidebandProviderCommand::NarrateDelegationContext { .. }
+        ));
     }
 
     /// Only a result release is marked as one: its acknowledgement is the

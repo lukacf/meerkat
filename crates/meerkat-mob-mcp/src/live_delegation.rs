@@ -14,6 +14,7 @@ use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveBridgeError, ExperimentalGptLiveControlObservation,
     ExperimentalGptLiveControlPlane, ExperimentalGptLiveNarrationDispatch,
     ExperimentalGptLiveResultDeliveryDispatch, ExperimentalLiveLifecycleObservationError,
+    LiveDelegationResultAnnouncement,
 };
 use meerkat_core::exact_operation::ExactOperationIdentity;
 use meerkat_core::ops::OperationId;
@@ -4567,6 +4568,37 @@ impl ExperimentalLiveDelegationCoordinator {
         });
     }
 
+    /// Authorize `kind`'s narration exactly as [`Self::narrate_on_held_lane`]
+    /// would, but hand it back as an announcement for the result release to
+    /// carry in the result's own provider event instead of dispatching it.
+    async fn result_announcement(
+        &self,
+        subject: &NarrationSubject,
+        kind: LiveDelegationNarrationKind,
+    ) -> Option<LiveDelegationResultAnnouncement> {
+        if let Err(skip) = self
+            .runtime
+            .live_delegation_narration_eligibility(&subject.runtime_binding)
+            .await
+        {
+            tracing::debug!(%skip, ?kind, "live delegation result announcement skipped");
+            return None;
+        }
+        let authority = match self
+            .runtime
+            .authorize_live_delegation_narration(&subject.runtime_binding, &subject.operation, kind)
+            .await
+        {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::debug!(%error, ?kind, "live delegation result announcement was not authorized");
+                return None;
+            }
+        };
+        let text = narration_text(kind, &subject.title, 0, &[], false);
+        Some(LiveDelegationResultAnnouncement::new(authority, text))
+    }
+
     async fn narrate_on_held_lane(
         &self,
         subject: &NarrationSubject,
@@ -5470,6 +5502,7 @@ impl ExperimentalLiveDelegationCoordinator {
         control: &dyn ExperimentalGptLiveControlPlane,
         projection: ExactDelegationResultProjection<LiveDelegationResultDeliveryAuthority>,
         awaiting_peer_replies: Vec<String>,
+        announcement: Option<LiveDelegationResultAnnouncement>,
     ) -> (
         Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>,
         ExactDelegationResultProjectionEvidence,
@@ -5481,6 +5514,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     delegation,
                     result_text,
                     awaiting_peer_replies,
+                    announcement,
                 )
             })
             .await
@@ -5674,22 +5708,27 @@ impl ExperimentalLiveDelegationCoordinator {
         // the narration's insertion point, before the pending-answer notice
         // and the result were sent). So it is not sent: the voice gets the
         // broker's pending-answer notice first, then the result.
-        if awaiting_peer_replies.is_empty() {
-            self.narrate_on_held_lane(
+        //
+        // Otherwise the Completed sentence is released inside the result's own
+        // provider event, ahead of the result text. Dispatched on its own and
+        // acknowledged before the result, it sat committed at the provider for
+        // that round trip with no result behind it, and the voice answered in
+        // the gap with an invented outcome (Turbo S S101: "Two." and "3" for a
+        // "0" result).
+        let announcement = if awaiting_peer_replies.is_empty() {
+            self.result_announcement(
                 &NarrationSubject::from_retained(retained),
                 LiveDelegationNarrationKind::Completed,
-                0,
-                Vec::new(),
-                false,
             )
-            .await;
+            .await
         } else {
             tracing::info!(
                 operation_id = %retained.operation.operation_id(),
                 members = awaiting_peer_replies.len(),
                 "live delegation result awaits members' answers; its Completed narration is not sent"
             );
-        }
+            None
+        };
         retained.result.lock().await.dispatch_crossed = true;
         let (dispatch, projection_evidence) = Self::release_exact_delegation_result_projection(
             retained.control.as_ref(),
@@ -5699,6 +5738,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 result_text,
             ),
             awaiting_peer_replies,
+            announcement,
         )
         .await;
         let resolution = match dispatch {
@@ -7800,6 +7840,12 @@ mod tests {
         awaiting_peer_replies: Mutex<Vec<Vec<String>>>,
         /// Narrations and result releases in the order the provider saw them.
         events: Mutex<Vec<ExactProjectionControlEvent>>,
+        /// Announcements released inside their result's own event, as
+        /// (delegation adapter key, announcement text), in release order.
+        announced_releases: Mutex<Vec<(String, String)>>,
+        /// Narration kinds dispatched as their own provider event (never an
+        /// announcement carried by a result release).
+        separate_narration_kinds: Mutex<Vec<LiveDelegationNarrationKind>>,
         /// The provider transport has been retired: every release and
         /// narration reports `ActiveBindingUnavailable`, as the real control
         /// plane does between the physical close and the machine's close.
@@ -7877,9 +7923,30 @@ mod tests {
             delegation: LiveSidebandDelegationRef,
             text: String,
             peers: Vec<String>,
+            announcement: Option<LiveDelegationResultAnnouncement>,
         ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>
         {
             self.awaiting_peer_replies.lock().await.push(peers);
+            // The announcement reaches the provider in the result's own event,
+            // ahead of the result text: recorded as that narration immediately
+            // followed by the release, with nothing between them.
+            if let Some(announcement) = announcement
+                && !self
+                    .binding_unavailable
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                let kind = announcement.authority().kind();
+                let text = announcement.text().to_string();
+                self.announced_releases
+                    .lock()
+                    .await
+                    .push((delegation.adapter_key().to_string(), text.clone()));
+                self.narrations.lock().await.push((kind, text.clone()));
+                self.events
+                    .lock()
+                    .await
+                    .push(ExactProjectionControlEvent::Narration(kind, text));
+            }
             self.release_delegation_context(authority, delegation, text)
                 .await
         }
@@ -7975,6 +8042,10 @@ mod tests {
                 .lock()
                 .await
                 .push((authority.kind(), text.clone()));
+            self.separate_narration_kinds
+                .lock()
+                .await
+                .push(authority.kind());
             self.events
                 .lock()
                 .await

@@ -1252,6 +1252,16 @@ them.
 
 ### Fixed
 
+- GPT Live no longer gives the voice a "Finished voice request: ... The
+  result follows." announcement without the result behind it. The Completed
+  narration was its own provider event, acknowledged before the result was
+  released, so for that round trip (550-700 ms) the provider held the
+  announcement alone and the voice answered in the gap with an invented
+  outcome (Turbo S S101: "Two." and "3" for a "0" result). The narration is
+  still machine-authorized, but it now travels inside the result's release
+  and reaches the provider in the result's own commentary event, ahead of
+  the result text.
+
 - A GPT Live result cue no longer carries delegation framing into the user's
   next question (Turbo S S99: recall questions were delegated after a cue)
   (#1630).

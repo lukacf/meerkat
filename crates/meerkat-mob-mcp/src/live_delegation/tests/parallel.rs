@@ -605,6 +605,14 @@ impl Fixture {
         self.control.events.lock().await.clone()
     }
 
+    async fn announced_releases(&self) -> Vec<(String, String)> {
+        self.control.announced_releases.lock().await.clone()
+    }
+
+    async fn separate_narration_kinds(&self) -> Vec<LiveDelegationNarrationKind> {
+        self.control.separate_narration_kinds.lock().await.clone()
+    }
+
     /// Close a voice item the way a fork's `workgraph_close` tool call does.
     async fn close_item_as(&self, title: &str, status: meerkat::WorkStatus) {
         let item = self.voice_item_titled(title).await;
@@ -794,6 +802,26 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
         ),
         "{narrations:?}"
     );
+
+    // The Completed sentence is never its own provider event: it rides in
+    // the release of the result it introduces, so the provider never holds
+    // "Finished ..." without that result (Turbo S S101: sent separately it
+    // was answered with an invented value before the result landed).
+    assert!(
+        !fx.separate_narration_kinds()
+            .await
+            .contains(&LiveDelegationNarrationKind::Completed),
+        "{:?}",
+        fx.separate_narration_kinds().await
+    );
+    let announced = fx.announced_releases().await;
+    assert_eq!(announced.len(), 2, "{announced:?}");
+    assert!(announced.iter().any(|(key, text)| key == "first-delegation"
+        && text.contains("find the fastest train to Oslo")
+        && text.starts_with("Finished voice request")));
+    assert!(announced.iter().any(
+        |(key, text)| key == "second-delegation" && text.starts_with("Finished voice request")
+    ));
 
     // The Completed sentence and the result it introduces are released under
     // one hold of the channel's delegation append lane: nothing from the

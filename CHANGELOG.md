@@ -2593,7 +2593,6 @@ them.
   ("model call settled"); shell tool calls log their tool call id at start and
   their exit code, timeout and duration at completion (never the command or
   its output) (#1563).
-- **Model calls and shell rounds are attributable in debug logs.** The agent loop logs each model call's session, turn, attempt, elapsed time and outcome ("model call settled"); shell tool calls log their tool call id at start and their exit code, timeout and duration at completion (never the command or its output).
 - **Turbo S no longer retries a failed scenario.** The BuildBuddy Turbo S lane ran each failed shard a second time (`--flaky_test_attempts=2`), so a scenario that failed and then passed reported green. Every scenario now runs exactly once; a failure is classified (product bug, oracle or fixture brittleness, or provider-degraded void), never absorbed by a retry.
 
 - Generated machine TLA models lead each quantified `Next` disjunct with its

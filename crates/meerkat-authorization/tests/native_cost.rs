@@ -19,6 +19,14 @@
 //! representative matrix is expensive; allocate its wall budget explicitly
 //! rather than borrowing a smoke timeout.
 //! Preserve the raw sample JSON beside the existing command/stdout/stderr logs.
+//! Analyze each raw output independently with the repository-owned script:
+//! ```text
+//! python3 scripts/analyze-native-cost.py "$NATIVE_COST_OUTPUT" > summary.json
+//! make native-cost-analysis-selftest
+//! ```
+//! The analyzer checks sample structure and reports matched costs. Build identity,
+//! quiet-window qualification and the producer's typed audit assertions remain
+//! separate requirements. Do not pair samples across distinct measurement runs.
 //! These diagnostics do not establish full/default overhead acceptance.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]

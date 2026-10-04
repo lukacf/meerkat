@@ -40,6 +40,7 @@ use meerkat_core::authorization::{
     ToolAuthorizationTarget,
 };
 use meerkat_core::connection::{AuthCredentialIdentity, RealmId};
+use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::exact_operation::OperationExecutionScope;
 use meerkat_core::service::SessionService;
 use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy};
@@ -912,6 +913,20 @@ async fn response(
     id: u64,
     effects: &Arc<Mutex<Vec<String>>>,
 ) -> Value {
+    response_with_events(reader, writer, id, effects, None).await
+}
+
+type SessionNotifications = Arc<Mutex<Vec<(SessionId, EventEnvelope<AgentEvent>)>>>;
+
+async fn response_with_events(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    id: u64,
+    effects: &Arc<Mutex<Vec<String>>>,
+    notifications: Option<&SessionNotifications>,
+) -> Value {
+    let mut matching_response = None;
+    let mut terminal_seen = false;
     loop {
         let mut line = String::new();
         assert!(
@@ -928,10 +943,161 @@ async fn response(
             );
             assert_eq!(value["params"]["arguments"], json!({"record":"record-7"}));
             send(writer, json!({"jsonrpc":"2.0","id":value["id"],"result":{"content":"record-7 value","is_error":false}})).await;
+        } else if value["method"] == "session/event"
+            && let Some(notifications) = notifications
+        {
+            let session_id = SessionId::parse(
+                value["params"]["session_id"]
+                    .as_str()
+                    .expect("actual notification session"),
+            )
+            .unwrap();
+            let event: EventEnvelope<AgentEvent> =
+                serde_json::from_value(value["params"]["event"].clone())
+                    .expect("actual canonical native event envelope");
+            terminal_seen |= matches!(
+                &event.payload,
+                AgentEvent::RunCompleted { .. } | AgentEvent::RunFailed { .. }
+            );
+            notifications.lock().unwrap().push((session_id, event));
+            if terminal_seen && let Some(result) = matching_response.take() {
+                return result;
+            }
         } else if value["id"] == id {
-            return value;
+            if notifications.is_none() || terminal_seen || value.get("error").is_some() {
+                return value;
+            }
+            // Response and notification queues are selected independently.
+            // Keep the result while waiting for its actual terminal event.
+            matching_response = Some(value);
         }
     }
+}
+
+#[cfg(not(feature = "mcp"))]
+fn assert_public_notifications(
+    notifications: &SessionNotifications,
+    session_id: &SessionId,
+    run_id: &meerkat_core::lifecycle::RunId,
+) {
+    let events = notifications.lock().unwrap();
+    for (route, event) in events.iter() {
+        assert_eq!(route, session_id);
+        assert_eq!(event.source.session_id(), Some(session_id));
+    }
+    assert!(events.windows(2).all(|pair| pair[0].1.seq < pair[1].1.seq));
+    let starts: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (_, event))| match &event.payload {
+            AgentEvent::RunStarted {
+                session_id,
+                identity,
+                ..
+            } => Some((position, session_id, identity)),
+            _ => None,
+        })
+        .collect();
+    let ends: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (_, event))| match &event.payload {
+            AgentEvent::RunCompleted {
+                session_id,
+                identity,
+                result,
+                terminal_cause_kind,
+                ..
+            } => Some((position, session_id, identity, result, terminal_cause_kind)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 1, "one real native run start");
+    assert_eq!(ends.len(), 1, "one real native run completion");
+    assert_eq!(starts[0].1, session_id);
+    assert_eq!(ends[0].1, session_id);
+    assert_eq!(starts[0].2.run_id.as_ref(), Some(run_id));
+    assert_eq!(ends[0].2.run_id.as_ref(), Some(run_id));
+    assert_eq!(ends[0].3, FINISHED);
+    assert!(ends[0].4.is_none());
+    assert!(
+        !events
+            .iter()
+            .any(|(_, event)| matches!(&event.payload, AgentEvent::RunFailed { .. }))
+    );
+    let completions: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (_, event))| match &event.payload {
+            AgentEvent::ToolExecutionCompleted {
+                id,
+                name,
+                content,
+                is_error,
+                ..
+            } => Some((
+                position,
+                id.as_str(),
+                name.as_str(),
+                content.as_slice(),
+                *is_error,
+            )),
+            _ => None,
+        })
+        .collect();
+    let results: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (_, event))| match &event.payload {
+            AgentEvent::ToolResultReceived {
+                id,
+                name,
+                content,
+                is_error,
+            } => Some((
+                position,
+                id.as_str(),
+                name.as_str(),
+                content.as_slice(),
+                *is_error,
+            )),
+            _ => None,
+        })
+        .collect();
+    for outcomes in [completions.as_slice(), results.as_slice()] {
+        assert_eq!(outcomes.len(), 2, "one outcome per actual sibling call");
+        for ((_, id, name, content, is_error), (expected_id, expected_name, expected_error)) in
+            outcomes.iter().zip([
+                (DENIED_CALL, "delete_record", true),
+                (PERMITTED_CALL, "read_record", false),
+            ])
+        {
+            assert_eq!(*id, expected_id);
+            assert_eq!(*name, expected_name);
+            assert_eq!(*is_error, expected_error);
+            let text = meerkat_core::types::text_content(content);
+            if expected_error {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&text).unwrap(),
+                    ToolError::AuthorizationRefused { refusal: denied() }.to_error_payload()
+                );
+            } else {
+                assert_eq!(text, "record-7 value");
+            }
+        }
+    }
+    let ordered = [
+        starts[0].0,
+        completions[0].0,
+        results[0].0,
+        completions[1].0,
+        results[1].0,
+        ends[0].0,
+    ];
+    assert!(
+        ordered.windows(2).all(|pair| pair[0] < pair[1]),
+        "canonical sibling feedback stays ordered inside the same native run"
+    );
 }
 #[derive(Deserialize)]
 struct AuditProjection {
@@ -1034,6 +1200,7 @@ async fn governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_comp
     let (reader, mut writer) = tokio::io::split(client_io);
     let mut reader = BufReader::new(reader);
     let effects: Arc<Mutex<Vec<String>>> = Arc::default();
+    let notifications: SessionNotifications = Arc::default();
     let scenario = async {
         send(
             &mut writer,
@@ -1076,7 +1243,13 @@ async fn governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_comp
         send(&mut writer, json!({"jsonrpc":"2.0","id":103,"method":"turn/start","params":{
             "session_id":sid.to_string(), "prompt":"turn-prompt-s2", "injected_context":["turn-context-s2"]
         }})).await;
-        let wait = response(&mut reader, &mut writer, 103, &effects);
+        let wait = response_with_events(
+            &mut reader,
+            &mut writer,
+            103,
+            &effects,
+            Some(&notifications),
+        );
         tokio::pin!(wait);
         tokio::select! {
             result = &mut wait => panic!("public entry completed before held model request2: {result}"),
@@ -1117,6 +1290,7 @@ async fn governed_jsonl_public_entry_preserves_refusal_sibling_feedback_and_comp
         let result = wait.await;
         assert!(result.get("error").is_none(), "{result}");
         assert_eq!(result["result"]["text"], FINISHED);
+        assert_public_notifications(&notifications, &sid, &run_id);
         let row = store
             .load_input_state(&rid, &input_id)
             .await

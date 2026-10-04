@@ -2670,6 +2670,16 @@ trait ExperimentalGptLiveBrokerSession: Send + Sync {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError>;
 
+    /// The narration that ends a delegation without a result. Sessions that
+    /// do not track running delegations append it as delegation context.
+    async fn append_terminal_delegation_narration(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.append_delegation_context(delegation, text).await
+    }
+
     /// An executor result for one delegation. Sessions without a distinct
     /// result path append it as delegation context.
     async fn append_delegation_result(
@@ -2784,6 +2794,14 @@ impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         PublicLiveBrokerSession::append_delegation_context(self, delegation, text).await
+    }
+
+    async fn append_terminal_delegation_narration(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_terminal_delegation_narration(self, delegation, text).await
     }
 
     async fn append_delegation_result(
@@ -8731,6 +8749,7 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                 attempt,
                 delegation,
                 text,
+                ends_delegation,
                 ..
             } => {
                 let provider_delegation = self
@@ -8747,10 +8766,15 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                     .await
                     .appends
                     .reserve(SidebandAppendLane::Delegation, attempt)?;
-                let result = self
-                    .session
-                    .append_delegation_context(&provider_delegation, text)
-                    .await;
+                let result = if ends_delegation {
+                    self.session
+                        .append_terminal_delegation_narration(&provider_delegation, text)
+                        .await
+                } else {
+                    self.session
+                        .append_delegation_context(&provider_delegation, text)
+                        .await
+                };
                 self.lower_append_delivery(reservation, result).await
             }
         }

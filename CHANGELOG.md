@@ -1272,6 +1272,26 @@ them.
     started before the user's utterance is the tail of the previous reply
     and clears neither the user's floor nor the open request, and a deferred
     cue waits while reflected input still carries the user's speech (S99).
+  - A result the model has already read out gets no cue after it (S100 r2:
+    the model read the result out in full, the deferred cue still
+    followed, and the model read it out again over the user's next turn).
+    The cue is skipped when the model's first output after the end of the
+    result's insertion starts before any user utterance that took the floor
+    after that insertion: the model's own continuation, which in every
+    recorded readout voiced the result before any cue (S97: 10 of 10). When
+    the user's utterance came first, that output answered the user, so the
+    cue is still owed. Both are provider-timeline starts. The cue has one
+    wording per kind, with no "unless you have already told the user"
+    exception.
+  - Every in-progress notice and every result cue names the other
+    delegations still running, by the user's words for them: "Still
+    running: "X". Do not say it is done until its result arrives." (S101:
+    the voice claimed a job done 10-14 s before its result existed, right
+    after the cues of the jobs that had finished, in 5 of 5 runs.) A
+    delegation is running from `session.delegation.created` until its
+    result is acknowledged or a Failed narration ends it; the narration
+    authority carries that as a typed flag (`ends_delegation`) to the
+    provider session.
 - The LLM reconfigure host's turn-finalization boundary now keeps its session
   service alive. The host holds the service weakly and upgraded it only to
   acquire the boundary, so a caller that dropped its last service handle while

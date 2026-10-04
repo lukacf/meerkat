@@ -11,15 +11,14 @@
 //!   --nocapture --test-threads=1
 //! ```
 //! Measure only in an explicitly allocated, externally monitored quiet window.
-//! Set NATIVE_COST_RUN=approved-quiet-window, NATIVE_COST_WARMUP_PAIRS=100,
-//! NATIVE_COST_PAIRS=2000 and a fresh NATIVE_COST_OUTPUT path for each matrix.
-//! Run that same binary with --exact native_cost_matrix, then with
-//! --exact representative::native_representative_matrix. Both matrices require
-//! --ignored --nocapture --test-threads=1 and separate raw outputs. The
-//! representative tail profile is expensive and is not the minutes-scale plan.
-//! Use NATIVE_COST_MEASUREMENT_PROFILE=fixed_mean_32 together with
-//! NATIVE_COST_WARMUP_PAIRS=20 and NATIVE_COST_PAIRS=32 for the minutes-scale
-//! profile, with no interim decisions.
+//! Set NATIVE_COST_RUN=approved-quiet-window and a fresh NATIVE_COST_OUTPUT
+//! path for each matrix. Both matrices require --ignored --nocapture
+//! --test-threads=1 and separate raw outputs. For --exact native_cost_matrix,
+//! set NATIVE_COST_WARMUP_PAIRS=100 and NATIVE_COST_PAIRS=2000.
+//! For --exact representative::native_representative_matrix, the default is
+//! fixed_mean_32 with 20 warmup and 32 measured pairs; explicit profile/count
+//! overrides must match those values. The representative tail profile is
+//! withdrawn. Run this minutes-scale profile with no interim decisions.
 //! Its internal 1,200-second deadline does not preempt synchronous work. Use
 //! GNU timeout --signal=KILL 1190s before the binary and reserve at most ten
 //! seconds for bounded postwork within the hard 1,200-second end-to-end cap.

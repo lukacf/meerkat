@@ -1,6 +1,6 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 17:10 UTC
+## Current delivery status, 2026-10-04 at 17:33 UTC
 
 The native governed-flow checkpoint is published and CI-green at `00b0cab3`.
 Its allocation/benchmark successor `b12d81e7` is still running normal push
@@ -37,9 +37,23 @@ The separate push-range workflow fix `5ecab297` remains unpublished. Its
 12,155 executed unit tests (17 skipped). The unchanged interrupted-harness
 cleanup test observed FIFO closure before its immediate process-state check
 reported exit. A bounded process-exit check with a still-running negative is
-being prepared; the cause is not yet proven. Integration and E2E gates were
-not reached. This failed attempt is recorded as validation time, not delivered
-feature coverage.
+prepared; the cause is not yet proven. Its first focused test attempt exhausted
+600 seconds rebuilding a different dependency feature graph, before any test
+body ran. The repair remains unapplied. Integration and E2E gates were not
+reached. These attempts are validation time, not delivered feature coverage.
+
+The representative benchmark now defaults to the approved fixed W20/N32
+profile and rejects the withdrawn tail profile or conflicting count overrides.
+Both profile tests first failed against the prior helper, then passed after the
+repair; all three existing deadline controls also passed. Initial compilation
+took 3m19s, the repair recompile took 2.63s, and test bodies took 0.03s total.
+The six measurement cells, workload oracles, output format, 1,200-second budget
+and separate small-matrix profile remain unchanged. Raw `red.log`, `green.log`
+and `deadline.log` are retained in
+`/private/tmp/adr-001-representative-profile-contract-r1`. This qualifies profile
+selection, not performance. Strict scoped Clippy passed in 3m21s and the
+repository analyzer self-test passed all 20 cases in 1.419s. Publication is
+pending.
 
 ## Publication gate, 2026-10-04
 

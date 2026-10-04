@@ -23,15 +23,8 @@ fn representative_measurement_settings(
     pairs: Option<usize>,
 ) -> Result<RepresentativeMeasurementSettings, &'static str> {
     let (profile, warmup, pairs) = match profile {
-        None | Some("tail") => {
-            let warmup = warmup.unwrap_or(100);
-            let pairs = pairs.unwrap_or(2000);
-            if !(20..=500).contains(&warmup) || !(2000..=10000).contains(&pairs) {
-                return Err("invalid representative tail counts");
-            }
-            ("tail", warmup, pairs)
-        }
-        Some("fixed_mean_32") => {
+        Some("tail") => return Err("representative tail profile is withdrawn; use fixed_mean_32"),
+        None | Some("fixed_mean_32") => {
             if warmup.is_some_and(|value| value != 20) || pairs.is_some_and(|value| value != 32) {
                 return Err("fixed mean profile requires exactly 20 warmup and 32 measured pairs");
             }
@@ -82,11 +75,18 @@ fn representative_fixed_mean_profile_keeps_exact_counts_separate_from_tail() {
     assert_eq!(
         representative_measurement_settings(None, None, None),
         Ok(RepresentativeMeasurementSettings {
-            profile: "tail",
-            warmup: 100,
-            pairs: 2000,
+            profile: "fixed_mean_32",
+            warmup: 20,
+            pairs: 32,
         })
     );
+    assert!(representative_measurement_settings(None, Some(100), Some(2000)).is_err());
+}
+
+#[test]
+fn representative_tail_profile_is_withdrawn() {
+    assert!(representative_measurement_settings(Some("tail"), None, None).is_err());
+    assert!(representative_measurement_settings(Some("tail"), Some(100), Some(2000)).is_err());
 }
 
 #[tokio::test]

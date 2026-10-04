@@ -456,6 +456,216 @@ pub(crate) mod tests {
         assert_eq!(hex(&mixed), "ff00100a7f01fe00ff");
     }
 
+    #[test]
+    fn replay_digest_preserves_buffered_codec_for_all_input_families() {
+        use crate::input::{
+            ContinuationInput, ExternalEventInput, FlowStepInput, InputDurability, InputOrigin,
+            OperationInput, PeerConvention, PeerInput,
+        };
+        use meerkat_core::ops::{OpEvent, OperationId};
+        use meerkat_core::types::{ContentBlock, ContentInput, ImageData};
+
+        let original = input("caller");
+        let header = original.header().clone();
+        let escaped = "quoted \"text\"\\path\n\t\0\u{00e9}\u{1f642}".repeat(96);
+        let blocks = vec![
+            ContentBlock::Text {
+                text: escaped.clone(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: ImageData::Inline {
+                    data: "AAECAwQ=".into(),
+                },
+            },
+        ];
+        let payload = serde_json::json!({
+            "text": escaped,
+            "nested": [null, true, 17, {"b": "second", "a": "first"}]
+        });
+        let mut prompt = original;
+        let Input::Prompt(prompt_body) = &mut prompt else {
+            panic!("existing prompt fixture");
+        };
+        prompt_body.content = ContentInput::Blocks(blocks.clone());
+        prompt_body.injected_context = vec!["first context".into(), "second context".into()];
+        let peer = Input::Peer(PeerInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::Peer {
+                    peer_id: "peer-7".into(),
+                    display_identity: Some("Peer Seven".into()),
+                    runtime_id: None,
+                },
+                ..header.clone()
+            },
+            directed_interaction_id: None,
+            convention: Some(PeerConvention::Request {
+                request_id: "request-7".into(),
+                intent: "inspect record".into(),
+            }),
+            content: ContentInput::Blocks(blocks.clone()),
+            payload: Some(payload.clone()),
+            handling_mode: None,
+            sender_taint: None,
+            objective_id: None,
+            system_prompts: vec!["first system".into(), "second system".into()],
+            injected_context: vec!["peer context".into()],
+        });
+        let flow = Input::FlowStep(FlowStepInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::Flow {
+                    flow_id: "flow-7".into(),
+                    step_index: 2,
+                },
+                ..header.clone()
+            },
+            step_id: "step-7".into(),
+            content: ContentInput::Blocks(blocks.clone()),
+            directed_interaction_id: None,
+            turn_metadata: None,
+        });
+        let event = Input::ExternalEvent(ExternalEventInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::External {
+                    source_name: "fixture-source".into(),
+                },
+                ..header.clone()
+            },
+            event_type: "record-updated".into(),
+            payload,
+            blocks: Some(blocks),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+            objective_id: None,
+        });
+        let mut continuation = ContinuationInput::detached_background_op_completed();
+        continuation.header.authority_association = header.authority_association.clone();
+        continuation.header.idempotency_key = header.idempotency_key.clone();
+        continuation.request_id = Some("request-7".into());
+        let operation_id = OperationId::new();
+        let operation = Input::Operation(OperationInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::System,
+                durability: InputDurability::Derived,
+                ..header
+            },
+            operation_id: operation_id.clone(),
+            event: OpEvent::Progress {
+                id: operation_id,
+                message: "progress\n\"quoted\"\\path".into(),
+                percent: Some(12.5),
+            },
+        });
+
+        for (family, input) in [
+            ("prompt", prompt),
+            ("peer", peer),
+            ("flow_step", flow),
+            ("external_event", event),
+            ("continuation", Input::Continuation(continuation)),
+            ("operation", operation),
+        ] {
+            // Retain the old implementation as the representation oracle.
+            let mut normalized = input.clone();
+            normalized.header_mut().id = InputId::from_uuid(uuid::Uuid::nil());
+            normalized.header_mut().timestamp = chrono::DateTime::UNIX_EPOCH;
+            let bytes = serde_json::to_vec(&normalized).expect("existing compact input codec");
+            let expected: [u8; 32] = Sha256::digest(&bytes).into();
+            assert_eq!(
+                replay_digest(&input).expect("replay digest"),
+                expected,
+                "{family}"
+            );
+            let encoded: serde_json::Value = serde_json::from_slice(&bytes).expect("input JSON");
+            assert_eq!(encoded["input_type"], family);
+            assert!(encoded["header"].get("ingress_context").is_none());
+        }
+    }
+
+    #[test]
+    fn replay_digest_preserves_retry_normalization_and_exact_authority_payload() {
+        let original = input("caller");
+        let digest = replay_digest(&original).expect("original digest");
+        let retained = RetainedInputAuthority::from_input(&original)
+            .expect("retained original")
+            .expect("association");
+        let mut retry = original.clone();
+        retry.header_mut().id = InputId::from_uuid(uuid::Uuid::nil());
+        retry.header_mut().timestamp = chrono::DateTime::UNIX_EPOCH;
+        assert!(
+            original
+                .header()
+                .ingress_context
+                .as_ref()
+                .expect("original ingress")
+                .verify_submission(&retry)
+                .is_err(),
+            "normalized replay equality cannot reuse another submission's ingress"
+        );
+        retry.header_mut().ingress_context = None;
+        assert_eq!(replay_digest(&retry).expect("retry digest"), digest);
+        let retry = attach_ingress(retry, "caller", "fresh-retry-observation");
+        assert_eq!(replay_digest(&retry).expect("fresh ingress digest"), digest);
+        retained
+            .verify_replay(&retry)
+            .expect("exact original work retry");
+
+        for change in 0..6 {
+            let mut altered = original.clone();
+            let mut candidate = altered
+                .header()
+                .authority_association
+                .as_ref()
+                .expect("claims")
+                .candidate()
+                .clone();
+            match change {
+                0 => candidate.requester = principal("different-caller"),
+                1 => candidate.ingress_actor = principal("different-ingress"),
+                2 => candidate.logical_executor = principal("different-executor"),
+                3 => candidate.original_authentication = evidence("different-authentication"),
+                4 => candidate.original_work.work = id("different-original"),
+                _ => candidate.target.logical_runtime = id("different-runtime"),
+            }
+            altered.header_mut().authority_association = Some(
+                InputAuthorityAssociation::new(candidate).expect("different well-formed claims"),
+            );
+            assert_ne!(
+                replay_digest(&altered).expect("altered digest"),
+                digest,
+                "claim {change}"
+            );
+            assert!(matches!(
+                retained.verify_replay(&altered),
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == *original.id()
+            ));
+        }
+        for change in 0..2 {
+            let mut altered = original.clone();
+            let Input::Prompt(prompt) = &mut altered else {
+                panic!("existing prompt fixture");
+            };
+            if change == 0 {
+                prompt.content = "different original content".into();
+            } else {
+                prompt
+                    .injected_context
+                    .push("different hidden context".into());
+            }
+            assert_ne!(
+                replay_digest(&altered).expect("altered digest"),
+                digest,
+                "content {change}"
+            );
+            assert!(matches!(
+                retained.verify_replay(&altered),
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == *original.id()
+            ));
+        }
+    }
+
     fn id(value: &str) -> EvidenceId {
         EvidenceId::new(value).expect("fixture id")
     }

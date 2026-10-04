@@ -5,7 +5,7 @@
 //! source custody, grant issuance or replay acceptance. The transport must impose
 //! its own byte limit before decoding; the bounds here also apply to local data.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use meerkat_core::auth::PrincipalRef;
 use meerkat_core::connection::RealmId;
@@ -150,7 +150,7 @@ pub struct InputAuthorityAssociationCandidate {
 /// generated source-bound preparation, not this wrapper, confers admission.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct InputAuthorityAssociation(InputAuthorityAssociationCandidate);
+pub struct InputAuthorityAssociation(Arc<InputAuthorityAssociationCandidate>);
 
 impl InputAuthorityAssociation {
     /// Bound an immutable candidate without accepting it as native work.
@@ -197,7 +197,7 @@ impl InputAuthorityAssociation {
         }
         // The order of contributor, grant and source references is retained.
         // It is not silently sorted or deduplicated during admission/recovery.
-        let association = Self(candidate);
+        let association = Self(Arc::new(candidate));
         association.canonical_bytes()?;
         Ok(association)
     }
@@ -611,6 +611,51 @@ mod tests {
         assert_eq!(
             format!("{:?}", value.candidate()),
             "InputAuthorityAssociationCandidate([protected])"
+        );
+    }
+
+    #[test]
+    fn cloned_association_shares_immutable_data_and_preserves_exact_encoding() {
+        let mut original = candidate();
+        original.represented_subject = Some(principal("represented"));
+        original.controller_grant_lineage = fixture_lineage_mut(&mut candidate()).to_vec();
+        original.controller_model = Some(controller_selection("controller"));
+        let association = InputAuthorityAssociation::new(original.clone()).expect("association");
+        let cloned = association.clone();
+        assert!(std::ptr::eq(association.candidate(), cloned.candidate()));
+        assert_eq!(association.candidate(), &original);
+        assert_eq!(cloned, association);
+        let wire = serde_json::to_vec(&original).expect("candidate wire");
+        assert_eq!(
+            serde_json::to_vec(&association).expect("association wire"),
+            wire
+        );
+        assert_eq!(serde_json::to_vec(&cloned).expect("clone wire"), wire);
+        let bytes = association.canonical_bytes().expect("canonical bytes");
+        assert_eq!(cloned.canonical_bytes().expect("clone bytes"), bytes);
+        let decoded: InputAuthorityAssociation = serde_json::from_slice(&wire).expect("decode");
+        assert_eq!(decoded, association);
+        assert!(!std::ptr::eq(association.candidate(), decoded.candidate()));
+        assert_eq!(decoded.canonical_bytes().expect("decoded bytes"), bytes);
+
+        let mut independent = cloned.candidate().clone();
+        independent.requester = principal("other-requester");
+        independent
+            .source_observations
+            .push(evidence("other-source"));
+        let changed = InputAuthorityAssociation::new(independent).expect("changed candidate");
+        assert!(!std::ptr::eq(association.candidate(), changed.candidate()));
+        assert_ne!(changed, association);
+        assert_ne!(changed.canonical_bytes().expect("changed bytes"), bytes);
+        assert_eq!(association.candidate(), &original);
+        assert_eq!(cloned.candidate(), &original);
+        assert_eq!(
+            association.canonical_bytes().expect("retained bytes"),
+            bytes
+        );
+        assert_eq!(
+            serde_json::to_vec(&association).expect("retained wire"),
+            wire
         );
     }
 

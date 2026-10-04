@@ -318,13 +318,15 @@ them.
   The supported memory-backed composition uses the actual stock
   `PersistenceBundle`, `PersistentSessionService` and persistent executor for
   process-lifetime input, session and audit commits. Persistent controller/grant
-  administration remains unavailable. Stock SQLite WholeBlob admission,
-  physical execution custody and same-process close/reopen with fresh work
-  passed local controls using current host authority. Required native shell
-  confinement covers supported macOS requirements. Process restart, durable
-  grant recovery, consent, command-hook confinement and full execution-mode
-  and platform coverage remain separate work. See `docs/rust/native-authorization.mdx` for
-  the integration boundary; performance acceptance remains unmeasured.
+  administration remains unavailable. Stock SQLite WholeBlob admission and
+  physical execution custody have completed-turn acceptance through a separate
+  process restart followed by fresh work under current host authority. Fixed-host
+  JSONL ingress also has authenticated model-tool-model acceptance. Required native
+  shell confinement covers supported macOS requirements. Interrupted recovery,
+  durable grant administration, consent, command-hook confinement and full
+  execution-mode and platform coverage remain separate work. See
+  `docs/rust/native-authorization.mdx` for the integration boundary; measured
+  representative authorization overhead still exceeds the target.
 - The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
   single-connection profile with native input admission and a fixed callback
   catalog. It requires `default-features = false` plus `local-authorization`;
@@ -622,6 +624,12 @@ them.
 
 ### Changed
 
+- Native input authorization avoids per-byte formatting and an intermediate
+  replay-serialization buffer, shares immutable association data across clones,
+  and reuses the owned preview snapshot. Canonical bytes, policy evaluation and
+  recovery validation are preserved. The repository-owned native cost fixture
+  now includes a bounded W20/N32 mean study and raw-result analyzer. These
+  reductions do not yet meet the authorization overhead target.
 - Supervisor rotation no longer polls a member for convergence. A member
   advertising `rotation_observe_hold` answers a held
   `ObserveSupervisorRotation` when the operation is terminal, waking on a

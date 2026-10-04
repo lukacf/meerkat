@@ -211,10 +211,7 @@ impl MeerkatMachine {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::input_authority::{
-        NativeIngressContext,
-        tests::{TestIngress, input},
-    };
+    use crate::input_authority::{NativeIngressContext, tests::TestIngress};
     use crate::input_state::InputAbandonReason;
     use crate::traits::RuntimeDriver;
     use meerkat_authorization_contracts::evidence::EvidenceId;
@@ -222,7 +219,8 @@ mod tests {
 
     async fn admitted() -> (MeerkatMachine, SessionId, GrantLineageRef) {
         let machine = MeerkatMachine::ephemeral();
-        let host = Arc::new(TestIngress::new(machine.generated_auth_lease_handle()));
+        let host = Arc::new(TestIngress::isolated(machine.generated_auth_lease_handle()));
+        let mut prompt = host.input("caller");
         let machine = machine
             .with_native_work_authorization_host(host)
             .expect("configured host");
@@ -236,7 +234,6 @@ mod tests {
             let entry = sessions.get(&session_id).expect("session");
             (Arc::clone(&entry.driver), entry.runtime_id.clone())
         };
-        let mut prompt = input("caller");
         let ingress = Arc::clone(
             prompt
                 .header()
@@ -383,6 +380,97 @@ mod tests {
         drop(custody);
         assert!(driver.try_lock().is_ok());
         assert!(machine.sessions.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn controller_custody_composes_both_native_maps_before_mutation() {
+        let first = MeerkatMachine::ephemeral();
+        let (second, _, controller) = admitted().await;
+        let mut first_custody = first.try_controller_grant_mutation().expect("first scope");
+        let mut second_custody = second
+            .try_controller_grant_mutation()
+            .expect("second scope");
+        let mut mutation_entered = false;
+        let result = first_custody.with_unreferenced_controller_grant(&controller, || {
+            second_custody.with_unreferenced_controller_grant(&controller, || {
+                mutation_entered = true;
+                Ok::<_, ()>(())
+            })
+        });
+        assert_eq!(result, Ok(Err(ControllerCustodyRefusal::ControllerInUse)));
+        assert!(!mutation_entered);
+
+        // The exact same owners permit a reference outside the retained lineage.
+        let mut unrelated = controller;
+        unrelated.authority_namespace = EvidenceId::new("other-authority").expect("namespace");
+        assert_eq!(
+            first_custody.with_unreferenced_controller_grant(&unrelated, || {
+                second_custody.with_unreferenced_controller_grant(&unrelated, || {
+                    mutation_entered = true;
+                    Ok::<_, ()>(42)
+                })
+            }),
+            Ok(Ok(Ok(42)))
+        );
+        assert!(mutation_entered);
+        assert!(first.sessions.try_write().is_err());
+        assert!(second.sessions.try_write().is_err());
+        drop(second_custody);
+        drop(first_custody);
+        assert!(first.sessions.try_write().is_ok());
+        assert!(second.sessions.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn controller_custody_busy_second_scope_releases_first_without_callback() {
+        let first = MeerkatMachine::ephemeral();
+        let (second, session_id, mut unrelated) = admitted().await;
+        unrelated.authority_namespace = EvidenceId::new("other-authority").expect("namespace");
+        let mut mutation_entered = false;
+        {
+            let mut first_custody = first.try_controller_grant_mutation().expect("first scope");
+            let mut second_custody = second
+                .try_controller_grant_mutation()
+                .expect("second scope");
+            assert_eq!(
+                first_custody.with_unreferenced_controller_grant(&unrelated, || {
+                    second_custody.with_unreferenced_controller_grant(&unrelated, || {
+                        mutation_entered = true;
+                        Ok::<_, ()>(())
+                    })
+                }),
+                Ok(Ok(Ok(())))
+            );
+            assert!(mutation_entered);
+        }
+        mutation_entered = false;
+        let driver = {
+            let sessions = second.sessions.read().await;
+            Arc::clone(
+                &sessions
+                    .get(&session_id)
+                    .expect("actual second session")
+                    .driver,
+            )
+        };
+        let busy_driver = driver.lock().await;
+        let result = (|| {
+            let mut first_custody = first.try_controller_grant_mutation()?;
+            let mut second_custody = second.try_controller_grant_mutation()?;
+            first_custody.with_unreferenced_controller_grant(&unrelated, || {
+                second_custody.with_unreferenced_controller_grant(&unrelated, || {
+                    mutation_entered = true;
+                    Ok::<_, ()>(())
+                })
+            })
+        })();
+        assert_eq!(result, Err(ControllerCustodyRefusal::Unavailable));
+        assert!(!mutation_entered);
+        assert!(first.sessions.try_write().is_ok());
+        assert!(second.sessions.try_write().is_ok());
+        assert!(driver.try_lock().is_err());
+        drop(busy_driver);
+        assert!(driver.try_lock().is_ok());
     }
 }
 

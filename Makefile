@@ -250,6 +250,10 @@ ci-lanes-selftest:
 	@echo "$(GREEN)Self-testing the CI lane classifier (fail-closed contracts)...$(NC)"
 	@node scripts/ci-cargo-lanes-selftest.mjs
 
+.PHONY: native-cost-analysis-selftest
+native-cost-analysis-selftest:
+	@$(PYTHON) scripts/test_analyze_native_cost.py
+
 # Path classifiers (machine-authority-changed, buildbuddy-edge-changes,
 # cargo-agent-gate) and gate wiring contracts. Pure shell, no cargo build.
 path-classifier-selftest:

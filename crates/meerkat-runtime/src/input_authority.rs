@@ -333,10 +333,11 @@ pub(crate) fn unavailable() -> RuntimeDriverError {
 /// Lossless bytes as an opaque String in the generated map. No identity or
 /// authority is inferred from a prefix or parsed back out of this encoding.
 fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
+    for &byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     out
 }
@@ -390,8 +391,9 @@ fn replay_digest(input: &Input) -> Result<[u8; 32], RuntimeDriverError> {
     // original work, qualified requester/target, content, and authority claims.
     replay.header_mut().id = InputId::from_uuid(uuid::Uuid::nil());
     replay.header_mut().timestamp = chrono::DateTime::UNIX_EPOCH;
-    let bytes = serde_json::to_vec(&replay).map_err(|_| unavailable())?;
-    Ok(Sha256::digest(bytes).into())
+    let mut digest = Sha256::new();
+    serde_json::to_writer(&mut digest, &replay).map_err(|_| unavailable())?;
+    Ok(digest.finalize().into())
 }
 
 pub(crate) fn verify_retained_replay(
@@ -436,6 +438,300 @@ pub(crate) mod tests {
     use meerkat_core::connection::RealmId;
     use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
 
+    #[test]
+    fn hex_preserves_existing_lowercase_byte_format() {
+        use std::fmt::Write;
+
+        let all_bytes: Vec<u8> = (u8::MIN..=u8::MAX).collect();
+        let mixed = [0xff, 0x00, 0x10, 0x0a, 0x7f, 0x01, 0xfe, 0x00, 0xff];
+        for bytes in [&[][..], all_bytes.as_slice(), mixed.as_slice()] {
+            let mut formatted = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                write!(&mut formatted, "{byte:02x}").expect("existing String formatter");
+            }
+            let actual = hex(bytes);
+            assert_eq!(actual, formatted, "exact existing protected binding bytes");
+            assert_eq!(actual.len(), bytes.len() * 2);
+            assert!(actual.is_ascii());
+        }
+        assert_eq!(hex(&mixed), "ff00100a7f01fe00ff");
+    }
+
+    #[test]
+    fn replay_digest_preserves_buffered_codec_for_all_input_families() {
+        use crate::input::{
+            ContinuationInput, ExternalEventInput, FlowStepInput, InputDurability, InputOrigin,
+            OperationInput, PeerConvention, PeerInput,
+        };
+        use meerkat_core::ops::{OpEvent, OperationId};
+        use meerkat_core::types::{ContentBlock, ContentInput, ImageData};
+
+        let original = input("caller");
+        let header = original.header().clone();
+        let escaped = "quoted \"text\"\\path\n\t\0\u{00e9}\u{1f642}".repeat(2048);
+        let blocks = vec![
+            ContentBlock::Text {
+                text: escaped.clone(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: ImageData::Inline {
+                    data: "AAECAwQ=".into(),
+                },
+            },
+        ];
+        let payload = serde_json::json!({
+            "text": escaped,
+            "nested": [null, true, 17, {"b": "second", "a": "first"}],
+            "numbers": [0.5, -0.0, -16.75, u64::MAX, i64::MIN],
+            "ordered": ["first", "second"]
+        });
+        let mut prompt = original;
+        let Input::Prompt(prompt_body) = &mut prompt else {
+            panic!("existing prompt fixture");
+        };
+        prompt_body.content = ContentInput::Blocks(blocks.clone());
+        prompt_body.injected_context = vec!["first context".into(), "second context".into()];
+        let peer = Input::Peer(PeerInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::Peer {
+                    peer_id: "peer-7".into(),
+                    display_identity: Some("Peer Seven".into()),
+                    runtime_id: None,
+                },
+                ..header.clone()
+            },
+            directed_interaction_id: None,
+            convention: Some(PeerConvention::Request {
+                request_id: "request-7".into(),
+                intent: "inspect record".into(),
+            }),
+            content: ContentInput::Blocks(blocks.clone()),
+            payload: Some(payload.clone()),
+            handling_mode: None,
+            sender_taint: None,
+            objective_id: None,
+            system_prompts: vec!["first system".into(), "second system".into()],
+            injected_context: vec!["peer context".into()],
+        });
+        let flow = Input::FlowStep(FlowStepInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::Flow {
+                    flow_id: "flow-7".into(),
+                    step_index: 2,
+                },
+                ..header.clone()
+            },
+            step_id: "step-7".into(),
+            content: ContentInput::Blocks(blocks.clone()),
+            directed_interaction_id: None,
+            turn_metadata: None,
+        });
+        let event = Input::ExternalEvent(ExternalEventInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::External {
+                    source_name: "fixture-source".into(),
+                },
+                ..header.clone()
+            },
+            event_type: "record-updated".into(),
+            payload,
+            blocks: Some(blocks),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+            objective_id: None,
+        });
+        let mut continuation = ContinuationInput::detached_background_op_completed();
+        continuation.header.authority_association = header.authority_association.clone();
+        continuation.header.idempotency_key = header.idempotency_key.clone();
+        continuation.request_id = Some("request-7".into());
+        let operation_id = OperationId::new();
+        let operation = Input::Operation(OperationInput {
+            header: crate::input::InputHeader {
+                source: InputOrigin::System,
+                durability: InputDurability::Derived,
+                ..header
+            },
+            operation_id: operation_id.clone(),
+            event: OpEvent::Progress {
+                id: operation_id,
+                message: "progress\n\"quoted\"\\path".into(),
+                percent: Some(12.5),
+            },
+        });
+
+        for (family, input) in [
+            ("prompt", prompt),
+            ("peer", peer),
+            ("flow_step", flow),
+            ("external_event", event),
+            ("continuation", Input::Continuation(continuation)),
+            ("operation", operation),
+        ] {
+            // Retain the old implementation as the representation oracle.
+            let mut normalized = input.clone();
+            normalized.header_mut().id = InputId::from_uuid(uuid::Uuid::nil());
+            normalized.header_mut().timestamp = chrono::DateTime::UNIX_EPOCH;
+            let bytes = serde_json::to_vec(&normalized).expect("existing compact input codec");
+            let expected: [u8; 32] = Sha256::digest(&bytes).into();
+            assert_eq!(
+                replay_digest(&input).expect("replay digest"),
+                expected,
+                "{family}"
+            );
+            let encoded: serde_json::Value = serde_json::from_slice(&bytes).expect("input JSON");
+            assert_eq!(encoded["input_type"], family);
+            assert!(encoded["header"].get("ingress_context").is_none());
+            let decoded: Input = serde_json::from_slice(&bytes).expect("owned input roundtrip");
+            assert_eq!(
+                replay_digest(&decoded).expect("roundtrip digest"),
+                expected,
+                "{family} roundtrip"
+            );
+            if matches!(family, "prompt" | "peer" | "flow_step" | "external_event") {
+                assert!(bytes.len() > 64 * 1024, "large escaped {family} payload");
+            }
+        }
+    }
+
+    #[test]
+    fn replay_digest_preserves_retry_normalization_and_exact_authority_payload() {
+        let original = input("caller");
+        let digest = replay_digest(&original).expect("original digest");
+        let retained = RetainedInputAuthority::from_input(&original)
+            .expect("retained original")
+            .expect("association");
+        let mut retry = original.clone();
+        retry.header_mut().id = InputId::from_uuid(uuid::Uuid::nil());
+        retry.header_mut().timestamp = chrono::DateTime::UNIX_EPOCH;
+        assert!(
+            original
+                .header()
+                .ingress_context
+                .as_ref()
+                .expect("original ingress")
+                .verify_submission(&retry)
+                .is_err(),
+            "normalized replay equality cannot reuse another submission's ingress"
+        );
+        retry.header_mut().ingress_context = None;
+        assert_eq!(replay_digest(&retry).expect("retry digest"), digest);
+        let retry = attach_ingress(retry, "caller", "fresh-retry-observation");
+        assert_eq!(replay_digest(&retry).expect("fresh ingress digest"), digest);
+        retained
+            .verify_replay(&retry)
+            .expect("exact original work retry");
+
+        for change in 0..6 {
+            let mut altered = original.clone();
+            let mut candidate = altered
+                .header()
+                .authority_association
+                .as_ref()
+                .expect("claims")
+                .candidate()
+                .clone();
+            match change {
+                0 => candidate.requester = principal("different-caller"),
+                1 => candidate.ingress_actor = principal("different-ingress"),
+                2 => candidate.logical_executor = principal("different-executor"),
+                3 => candidate.original_authentication = evidence("different-authentication"),
+                4 => candidate.original_work.work = id("different-original"),
+                _ => candidate.target.logical_runtime = id("different-runtime"),
+            }
+            altered.header_mut().authority_association = Some(
+                InputAuthorityAssociation::new(candidate).expect("different well-formed claims"),
+            );
+            assert_ne!(
+                replay_digest(&altered).expect("altered digest"),
+                digest,
+                "claim {change}"
+            );
+            assert!(matches!(
+                retained.verify_replay(&altered),
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == *original.id()
+            ));
+        }
+        for change in 0..2 {
+            let mut altered = original.clone();
+            let Input::Prompt(prompt) = &mut altered else {
+                panic!("existing prompt fixture");
+            };
+            if change == 0 {
+                prompt.content = "different original content".into();
+            } else {
+                prompt
+                    .injected_context
+                    .push("different hidden context".into());
+            }
+            assert_ne!(
+                replay_digest(&altered).expect("altered digest"),
+                digest,
+                "content {change}"
+            );
+            assert!(matches!(
+                retained.verify_replay(&altered),
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == *original.id()
+            ));
+        }
+
+        let event = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: crate::input::InputHeader {
+                source: crate::input::InputOrigin::External {
+                    source_name: "replay-fixture".into(),
+                },
+                ingress_context: None,
+                ..original.header().clone()
+            },
+            event_type: "record-updated".into(),
+            payload: serde_json::json!({
+                "nested": {"ratio": 0.5, "ordered": ["first", "second"]},
+                "large": "quoted \"text\"\\path\n\u{00e9}\u{1f642}".repeat(2048)
+            }),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+            objective_id: None,
+        });
+        let event_digest = replay_digest(&event).expect("external event digest");
+        let retained_event = RetainedInputAuthority::from_input(&event)
+            .expect("retained external event")
+            .expect("association");
+        for change in 0..3 {
+            let mut altered = event.clone();
+            let Input::ExternalEvent(body) = &mut altered else {
+                panic!("external event fixture");
+            };
+            match change {
+                0 => body.payload["nested"]["ratio"] = serde_json::json!(0.75),
+                1 => body.payload["nested"]["ordered"]
+                    .as_array_mut()
+                    .expect("ordered payload")
+                    .reverse(),
+                _ => {
+                    let mut large = body.payload["large"]
+                        .as_str()
+                        .expect("large payload")
+                        .to_owned();
+                    large.push('x');
+                    body.payload["large"] = serde_json::json!(large);
+                }
+            }
+            assert_ne!(
+                replay_digest(&altered).expect("changed external event digest"),
+                event_digest,
+                "external payload {change}"
+            );
+            assert!(matches!(
+                retained_event.verify_replay(&altered),
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == *event.id()
+            ));
+        }
+    }
+
     fn id(value: &str) -> EvidenceId {
         EvidenceId::new(value).expect("fixture id")
     }
@@ -461,6 +757,12 @@ pub(crate) mod tests {
         }
     }
     fn controller_selection(model: &str) -> meerkat_core::ControllerModelSelection {
+        controller_selection_for_account(model, "controller")
+    }
+    fn controller_selection_for_account(
+        model: &str,
+        account: &str,
+    ) -> meerkat_core::ControllerModelSelection {
         meerkat_core::ControllerModelSelection::new(
             meerkat_core::SessionLlmIdentity {
                 model: model.into(),
@@ -469,15 +771,19 @@ pub(crate) mod tests {
                 provider_params: None,
                 auth_binding: None,
             },
-            serde_json::from_value(
-                serde_json::json!({"realm":"native-test", "account":"controller"}),
-            )
-            .expect("credential identity"),
+            serde_json::from_value(serde_json::json!({"realm":"native-test", "account":account}))
+                .expect("credential identity"),
             "profile".into(),
             "fixture".into(),
         )
     }
     pub(crate) fn input(requester: &str) -> Input {
+        input_with_controller(requester, controller_selection("controller"))
+    }
+    fn input_with_controller(
+        requester: &str,
+        selection: meerkat_core::ControllerModelSelection,
+    ) -> Input {
         let mut prompt = PromptInput::new("exact admitted content", None);
         prompt.header.idempotency_key = Some(IdempotencyKey::new("same-event"));
         prompt.header.authority_association = Some(
@@ -516,7 +822,7 @@ pub(crate) mod tests {
                     grant_id: id("controller-leaf"),
                     issued_revision: 1,
                 }],
-                controller_model: Some(controller_selection("controller")),
+                controller_model: Some(selection),
                 controller_ceiling: ExecutionRestrictions::unrestricted(),
                 admitted_ceiling: ExecutionRestrictions::unrestricted(),
                 source_observations: Vec::new(),
@@ -606,20 +912,39 @@ pub(crate) mod tests {
             Err(OperationRefused::new(OperationRefusalKind::Denied).into())
         }
     }
-    pub(crate) struct TestIngress;
+    pub(crate) struct TestIngress {
+        selection: meerkat_core::ControllerModelSelection,
+    }
     impl TestIngress {
         pub(crate) fn new(authority: meerkat_core::handles::GeneratedAuthLeaseHandle) -> Self {
+            Self::with_selection(authority, controller_selection("controller"))
+        }
+        pub(crate) fn isolated(authority: meerkat_core::handles::GeneratedAuthLeaseHandle) -> Self {
+            Self::with_selection(
+                authority,
+                controller_selection_for_account(
+                    "controller",
+                    &format!("controller-{}", uuid::Uuid::new_v4()),
+                ),
+            )
+        }
+        fn with_selection(
+            authority: meerkat_core::handles::GeneratedAuthLeaseHandle,
+            selection: meerkat_core::ControllerModelSelection,
+        ) -> Self {
             // These owner/serialization fixtures do not use a token store or
             // transport. Supply their initial synthetic credential through the
             // actual generated owner, not a Ready boolean or policy bypass.
-            let selection = controller_selection("controller");
             meerkat_core::publish_token_lifecycle_acquired_for_identity(
                 &authority,
                 selection.credential(),
                 &meerkat_core::auth::PersistedTokens::api_key("synthetic-ingress-fixture"),
             )
             .expect("actual initial credential owner");
-            Self
+            Self { selection }
+        }
+        pub(crate) fn input(&self, requester: &str) -> Input {
+            input_with_controller(requester, self.selection.clone())
         }
     }
     impl NativeWorkAuthorizationHost for TestIngress {
@@ -638,7 +963,7 @@ pub(crate) mod tests {
                 && ingress.realm() == &candidate.ingress_namespace.realm
                 && candidate.represented_subject.is_none()
                 && candidate.logical_executor == principal("executor")
-                && candidate.controller_model == Some(controller_selection("controller"))
+                && candidate.controller_model.as_ref() == Some(&self.selection)
             {
                 Ok(())
             } else {
@@ -663,6 +988,12 @@ pub(crate) mod tests {
     struct DriverFixture {
         driver: EphemeralRuntimeDriver,
         _owner: crate::meerkat_machine::MeerkatMachine,
+        host: Arc<TestIngress>,
+    }
+    impl DriverFixture {
+        fn input(&self, requester: &str) -> Input {
+            self.host.input(requester)
+        }
     }
     impl std::ops::Deref for DriverFixture {
         type Target = EphemeralRuntimeDriver;
@@ -677,13 +1008,13 @@ pub(crate) mod tests {
     }
     fn driver(supports: bool) -> DriverFixture {
         let owner = crate::meerkat_machine::MeerkatMachine::ephemeral();
-        let host: Arc<dyn NativeWorkAuthorizationHost> =
-            Arc::new(TestIngress::new(owner.generated_auth_lease_handle()));
+        let host = Arc::new(TestIngress::isolated(owner.generated_auth_lease_handle()));
         let slot = Arc::new(std::sync::OnceLock::new());
         assert!(
             slot.set(
                 crate::meerkat_machine::credential_custody::NativeWorkAuthorizationAttachment::new(
-                    host, &owner
+                    host.clone(),
+                    &owner
                 )
             )
             .is_ok()
@@ -694,16 +1025,19 @@ pub(crate) mod tests {
         DriverFixture {
             driver,
             _owner: owner,
+            host,
         }
     }
 
     #[tokio::test]
     async fn decoded_claims_and_unsupported_executor_cannot_admit_governed_work() {
-        let original = input("caller");
+        let mut configured = driver(true);
+        let original = configured.input("caller");
         let mut unconfigured = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("native-test"));
         assert!(unconfigured.accept_input(original.clone()).await.is_err());
-        assert!(driver(false).accept_input(original.clone()).await.is_err());
-        let mut configured = driver(true);
+        let mut unsupported = driver(false);
+        let unsupported_input = unsupported.input("caller");
+        assert!(unsupported.accept_input(unsupported_input).await.is_err());
         let wire = serde_json::to_value(&original).expect("wire");
         assert!(
             !wire["header"]
@@ -732,9 +1066,9 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn qualified_replay_never_aliases_another_requester_and_preserves_retained_bytes() {
-        let original = input("caller-a");
-        let other = input("caller-b");
         let mut driver = driver(true);
+        let original = driver.input("caller-a");
+        let other = driver.input("caller-b");
         let accepted = driver.accept_input(original.clone()).await.expect("first");
         let AcceptOutcome::Accepted { state, seed, .. } = accepted else {
             panic!("first admission");
@@ -791,23 +1125,24 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn actual_requester_cannot_activate_another_callers_retained_association() {
-        let original = input("caller-a");
+        let mut driver = driver(true);
+        let original = driver.input("caller-a");
         let wrong_caller = attach_ingress(original.clone(), "caller-b", "caller-b-authentication");
-        assert!(driver(true).accept_input(wrong_caller).await.is_err());
+        assert!(driver.accept_input(wrong_caller).await.is_err());
         let mut different_id = original.clone();
         different_id.header_mut().id = InputId::new();
-        assert!(driver(true).accept_input(different_id).await.is_err());
+        assert!(driver.accept_input(different_id).await.is_err());
         assert!(
-            driver(true).accept_input(original).await.is_ok(),
+            driver.accept_input(original).await.is_ok(),
             "matching baseline"
         );
     }
 
     #[tokio::test]
     async fn recovered_accepted_rows_do_not_reconstruct_process_authentication() {
-        let original = input("caller");
-        let input_id = original.id().clone();
         let mut original_driver = driver(true);
+        let original = original_driver.input("caller");
+        let input_id = original.id().clone();
         original_driver
             .accept_input(original)
             .await
@@ -857,7 +1192,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn unfinished_controller_query_uses_real_lifecycle_and_refuses_missing_truth() {
-        let original = input("caller");
+        let mut driver = driver(true);
+        let original = driver.input("caller");
         let grant = original
             .header()
             .authority_association
@@ -867,7 +1203,6 @@ pub(crate) mod tests {
             .controller_grant_lineage[0]
             .clone();
         let input_id = original.id().clone();
-        let mut driver = driver(true);
         assert!(
             !driver
                 .unfinished_work_references_controller(&grant)

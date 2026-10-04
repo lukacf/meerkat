@@ -1828,6 +1828,112 @@ async fn assert_no_runtime_binding(machine: &MeerkatMachine, session_id: &Sessio
 }
 
 #[tokio::test]
+async fn dsl_preview_preserves_full_history_and_publishes_no_effects() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register preview session");
+    let binding = "exact-original-association".repeat(256);
+    let batch = "exact-original-participants".repeat(256);
+    let mut tracked_ids = Vec::new();
+    let mut completions = Vec::new();
+    for text in ["first retained original", "second retained original"] {
+        let input = make_prompt(text);
+        let input_id = input.id().clone();
+        let (outcome, completion) = machine
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("actual ordinary queued input admission");
+        assert!(matches!(outcome, AcceptOutcome::Accepted { .. }));
+        completions.push(completion.expect("queued prompt retains its actual completion handle"));
+        // These opaque equality facts carry no authentication or permission.
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                    input_id: input_id.to_string(),
+                    authority_binding: binding.clone(),
+                    authority_batch_key: batch.clone(),
+                },
+                "BindInputAuthority(preview history)",
+            )
+            .await
+            .expect("generated binding of an actual tracked input");
+        tracked_ids.push(input_id);
+    }
+    let before = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("exact live generated state");
+    for input_id in &tracked_ids {
+        assert_eq!(
+            before.input_authority_bindings.get(&input_id.to_string()),
+            Some(&binding)
+        );
+        assert_eq!(
+            before.input_authority_batch_keys.get(&input_id.to_string()),
+            Some(&batch)
+        );
+    }
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine, &session_id).await;
+    let epoch = registered_runtime_epoch_id(&machine, &session_id).await;
+    let effects = machine
+        .preview_session_dsl_input(
+            &session_id,
+            prepare_bindings_input(&session_id, "preview-only-runtime", 7, epoch),
+            "PrepareBindings(preview isolation)",
+        )
+        .await
+        .expect("valid preview returns its real generated effect");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, mm_dsl::MeerkatMachineEffect::RuntimeBound { .. }))
+    );
+    assert_eq!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("live state after preview"),
+        before
+    );
+    assert!(signal_surface.log.lock().await.is_empty());
+
+    let error = machine
+        .preview_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                input_id: tracked_ids[0].to_string(),
+                authority_binding: "different-association".into(),
+                authority_batch_key: batch,
+            },
+            "BindInputAuthority(conflicting preview)",
+        )
+        .await
+        .expect_err("the retained binding cannot be replaced in preview");
+    assert!(
+        error.contains("BindInputAuthority(conflicting preview)"),
+        "{error}"
+    );
+    assert!(error.contains("guard rejected"), "{error}");
+    assert_eq!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("live state after rejection"),
+        before
+    );
+    assert!(signal_surface.log.lock().await.is_empty());
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("preview session cleanup");
+    drop(completions);
+}
+
+#[tokio::test]
 async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_apply() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();

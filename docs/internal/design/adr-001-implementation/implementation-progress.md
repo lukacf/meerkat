@@ -283,6 +283,48 @@ lead/typing-lag acknowledgment was absent. No full-host acknowledgment is
 claimed. Performance remains an unmet architecture gate, and further runtime
 expansion remains held behind it.
 
+The next candidate `f9f0cd55ef06156ebda74097cac3591ca538f2f4`, tree
+`4ef17e5630398603de7accb6ccef7f9c9e1780d1`, shares the private immutable input
+association across clones. Its new sharing/encoding test first failed on the
+old representation; the repair passed all 58 contracts tests and strict
+all-target Clippy. The optimized build passed in 453s, followed by both native
+cost correctness selectors (0.04s and 8.74s). The executable SHA256 is
+`18293a9065f91338a55bd93df24f176689bd120600b3c1220e2f772a65385664`.
+OB3 and Toolkit source reviews found no blocker. The measured fixture, analyzer,
+features, build profile and canonical encoding are unchanged from a08.
+
+Its W20/N32 study ran from 15:43:16 to 15:47:59 UTC: 283s total, 283.10s
+reported test bodies, all 384 measured samples complete and no failures or
+timeouts. All six conditional mean comparisons still missed the threshold.
+
+| Unit | Lineage depth | Trusted mean (ms) | Local mean (ms) | Added mean (ms) | Overhead | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fresh whole turn | 1 | 12.830315 | 30.408860 | 17.578546 | 137.01 percent | MISS |
+| Fresh whole turn | 3 | 15.042932 | 36.884818 | 21.841885 | 145.20 percent | MISS |
+| Continuing segment | 1 | 8.041696 | 17.584395 | 9.542699 | 118.67 percent | MISS |
+| Continuing segment | 3 | 8.719318 | 21.029911 | 12.310593 | 141.19 percent | MISS |
+| Sum of four direct calls | 1 | 0.073372 | 0.432092 | 0.358720 | 488.90 percent | MISS |
+| Sum of four direct calls | 3 | 0.076322 | 0.922383 | 0.846061 | 1108.54 percent | MISS |
+
+Fresh added means were 9.58/12.89 percent lower than the separate a08 run;
+continuing added means were 11.14/10.98 percent lower. These are descriptive
+comparisons between separate runs, not a causal estimate or performance
+acceptance. The same conditional mean assumptions and scope limits apply.
+Raw `rawf9f0-native-fixed-mean32-r1.json` has SHA256
+`952f2c5ce7de889757f2d2f66daab6a12d753581799e3c7c98ba4bc66f3dff30`;
+`nativef9f0-fixed-mean32-r1-summary.json` has SHA256
+`162bfbb49c0fe40f9c4b35d23c16e74cf0dfb0aad072ff070f26b266ed384bc2`.
+Local reanalysis reproduced the summary bytes. The external observer retained
+57 complete five-second frames covering 15:43:16-15:48:03 UTC, with
+99.34-99.79 percent CPU idle, zero iowait/steal/swap and no unexpected matching
+heavy process. Minimum available memory was 729,546 MiB. The retained Cargo
+process was a zero-CPU zombie and its parent remained suspended. Raw
+`quiet-f9f0-fixed-mean32-r1-monitor.log` has SHA256
+`4399342d870895bdb808459cf7aceb4ccd0b0c8461e2d89d9c116b0293304aa0`.
+Fresh lead/typing-lag acknowledgment remained absent; this is sampled resource
+qualification, not all-owner clearance. Source and measurement remain separate
+from published native00b0 CI; the combined successor must pass its own normal gates.
+
 The fixture-only `685e336d3b0984f72dab5517e6617bd366ce2b7a` checkpoint passed
 input-authority 9 and controller-custody 5 tests under ordinary parallelism,
 with no failures or ignores; post-format passes and applicable normal hooks

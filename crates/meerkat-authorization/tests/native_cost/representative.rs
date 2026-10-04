@@ -10,6 +10,126 @@ const CONTRIBUTORS: usize = 4;
 const PREFIX_READS: usize = 333;
 const PREFIX_RECORDS: usize = 1002;
 
+#[derive(Debug, PartialEq, Eq)]
+struct RepresentativeMeasurementSettings {
+    profile: &'static str,
+    warmup: usize,
+    pairs: usize,
+}
+
+fn representative_measurement_settings(
+    profile: Option<&str>,
+    warmup: Option<usize>,
+    pairs: Option<usize>,
+) -> Result<RepresentativeMeasurementSettings, &'static str> {
+    let (profile, warmup, pairs) = match profile {
+        None | Some("tail") => {
+            let warmup = warmup.unwrap_or(100);
+            let pairs = pairs.unwrap_or(2000);
+            if !(20..=500).contains(&warmup) || !(2000..=10000).contains(&pairs) {
+                return Err("invalid representative tail counts");
+            }
+            ("tail", warmup, pairs)
+        }
+        Some("fixed_mean_32") => {
+            if warmup.is_some_and(|value| value != 20) || pairs.is_some_and(|value| value != 32) {
+                return Err("fixed mean profile requires exactly 20 warmup and 32 measured pairs");
+            }
+            ("fixed_mean_32", 20, 32)
+        }
+        _ => return Err("unknown representative measurement profile"),
+    };
+    Ok(RepresentativeMeasurementSettings {
+        profile,
+        warmup,
+        pairs,
+    })
+}
+
+async fn with_representative_deadline<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(());
+    }
+    let result = tokio::time::timeout_at(deadline, work)
+        .await
+        .map_err(|_| ())?;
+    // A synchronous poll (including output I/O) cannot be preempted by Tokio.
+    // Reject its late completion; the external process deadline bounds it.
+    if tokio::time::Instant::now() >= deadline {
+        return Err(());
+    }
+    Ok(result)
+}
+
+#[test]
+fn representative_fixed_mean_profile_keeps_exact_counts_separate_from_tail() {
+    let expected = RepresentativeMeasurementSettings {
+        profile: "fixed_mean_32",
+        warmup: 20,
+        pairs: 32,
+    };
+    assert_eq!(
+        representative_measurement_settings(Some("fixed_mean_32"), None, None),
+        Ok(expected)
+    );
+    assert!(representative_measurement_settings(Some("fixed_mean_32"), Some(21), None).is_err());
+    assert!(representative_measurement_settings(Some("fixed_mean_32"), None, Some(31)).is_err());
+    assert!(representative_measurement_settings(Some("tail"), Some(20), Some(32)).is_err());
+    assert!(representative_measurement_settings(Some("unknown"), None, None).is_err());
+    assert_eq!(
+        representative_measurement_settings(None, None, None),
+        Ok(RepresentativeMeasurementSettings {
+            profile: "tail",
+            warmup: 100,
+            pairs: 2000,
+        })
+    );
+}
+
+#[tokio::test]
+async fn representative_expired_deadline_never_enters_work() {
+    let entered = std::cell::Cell::new(false);
+    let result = with_representative_deadline(
+        tokio::time::Instant::now() - Duration::from_secs(1),
+        async {
+            entered.set(true);
+            7
+        },
+    )
+    .await;
+    assert_eq!(result, Err(()));
+    assert!(!entered.get());
+}
+
+#[tokio::test]
+async fn representative_deadline_bounds_held_work() {
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        with_representative_deadline(
+            tokio::time::Instant::now() + Duration::from_millis(20),
+            std::future::pending::<()>(),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(result, Ok(Err(()))),
+        "held work must meet the inner budget"
+    );
+}
+
+#[tokio::test]
+async fn representative_deadline_refuses_late_synchronous_completion() {
+    let result = with_representative_deadline(
+        tokio::time::Instant::now() + Duration::from_millis(1),
+        async { std::thread::sleep(Duration::from_millis(20)) },
+    )
+    .await;
+    assert_eq!(result, Err(()));
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Workload {
@@ -1229,65 +1349,85 @@ async fn native_representative_correctness() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit quiet-host performance lease; full representative setup is expensive"]
 async fn native_representative_matrix() {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
     assert_eq!(
         std::env::var("NATIVE_COST_RUN").as_deref(),
         Ok("approved-quiet-window")
     );
     assert!(!std::hint::black_box(cfg!(debug_assertions)));
-    let count = |name: &str, default: usize| {
+    let count = |name: &str| {
         std::env::var(name)
             .ok()
             .map(|v| v.parse::<usize>().unwrap())
-            .unwrap_or(default)
     };
-    let warmup = count("NATIVE_COST_WARMUP_PAIRS", 100);
-    let pairs = count("NATIVE_COST_PAIRS", 2000);
-    assert!((20..=500).contains(&warmup) && (2000..=10000).contains(&pairs));
-    let path = fixture_file();
-    let mut samples = Vec::new();
-    for depth in [1, 3] {
-        for workload in [
-            Workload::FreshAdmission,
-            Workload::ContinuingSegment,
-            Workload::IndividualFencedTools,
-        ] {
-            for iteration in 0..warmup + pairs {
-                let order = if iteration % 2 == 0 {
-                    [HostMode::TrustedHost, HostMode::LocalGoverned]
-                } else {
-                    [HostMode::LocalGoverned, HostMode::TrustedHost]
-                };
-                for (position, mode) in order.into_iter().enumerate() {
-                    let value = tokio::time::timeout(
-                        Duration::from_secs(60),
-                        representative_sample(
-                            mode,
-                            depth,
-                            workload,
-                            path.clone(),
-                            iteration.saturating_sub(warmup),
-                            position == 0,
-                        ),
-                    )
-                    .await
-                    .expect("failed/slow samples fail the run; never discard them");
-                    if iteration >= warmup {
-                        samples.push(value);
+    let profile = std::env::var("NATIVE_COST_MEASUREMENT_PROFILE").ok();
+    let settings = representative_measurement_settings(
+        profile.as_deref(),
+        count("NATIVE_COST_WARMUP_PAIRS"),
+        count("NATIVE_COST_PAIRS"),
+    )
+    .expect("valid declared representative measurement profile");
+    let warmup = settings.warmup;
+    let pairs = settings.pairs;
+    let output_path =
+        std::env::var_os("NATIVE_COST_OUTPUT").expect("fresh measurement output path");
+    let output_created = std::cell::Cell::new(false);
+    let completed = with_representative_deadline(deadline, async {
+        let path = fixture_file();
+        let mut samples = Vec::new();
+        for depth in [1, 3] {
+            for workload in [
+                Workload::FreshAdmission,
+                Workload::ContinuingSegment,
+                Workload::IndividualFencedTools,
+            ] {
+                for iteration in 0..warmup + pairs {
+                    let order = if iteration % 2 == 0 {
+                        [HostMode::TrustedHost, HostMode::LocalGoverned]
+                    } else {
+                        [HostMode::LocalGoverned, HostMode::TrustedHost]
+                    };
+                    for (position, mode) in order.into_iter().enumerate() {
+                        let value = tokio::time::timeout(
+                            Duration::from_secs(60),
+                            representative_sample(
+                                mode,
+                                depth,
+                                workload,
+                                path.clone(),
+                                iteration.saturating_sub(warmup),
+                                position == 0,
+                            ),
+                        )
+                        .await
+                        .expect("failed/slow samples fail the run; never discard them");
+                        if iteration >= warmup {
+                            samples.push(value);
+                        }
                     }
                 }
             }
         }
+        std::fs::remove_file(path).unwrap();
+        let payload = serde_json::json!({"schema":2,"suite":"representative","measurement_profile":settings.profile,"measurement_status":"complete","samples":samples,"warmup_pairs":warmup,"pairs_per_cell":pairs,
+            "failures":0,"timeouts":0,"acceptance":"not evaluated","scope":"fresh admission and continuing segment separated; direct fenced tool excludes Agent scheduling"});
+        use std::io::Write;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .unwrap();
+        output_created.set(true);
+        output
+            .write_all(&serde_json::to_vec_pretty(&payload).unwrap())
+            .unwrap();
+    })
+    .await;
+    if completed.is_err() && output_created.get() {
+        std::fs::remove_file(&output_path).expect("remove only this run's late output");
     }
-    std::fs::remove_file(path).unwrap();
-    let payload = serde_json::json!({"schema":2,"suite":"representative","samples":samples,"warmup_pairs":warmup,"pairs_per_cell":pairs,
-        "failures":0,"timeouts":0,"acceptance":"not evaluated","scope":"fresh admission and continuing segment separated; direct fenced tool excludes Agent scheduling"});
-    use std::io::Write;
-    let mut output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(std::env::var_os("NATIVE_COST_OUTPUT").unwrap())
-        .unwrap();
-    output
-        .write_all(&serde_json::to_vec_pretty(&payload).unwrap())
-        .unwrap();
+    assert!(
+        completed.is_ok(),
+        "UNCERTAIN: representative overall budget exhausted"
+    );
 }

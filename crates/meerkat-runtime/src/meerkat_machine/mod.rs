@@ -6810,11 +6810,11 @@ impl MeerkatMachine {
     }
 
     fn preview_dsl_input_on_state(
-        state: &dsl::MeerkatMachineState,
+        state: dsl::MeerkatMachineState,
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
-        let mut preview = dsl::MeerkatMachineAuthority::recover_from_state(state.clone())
+        let mut preview = dsl::MeerkatMachineAuthority::recover_from_state(state)
             .map_err(|err| dsl_authority::map_error(err, context))?;
         dsl::MeerkatMachineMutator::apply(&mut preview, input)
             .map(|transition| transition.into_effects())
@@ -6834,7 +6834,7 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             authority.state().clone()
         };
-        Self::preview_dsl_input_on_state(&state, input, context)
+        Self::preview_dsl_input_on_state(state, input, context)
     }
 
     async fn session_dsl_state(

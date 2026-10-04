@@ -3,16 +3,24 @@
 ## Publication gate, 2026-10-04
 
 Native [PR1634](https://github.com/lukacf/meerkat/pull/1634) is published at
-`7defcdd7fa069782b12c9073bd3b128a08147d6d`, tree
-`6cf73b7019955daa40e653abf047687535fa3d37`. All normal push hooks passed
-in 4,788s (79m48s; `public7def-normal-push.log`), without bypass. Fresh
+`00b0cab3e3480efac149c91f0823fa687b862639`, tree
+`858a61c033b266086a0cf313d27b588b23247e6a`. All installed normal push hooks
+passed without bypass in 118m17s, ending at 14:58:02 UTC
+(`public00b0-normal-push.log`). Exact-head
+[CI run 37211222497](https://github.com/lukacf/meerkat/actions/runs/37211222497)
+passed 38 jobs with four intentional skips in 15m56s, ending at 15:14:04 UTC.
+[Semver readiness](https://github.com/lukacf/meerkat/actions/runs/37211222385)
+also passed. The governed JSONL job ran all three required cases with zero
+failures or ignores in 0.21s test bodies. PR readback confirmed the exact head
+and clean merge state. Raw evidence is `public00b0-ci-37211222497-final.json`,
+`public00b0-governed-jsonl-ci.log` and
+`public00b0-pr1634-ci-green-readback.json`. No merge or release is recorded.
+
+Published predecessor `7defcdd7fa069782b12c9073bd3b128a08147d6d` passed all
+normal hooks in 79m48s and
 [CI run 37196269479](https://github.com/lukacf/meerkat/actions/runs/37196269479)
-passed on exact7def: 38 successful jobs and 4 intentional skips in 17m27s
-(10:43:05 creation to 11:00:32 UTC last completion). Exact-head
-[semver run 37196269475](https://github.com/lukacf/meerkat/actions/runs/37196269475)
-also passed. Root's PR readback confirmed exact7def and clean merge state;
-raw records are `public7def-ci-37196269479-final.json` and
-`public7def-semver-37196269475-final.json`. No merge or release is recorded.
+in 17m27s with 38 successful jobs and four intentional skips. Its retained
+logs remain historical evidence for that exact source.
 
 Published predecessor `c18c619bf2d140663eb0a78d17d7122d9ac1a5ef`, tree
 `f81231a73c2f4ba5befa1cf2575fe1834016c77f`. Its normal GCP push passed all
@@ -53,18 +61,22 @@ normal successor publication. Published `51` has identical Rust bytes to `157`.
 Additional runtime production integration remains held.
 
 Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published
-at tests-only `e26bb4173df36e2aab0ee7e485d6568fa152d1bd`, tree
-`4b803040731ed497d5736132cdf9010d92ae8cb7`. Its applicable normal hooks
-passed; fresh [CI run 37194585660](https://github.com/lukacf/meerkat-mobkit/actions/runs/37194585660)
-passed all 11 jobs in 40m05s, with its last job completing at 10:52:00 UTC.
-Root's exact-head PR readback confirmed e26 and clean merge state; the raw
-record is `consolee26-ci-37194585660-final.json`.
-The existing SDK event modules passed Python 19/19 in 0.16s and
-TypeScript 43/43 in 224.54ms, with the unchanged SDK build successful. These
-synthetic packet controls preserve exact refusal/result fields, unfamiliar raw
-hook events and decoder continuation; they do not prove native entry, actual
-sibling execution, model continuation or integrated native-plus-Console enforcement.
-Console/Rust production bytes and assets are unchanged from `37`.
+at `db369979a28bef472ddae729b9f5003e0bec4aeb`, tree
+`6c76fbd96eeaf92cb40ac93e4d776fd782b062dc`. Normal hooks passed and
+[CI run 37206031337](https://github.com/lukacf/meerkat-mobkit/actions/runs/37206031337)
+passed all 11 jobs in 40m27s, ending at 14:13:42 UTC. The complete browser suite
+passed. The repaired canonical-send scenario waits for its exact RPC response
+before checking the refreshed access state; its identity, member and pending
+state assertions remain. PR readback confirmed the exact head and clean merge
+state. Raw evidence is `consoledb369-ci-37206031337-final.json`,
+`consoledb369-ci-browser-job.log` and
+`consoledb369-pr520-ci-green-readback.json`.
+
+The preceding c973 source passed Python20/TypeScript44 event tests and SDK build,
+but its CI browser scenario failed; that failure remains retained. Earlier e26
+passed all 11 CI jobs. These packet and browser results qualify projection and
+access UX, not integrated native-plus-Console enforcement. MobKit still needs
+the explicit native dependency and authenticated ingress integration.
 
 Docs-only predecessor `37ca84df0fb3b6c956501374183b3e0866880db6` passed its normal
 push and all 11 jobs in [CI run 37188101522](https://github.com/lukacf/meerkat-mobkit/actions/runs/37188101522)
@@ -231,6 +243,46 @@ warmup, measured work, oracles, cleanup and output. Functional PASS, sampled
 quiet and the conditional MISS do not establish causal optimization gain or
 full performance acceptance.
 
+The next optimized candidate `a08b46c22eb178ed41a321f2831ef0424bfb23a8`, tree
+`e04e777ed0ce3546e41612e0ec7a96119fc64445`, removes the intermediate replay JSON
+buffer and a redundant full-state preview copy. It preserves all owner checks
+and the measured fixture. Its release build took 385s, and both existing cost
+correctness selectors passed (0.04s and 10.48s). The emitted binary SHA256 is
+`5da51a8c5a24ca7902bd8530e354be38e5518671a8b0859a1f52287b05ee8ac7`;
+profile and feature selection match optimized761.
+
+The unchanged W20/N32 study ran from 15:15:01 to 15:20:43 UTC: 342s total,
+341.59s test bodies, 384 complete measured samples, no failures or timeouts.
+All six conditional mean comparisons again missed the 10 percent threshold.
+
+| Unit | Lineage depth | Trusted mean (ms) | Local mean (ms) | Added mean (ms) | Overhead | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fresh whole turn | 1 | 12.887888 | 32.329614 | 19.441726 | 150.85 percent | MISS |
+| Fresh whole turn | 3 | 15.747978 | 40.822693 | 25.074715 | 159.22 percent | MISS |
+| Continuing segment | 1 | 8.037428 | 18.776226 | 10.738798 | 133.61 percent | MISS |
+| Continuing segment | 3 | 8.918356 | 22.747428 | 13.829072 | 155.06 percent | MISS |
+| Sum of four direct calls | 1 | 0.076086 | 0.441294 | 0.365208 | 480.00 percent | MISS |
+| Sum of four direct calls | 3 | 0.083527 | 0.966538 | 0.883011 | 1057.16 percent | MISS |
+
+Fresh added means were only 2.24/2.26 percent lower than the separate761 run;
+continuing added means increased 1.06/1.69 percent. These descriptive changes
+establish neither causal nor material improvement. The unchanged conditional
+mean model and six-comparison limits still apply; direct sums are diagnostics,
+not per-operation p99 acceptance. Raw `rawa08-native-fixed-mean32-r1.json` has
+SHA256 `f8dd00ed9abbbe188483291fd2342a32d31591383a268dfddecb2b449cb0f18e`;
+`nativea08-fixed-mean32-r1-summary.json` has SHA256
+`069bd2e3bc7bd13445f6125d2b7cbd3ef9809e1a560d54a9452e391b255c4c15`.
+Local reanalysis reproduced the summary bytes. The external five-second
+observer retained 68 complete frames overlapping the measurement, covering
+15:15:00-15:20:43 UTC. They showed no competing compiler, 99.33-99.43 percent
+CPU idle and zero iowait/steal/swap.
+Its raw log is `quiet-a08-fixed-mean32-r1-monitor.log`, SHA256
+`7957dbadc462f3d2881182ca169eb9a42618601226e82b48bd48ba3f5287fda7`.
+OB3 and Toolkit supplied current nonconflict replies, while fresh
+lead/typing-lag acknowledgment was absent. No full-host acknowledgment is
+claimed. Performance remains an unmet architecture gate, and further runtime
+expansion remains held behind it.
+
 The fixture-only `685e336d3b0984f72dab5517e6617bd366ce2b7a` checkpoint passed
 input-authority 9 and controller-custody 5 tests under ordinary parallelism,
 with no failures or ignores; post-format passes and applicable normal hooks
@@ -274,10 +326,9 @@ the publication/grant invariant companions passed
 `persistent-controller-nonwaiting-normal-commit-r2.log`,
 `persistent-controller-nonwaiting-grants-green-postfmt-r1.log`).
 
-Published native remains exact `7def`. The local public candidate is committed at
-`ec7196736c8c43677724c1c2eb6fb135c121623b`, tree
-`8f1b1b93bf7ddbeb4ba28a48309858fce9c1198a`, with exactly the reviewed three repair
-paths and three status documents. Its normal push and exact-head CI remain pending. The two grant-lock REDs are resolved locally;
+The public repair commit `ec7196736c8c43677724c1c2eb6fb135c121623b` is included
+in published, CI-green `00b0` above, along with the status and public-guide
+updates. The two grant-lock REDs are resolved and published;
 the separate 16 backend controls remain at 3 passes and 13 failures. No backend
 production repair or native/grant assembly has been accepted, and persistent
 public Try remains unsupported. This narrow lock repair does not qualify full

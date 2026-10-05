@@ -102,6 +102,7 @@ fn wired_state(root: &std::path::Path, client: ScriptedCouncilClient) -> Arc<Mob
         None,
         MobControlPrincipal::Owner,
     )
+    .expect("wire mob tools")
 }
 
 /// The tool-result text of each call in `messages`, keyed by call id.

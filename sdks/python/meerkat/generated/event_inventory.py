@@ -57,6 +57,7 @@ KNOWN_AGENT_EVENT_TYPES: frozenset[str] = frozenset({
     "provider_cache_breakpoints_discarded",
     "boundary_append_applied",
     "boundary_appends_discarded",
+    "live_channel_closed",
 })
 
 

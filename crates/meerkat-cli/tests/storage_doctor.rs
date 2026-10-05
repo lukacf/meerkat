@@ -144,12 +144,16 @@ fn healthy_sqlite_realm_is_clean_and_exits_zero() {
     let domains = inventory[0]["databases"][0]["domains"]
         .as_array()
         .expect("domains array");
+    // A healthy realm is stamped at the current session-store version, read
+    // from the code: the literal 4 went stale when #1541 added migration 5.
+    let session_store_version =
+        meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.supported_version();
     assert!(
         domains
             .iter()
-            .any(|pair| pair[0] == "session-store" && pair[1] == 4),
-        "session-store domain must be ledger-stamped at v4 (v4 completes the \
-         supported HeadCanonical v1-to-v2 authority crossing): {domains:?}"
+            .any(|pair| pair[0] == "session-store" && pair[1] == session_store_version),
+        "session-store domain must be ledger-stamped at the current version \
+         {session_store_version}: {domains:?}"
     );
     let errors: Vec<_> = report["findings"]
         .as_array()

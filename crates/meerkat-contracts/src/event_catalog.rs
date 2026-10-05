@@ -51,4 +51,5 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "provider_cache_breakpoints_discarded",
     "boundary_append_applied",
     "boundary_appends_discarded",
+    "live_channel_closed",
 ];

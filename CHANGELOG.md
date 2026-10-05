@@ -1307,6 +1307,13 @@ them.
   per channel, written whether the scenario passed or failed. The lag rule
   that voids provider-degraded runs could not be computed for them before,
   so a failing S97 or S99 run could not be classified as void or valid.
+- The documented agent event catalog (`meerkat_contracts::KNOWN_AGENT_EVENT_TYPES`,
+  the emitted `known_event_types` and the Python, TypeScript and Web SDK
+  inventories) now lists `live_channel_closed`, which the core event schema
+  has carried since it was added. The `rkat storage doctor` and `storage
+  migrate` integration tests read the session-store and runtime-store
+  ledger versions from the code instead of literals that went stale when
+  session-store migration 5 landed.
 - A voice delegation's result that was merged into the session after its call
   closed now replays on a reopened channel as the result of that request:
   "Finished voice request: "<the user's own words>". It finished after the

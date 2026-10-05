@@ -681,11 +681,21 @@ fn explicit_pre_floor_bridge_migrates_then_reopens_idempotently() {
     let session_ledger = ledger_entries(&realms[0], "session-store", "sessions.sqlite3");
     assert_eq!(session_ledger.len(), 1, "{report:#}");
     assert_eq!(session_ledger[0]["action"], "stamped", "{report:#}");
-    assert_eq!(session_ledger[0]["after"], 4, "{report:#}");
+    // Stamped at the current domain version, read from the code: a literal
+    // went stale when #1541 added session-store migration 5.
+    assert_eq!(
+        session_ledger[0]["after"],
+        meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.supported_version(),
+        "{report:#}"
+    );
     let runtime_ledger = ledger_entries(&realms[0], "runtime-store", "sessions.sqlite3");
     assert_eq!(runtime_ledger.len(), 1, "{report:#}");
     assert_eq!(runtime_ledger[0]["action"], "stamped", "{report:#}");
-    assert_eq!(runtime_ledger[0]["after"], 3, "{report:#}");
+    assert_eq!(
+        runtime_ledger[0]["after"],
+        meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN.supported_version(),
+        "{report:#}"
+    );
 
     let list = run_rkat(
         &temp,

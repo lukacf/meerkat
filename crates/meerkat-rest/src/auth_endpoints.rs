@@ -246,7 +246,10 @@ fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Re
     }
     (
         status,
-        Json(serde_json::json!({ "error": error.public_message(), "reason": reason })),
+        Json(meerkat_contracts::WireAuthErrorBody {
+            error: error.public_message(),
+            reason,
+        }),
     )
         .into_response()
 }

@@ -612,6 +612,19 @@ WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireScopeEvidenceRe
 # existing status codes and RPC error codes are unchanged.
 WireAuthErrorReason = Literal['realm_not_found', 'binding_not_found', 'mcp_server_not_configured', 'account_selection_required', 'unknown_strategy', 'device_poll_in_progress', 'device_code_already_admitted', 'device_expiry_invalid', 'missing_scopes', 'slot_occupied', 'slot_account_mismatch', 'slot_context_mismatch', 'slot_mode_mismatch', 'unverified_connector_publication', 'reauth_required', 'configuration_invalid'] | Literal['invalid_target'] | Literal['binding_invalid'] | Literal['binding_inherited'] | Literal['flow_unsupported'] | Literal['mcp_server_mismatch'] | Literal['attempt_missing'] | Literal['attempt_mismatch'] | Literal['account_mismatch'] | Literal['credential_mismatch'] | Literal['verification_unavailable'] | Literal['authorization_required'] | Literal['callback_unavailable'] | Literal['upstream_failure'] | Literal['infrastructure']
 
+@dataclass
+class WireAuthErrorData:
+    """`error.data` of an auth RPC error."""
+    reason: WireAuthErrorReason
+
+
+@dataclass
+class WireAuthErrorBody:
+    """Body of a REST auth endpoint error."""
+    error: str
+    reason: WireAuthErrorReason
+
+
 # Wire payload for InstructionActivationDisposition.
 InstructionActivationDisposition = Any
 

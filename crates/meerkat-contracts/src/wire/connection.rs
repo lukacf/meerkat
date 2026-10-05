@@ -328,6 +328,24 @@ pub enum WireAuthErrorReason {
     Infrastructure,
 }
 
+/// `error.data` of an auth RPC error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireAuthErrorData {
+    pub reason: WireAuthErrorReason,
+}
+
+/// Body of a REST auth endpoint error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireAuthErrorBody {
+    /// Human-readable, secret-free text; never part of the contract.
+    pub error: String,
+    pub reason: WireAuthErrorReason,
+}
+
 /// Provider binding addressed by `auth/login/*`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

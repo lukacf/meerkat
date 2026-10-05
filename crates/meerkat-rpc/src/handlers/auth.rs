@@ -116,12 +116,10 @@ fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthErr
         // Protected diagnostics only: the public text is fixed.
         tracing::warn!(target: "meerkat::auth", error = %error_value, "auth infrastructure failure");
     }
-    RpcResponse::error_with_data(
-        id,
-        code,
-        error_value.public_message(),
-        serde_json::json!({ "reason": reason }),
-    )
+    match serde_json::to_value(meerkat_contracts::WireAuthErrorData { reason }) {
+        Ok(data) => RpcResponse::error_with_data(id, code, error_value.public_message(), data),
+        Err(_) => RpcResponse::error(id, code, error_value.public_message()),
+    }
 }
 
 /// Effective config the auth-resolution read path consumes.

@@ -938,7 +938,7 @@ jobs:
           [[ "${PARTITIONS}" =~ ^[0-9]+$ ]] && (( PARTITIONS >= 2 )) || { echo "::error::archived lane without a partition count"; exit 1; }
           archive="${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
           list() {
-            cargo nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
+            cargo-nextest nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
               --profile ci-pr --message-format oneline "$@" | LC_ALL=C sort
           }
           list > "${RUNNER_TEMP}/all.txt"
@@ -1021,7 +1021,7 @@ jobs:
           # does not apply outside cargo builds, so its test-thread stack is
           # exported here, and an explicit row stack overrides it.
           export RUST_MIN_STACK="${MIN_STACK:-8388608}"
-          cargo nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-${ARCHIVE}.tar.zst" \
+          cargo-nextest nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-${ARCHIVE}.tar.zst" \
             --workspace-remap "${GITHUB_WORKSPACE}" --partition "${PARTITION}" --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
 

@@ -73,8 +73,14 @@ impl RuntimeDeliveryOwner {
         }
     }
 
+    /// The job store this owner projects from.
+    pub fn job_store(&self) -> Arc<dyn DetachedJobStore> {
+        self.job_store.clone()
+    }
+
     /// Retry blocked sessions when a runtime attachment becomes serving, for
     /// example from [`meerkat_runtime::MeerkatMachine::subscribe_attachment_commits`].
+    /// When this signal closes (its runtime is gone) the owner stops.
     #[must_use]
     pub fn with_attachment_commits(mut self, attachment_commits: watch::Receiver<u64>) -> Self {
         self.attachment_commits = Some(attachment_commits);
@@ -105,15 +111,16 @@ impl RuntimeDeliveryOwner {
             passes,
         }));
         Ok(RuntimeDeliveryOwnerHandle {
-            task,
+            task: Some(task),
             passes: passes_rx,
         })
     }
 }
 
-/// A running owner. Dropping it stops the owner and releases the inbox.
+/// A running owner. Dropping it stops the owner and releases the inbox,
+/// unless it was [detached](Self::detach).
 pub struct RuntimeDeliveryOwnerHandle {
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
     passes: watch::Receiver<RuntimeDeliveryPass>,
 }
 
@@ -130,15 +137,24 @@ impl RuntimeDeliveryOwnerHandle {
         self.passes.clone()
     }
 
-    /// Whether the owner has stopped (its host is gone).
+    /// Whether the owner has stopped (its host or its runtime is gone).
     pub fn is_stopped(&self) -> bool {
-        self.task.is_finished()
+        self.task
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
+    /// Let the owner run on its own until its host or its runtime is gone.
+    pub fn detach(mut self) {
+        self.task = None;
     }
 }
 
 impl Drop for RuntimeDeliveryOwnerHandle {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -214,11 +230,11 @@ async fn run_owner(mut owner: OwnerLoop) {
                 }
             }
             changed = attachment_commit_changed(&mut owner.attachment_commits) => {
-                match changed {
-                    Ok(()) => wake.attachment_commit = true,
-                    // The runtime is gone; no attachment can serve again.
-                    Err(_) => owner.attachment_commits = None,
+                // A closed attachment signal means the runtime is gone.
+                if changed.is_err() {
+                    return;
                 }
+                wake.attachment_commit = true;
             }
         }
     }

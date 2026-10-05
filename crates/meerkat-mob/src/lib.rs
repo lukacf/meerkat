@@ -238,7 +238,6 @@ pub use runtime::DeliveryInputSettleTestRelease;
 pub use runtime::FactoryChainSpawnBasePromptSource;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::MemberInstructionActivationError;
-pub use runtime::MobBeforeActivation;
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};
 pub use runtime::bridge_protocol::{
@@ -338,6 +337,7 @@ pub use runtime::{
     arm_identity_recovery_fail_stop_for_test, member_operator_tool_defs_for_test,
     member_status_deadline_after_snapshot_wait_for_test,
 };
+pub use runtime::{MobBeforeActivation, MobReadHandle};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
 pub use runtime_mode::MobRuntimeMode;

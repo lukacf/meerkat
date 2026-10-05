@@ -2,6 +2,113 @@ use super::*;
 use crate::MemberCreationProvenance;
 
 #[tokio::test]
+async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
+    for (bind_owner, fail_metadata) in [(false, false), (true, false), (true, true)] {
+        let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+        let parent = AgentIdentity::from("operator-parent");
+        handle
+            .spawn(ProfileName::from("worker"), parent.clone(), None)
+            .await
+            .unwrap();
+        let parent_session = handle.resolve_bridge_session_id(&parent).await.unwrap();
+        let dispatcher: Arc<dyn AgentToolDispatcher> =
+            Arc::new(super::super::tools::MobOperatorToolDispatcher::new(
+                handle.clone(),
+                true,
+                generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
+            ));
+        let dispatcher = if bind_owner {
+            match dispatcher
+                .bind_ops_lifecycle(
+                    Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                    parent_session.clone(),
+                )
+                .unwrap()
+            {
+                meerkat_core::agent::BindOutcome::Bound(bound)
+                | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
+            }
+        } else {
+            dispatcher
+        };
+        if fail_metadata {
+            service.fail_persisted_session_metadata_reads_for(parent_session.clone());
+        }
+        for (tool, identity, args) in [
+            (
+                "spawn_member",
+                "single",
+                serde_json::json!({"profile":"worker", "member_id":"single"}),
+            ),
+            (
+                "spawn_many_members",
+                "batch",
+                serde_json::json!({"specs":[{"profile":"worker", "member_id":"batch"}]}),
+            ),
+        ] {
+            let args = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+            dispatcher
+                .dispatch(ToolCallView {
+                    id: "creation-ingress",
+                    name: tool,
+                    args: &args,
+                })
+                .await
+                .unwrap();
+            let session = handle
+                .resolve_bridge_session_id(&AgentIdentity::from(identity))
+                .await
+                .unwrap();
+            let proof = handle
+                .member_creation_for_session(&session)
+                .await
+                .unwrap()
+                .unwrap();
+            if bind_owner && !fail_metadata {
+                assert!(
+                    matches!(proof.creation.provenance, MemberCreationProvenance::Spawn { source }
+                    if source.session_id == parent_session)
+                );
+            } else {
+                assert_eq!(
+                    proof.creation.provenance,
+                    MemberCreationProvenance::Unproven
+                );
+            }
+        }
+        handle.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn member_creation_public_roster_snapshot_cannot_mutate_live_history() {
+    let (handle, _) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("snapshot-member");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .unwrap();
+    let session = handle.resolve_bridge_session_id(&identity).await.unwrap();
+    let before = handle
+        .member_creation_for_session(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut event = handle.events.replay_all().await.unwrap().into_iter()
+        .find(|event| matches!(&event.kind, MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == identity)).unwrap();
+    if let MobEventKind::MemberSpawned(spawned) = &mut event.kind {
+        spawned.creation.creation_id = Some(crate::MemberCreationId::new());
+    }
+    let mut public = handle.roster().await;
+    public.apply(&event);
+    assert_eq!(
+        handle.member_creation_for_session(&session).await.unwrap(),
+        Some(before)
+    );
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn member_creation_source_metadata_fault_remains_an_error() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member = handle
@@ -18,6 +125,24 @@ async fn member_creation_source_metadata_fault_remains_an_error() {
         handle.capture_member_creation_source(session).await,
         Err(crate::MemberCreationError::Session(_))
     ));
+    let fork = handle
+        .fork_member(
+            &AgentIdentity::from("fault-source"),
+            SpawnMemberSpec::new("worker", "fault-child"),
+            None,
+        )
+        .await
+        .expect("optional creation proof must not change ordinary fork admission");
+    assert_eq!(
+        handle
+            .member_creation_for_session(&fork.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .creation
+            .provenance,
+        MemberCreationProvenance::Unproven,
+    );
     handle.shutdown().await.unwrap();
 }
 
@@ -90,7 +215,7 @@ async fn member_creation_unproven_boundary_and_context_forks_are_not_roots() {
         .unwrap();
     assert_eq!(
         boundary.creation.provenance,
-        MemberCreationProvenance::LegacyUnknown
+        MemberCreationProvenance::Unproven
     );
     assert!(boundary.fork_source.is_none());
     let context = handle
@@ -118,7 +243,7 @@ async fn member_creation_unproven_boundary_and_context_forks_are_not_roots() {
         .unwrap();
     assert_eq!(
         context.creation.provenance,
-        MemberCreationProvenance::LegacyUnknown
+        MemberCreationProvenance::Unproven
     );
     handle.shutdown().await.unwrap();
 }
@@ -167,8 +292,8 @@ async fn member_creation_runtime_fork_spawn_and_respawn_keep_exact_authority() {
         .unwrap();
     assert!(
         matches!(&child_proof.creation.provenance, MemberCreationProvenance::Spawn { source }
-        if source.session_id == parent_session && Some(source.creation_id) == parent_proof.creation.creation_id
-        && source.tool_access_policy == Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly))
+                if source.session_id == parent_session && Some(source.creation_id) == parent_proof.creation.creation_id
+        )
     );
     assert!(child_proof.fork_source.is_none());
 
@@ -188,7 +313,7 @@ async fn member_creation_runtime_fork_spawn_and_respawn_keep_exact_authority() {
         .unwrap();
     assert!(
         matches!(fork_proof.creation.provenance, MemberCreationProvenance::Fork {
-        source_creation_id, source_tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly),
+        source_creation_id,
     } if Some(source_creation_id) == parent_proof.creation.creation_id)
     );
     assert_eq!(
@@ -379,10 +504,15 @@ async fn member_creation_cold_resume_projects_recovered_binding_immediately() {
         .await
         .unwrap();
     let preview = retained.read().await.clone().unwrap();
-    for handle in [&resumed, &preview] {
+    for handle in [resumed.read_handle(), preview] {
         assert_eq!(
-            handle.resolve_bridge_session_id(&identity).await.unwrap(),
-            replacement.session_id
+            handle
+                .get_member(&identity)
+                .await
+                .unwrap()
+                .unwrap()
+                .bridge_session_id(),
+            Some(&replacement.session_id)
         );
         let recovered = handle
             .member_creation_for_session(&replacement.session_id)

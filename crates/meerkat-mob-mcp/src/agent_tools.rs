@@ -498,28 +498,36 @@ impl AgentMobToolSurface {
     /// Capture the authenticated source's immutable creation facts, including
     /// when it delegates into another mob. Arguments never select the source.
     async fn capture_creation_source(
-        &self,
+        state: Arc<MobMcpState>,
+        owner_bridge_session_id: SessionId,
+    ) -> meerkat_mob::MemberCreationSourceWitness {
+        Self::try_capture_creation_source(&state, &owner_bridge_session_id)
+            .await
+            .unwrap_or_else(|_| meerkat_mob::MemberCreationSourceWitness::unavailable())
+    }
+
+    async fn try_capture_creation_source(
+        state: &MobMcpState,
+        owner_bridge_session_id: &SessionId,
     ) -> Result<meerkat_mob::MemberCreationSourceWitness, MobError> {
         // A nonpersistent service may derive this read through the current
         // session task, which is waiting for this tool. It has no durable
         // source authority to capture, so do not enter that read at all.
-        if !self.state.session_service().supports_persistent_sessions() {
+        if !state.session_service().supports_persistent_sessions() {
             return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
         }
-        let view = self
-            .state
+        let view = state
             .session_service()
-            .load_persisted_session_metadata(&self.owner_bridge_session_id)
+            .load_persisted_session_metadata(owner_bridge_session_id)
             .await?;
         let Some(binding) = view.as_ref().and_then(|view| view.mob_member_binding()) else {
             return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
         };
-        let source = self
-            .state
+        let source = state
             .handle_for(&MobId::from(binding.mob_id.as_str()))
             .await?;
         match source
-            .capture_member_creation_source(&self.owner_bridge_session_id)
+            .capture_member_creation_source(owner_bridge_session_id)
             .await
         {
             Ok(witness) => Ok(witness),
@@ -1062,10 +1070,13 @@ impl AgentMobToolSurface {
         };
         let mut request = DelegationExecutionRequest::new(identity.clone(), args.task, result_spec);
         let mut member = DelegationMemberOptions::default();
+        let source_state = Arc::clone(&self.state);
+        let source_session = self.owner_bridge_session_id.clone();
         member.creation_source = Some(
-            self.capture_creation_source()
-                .await
-                .map_err(|error| Self::map_mob_error(call, error))?,
+            meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+                Self::capture_creation_source(source_state, source_session).await
+            })
+            .await,
         );
         member.placement = lower_wire_placement(args.placement);
         member.additional_instructions = args.additional_instructions.map(|value| vec![value]);
@@ -1812,15 +1823,20 @@ impl AgentMobToolSurface {
         // worker-stack budget).
         let handle = handle.clone();
         let owner_bridge_session_id = self.owner_bridge_session_id.clone();
-        Box::pin(async move {
-            let spec = spec.with_creation_source(self.capture_creation_source().await?);
-            meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+        let source_state = Arc::clone(&self.state);
+        Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
+            move || async move {
+                let source =
+                    Self::capture_creation_source(source_state, owner_bridge_session_id.clone())
+                        .await;
                 handle
-                    .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id)
+                    .spawn_spec_with_generated_owner_context(
+                        spec.with_creation_source(source),
+                        owner_bridge_session_id,
+                    )
                     .await
-            })
-            .await
-        })
+            },
+        ))
     }
 
     async fn dispatch_conclude_objective(

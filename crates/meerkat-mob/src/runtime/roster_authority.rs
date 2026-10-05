@@ -69,7 +69,7 @@ impl RosterAuthority {
     }
 
     pub(crate) fn record_creation_event(&mut self, event: &MobEvent) {
-        std::sync::Arc::make_mut(&mut self.roster.creation_history).observe(event);
+        self.roster.creation_history.observe(event);
     }
 
     pub(crate) fn member_creation_for_session(

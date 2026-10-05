@@ -4,7 +4,7 @@
 //! intersect every edge with their current access policy. Fork endpoints remain
 //! owned by `MemberSpawnedEvent::fork_source`.
 
-use meerkat_core::{MobMemberBinding, SessionId, ops::ToolAccessPolicy};
+use meerkat_core::{MobMemberBinding, SessionId};
 use serde::{Deserialize, Serialize};
 
 /// A runtime-issued creation token. Restoring a session preserves this token;
@@ -31,9 +31,6 @@ pub struct MemberCreationSource {
     pub session_id: SessionId,
     pub member_binding: MobMemberBinding,
     pub creation_id: MemberCreationId,
-    /// Effective policy at delegation. `None` means unrestricted. `Inherit`
-    /// is never a valid captured policy; resolve it before issuing a witness.
-    pub tool_access_policy: Option<ToolAccessPolicy>,
 }
 
 /// Creation provenance. Missing old fields are unknown, never proven roots.
@@ -47,7 +44,6 @@ pub enum MemberCreationProvenance {
     /// The exact source binding/session is the event's existing `fork_source`.
     Fork {
         source_creation_id: MemberCreationId,
-        source_tool_access_policy: Option<ToolAccessPolicy>,
     },
     /// Runtime-authorized respawn of the same logical member. Follow this
     /// exact predecessor to recover ancestry; this is not a delegation edge.
@@ -56,6 +52,9 @@ pub enum MemberCreationProvenance {
         predecessor_member_binding: MobMemberBinding,
         predecessor_creation_id: MemberCreationId,
     },
+    /// This creation happened under the current runtime, but its ancestry
+    /// could not be proved. Consumers must not infer inherited authority.
+    Unproven,
     #[default]
     LegacyUnknown,
 }
@@ -88,11 +87,6 @@ impl MemberCreationSnapshot {
         if id.0.is_nil() || self.birth_cursor == 0 {
             return false;
         }
-        let resolved = |policy: &Option<ToolAccessPolicy>| {
-            policy.as_ref().is_none_or(|policy| {
-                meerkat_core::ToolExecutionPolicy::resolve(policy.clone()).is_ok()
-            })
-        };
         match &self.creation.provenance {
             MemberCreationProvenance::Root => self.fork_source.is_none(),
             MemberCreationProvenance::Spawn { source } => {
@@ -100,18 +94,13 @@ impl MemberCreationSnapshot {
                     && source.session_id != self.session_id
                     && source.creation_id != id
                     && !source.creation_id.0.is_nil()
-                    && resolved(&source.tool_access_policy)
             }
-            MemberCreationProvenance::Fork {
-                source_creation_id,
-                source_tool_access_policy,
-            } => {
+            MemberCreationProvenance::Fork { source_creation_id } => {
                 self.fork_source
                     .as_ref()
                     .is_some_and(|source| source.source_session_id != self.session_id)
                     && *source_creation_id != id
                     && !source_creation_id.0.is_nil()
-                    && resolved(source_tool_access_policy)
             }
             MemberCreationProvenance::Successor {
                 predecessor_session_id,
@@ -124,7 +113,7 @@ impl MemberCreationSnapshot {
                     && predecessor_member_binding.mob_id == self.member_binding.mob_id
                     && predecessor_member_binding.member == self.member_binding.member
             }
-            MemberCreationProvenance::LegacyUnknown => true,
+            MemberCreationProvenance::Unproven | MemberCreationProvenance::LegacyUnknown => true,
         }
     }
 }
@@ -135,6 +124,15 @@ impl MemberCreationSnapshot {
 pub struct MemberCreationSourceWitness {
     pub(crate) source: Option<MemberCreationSource>,
     pub(crate) successor: bool,
+}
+
+/// Host construction and agent ingress are explicit even without a witness.
+/// Only trusted host constructors issue `HostRoot`; agent ingress replaces it.
+#[derive(Debug, Clone)]
+pub(crate) enum MemberCreationOrigin {
+    HostRoot,
+    Source(MemberCreationSourceWitness),
+    Unproven,
 }
 
 impl MemberCreationSourceWitness {
@@ -163,14 +161,18 @@ pub enum MemberCreationError {
 
 /// Read index of immutable journal facts. Only committed event projection
 /// populates this index; it is never a second persistence or write authority.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MemberCreationProjection {
-    entries: std::collections::BTreeMap<uuid::Uuid, Option<MemberCreationSnapshot>>,
+    // Shared only by internal canonical replay/commit projections. Public
+    // roster snapshots are rebuilt from entries with independent history.
+    // No await or external call occurs under this lock.
+    entries:
+        std::sync::RwLock<std::collections::BTreeMap<uuid::Uuid, Option<MemberCreationSnapshot>>>,
 }
 
 impl MemberCreationProjection {
     pub(crate) fn recover_binding(
-        &mut self,
+        &self,
         mob_id: &crate::MobId,
         recovered: &crate::event::MemberSessionBindingRecoveredEvent,
         previous: Option<&crate::roster::RosterEntry>,
@@ -183,7 +185,7 @@ impl MemberCreationProjection {
             .and_then(|entry| entry.bridge_session_id())
             .and_then(|source_session| self.get(source_session).ok().flatten());
         let Some(previous) = snapshot else {
-            self.entries.insert(session_id.0, None);
+            self.poison(session_id);
             return;
         };
         if previous.session_id == *session_id {
@@ -211,13 +213,13 @@ impl MemberCreationProjection {
             || snapshot.member_binding.member != recovered.agent_identity.as_str()
             || !snapshot.coherent()
         {
-            self.entries.insert(session_id.0, None);
+            self.poison(session_id);
             return;
         }
         self.insert(snapshot);
     }
 
-    pub(crate) fn observe(&mut self, event: &crate::MobEvent) {
+    pub(crate) fn observe(&self, event: &crate::MobEvent) {
         let crate::MobEventKind::MemberSpawned(spawned) = &event.kind else {
             return;
         };
@@ -230,7 +232,7 @@ impl MemberCreationProjection {
         let Ok(Some(mut snapshot)) =
             select_creation_snapshot(std::slice::from_ref(event), &event.mob_id, session_id)
         else {
-            self.entries.insert(session_id.0, None);
+            self.poison(session_id);
             return;
         };
         if let MemberCreationProvenance::Successor {
@@ -245,7 +247,7 @@ impl MemberCreationProjection {
                     && previous.member_binding == *predecessor_member_binding
                     && previous.birth_cursor < event.cursor
             }) else {
-                self.entries.insert(session_id.0, None);
+                self.poison(session_id);
                 return;
             };
             snapshot.birth_cursor = previous.birth_cursor;
@@ -253,8 +255,18 @@ impl MemberCreationProjection {
         self.insert(snapshot);
     }
 
-    fn insert(&mut self, snapshot: MemberCreationSnapshot) {
-        match self.entries.entry(snapshot.session_id.0) {
+    fn poison(&self, session_id: &SessionId) {
+        if let Ok(mut entries) = self.entries.write() {
+            entries.insert(session_id.0, None);
+        }
+        // A poisoned lock stays poisoned and every read reports the fault.
+    }
+
+    fn insert(&self, snapshot: MemberCreationSnapshot) {
+        let Ok(mut entries) = self.entries.write() else {
+            return;
+        };
+        match entries.entry(snapshot.session_id.0) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(Some(snapshot));
             }
@@ -275,7 +287,10 @@ impl MemberCreationProjection {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<MemberCreationSnapshot>, MemberCreationError> {
-        match self.entries.get(&session_id.0) {
+        let entries = self.entries.read().map_err(|_| {
+            MemberCreationError::Unavailable("member creation history lock poisoned")
+        })?;
+        match entries.get(&session_id.0) {
             Some(Some(snapshot)) => Ok(Some(snapshot.clone())),
             Some(None) => Err(MemberCreationError::Unavailable(
                 "conflicting session history",
@@ -414,7 +429,7 @@ mod tests {
     fn conflicting_session_history_is_poisoned_and_cannot_be_repaired_by_later_duplicate() {
         let session = SessionId::new();
         let original = created(&session, MemberCreationId::new());
-        let mut index = MemberCreationProjection::default();
+        let index = MemberCreationProjection::default();
         index.observe(&original);
         index.observe(&created(&session, MemberCreationId::new()));
         index.observe(&original);
@@ -461,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_successor_ancestor_and_unresolved_policy_fail_closed() {
+    fn missing_successor_ancestor_and_unproven_without_token_fail_closed() {
         let session = SessionId::new();
         let id = MemberCreationId::new();
         let mut event = created(&session, id);
@@ -477,7 +492,7 @@ mod tests {
             },
             predecessor_creation_id: id,
         };
-        let mut index = MemberCreationProjection::default();
+        let index = MemberCreationProjection::default();
         index.observe(&event);
         assert!(index.get(&session).is_err());
 
@@ -486,17 +501,9 @@ mod tests {
         let MobEventKind::MemberSpawned(spawned) = &mut event.kind else {
             unreachable!()
         };
-        spawned.creation.provenance = MemberCreationProvenance::Spawn {
-            source: MemberCreationSource {
-                session_id: SessionId::new(),
-                member_binding: MobMemberBinding {
-                    mob_id: "test".into(),
-                    role: "worker".into(),
-                    member: "parent".into(),
-                },
-                creation_id: MemberCreationId::new(),
-                tool_access_policy: Some(ToolAccessPolicy::Inherit),
-            },
+        spawned.creation = MemberCreationRecord {
+            creation_id: None,
+            provenance: MemberCreationProvenance::Unproven,
         };
         index.observe(&event);
         assert!(index.get(&session).is_err());
@@ -507,6 +514,7 @@ mod tests {
         let record: MemberCreationRecord = Default::default();
         assert!(record.creation_id.is_none());
         assert_eq!(record.provenance, MemberCreationProvenance::LegacyUnknown);
+        assert_ne!(record.provenance, MemberCreationProvenance::Unproven);
         let session = SessionId::new();
         let original = created(&session, MemberCreationId::new());
         let mut migrated = original.clone();
@@ -514,7 +522,7 @@ mod tests {
             unreachable!()
         };
         spawned.role = ProfileName::from("analyst");
-        let mut index = MemberCreationProjection::default();
+        let index = MemberCreationProjection::default();
         index.observe(&original);
         index.observe(&migrated);
         assert_eq!(
@@ -538,7 +546,6 @@ mod tests {
         spawned.agent_runtime_id = crate::AgentRuntimeId::initial(spawned.agent_identity.clone());
         spawned.creation.provenance = MemberCreationProvenance::Fork {
             source_creation_id: source_id,
-            source_tool_access_policy: Some(ToolAccessPolicy::ReadOnly),
         };
         spawned.fork_source = Some(meerkat_core::ForkBuildSource::new(
             MobMemberBinding {
@@ -569,7 +576,7 @@ mod tests {
         );
         assert!(
             matches!(snapshot.creation.provenance, MemberCreationProvenance::Fork {
-            source_creation_id, source_tool_access_policy: Some(ToolAccessPolicy::ReadOnly),
+            source_creation_id,
         } if source_creation_id == source_id)
         );
     }

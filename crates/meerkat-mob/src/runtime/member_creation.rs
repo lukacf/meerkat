@@ -25,7 +25,7 @@ impl super::MobHandle {
     }
 
     /// Capture a sealed source witness from a currently bound member and its
-    /// persisted effective tool policy. The witness can accompany a spawn in
+    /// persisted member binding. The witness can accompany a spawn in
     /// another mob; no comms label or model-supplied parent is consulted.
     pub async fn capture_member_creation_source(
         &self,
@@ -83,19 +83,12 @@ impl super::MobHandle {
                 "source metadata binding disagrees",
             ));
         }
-        let policy = metadata.tooling.tool_access_policy;
-        if let Some(policy) = policy.as_ref() {
-            meerkat_core::ToolExecutionPolicy::resolve(policy.clone()).map_err(|_| {
-                MemberCreationError::Unavailable("source tool policy is unresolved")
-            })?;
-        }
         Ok(MemberCreationSourceWitness {
             successor: false,
             source: Some(MemberCreationSource {
                 session_id: session_id.clone(),
                 member_binding: binding,
                 creation_id,
-                tool_access_policy: policy,
             }),
         })
     }

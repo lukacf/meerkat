@@ -454,9 +454,10 @@ original token and birth cursor and records its exact predecessor binding.
 | Provenance | Meaning |
 |---|---|
 | `Root` | The runtime attests an independent creation with no delegated ancestor. |
-| `Spawn` | An exact source session, typed member binding, creation token and captured effective tool policy establish a spawn edge. |
-| `Fork` | The existing `fork_source` owns the source endpoint; the creation record adds its token and captured effective tool policy. |
+| `Spawn` | An exact source session, typed member binding and creation token establish a spawn edge. |
+| `Fork` | The existing `fork_source` owns the source endpoint; the creation record adds its token. |
 | `Successor` | An exact predecessor proves continuity of the same logical member, not a new delegation edge. |
+| `Unproven` | A new creation has a token, but complete ancestry cannot be proved. This does not prevent ordinary member execution. |
 | `LegacyUnknown` | The runtime cannot prove complete ancestry. An absent old field never becomes a root. |
 
 Historical creation facts remain in the existing journal-backed roster
@@ -467,18 +468,20 @@ caller. Hosts must independently validate its current session/member binding.
 Conflicting history is an error, not evidence that an ancestor is absent.
 
 `MobHandle::capture_member_creation_source` issues a sealed process-local
-`MemberCreationSourceWitness` after checking the current binding and persisted
-effective tool policy. Agent arguments, transcript text and comms labels cannot
+`MemberCreationSourceWitness` after checking the current and persisted typed
+binding. Agent arguments, transcript text and comms labels cannot
 construct that witness. Unsupported source authority remains unknown. A
-delegation edge records an authority ceiling; it never grants execution rights
-or resource access. Current tool execution policy and host access policy still
-apply to every call.
+delegation edge records ancestry only; it never grants execution rights or
+resource access and carries no serialized tool policy. Current tool execution
+policy and host access policy still apply to every call. Optional consumers
+that need a source policy ceiling must read it through the native session API;
+missing proof cannot be interpreted as unrestricted access.
 
 Trusted hosts can install `MobBuilder::before_activation` to bind optional
 services before fresh or restored members execute. The `MobBeforeActivation`
-callback receives a handle backed by the same roster and lifecycle watch as
-the eventual public handle. Read-only direct authority queries are available;
-the callback must not wait for actor commands because the actor has not started.
+callback receives a `MobReadHandle` backed by the same roster and lifecycle
+watch as the eventual public handle. Only direct read operations are exposed;
+the type cannot submit actor commands while the actor has not started.
 A callback error aborts bootstrap. Hosts must discard provisional service
 bindings if a later bootstrap step fails. With no callback configured, no host
 hook runs.

@@ -37,11 +37,6 @@ them.
 
 ### Breaking
 
-- `meerkat_mob::event::MemberSpawnedEvent` gains the public `creation` field.
-  Rust struct initializers must supply a `MemberCreationRecord`. Journals
-  without that field remain readable as unknown provenance with no creation
-  token; replay never invents an ancestor or a proven root.
-
 - Connector OAuth (#1631; see Added) changes these Rust types:
   - `PersistedAuthMode` gains `ConnectorOauth`.
   - `CredentialMutationError` gains `SlotRefused(CredentialSlotRefusal)`.
@@ -60,6 +55,9 @@ them.
 
 ### Added
 
+- `meerkat_mob::event::MemberSpawnedEvent` gains the public `creation` field.
+  Journals without that field remain readable as unknown provenance with no
+  creation token; replay never invents an ancestor or a proven root.
 - `meerkat-mob` records runtime-issued member creation identities and exact
   spawn, fork and successor provenance in the existing member-created journal.
   `MemberCreationId`, `MemberCreationRecord`, `MemberCreationProvenance`,
@@ -67,9 +65,12 @@ them.
   and `MemberCreationError` expose those facts. `MobHandle` can read historical
   creation facts and capture a sealed source witness before delegation. These
   facts prove ancestry, not permission to execute tools or access a resource.
+  New unproven ancestry is distinct from missing legacy data, and a provenance
+  read failure does not prevent ordinary spawn, fork or delegation execution.
 - `MobBuilder::before_activation` accepts a `MobBeforeActivation` host hook
   before fresh or restored members execute. Hosts can bind optional services
   to the current roster and session authority before the first tool call.
+  Its `MobReadHandle` exposes direct reads and no actor commands.
   A failed hook aborts startup; no hook runs unless explicitly configured.
 
 - Generic connector OAuth (#1631). A trusted host names a credential slot

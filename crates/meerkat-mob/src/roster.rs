@@ -203,7 +203,7 @@ impl Roster {
     pub fn apply(&mut self, event: &MobEvent) {
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
-                std::sync::Arc::make_mut(&mut self.creation_history).observe(event);
+                self.creation_history.observe(event);
                 // Fail closed on a malformed spawn event: a member with no
                 // bridge member ref cannot be admitted with a real backend
                 // identity, so skip the projection rather than fabricate a
@@ -291,7 +291,7 @@ impl Roster {
                 }
             }
             MobEventKind::MemberSessionBindingRecovered(recovered) => {
-                std::sync::Arc::make_mut(&mut self.creation_history).recover_binding(
+                self.creation_history.recover_binding(
                     &event.mob_id,
                     recovered,
                     self.entries.get(&recovered.agent_identity),

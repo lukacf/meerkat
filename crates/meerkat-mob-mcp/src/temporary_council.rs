@@ -2491,7 +2491,8 @@ impl CouncilRun {
             let mut spec = SpawnMemberSpec::new(
                 custody.target_profile.clone(),
                 custody.target_identity.clone(),
-            );
+            )
+            .with_creation_source(meerkat_mob::MemberCreationSourceWitness::unavailable());
             // A council drives explicit bounded turns, so the seated branch is
             // turn-driven regardless of the template profile's mode: an
             // autonomous inbox loop cannot serve a tracked bounded turn.

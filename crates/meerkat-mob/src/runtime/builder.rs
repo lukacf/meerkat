@@ -504,15 +504,15 @@ pub(super) fn recovered_peer_only_overlay_allows_trust_reconcile(
 // ---------------------------------------------------------------------------
 
 /// Host binding hook called once during create or cold resume, before members
-/// can execute. The handle is not yet published: use the hook to bind host
-/// services, not to submit actor commands or start work. An error aborts startup.
+/// can execute. The read-only handle exposes no actor commands. Use the hook
+/// to bind host services; an error aborts startup.
 ///
 /// Hosts must discard bindings if a later bootstrap step fails. No hook runs
 /// unless one was explicitly installed with [`MobBuilder::before_activation`].
 #[cfg(not(target_arch = "wasm32"))]
 pub type MobBeforeActivation = Arc<
     dyn Fn(
-            MobHandle,
+            super::MobReadHandle,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MobError>> + Send>>
         + Send
@@ -521,7 +521,9 @@ pub type MobBeforeActivation = Arc<
 /// Host binding hook called before member execution on create or cold resume.
 #[cfg(target_arch = "wasm32")]
 pub type MobBeforeActivation = Arc<
-    dyn Fn(MobHandle) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MobError>>>>
+    dyn Fn(
+            super::MobReadHandle,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MobError>>>>
         + Send
         + Sync,
 >;
@@ -6961,8 +6963,8 @@ impl MobBuilder {
 
     /// Bind host services before any newly created or restored member can run.
     /// The callback receives the same roster and session authority used by the
-    /// eventual public handle. It must not wait for actor commands, because the
-    /// actor starts only after bootstrap succeeds. A failure aborts bootstrap.
+    /// eventual public handle. It exposes only direct read operations because
+    /// the actor starts after bootstrap succeeds. A failure aborts bootstrap.
     pub fn before_activation(mut self, hook: MobBeforeActivation) -> Self {
         self.before_activation = Some(hook);
         self
@@ -7843,7 +7845,7 @@ impl MobBuilder {
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
             if let Some(hook) = before_activation {
-                hook(preview_handle.clone()).await?;
+                hook(preview_handle.read_handle()).await?;
             }
 
             let seeded_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
@@ -9912,7 +9914,7 @@ impl MobBuilder {
                 per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
             if let Some(hook) = before_activation {
-                hook(handle.clone()).await?;
+                hook(handle.read_handle()).await?;
             }
             // Row #320: the orphan budget is MobMachine state (seeded once in
             // `start_runtime` from `definition.limits.max_orphaned_turns`); the

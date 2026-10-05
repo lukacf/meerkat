@@ -350,7 +350,10 @@ impl ForkBuildInheritance {
             external_tools_origin,
         } = self;
         spec.fork_source = Some(source);
-        spec.creation_source = creation_source;
+        spec.creation_origin = creation_source.map_or(
+            crate::member_creation::MemberCreationOrigin::Unproven,
+            crate::member_creation::MemberCreationOrigin::Source,
+        );
         spec.fork_overlay = match (spec.external_tools.is_some(), external_tools_origin) {
             (true, _) => ForkOverlayOrigin::Caller,
             (false, RetainedOverlayOrigin::Inherited) => ForkOverlayOrigin::Source,

@@ -230,6 +230,7 @@ mod live_bridge_operation;
 mod member_creation;
 #[cfg(any(test, feature = "test-support"))]
 mod member_status_test_support;
+mod read_handle;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use handle::ForkSupervisorExitForTest;
@@ -470,6 +471,7 @@ pub use member_live_proxy::MemberLiveStatusDomain;
 pub use mobpack_execution::run_mobpack_callable;
 pub use mobpack_execution::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
+pub use read_handle::MobReadHandle;
 pub use reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
     ReconcileStage,

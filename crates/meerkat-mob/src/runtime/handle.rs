@@ -5580,7 +5580,7 @@ pub struct SpawnMemberSpec {
     /// without holding manage scope over the whole mob. Never taken from
     /// caller-supplied arguments.
     pub(crate) spawned_by: Option<AgentIdentity>,
-    pub(crate) creation_source: Option<crate::MemberCreationSourceWitness>,
+    pub(crate) creation_origin: crate::member_creation::MemberCreationOrigin,
     pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed lineage of a fork-derived member, carried into its seating build
     /// as `SessionBuildOptions::fork_source`. Set only when the runtime applies
@@ -5649,9 +5649,18 @@ impl std::fmt::Debug for SpawnMemberSpec {
 }
 
 impl SpawnMemberSpec {
+    fn mark_agent_creation(&mut self) {
+        if matches!(
+            self.creation_origin,
+            crate::member_creation::MemberCreationOrigin::HostRoot
+        ) {
+            self.creation_origin = crate::member_creation::MemberCreationOrigin::Unproven;
+        }
+    }
+
     /// Attach exact runtime-proven parent ancestry to a child launch.
     pub fn with_creation_source(mut self, source: crate::MemberCreationSourceWitness) -> Self {
-        self.creation_source = Some(source);
+        self.creation_origin = crate::member_creation::MemberCreationOrigin::Source(source);
         self
     }
 
@@ -5686,7 +5695,7 @@ impl SpawnMemberSpec {
             placement: None,
             forked_participant_attachment: None,
             spawned_by: None,
-            creation_source: None,
+            creation_origin: crate::member_creation::MemberCreationOrigin::HostRoot,
             fork_job: None,
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
@@ -10497,9 +10506,15 @@ impl MobHandle {
 
     pub(crate) async fn spawn_spec_internal_with_source(
         &self,
-        spec: SpawnMemberSpec,
+        mut spec: SpawnMemberSpec,
         spawn_source: SpawnSource,
     ) -> Result<MemberRef, MobError> {
+        if matches!(
+            self.command_authority_kind(),
+            crate::control_policy::CommandAuthorityKind::AgentLane
+        ) {
+            spec.mark_agent_creation();
+        }
         let spawn_source = SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode);
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
@@ -10624,10 +10639,11 @@ impl MobHandle {
 
     pub(super) async fn spawn_spec_receipt_with_owner_context_and_source(
         &self,
-        spec: SpawnMemberSpec,
+        mut spec: SpawnMemberSpec,
         owner_context: CanonicalOpsOwnerContext,
         spawn_source: SpawnSource,
     ) -> Result<MemberSpawnReceipt, MobError> {
+        spec.mark_agent_creation();
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
                 spawn_source: SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode),
@@ -14410,10 +14426,7 @@ impl MobHandle {
         );
         let creation_source = match self.capture_member_creation_source(source_session_id).await {
             Ok(witness) => witness,
-            Err(crate::MemberCreationError::Unavailable(_)) => {
-                crate::MemberCreationSourceWitness::unavailable()
-            }
-            Err(error) => return Err(MobError::Internal(error.to_string())),
+            Err(_) => crate::MemberCreationSourceWitness::unavailable(),
         };
         let mut inheritance = super::ForkBuildInheritance::new(
             source,
@@ -15181,7 +15194,8 @@ impl MobHandle {
             objective_id: options.objective_id,
             ..MemberTurnOptions::default()
         };
-        let mut spec = SpawnMemberSpec::new(profile_name, identity);
+        let mut spec = SpawnMemberSpec::new(profile_name, identity)
+            .with_creation_source(crate::MemberCreationSourceWitness::unavailable());
         // The task is admitted explicitly through the exact internal work
         // carrier after provisioning, so no deferred initial turn may exist.
         spec.initial_message = None;

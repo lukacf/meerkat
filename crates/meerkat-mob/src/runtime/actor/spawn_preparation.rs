@@ -95,7 +95,7 @@ pub(super) struct SpawnPreparationCarry {
         oneshot::Sender<Result<super::super::handle::MemberSpawnReceipt, MobError>>,
     pub(super) suppress_autonomous_initial_prompt: bool,
     pub(super) spawned_by: Option<AgentIdentity>,
-    pub(super) creation_source: Option<crate::MemberCreationSourceWitness>,
+    pub(super) creation_origin: crate::member_creation::MemberCreationOrigin,
     pub(super) fork_job: Option<crate::runtime::ForkJobRecord>,
     pub(super) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(super) fork_overlay: super::super::ForkOverlayOrigin,

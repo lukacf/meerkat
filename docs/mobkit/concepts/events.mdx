@@ -154,14 +154,16 @@ The projection uses `event_id: "mob-evt-{cursor}"`, preserves the upstream curso
 The `member_spawned` structural payload includes `creation`, a
 `MemberCreationRecord` from the canonical Meerkat journal. Its `creation_id`
 is a runtime-issued token; its `provenance.kind` is `root`, `spawn`, `fork`,
-`successor` or `legacy_unknown`. Spawn provenance records the exact source
+`successor`, `unproven` or `legacy_unknown`. Spawn provenance records the exact source
 session and member binding. Fork provenance refers to the event's existing
 `fork_source` endpoint instead of introducing a second source endpoint.
 
 Older journals that omit `creation` deserialize with `creation_id: null` and
 `provenance.kind: "legacy_unknown"`. Projection never fabricates a token or
 turns missing ancestry into a proven root. Consumers must handle unknown
-provenance explicitly. These facts establish runtime ancestry only; resource
+provenance explicitly. New creations whose ancestry cannot be proved use
+`unproven` with a new token; ordinary member execution can still proceed.
+These facts establish runtime ancestry only and contain no tool policy; resource
 ACLs and current tool execution policy remain separate checks. See the
 [member creation contract](/reference/session-contracts#member-creation-provenance-and-host-activation).
 

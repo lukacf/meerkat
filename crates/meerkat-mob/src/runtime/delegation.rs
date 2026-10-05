@@ -823,7 +823,7 @@ impl DelegationExecutionService {
             "delegation service resolved member role"
         );
         let mut spec = SpawnMemberSpec::new(role, identity.clone());
-        spec.creation_source = Some(
+        spec.creation_origin = crate::member_creation::MemberCreationOrigin::Source(
             member
                 .creation_source
                 .unwrap_or_else(crate::MemberCreationSourceWitness::unavailable),

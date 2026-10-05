@@ -6323,7 +6323,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
-                        let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity);
+                        let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity)
+                            .with_creation_source(
+                                meerkat_mob::MemberCreationSourceWitness::unavailable(),
+                            );
                         s.initial_message = spec
                             .initial_message
                             .map(agent_input::decode_agent_content_input)

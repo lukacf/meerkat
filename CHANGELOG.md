@@ -38,7 +38,9 @@ them.
 ### Breaking
 
 - Connector OAuth (#1631; see Added) changes these Rust types:
-  - `PersistedAuthMode` gains `ConnectorOauth`.
+  - `PersistedAuthMode` gains `ConnectorOauth` before `ExternalTokens`, so
+    the implicit discriminants of `PersistedAuthMode::*` after it shift
+    (`ExternalTokens`, `ExternalAuthorizer`, `Command`).
   - `CredentialMutationError` gains `SlotRefused(CredentialSlotRefusal)`.
   - `RefreshError` gains `RequiredScopesNotGranted`.
   - `ConnectorOAuthParameters::expected_account` is an `AccountSelection`
@@ -47,8 +49,13 @@ them.
   - `OAuthFlowRecord` and `PersistedOAuthBrowserFlow` gain `nonce`.
   - `OAuthFlowRegistry::insert_browser_flow_with_pruned` takes the nonce,
     and `insert_restored_browser_flow` takes the whole `OAuthFlowRecord`.
-  - `LoginCancelParams` and `WireLoginCancelled` become target unions
-    (`Mcp` or `Connector`).
+  - `LoginCancelParams` changes from a struct to a target union
+    (`Mcp(McpLoginCancelParams)` or `Connector(ConnectorLoginCancelParams)`),
+    and `WireLoginCancelled` replaces its `mcp` field with a flattened
+    `target` (`WireLoginCancelledTarget`: `Mcp` or `Connector`).
+  - `WireLoginTarget`, `WireLoginStartTarget`, `WireLoginReadyTarget`,
+    `AuthStatusParams` and `WireAuthStatusResult` gain a `Connector` variant.
+  - `HostAuthError` gains `Connector` and `ConnectorTarget`.
 
   The JSON of MCP cancel requests and results is unchanged.
 
@@ -283,6 +290,12 @@ them.
   runs on main. It now checks the rebuilt index cardinality and the exact
   durable texts (780/780 under serial and 48-way stress).
 
+- A `meerkat-mob` reload-lane test
+  (`queued_reload_and_predecessor_settle_before_topology_acquires_graph_fence`)
+  no longer flakes: its trust gate parks only topology's own trust source, so
+  a member's comms-drain startup publish can no longer be caught as a
+  topology mutation, and the test pins that this publish lands after
+  readiness (#1755, for #1748).
 - The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
   - Four workers spawn at once while a member's turn runs.
   - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
@@ -323,6 +336,11 @@ them.
   audio over the user's last word while its transcript kept the whole answer
   (#1717). The browser peer counts decoded speech before its playback gate,
   so no duck causes it.
+- The Turbo S S97 and S99 live scenarios record their journal timeline, the
+  evidence the provider-degradation lag rule reads, before a panic is
+  re-raised, so a run that fails by panic stays classifiable. Previously the
+  unwind finished the journal first and the timeline write was refused
+  (#1774, for #1765).
 
 ## [0.8.51] - 2026-10-05
 

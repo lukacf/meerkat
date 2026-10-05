@@ -5,6 +5,7 @@
 //! its exact state with CAS and atomically insert opaque inbox rows.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -316,7 +317,59 @@ pub struct RuntimeDeliveryInbox {
     /// Runtimes that received a newly committed row since the last
     /// [`Self::take_committed_runtimes`], shared by all clones.
     committed_runtimes: Arc<Mutex<HashSet<LogicalRuntimeId>>>,
+    /// Whether a [`RuntimeDeliveryOwnership`] is outstanding, shared by all
+    /// clones.
+    owner_claimed: Arc<AtomicBool>,
 }
+
+/// Exclusive delivery ownership of one [`RuntimeDeliveryInbox`].
+///
+/// At most one ownership exists per inbox (across its clones) at a time; it
+/// is released when dropped. Only the owner takes the runtimes of new
+/// commits, so a second consumer can never steal another's wakeups.
+pub struct RuntimeDeliveryOwnership {
+    inbox: RuntimeDeliveryInbox,
+}
+
+impl std::fmt::Debug for RuntimeDeliveryOwnership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeDeliveryOwnership")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeDeliveryOwnership {
+    pub fn inbox(&self) -> &RuntimeDeliveryInbox {
+        &self.inbox
+    }
+
+    /// Take the runtimes that received a newly committed row through the
+    /// inbox (or a clone) since the previous call.
+    ///
+    /// A runtime is recorded before the commit generation advances, so an
+    /// owner that observes a generation change and then takes the set always
+    /// sees the runtime of that commit. Like the commit signal, this is
+    /// in-process only.
+    pub fn take_committed_runtimes(&self) -> Vec<LogicalRuntimeId> {
+        let mut committed = self
+            .inbox
+            .committed_runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        committed.drain().collect()
+    }
+}
+
+impl Drop for RuntimeDeliveryOwnership {
+    fn drop(&mut self) {
+        self.inbox.owner_claimed.store(false, Ordering::Release);
+    }
+}
+
+/// A second delivery owner was armed on an inbox that already has one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("runtime delivery inbox already has a delivery owner")]
+pub struct RuntimeDeliveryOwnerAlreadyArmed;
 
 impl std::fmt::Debug for RuntimeDeliveryInbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -332,7 +385,33 @@ impl RuntimeDeliveryInbox {
             store,
             commits: Arc::new(commits),
             committed_runtimes: Arc::new(Mutex::new(HashSet::new())),
+            owner_claimed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Claim exclusive delivery ownership of this inbox.
+    ///
+    /// Fails with [`RuntimeDeliveryOwnerAlreadyArmed`] while another
+    /// ownership (through this inbox or any clone) is outstanding. The set of
+    /// committed runtimes is reset on claim: rows committed before the claim
+    /// are found by the owner's reconcile read, not by the set.
+    pub fn claim_delivery_ownership(
+        &self,
+    ) -> Result<RuntimeDeliveryOwnership, RuntimeDeliveryOwnerAlreadyArmed> {
+        if self
+            .owner_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(RuntimeDeliveryOwnerAlreadyArmed);
+        }
+        self.committed_runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        Ok(RuntimeDeliveryOwnership {
+            inbox: self.clone(),
+        })
     }
 
     /// Observe newly committed deliveries made through this inbox or any of
@@ -346,22 +425,6 @@ impl RuntimeDeliveryInbox {
     /// example [`Self::runtimes_with_pending_deliveries`]).
     pub fn subscribe_commits(&self) -> crate::tokio::sync::watch::Receiver<u64> {
         self.commits.subscribe()
-    }
-
-    /// Take the runtimes that received a newly committed row through this
-    /// inbox (or a clone) since the previous call.
-    ///
-    /// A runtime is recorded before the commit generation advances, so a
-    /// consumer that observes a generation change and then takes the set
-    /// always sees the runtime of that commit. Taking empties the set: the
-    /// inbox has one delivery owner, and a second consumer would take rows
-    /// from it. Like the commit signal, this is in-process only.
-    pub fn take_committed_runtimes(&self) -> Vec<LogicalRuntimeId> {
-        let mut committed = self
-            .committed_runtimes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        committed.drain().collect()
     }
 
     /// Whether `other` shares this inbox's commit signal, i.e. is the same

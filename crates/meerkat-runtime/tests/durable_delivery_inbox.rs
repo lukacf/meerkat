@@ -5,7 +5,8 @@ use std::sync::Arc;
 use meerkat_runtime::{
     InMemoryRuntimeStore, LogicalRuntimeId, RuntimeDeliveryAuthorityCasOutcome,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
-    RuntimeDeliveryKind, RuntimeDeliveryStoreRecord, RuntimeDeliverySubmission, RuntimeStore,
+    RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryStoreRecord,
+    RuntimeDeliverySubmission, RuntimeStore,
 };
 
 fn submission(id: &str, payload: &[u8]) -> RuntimeDeliverySubmission {
@@ -317,17 +318,32 @@ async fn sqlite_reopen_rehydrates_delivery_identity_sequence_and_cursor_without_
     assert_eq!(next.sequence, first.sequence + 1);
 }
 
-/// The commit generation names its runtimes: every runtime that received a
-/// new row is taken exactly once, across clones, and an exact replay records
-/// nothing.
+/// The commit generation names its runtimes: the one delivery owner takes
+/// every runtime that received a new row exactly once, across clones, and an
+/// exact replay records nothing. A second owner is refused until the first
+/// is released.
 #[tokio::test]
-async fn committed_runtimes_are_taken_once_across_clones_and_skip_replays() {
+async fn committed_runtimes_are_taken_once_by_the_one_delivery_owner() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let inbox = RuntimeDeliveryInbox::new(store);
     let producer = inbox.clone();
     let first = LogicalRuntimeId::new("rt:test:committed-a");
     let second = LogicalRuntimeId::new("rt:test:committed-b");
-    assert!(inbox.take_committed_runtimes().is_empty());
+
+    producer
+        .submit(&first, submission("job:early:terminal:1", b"early"))
+        .await
+        .expect("commit before the owner exists");
+    let owner = inbox.claim_delivery_ownership().expect("first owner");
+    assert!(
+        owner.take_committed_runtimes().is_empty(),
+        "rows committed before the claim belong to the owner's reconcile read"
+    );
+    assert_eq!(
+        producer.claim_delivery_ownership().err(),
+        Some(RuntimeDeliveryOwnerAlreadyArmed),
+        "a clone cannot arm a second owner"
+    );
 
     producer
         .submit(&first, submission("job:a:terminal:1", b"a"))
@@ -337,11 +353,11 @@ async fn committed_runtimes_are_taken_once_across_clones_and_skip_replays() {
         .submit(&second, submission("job:b:terminal:1", b"b"))
         .await
         .expect("commit b");
-    let mut taken = inbox.take_committed_runtimes();
+    let mut taken = owner.take_committed_runtimes();
     taken.sort_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(taken, vec![first.clone(), second]);
     assert!(
-        inbox.take_committed_runtimes().is_empty(),
+        owner.take_committed_runtimes().is_empty(),
         "taking empties the set"
     );
 
@@ -351,7 +367,13 @@ async fn committed_runtimes_are_taken_once_across_clones_and_skip_replays() {
         .expect("replay a");
     assert!(replay.deduplicated);
     assert!(
-        inbox.take_committed_runtimes().is_empty(),
+        owner.take_committed_runtimes().is_empty(),
         "an exact replay is not a new commit"
+    );
+
+    drop(owner);
+    assert!(
+        producer.claim_delivery_ownership().is_ok(),
+        "ownership is released on drop"
     );
 }

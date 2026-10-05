@@ -3398,6 +3398,10 @@ mod durable_tests {
         fn is_persistent(&self) -> bool {
             true
         }
+
+        fn outbox_commit_signal(&self) -> meerkat_jobs::JobOutboxCommitSignal {
+            self.inner.outbox_commit_signal()
+        }
     }
 
     fn durable_fixture_with_store_and_projector(

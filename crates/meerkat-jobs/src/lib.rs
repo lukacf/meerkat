@@ -33,8 +33,8 @@ pub use service::DetachedJobService;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite_store::{JOBS_DOMAIN, SqliteDetachedJobStore};
 pub use store::{
-    DetachedJobStore, InsertJobOutcome, MemoryDetachedJobStore, MemoryDetachedJobStoreSnapshot,
-    PredicateDeliveryCommitOutcome, StoredJob,
+    DetachedJobStore, InsertJobOutcome, JobOutboxCommitSignal, MemoryDetachedJobStore,
+    MemoryDetachedJobStoreSnapshot, PredicateDeliveryCommitOutcome, StoredJob,
 };
 pub use types::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CanonicalArgumentsHash,

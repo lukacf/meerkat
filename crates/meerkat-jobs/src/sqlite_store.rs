@@ -422,11 +422,19 @@ fn probe_settled_phase(encoded: &[u8]) -> bool {
 #[derive(Debug, Clone)]
 pub struct SqliteDetachedJobStore {
     path: PathBuf,
+    outbox_commits: crate::JobOutboxCommitSignal,
 }
 
 impl SqliteDetachedJobStore {
+    /// Open the store at `path`.
+    ///
+    /// Each opened instance owns its own outbox commit signal; a process
+    /// should open one instance per file and share clones of it.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, DetachedJobError> {
-        let store = Self { path: path.into() };
+        let store = Self {
+            path: path.into(),
+            outbox_commits: crate::JobOutboxCommitSignal::new(),
+        };
         store.with_connection(|_| Ok(()))?;
         Ok(store)
     }
@@ -886,6 +894,10 @@ impl DetachedJobStore for SqliteDetachedJobStore {
 
     fn is_persistent(&self) -> bool {
         true
+    }
+
+    fn outbox_commit_signal(&self) -> crate::JobOutboxCommitSignal {
+        self.outbox_commits.clone()
     }
 }
 

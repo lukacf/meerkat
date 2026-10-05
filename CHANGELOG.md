@@ -89,9 +89,6 @@ them.
   5.5 already did. Anthropic documents that Sonnet 5.5 rejects forced tool use
   with a 400, so the request no longer spends a provider round trip that is
   documented to fail. `auto` and `none` are unchanged.
-
-### Fixed
-
 - `meerkat-tools` tests compile on macOS again. The custody foreign-namespace
   fixture (`a_host_in_another_pid_namespace_is_proven_ended_by_its_lock`, its
   host role and their constants) uses `unshare(1)` and tokio's read-write FIFO
@@ -155,6 +152,14 @@ them.
   5.5 it accepts forced `tool_choice` and does not support mid-conversation
   system messages. Provider inference stays an exact catalog match: other
   uncatalogued `claude-*` IDs still fail loudly.
+- Published crates now include their license files. Every crate declares
+  `license = "MIT OR Apache-2.0"`, but cargo packages only files under the
+  crate directory, so 0.8.51 and earlier published every crate without
+  `LICENSE-MIT` or `LICENSE-APACHE`. Each release crate now carries symlinks
+  to the workspace-root files, which `cargo package` follows, and
+  `make check-crate-license-files` fails CI and release validation when a
+  release crate's `cargo package --list` lacks either file. The release
+  packaging check also verifies both files in every built `.crate` archive.
 
 ### Testing
 

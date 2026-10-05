@@ -349,6 +349,9 @@ jobs:
       - name: Verify Rust release configuration
         run: make check-rust-release-config
 
+      - name: Release crates package their license files
+        run: make check-crate-license-files
+
       - name: CI lane classifier fails closed
         run: make ci-lanes-selftest
 

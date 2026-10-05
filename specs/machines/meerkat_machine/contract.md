@@ -18082,6 +18082,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_above_every_live_recovery_seed`
+  - `canonical_cursor_is_above_the_pending_append`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -18101,6 +18102,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_above_every_live_recovery_seed`
+  - `canonical_cursor_is_above_the_pending_append`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -18120,6 +18122,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_above_every_live_recovery_seed`
+  - `canonical_cursor_is_above_the_pending_append`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`

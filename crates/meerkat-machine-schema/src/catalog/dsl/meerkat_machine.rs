@@ -30453,6 +30453,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value"))
                     || canonical_cursor > self.live_result_recovery_seed_cursor_by_channel.get_copied(source).get("value"))
             }
+            // A row is never queued inside an append still in flight: a
+            // causal-tail batch covers its whole run under the head append id
+            // alone, so without this a row of an in-flight batch could be
+            // queued again and delivered twice.
+            guard "canonical_cursor_is_above_the_pending_append" {
+                !self.live_context_pending_append_by_channel.contains_key(channel_id)
+                || self.live_context_pending_next_cursor_by_append.get_copied(
+                        self.live_context_pending_append_by_channel.get_cloned(channel_id).get("value"))
+                    .get("value") < canonical_cursor
+            }
             guard "canonical_cursor_is_unique" {
                 !self.live_context_queued_append_by_cursor.contains_key(canonical_cursor)
             }

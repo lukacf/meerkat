@@ -160,7 +160,7 @@ Each cell specifies `ApplyMode`, `WakeMode`, `QueueMode`, `ConsumePoint`, `Drain
 
 ## Silent intent override
 
-`silent_comms_intents` is a generic runtime feature for suppressing lifecycle notices. Mob lifecycle uses typed silent inputs (`mob.peer_added`, `mob.peer_retired`, `mob.peer_unwired`) and typed visible inputs (`mob.kickoff_failed`, `mob.kickoff_cancelled`) — never string matching on intent names for canonical routing.
+`silent_comms_intents` is a generic runtime feature for suppressing lifecycle notices. Mob lifecycle uses typed silent inputs (`mob.peer_added`, `mob.peer_retired`, `mob.peer_unwired`) and typed visible lifecycle notices (the six `mob.kickoff_*` kinds, which open no inbound request) — never string matching on intent names for canonical routing.
 
 ## Peer ingress ownership
 

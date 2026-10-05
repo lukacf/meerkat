@@ -82,7 +82,9 @@ impl MobCommand {
             | Self::AttachForkedParticipant { .. }
             // Seating a branch as an ordinary member is a spawn AND a lease
             // acquisition; both halves already require SendCommand.
-            | Self::SpawnAttachedForkedParticipant { .. } => Some(ControlScope::SendCommand),
+            | Self::SpawnAttachedForkedParticipant { .. }
+            // Releasing a host's run-start hold lets the member start runs.
+            | Self::ReleaseMemberRunStarts { .. } => Some(ControlScope::SendCommand),
 
             #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. }
@@ -195,6 +197,8 @@ impl MobCommand {
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
             | Self::AutonomousMemberStopsResolved { .. }
+            | Self::AutonomousStopInterruptSettled
+            | Self::ShutdownTeardownResolved { .. }
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }
@@ -272,9 +276,14 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::SpawnLiveMutationAwaitingActorForTest { .. }
+            | Self::HonourCompletionForTest { .. }
+            | Self::SpawnLiveMutationSendingCompletionForTest { .. }
             | Self::SpawnActivationCustodyProbe { .. }
             | Self::SpawnPreparationProbe { .. }
             | Self::BeginStopQuiesceForTest { .. }
+            | Self::FailNextResumeReadinessForTest { .. }
+            | Self::BindPeerOnlyMembersForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => None,
         }
@@ -364,6 +373,9 @@ impl MobCommand {
             Self::ProjectMemberStatus { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::ReleaseMemberRunStarts { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
             // Settling closes the waiter set; the actor's in-flight map prunes
             // closed entries when it next registers an observation.
             Self::ProjectMemberStatusObserved { waiters, .. } => {
@@ -387,7 +399,10 @@ impl MobCommand {
             Self::AdmitControlScope { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
-            Self::Stop { reply_tx } | Self::ResumeLifecycle { reply_tx, .. } => {
+            Self::Stop { reply_tx } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResumeLifecycle { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Complete { reply_tx } | Self::Reset { reply_tx } => {
@@ -535,7 +550,7 @@ impl MobCommand {
             | Self::HostRuntimeIncarnationObserved { reply_tx, .. }
             | Self::RecordOperatorActionProvenance { reply_tx, .. }
             | Self::SetSpawnPolicy { reply_tx, .. }
-            | Self::Shutdown { reply_tx } => {
+            | Self::Shutdown { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::EnsureMemberEventTap { reply_tx, .. } => {
@@ -556,6 +571,18 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::SpawnLiveMutationAwaitingActorForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::SpawnLiveMutationSendingCompletionForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::HonourCompletionForTest { .. } => {
+                tracing::error!("scope denial reached a test-only completion; dropped");
             }
             #[cfg(any(test, feature = "test-support"))]
             Self::CrashStopPreservingDurableWorkForTest { reply_tx } => {
@@ -579,6 +606,8 @@ impl MobCommand {
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
             | Self::AutonomousMemberStopsResolved { .. }
+            | Self::AutonomousStopInterruptSettled
+            | Self::ShutdownTeardownResolved { .. }
             | Self::ResumeLifecycleMemberObserved { .. }
             | Self::ResumeLifecycleMemberReady { .. }
             | Self::ResumeLifecycleMemberSettled { .. }
@@ -615,6 +644,8 @@ impl MobCommand {
             | Self::SpawnActivationCustodyProbe { .. }
             | Self::SpawnPreparationProbe { .. }
             | Self::BeginStopQuiesceForTest { .. }
+            | Self::FailNextResumeReadinessForTest { .. }
+            | Self::BindPeerOnlyMembersForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => {
                 tracing::error!("scope denial reached a test-only command; dropped");
@@ -918,6 +949,7 @@ mod tests {
         let (admission_tx, _admission_rx) = tokio::sync::watch::channel(false);
         let cmd = MobCommand::Retire {
             agent_identity: identity.clone(),
+            redrive: false,
             expected_incarnation: super::super::state::RetireMemberIncarnation {
                 agent_identity: identity.clone(),
                 agent_runtime_id: crate::ids::AgentRuntimeId::new(identity, generation),

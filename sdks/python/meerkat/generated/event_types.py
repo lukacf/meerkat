@@ -75,7 +75,7 @@ LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_er
 LlmProviderErrorRetryability = Literal['retryable', 'non_retryable']
 
 
-ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable']
+ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable'] | Literal['tool_choice_unsupported']
 
 
 # Closed machine-owned classifier for why a turn reached a terminal failure.
@@ -705,6 +705,10 @@ InteractionFailureReason = InteractionFailureReasonCancelled | InteractionFailur
 
 # Unique identifier for an interaction.
 InteractionId = str
+
+
+# Typed cause of a committed live channel close.
+LiveChannelCloseReason = Literal['client_requested', 'client_disconnected', 'provider_closed', 'error', 'media_fault', 'replaced', 'open_abandoned']
 
 
 # Closed classifier for recoverable LLM failures.
@@ -1415,9 +1419,10 @@ class RealtimeMessageOrigin(TypedDict, total=False):
     session_id: Required[SessionId]
 
 
-# Non-conversational authorship of a turn's input (see
-# [`TranscriptMessageIdentity::turn_input`]).
-TranscriptTurnInput = Literal['runtime_authored']
+# Authorship of a turn's input that readers act on (see
+# [`TranscriptMessageIdentity::turn_input`]). Absent for every other turn
+# (spoken, peer-driven, or a batch whose inputs disagree).
+TranscriptTurnInput = Literal['runtime_authored', 'typed_text']
 
 
 class TranscriptMessageIdentity(TypedDict, total=False):
@@ -2169,10 +2174,27 @@ class AgentEventBoundaryAppendsDiscarded(TypedDict, total=False):
     type: Required[Literal['boundary_appends_discarded']]
 
 
+class AgentEventLiveChannelClosed(TypedDict, total=False):
+    """The runtime closed one of this session's live channels for a typed
+    cause (a media fault on its first assistant output). Published on the
+    session event stream after the close commits, so every observer
+    learns the cause and whether the session may reopen the channel with
+    its retained context, without polling `live/status`.
+
+    Appended after every released variant: declaration order is the
+    implicit discriminant (the xtask `released_enum_ordinals` test).
+    """
+    channel_id: Required[str]
+    reason: Required[LiveChannelCloseReason]
+    reopen_recommended: Required[bool]
+    session_id: Required[SessionId]
+    type: Required[Literal['live_channel_closed']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

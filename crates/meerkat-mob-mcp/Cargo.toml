@@ -65,7 +65,7 @@ tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 meerkat-mob = { workspace = true, features = ["test-support"] }

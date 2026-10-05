@@ -48,6 +48,7 @@ rust_library(
     crate_name = "meerkat_integration_tests",
     crate_root = "src/lib.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -96,6 +97,7 @@ rust_library(
     crate_name = "meerkat_integration_tests",
     crate_root = "src/lib.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -152,6 +154,7 @@ rust_test(
     crate_name = "meerkat_integration_tests",
     crate_root = "src/lib.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -235,6 +238,7 @@ rust_binary(
     crate_name = "e2e_artifacts",
     crate_root = "src/bin/e2e_artifacts.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -287,6 +291,7 @@ rust_binary(
     crate_name = "voice_fixtures",
     crate_root = "src/bin/voice_fixtures.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -345,6 +350,7 @@ rust_test(
     crate_name = "copilot_live_e2e",
     crate_root = "tests/copilot_live_e2e.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -352,6 +358,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/copilot_live_e2e.rs",
@@ -418,6 +429,7 @@ rust_test(
     crate_name = "e2e_auth_lane",
     crate_root = "tests/e2e_auth_lane.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -425,6 +437,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/e2e_auth_lane.rs",
@@ -494,6 +511,7 @@ rust_test(
     crate_name = "e2e_build_lane",
     crate_root = "tests/e2e_build_lane.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -501,6 +519,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/e2e_build_lane.rs",
@@ -568,6 +591,7 @@ rust_test(
     crate_name = "e2e_fast_lane",
     crate_root = "tests/e2e_fast_lane.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -575,13 +599,17 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
     ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
         "//crates/meerkat-mob-mcp:tests/support/commit_gate.rs",
         "//crates/meerkat-mob-mcp:tests/support/mod.rs",
         "//crates/meerkat-mob:tests/support/live_plane.rs",
         "//crates/meerkat-mob:tests/support/mod.rs",
         "//crates/meerkat-mob:tests/support/probe_shared.rs",
         "//crates/meerkat-mob:tests/support/shared.rs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/e2e_fast/assistant_message_identity.rs",
@@ -666,6 +694,7 @@ rust_test(
     crate_name = "e2e_live_lane",
     crate_root = "tests/e2e_live_lane.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -673,6 +702,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/e2e_live_lane.rs",
@@ -741,6 +775,7 @@ rust_test(
     crate_name = "e2e_models_lane",
     crate_root = "tests/e2e_models_lane.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -748,6 +783,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/e2e_models_lane.rs",
@@ -817,6 +857,7 @@ rust_test(
     crate_name = "e2e_smoke_lane",
     crate_root = "tests/e2e_smoke_lane.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -824,6 +865,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/e2e_smoke_lane.rs",
@@ -891,6 +937,7 @@ rust_test(
     crate_name = "e2e_system_lane",
     crate_root = "tests/e2e_system_lane.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -898,6 +945,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/e2e_system_lane.rs",
@@ -966,6 +1018,7 @@ rust_test(
     crate_name = "gpt_live_public_e2e",
     crate_root = "tests/gpt_live_public_e2e.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -973,6 +1026,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/gpt_live_public_e2e.rs",
@@ -994,8 +1052,100 @@ rust_test(
     data = [
         ":package_runfiles",
         "//:live_smoke_browser_fixtures",
+        "//:repo_governance_files",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-rpc:meerkat_rpc_with_runtime_test_support",
+        "//crates/meerkat:meerkat_auth_core_agent_factory_build",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_comms_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_copilot_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_providers_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/integration:meerkat_integration_tests_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "gpt_live_replay_test",
+    aliases = aliases(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "gpt_live_replay",
+    crate_root = "tests/gpt_live_replay.rs",
+    crate_features = [
+        "gpt-live-replay",
+        "integration-real-tests",
+        "openai-live",
+        "openai-live-e2e",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
+    ],
+    srcs = [
+        "tests/gpt_live_replay.rs",
+        "tests/support/gpt_live_e2e.rs",
+        "tests/support/gpt_live_evidence.rs",
+        "tests/support/gpt_live_replay.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "gpt_live_replay",
+        "CARGO_MANIFEST_DIR": "./tests/integration",
+    },
+    tags = [
+        "integration",
+        "required-feature",
+    ],
+    data = [
+        ":package_runfiles",
+        "//:live_smoke_browser_fixtures",
+        "//:repo_governance_files",
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
+        "//crates/meerkat-openai:cargo_manifest",
+        "//crates/meerkat-openai:package_runfiles",
+        "//crates/meerkat:cargo_manifest",
+        "//crates/meerkat:package_runfiles",
+        "//tests/integration:cargo_manifest",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -1046,6 +1196,7 @@ rust_test(
     crate_name = "live_mob_tools",
     crate_root = "tests/live_mob_tools.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1053,6 +1204,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/live_mob_tools.rs",
@@ -1118,6 +1274,7 @@ rust_test(
     crate_name = "phase1_wiring",
     crate_root = "tests/phase1_wiring.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1125,6 +1282,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/phase1_wiring.rs",
@@ -1188,6 +1350,7 @@ rust_test(
     crate_name = "phase2_mode_routing",
     crate_root = "tests/phase2_mode_routing.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1195,6 +1358,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/phase2_mode_routing.rs",
@@ -1258,6 +1426,7 @@ rust_test(
     crate_name = "phase6_cleanup_sweep",
     crate_root = "tests/phase6_cleanup_sweep.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1265,6 +1434,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/phase6_cleanup_sweep.rs",
@@ -1332,6 +1506,7 @@ rust_test(
     crate_name = "provider_tool_schema_compat",
     crate_root = "tests/provider_tool_schema_compat.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1339,6 +1514,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/provider_tool_schema_compat.rs",
@@ -1405,6 +1585,7 @@ rust_test(
     crate_name = "reserve_interaction_subscriber_fires",
     crate_root = "tests/reserve_interaction_subscriber_fires.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1412,6 +1593,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/reserve_interaction_subscriber_fires.rs",
@@ -1475,6 +1661,7 @@ rust_test(
     crate_name = "session_tool_visibility_kernel",
     crate_root = "tests/session_tool_visibility_kernel.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1482,6 +1669,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/session_tool_visibility_kernel.rs",
@@ -1545,6 +1737,7 @@ rust_test(
     crate_name = "session_turn_admission_kernel",
     crate_root = "tests/session_turn_admission_kernel.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1552,6 +1745,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/session_turn_admission_kernel.rs",
@@ -1615,6 +1813,7 @@ rust_test(
     crate_name = "smoke_mob_fork_off",
     crate_root = "tests/smoke_mob_fork_off.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1622,6 +1821,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/smoke_mob_fork_off.rs",
@@ -1687,6 +1891,7 @@ rust_test(
     crate_name = "smoke_model_fallback",
     crate_root = "tests/smoke_model_fallback.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1694,6 +1899,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/smoke_model_fallback.rs",
@@ -1759,6 +1969,7 @@ rust_test(
     crate_name = "smoke_shared_realm",
     crate_root = "tests/smoke_shared_realm.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1766,6 +1977,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/smoke_shared_realm.rs",
@@ -1834,6 +2050,7 @@ rust_test(
     crate_name = "system_realm_inheritance",
     crate_root = "tests/system_realm_inheritance.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1841,6 +2058,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/system_realm_inheritance.rs",
@@ -1905,6 +2127,7 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1912,6 +2135,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/system_shared_realm.rs",
@@ -1980,6 +2208,7 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1987,6 +2216,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/system_shared_realm.rs",
@@ -2067,6 +2301,7 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -2074,6 +2309,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/system_shared_realm.rs",
@@ -2154,6 +2394,7 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
+        "gpt-live-replay",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -2161,6 +2402,11 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "fixtures/gpt_live_replay/s104.provider-stream.jsonl",
+        "fixtures/gpt_live_replay/s106.provider-stream.jsonl",
+    ] + [
+        "//:tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
+        "//crates/meerkat-openai:src/public_live.rs",
     ],
     srcs = [
         "tests/system_shared_realm.rs",

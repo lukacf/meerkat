@@ -178,6 +178,13 @@ define_identity!(
     /// Field name within a kernel state, input, signal, or effect.
     FieldId
 );
+
+impl FieldId {
+    /// Construct from a crate-owned catalog literal.
+    pub(crate) fn from_trusted_catalog_literal(value: &'static str) -> Self {
+        Self(value.to_owned())
+    }
+}
 define_identity!(
     /// Transition name.
     TransitionId

@@ -18,13 +18,19 @@ use thiserror::Error;
 
 pub const GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID: &str = "openai.gpt-live-1-codex.function-bridge.v1";
 pub const GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID: &str = "openai.gpt-live-1-codex.client-context.v1";
+/// Model-facing voice session instructions. They name no product or other
+/// proper noun the conversation does not need: the provider's input
+/// transcription is biased toward words in the session instructions (Turbo S
+/// S103: a planted "Marigold" was transcribed as "meerkat").
 pub(crate) const GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS: &str = concat!(
-    "You are the low-latency voice layer for a Meerkat executor. ",
-    "Delegate requests that need tools, files, current information, or extended reasoning to the client executor. ",
+    "You are the low-latency voice layer for an executor agent. ",
+    "The client executor does the work you cannot do yourself: hand it requests that need tools, files, current information, or extended reasoning. ",
+    "Everything said in this conversation, on this call or in the text chat before or during it and its summary, is something you already know: answer questions about it yourself. ",
     "Treat returned executor context as authoritative, present it naturally, and never expose the internal split. ",
+    "Ending the call is not executor work: when the user says goodbye or asks to end or close the call, say a brief goodbye yourself; the app ends the call. ",
     "This call continues an existing conversation with this user: do not greet or introduce yourself, wait for the user to speak. ",
     "Let the user finish. A pause in the middle of a sentence, a list, or a train of thought, or after a filler such as \"um\", \"uh\" or \"so\", is not the end of their turn: stay completely silent through it. ",
-    "While the user is still talking, do not backchannel (no \"mm-hm\", \"okay\" or \"got it\"), do not repeat details back, and do not delegate yet; respond once, when they have clearly finished. ",
+    "While the user is still talking, do not backchannel (no \"mm-hm\", \"okay\" or \"got it\"), do not repeat details back, and do not act yet; respond once, when they have clearly finished. ",
     "Several delegated requests may run at once. The executor reports task state for each one (queued, started, waiting on another request, finished): relay those updates briefly and say which request each result belongs to. ",
     "While delegated requests are running you may keep conversing; if asked, say you are working on it, and present each result when it arrives."
 );
@@ -953,6 +959,25 @@ pub enum ExperimentalLiveFactoryResolutionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The voice session instructions name no product: words in them bias
+    /// the provider's input transcription (Turbo S S103 transcribed a planted
+    /// "Marigold" as "meerkat").
+    #[test]
+    fn voice_session_instructions_name_no_product() {
+        let instructions = GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS.to_ascii_lowercase();
+        for name in ["meerkat", "rkat", "mobkit", "openai", "gpt"] {
+            assert!(
+                !instructions.contains(name),
+                "the voice session instructions name {name:?}: {GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS}"
+            );
+        }
+        assert!(
+            GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS
+                .starts_with("You are the low-latency voice layer for an executor agent. "),
+            "the opening keeps its meaning without the product name"
+        );
+    }
     use meerkat_core::{
         ActingOnBehalfOf, AuthBindingRef, AuthGrant, AuthMetadata, BindingId, BindingOrigin,
         Config, GrantAction, GrantScope, ModelRegistry, PrincipalKind, PrincipalRef,
@@ -1501,6 +1526,29 @@ mod tests {
             ExperimentalLiveGate0QualificationVersion::parse("not valid")
                 .expect_err("unsafe qualification"),
             ExperimentalLiveAdmissionError::InvalidGate0QualificationVersion
+        );
+    }
+    /// S106 r4 e10: "Thanks. That's all for today. Close the call" was
+    /// delegated. Ending the call is an action the voice model cannot take
+    /// itself, and the instructions route such work to the executor, so
+    /// call endings need an explicit owner: the voice layer says goodbye and
+    /// the app ends the call.
+    #[test]
+    fn voice_session_instructions_keep_call_endings_out_of_the_executor() {
+        let instructions = GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS;
+        let clause = "Ending the call is not executor work: when the user says goodbye or asks to end or close the call, say a brief goodbye yourself; the app ends the call. ";
+        assert_eq!(
+            instructions.matches(clause).count(),
+            1,
+            "the call-ending clause appears exactly once"
+        );
+        let routing = instructions
+            .find("The client executor does the work you cannot do yourself")
+            .expect("executor routing sentence");
+        let ending = instructions.find(clause).expect("call-ending clause");
+        assert!(
+            ending > routing,
+            "the call-ending exception follows the routing rule it narrows"
         );
     }
 }

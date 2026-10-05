@@ -519,6 +519,11 @@ pub struct WireMobToolConfig {
     /// makes the new-intent case fail closed and loudly instead of silently.
     #[serde(default, skip_serializing_if = "read_only_is_false")]
     pub read_only: bool,
+    /// Tool names members of the profile may not execute although their
+    /// families are enabled. Enforcement like `read_only`; omitted when empty
+    /// for the same compatibility reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
     #[serde(default)]
     pub mcp: Vec<String>,
 }
@@ -642,6 +647,11 @@ pub struct MobToolConfigInput {
     /// it. Enforcement, not prompt guidance.
     #[serde(default)]
     pub read_only: bool,
+    /// Tool names members of the profile may not execute although their
+    /// families are enabled. Enforcement like `read_only`; each name must
+    /// belong to the profile's composed tool families.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<String>,
 }
@@ -2143,6 +2153,11 @@ pub struct MobLifecycleResult {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destroy_report: Option<Value>,
+    /// For `stop`: what the stop did to each member's run and whether its
+    /// run starts are held (#1500). A member reported `not_holdable` may
+    /// still start a turn while the mob is stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_report: Option<Value>,
 }
 
 /// Request payload for `mob/append_system_context`.
@@ -4028,6 +4043,7 @@ mod tests {
             action: WireMobLifecycleAction::Complete,
             ok: true,
             destroy_report: None,
+            stop_report: None,
         };
 
         let json = serde_json::to_value(&result).expect("serialize lifecycle result");

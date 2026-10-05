@@ -774,6 +774,7 @@ impl AgentBuilder {
             live_bridge_tool_defs: None,
             noncommitting_live_bridge_run: false,
             turn_tool_dispatch_metadata: Default::default(),
+            turn_tool_choice_plan: Vec::new(),
             tools_config: self.tools_config,
         };
 

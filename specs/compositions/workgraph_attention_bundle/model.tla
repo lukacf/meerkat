@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for workgraph_attention_bundle.
 
-CONSTANTS AttentionDelegatedAuthorityValues, BooleanValues, CancelledChildJoinPolicyValues, ChildJoinDispositionValues, FailedChildJoinPolicyValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkAttentionModeValues, WorkCloseStatusAdmissionKindValues, WorkCompletionPolicyMutationAdmissionKindValues, WorkCompletionPolicyValues, WorkConfirmationAdmissionKindValues, WorkConfirmationEvidenceObservationValues, WorkCreateCompletionPolicyAdmissionKindValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkOwnerKindValues, WorkPolicyEscalationAdmissionKindValues, WorkPublicConfirmationAdmissionKindValues
+CONSTANTS AttentionDelegatedAuthorityValues, BooleanValues, CancelledChildJoinPolicyValues, ChildJoinDispositionValues, FailedChildJoinPolicyValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAdmissionDigestRefValues, WorkAdmissionKeyRefValues, WorkAdmissionReplayKindValues, WorkAttentionBindingKeyValues, WorkAttentionModeValues, WorkCloseStatusAdmissionKindValues, WorkCompletionPolicyMutationAdmissionKindValues, WorkCompletionPolicyValues, WorkConfirmationAdmissionKindValues, WorkConfirmationEvidenceObservationValues, WorkCreateCompletionPolicyAdmissionKindValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkOwnerKindValues, WorkPolicyEscalationAdmissionKindValues, WorkPublicConfirmationAdmissionKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -29,7 +29,37 @@ WorkDependencyPathKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Blo
 WorkEdgeKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkOwnerKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
 
+SetOfWorkDependencyPathKeyValuesWitnesskeyed_admission_replay_classification == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesWitnesskeyed_admission_replay_classification == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesWitnesskeyed_admission_replay_classification == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
+WorkDependencyPathKeyValuesWitnesskeyed_admission_replay_classification == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesWitnesskeyed_admission_replay_classification == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkOwnerKeyValuesWitnesskeyed_admission_replay_classification == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
+
+SetOfWorkDependencyPathKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
+WorkDependencyPathKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkOwnerKeyValuesWitnessunkeyed_admission_replay_is_key_mismatch == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
+
+SetOfWorkDependencyPathKeyValuesWitnessunpaired_create_open_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesWitnessunpaired_create_open_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesWitnessunpaired_create_open_admission_rejected == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
+WorkDependencyPathKeyValuesWitnessunpaired_create_open_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesWitnessunpaired_create_open_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkOwnerKeyValuesWitnessunpaired_create_open_admission_rejected == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
+
+SetOfWorkDependencyPathKeyValuesWitnessunpaired_create_blocked_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesWitnessunpaired_create_blocked_admission_rejected == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesWitnessunpaired_create_blocked_admission_rejected == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
+WorkDependencyPathKeyValuesWitnessunpaired_create_blocked_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesWitnessunpaired_create_blocked_admission_rejected == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkOwnerKeyValuesWitnessunpaired_create_blocked_admission_rejected == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
+
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
+OptionWorkAdmissionDigestRefValues == {None} \cup {Some(x) : x \in WorkAdmissionDigestRefValues}
+OptionWorkAdmissionKeyRefValues == {None} \cup {Some(x) : x \in WorkAdmissionKeyRefValues}
 OptionWorkAttentionBindingKeyValues == {None} \cup {Some(x) : x \in WorkAttentionBindingKeyValues}
 OptionWorkOwnerKeyValues == {None} \cup {Some(x) : x \in WorkOwnerKeyValues}
 OptionWorkOwnerKindValues == {None} \cup {Some(x) : x \in WorkOwnerKindValues}
@@ -49,16 +79,19 @@ SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRe
 AppendIfMissing(seq, value) == IF value \in SeqElements(seq) THEN seq ELSE Append(seq, value)
 Machines == {
     <<"workgraph", "WorkGraphLifecycleMachine", "workgraph_authority">>,
-    <<"attention", "WorkAttentionLifecycleMachine", "attention_authority">>
+    <<"attention", "WorkAttentionLifecycleMachine", "attention_authority">>,
+    <<"admission", "WorkItemAdmissionMachine", "admission_authority">>
 }
 
 RouteNames == {
+    "work_item_create_binds_admission",
     "work_item_close_stops_attention"
 }
 
 Actors == {
     "workgraph_authority",
-    "attention_authority"
+    "attention_authority",
+    "admission_authority"
 }
 
 ActorPriorities == {
@@ -70,49 +103,58 @@ SchedulerRules == {
 ActorOfMachine(machine_id) ==
     CASE machine_id = "workgraph" -> "workgraph_authority"
       [] machine_id = "attention" -> "attention_authority"
+      [] machine_id = "admission" -> "admission_authority"
 
 RouteSource(route_name) ==
-    CASE route_name = "work_item_close_stops_attention" -> "workgraph"
+    CASE route_name = "work_item_create_binds_admission" -> "workgraph"
+      [] route_name = "work_item_close_stops_attention" -> "workgraph"
 
 RouteEffect(route_name) ==
-    CASE route_name = "work_item_close_stops_attention" -> "Closed"
+    CASE route_name = "work_item_create_binds_admission" -> "Created"
+      [] route_name = "work_item_close_stops_attention" -> "Closed"
 
 RouteTargetMachine(route_name) ==
-    CASE route_name = "work_item_close_stops_attention" -> "attention"
+    CASE route_name = "work_item_create_binds_admission" -> "admission"
+      [] route_name = "work_item_close_stops_attention" -> "attention"
 
 RouteTargetInput(route_name) ==
-    CASE route_name = "work_item_close_stops_attention" -> "Stop"
+    CASE route_name = "work_item_create_binds_admission" -> "Bind"
+      [] route_name = "work_item_close_stops_attention" -> "Stop"
 
 RouteTargetKind(route_name) ==
-    CASE route_name = "work_item_close_stops_attention" -> "Input"
+    CASE route_name = "work_item_create_binds_admission" -> "Input"
+      [] route_name = "work_item_close_stops_attention" -> "Input"
       [] OTHER -> "Unknown"
 
 RouteDeliveryKind(route_name) ==
-    CASE route_name = "work_item_close_stops_attention" -> "Immediate"
+    CASE route_name = "work_item_create_binds_admission" -> "Immediate"
+      [] route_name = "work_item_close_stops_attention" -> "Immediate"
       [] OTHER -> "Unknown"
 
 RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))
 
-VARIABLES workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
-vars == << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+VARIABLES workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
+vars == << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
-UnchangedFrame_015b85a354faa85a == UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_0c3d4796d87a9bb2 == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_20b627546c44b4da == UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_21f4b2034a26b328 == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_308f57ef3f613b48 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_7678d52e76e8f1de == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_916ca33d3d806740 == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_9d39b985867de10a == UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_a1bc6bd970b1daa3 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_superseded_by_binding_key, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_af222da15ee00e22 == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_bff1428bb627c135 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
-UnchangedFrame_c53dfbacdd5606f2 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_e27b33fd9decab38 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_e6ba31d3f853e7c8 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
-UnchangedFrame_e8333ccf3574a1f1 == UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_028d7aaefc3ca7d2 == UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_0cc14d477c087f31 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_11dcc4b801d594cc == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_1446d5451fb83502 == UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_30c4158f34254c67 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_superseded_by_binding_key, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_3a26d5523f268c06 == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_4d20e403b6d6ed10 == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_560125c2bccbc982 == UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_7100cb53182ef0c4 == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_817bb7f71a278cf1 == UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_8dbfbb9b1380cd6c == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_9379ef6d7816fcfa == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_9be966d09f8bc94c == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_a13929a02412779a == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_a3bdd0418e78e6ca == UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_d944b7c26a50a63a == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, witness_current_script_input, witness_remaining_script_inputs >>
+UnchangedFrame_f4be6c91654670cd == UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, workgraph_failed_child_join_policy, workgraph_cancelled_child_join_policy, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, admission_phase, admission_admission_key, admission_request_digest, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 RoutePackets == SeqElements(pending_routes) \cup delivered_routes
 PendingActors == {ActorOfMachine(packet.machine) : packet \in SeqElements(pending_inputs)}
@@ -148,6 +190,9 @@ BaseInit ==
     /\ attention_paused_until_utc_ms = None
     /\ attention_superseded_by_binding_key = None
     /\ attention_terminal_at_utc_ms = None
+    /\ admission_phase = "Absent"
+    /\ admission_admission_key = None
+    /\ admission_request_digest = None
     /\ model_step_count = 0
     /\ pending_routes = <<>>
     /\ delivered_routes = {}
@@ -163,10 +208,38 @@ Init ==
 
 WitnessInit_close_stops_attention_route ==
     /\ BaseInit
-    /\ pending_inputs = <<[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]>>
-    /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]}
-    /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]
+    /\ pending_inputs = <<[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "workgraph", variant |-> "CloseCompleted", payload |-> [at_utc_ms |-> 1, expected_revision |-> 1], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:2", source_machine |-> "external_entry", source_effect |-> "CloseCompleted", effect_id |-> 0]>>
+
+WitnessInit_keyed_admission_replay_classification ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> Some("workadmissionkeyref_1"), admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:keyed_admission_replay_classification:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> Some("workadmissionkeyref_1"), admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:keyed_admission_replay_classification:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> Some("workadmissionkeyref_1"), admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:keyed_admission_replay_classification:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:keyed_admission_replay_classification:2", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0], [machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_2"], source_kind |-> "entry", source_route |-> "witness:keyed_admission_replay_classification:3", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0], [machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_2", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:keyed_admission_replay_classification:4", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]>>
+
+WitnessInit_unkeyed_admission_replay_is_key_mismatch ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unkeyed_admission_replay_is_key_mismatch:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unkeyed_admission_replay_is_key_mismatch:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unkeyed_admission_replay_is_key_mismatch:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unkeyed_admission_replay_is_key_mismatch:2", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]>>
+
+WitnessInit_unpaired_create_open_admission_rejected ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "admission", variant |-> "ClassifyAdmissionReplay", payload |-> [requested_admission_key |-> "workadmissionkeyref_1", requested_request_digest |-> "workadmissiondigestref_1"], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "ClassifyAdmissionReplay", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> Some("workadmissionkeyref_1"), admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:2", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0], [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_open_admission_rejected:3", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]>>
+
+WitnessInit_unpaired_create_blocked_admission_rejected ==
+    /\ BaseInit
+    /\ pending_inputs = <<[machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]>>
+    /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]}
+    /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> Some("workadmissiondigestref_1"), cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:1", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]
+    /\ witness_remaining_script_inputs = <<[machine |-> "workgraph", variant |-> "CreateBlocked", payload |-> [admission_key |-> None, admission_request_digest |-> None, cancelled_child_join_policy |-> "RequireSuccess", completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, failed_child_join_policy |-> "RequireSuccess", not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:unpaired_create_blocked_admission_rejected:2", source_machine |-> "external_entry", source_effect |-> "CreateBlocked", effect_id |-> 0]>>
 
 workgraph__claim_time_window_eligible(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, now_utc_ms) == ((IF (arg_due_at_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_due_at_utc_ms THEN arg_due_at_utc_ms["value"] ELSE None) <= now_utc_ms)) /\ (IF (arg_not_before_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_not_before_utc_ms THEN arg_not_before_utc_ms["value"] ELSE None) <= now_utc_ms)) /\ (IF (arg_snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_snoozed_until_utc_ms THEN arg_snoozed_until_utc_ms["value"] ELSE None) <= now_utc_ms)))
 
@@ -190,7 +263,7 @@ workgraph__completion_policy_escalation_admissible(current_policy, current_revie
 
 workgraph__confirmation_admits(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == ((workgraph__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (workgraph__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_self_attest_empty(arg_completion_policy, supplied_evidence_kind) = FALSE) /\ (workgraph__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) = FALSE))
 
-workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy) ==
+workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "CreateOpen"
@@ -203,9 +276,12 @@ workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until
        /\ packet.payload.unresolved_blocker_count = arg_unresolved_blocker_count
        /\ packet.payload.failed_child_join_policy = arg_failed_child_join_policy
        /\ packet.payload.cancelled_child_join_policy = arg_cancelled_child_join_policy
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.admission_request_digest = arg_admission_request_digest
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
        /\ workgraph__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)
+       /\ (IF ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest # None)))
        /\ workgraph_phase' = "Open"
        /\ workgraph_revision' = 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
@@ -217,17 +293,17 @@ workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
        /\ workgraph_failed_child_join_policy' = packet.payload.failed_child_join_policy
        /\ workgraph_cancelled_child_join_policy' = packet.payload.cancelled_child_join_policy
-       /\ UnchangedFrame_9d39b985867de10a
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
+       /\ UnchangedFrame_028d7aaefc3ca7d2
+       /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "admission", variant |-> "Bind", payload |-> [admission_key |-> packet.payload.admission_key, request_digest |-> packet.payload.admission_request_digest], source_kind |-> "route", source_route |-> "work_item_create_binds_admission", source_machine |-> "workgraph", source_effect |-> "Created", effect_id |-> (model_step_count + 1)])
+       /\ observed_inputs' = observed_inputs \cup {[machine |-> "admission", variant |-> "Bind", payload |-> [admission_key |-> packet.payload.admission_key, request_digest |-> packet.payload.admission_request_digest], source_kind |-> "route", source_route |-> "work_item_create_binds_admission", source_machine |-> "workgraph", source_effect |-> "Created", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Created", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CreateOpen"] }
+       /\ delivered_routes' = delivered_routes \cup { [route |-> "work_item_create_binds_admission", source_machine |-> "workgraph", effect |-> "Created", target_machine |-> "admission", target_input |-> "Bind", payload |-> [admission_key |-> packet.payload.admission_key, request_digest |-> packet.payload.admission_request_digest], actor |-> "admission_authority", effect_id |-> (model_step_count + 1), source_transition |-> "CreateOpen"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Created", payload |-> [admission_key |-> packet.payload.admission_key, admission_request_digest |-> packet.payload.admission_request_digest], effect_id |-> (model_step_count + 1), source_transition |-> "CreateOpen"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "CreateOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
        /\ model_step_count' = model_step_count + 1
 
 
-workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy) ==
+workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "CreateBlocked"
@@ -240,9 +316,12 @@ workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_un
        /\ packet.payload.unresolved_blocker_count = arg_unresolved_blocker_count
        /\ packet.payload.failed_child_join_policy = arg_failed_child_join_policy
        /\ packet.payload.cancelled_child_join_policy = arg_cancelled_child_join_policy
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.admission_request_digest = arg_admission_request_digest
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
        /\ workgraph__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)
+       /\ (IF ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest # None)))
        /\ workgraph_phase' = "Blocked"
        /\ workgraph_revision' = 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
@@ -254,12 +333,12 @@ workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_un
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
        /\ workgraph_failed_child_join_policy' = packet.payload.failed_child_join_policy
        /\ workgraph_cancelled_child_join_policy' = packet.payload.cancelled_child_join_policy
-       /\ UnchangedFrame_9d39b985867de10a
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
+       /\ UnchangedFrame_028d7aaefc3ca7d2
+       /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "admission", variant |-> "Bind", payload |-> [admission_key |-> packet.payload.admission_key, request_digest |-> packet.payload.admission_request_digest], source_kind |-> "route", source_route |-> "work_item_create_binds_admission", source_machine |-> "workgraph", source_effect |-> "Created", effect_id |-> (model_step_count + 1)])
+       /\ observed_inputs' = observed_inputs \cup {[machine |-> "admission", variant |-> "Bind", payload |-> [admission_key |-> packet.payload.admission_key, request_digest |-> packet.payload.admission_request_digest], source_kind |-> "route", source_route |-> "work_item_create_binds_admission", source_machine |-> "workgraph", source_effect |-> "Created", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Created", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CreateBlocked"] }
+       /\ delivered_routes' = delivered_routes \cup { [route |-> "work_item_create_binds_admission", source_machine |-> "workgraph", effect |-> "Created", target_machine |-> "admission", target_input |-> "Bind", payload |-> [admission_key |-> packet.payload.admission_key, request_digest |-> packet.payload.admission_request_digest], actor |-> "admission_authority", effect_id |-> (model_step_count + 1), source_transition |-> "CreateBlocked"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Created", payload |-> [admission_key |-> packet.payload.admission_key, admission_request_digest |-> packet.payload.admission_request_digest], effect_id |-> (model_step_count + 1), source_transition |-> "CreateBlocked"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "CreateBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -287,7 +366,7 @@ workgraph_UpdateOpen(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_ut
        /\ workgraph_due_at_utc_ms' = packet.payload.due_at_utc_ms
        /\ workgraph_not_before_utc_ms' = packet.payload.not_before_utc_ms
        /\ workgraph_snoozed_until_utc_ms' = packet.payload.snoozed_until_utc_ms
-       /\ UnchangedFrame_20b627546c44b4da
+       /\ UnchangedFrame_560125c2bccbc982
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -320,7 +399,7 @@ workgraph_UpdateInProgress(arg_expected_revision, arg_due_at_utc_ms, arg_not_bef
        /\ workgraph_due_at_utc_ms' = packet.payload.due_at_utc_ms
        /\ workgraph_not_before_utc_ms' = packet.payload.not_before_utc_ms
        /\ workgraph_snoozed_until_utc_ms' = packet.payload.snoozed_until_utc_ms
-       /\ UnchangedFrame_20b627546c44b4da
+       /\ UnchangedFrame_560125c2bccbc982
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -353,7 +432,7 @@ workgraph_UpdateBlocked(arg_expected_revision, arg_due_at_utc_ms, arg_not_before
        /\ workgraph_due_at_utc_ms' = packet.payload.due_at_utc_ms
        /\ workgraph_not_before_utc_ms' = packet.payload.not_before_utc_ms
        /\ workgraph_snoozed_until_utc_ms' = packet.payload.snoozed_until_utc_ms
-       /\ UnchangedFrame_20b627546c44b4da
+       /\ UnchangedFrame_560125c2bccbc982
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -380,7 +459,7 @@ workgraph_PolicyEscalateOpenAdmitted(arg_expected_revision, arg_requested_comple
        /\ workgraph_completion_policy' = packet.payload.requested_completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.requested_completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.requested_completion_reviewer_quorum_threshold
-       /\ UnchangedFrame_af222da15ee00e22
+       /\ UnchangedFrame_a3bdd0418e78e6ca
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -403,7 +482,7 @@ workgraph_PolicyEscalateOpenDenied(arg_expected_revision, arg_requested_completi
        /\ (workgraph_revision = packet.payload.expected_revision)
        /\ (workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE)
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -430,7 +509,7 @@ workgraph_PolicyEscalateInProgressAdmitted(arg_expected_revision, arg_requested_
        /\ workgraph_completion_policy' = packet.payload.requested_completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.requested_completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.requested_completion_reviewer_quorum_threshold
-       /\ UnchangedFrame_af222da15ee00e22
+       /\ UnchangedFrame_a3bdd0418e78e6ca
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -453,7 +532,7 @@ workgraph_PolicyEscalateInProgressDenied(arg_expected_revision, arg_requested_co
        /\ (workgraph_revision = packet.payload.expected_revision)
        /\ (workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE)
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -480,7 +559,7 @@ workgraph_PolicyEscalateBlockedAdmitted(arg_expected_revision, arg_requested_com
        /\ workgraph_completion_policy' = packet.payload.requested_completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.requested_completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.requested_completion_reviewer_quorum_threshold
-       /\ UnchangedFrame_af222da15ee00e22
+       /\ UnchangedFrame_a3bdd0418e78e6ca
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -503,7 +582,7 @@ workgraph_PolicyEscalateBlockedDenied(arg_expected_revision, arg_requested_compl
        /\ (workgraph_revision = packet.payload.expected_revision)
        /\ (workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE)
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -536,7 +615,7 @@ workgraph_ClaimOpen(arg_expected_revision, arg_owner_key, arg_now_utc_ms, arg_le
        /\ workgraph_claim_owner_key' = Some(packet.payload.owner_key)
        /\ workgraph_claimed_at_utc_ms' = Some(packet.payload.now_utc_ms)
        /\ workgraph_lease_expires_at_utc_ms' = packet.payload.lease_expires_at_utc_ms
-       /\ UnchangedFrame_7678d52e76e8f1de
+       /\ UnchangedFrame_3a26d5523f268c06
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -572,7 +651,7 @@ workgraph_ClaimExpiredInProgress(arg_expected_revision, arg_owner_key, arg_now_u
        /\ workgraph_claim_owner_key' = Some(packet.payload.owner_key)
        /\ workgraph_claimed_at_utc_ms' = Some(packet.payload.now_utc_ms)
        /\ workgraph_lease_expires_at_utc_ms' = packet.payload.lease_expires_at_utc_ms
-       /\ UnchangedFrame_7678d52e76e8f1de
+       /\ UnchangedFrame_3a26d5523f268c06
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -595,7 +674,7 @@ workgraph_ReleaseInProgress(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UnchangedFrame_7678d52e76e8f1de
+       /\ UnchangedFrame_3a26d5523f268c06
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -622,7 +701,7 @@ workgraph_ObserveLeaseExpiryInProgress(arg_expected_revision, arg_observed_at_ut
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UnchangedFrame_7678d52e76e8f1de
+       /\ UnchangedFrame_3a26d5523f268c06
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -649,7 +728,7 @@ workgraph_ObserveReadinessOpen(arg_expected_revision, arg_observed_at_utc_ms, ar
        /\ (IF (workgraph_snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN workgraph_snoozed_until_utc_ms THEN workgraph_snoozed_until_utc_ms["value"] ELSE None) <= packet.payload.observed_at_utc_ms))
        /\ workgraph_phase' = "Open"
        /\ workgraph_revision' = (workgraph_revision) + 1
-       /\ UnchangedFrame_21f4b2034a26b328
+       /\ UnchangedFrame_8dbfbb9b1380cd6c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -672,7 +751,7 @@ workgraph_BlockOpen(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UnchangedFrame_7678d52e76e8f1de
+       /\ UnchangedFrame_3a26d5523f268c06
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -695,7 +774,7 @@ workgraph_BlockInProgress(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UnchangedFrame_7678d52e76e8f1de
+       /\ UnchangedFrame_3a26d5523f268c06
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -718,7 +797,7 @@ workgraph_BlockBlocked(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UnchangedFrame_7678d52e76e8f1de
+       /\ UnchangedFrame_3a26d5523f268c06
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -738,7 +817,7 @@ workgraph_RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
        /\ workgraph_phase' = "Open"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
-       /\ UnchangedFrame_015b85a354faa85a
+       /\ UnchangedFrame_1446d5451fb83502
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -758,7 +837,7 @@ workgraph_RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
        /\ workgraph_phase' = "InProgress"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
-       /\ UnchangedFrame_015b85a354faa85a
+       /\ UnchangedFrame_1446d5451fb83502
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -778,7 +857,7 @@ workgraph_RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
        /\ workgraph_phase' = "Blocked"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
-       /\ UnchangedFrame_015b85a354faa85a
+       /\ UnchangedFrame_1446d5451fb83502
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -806,7 +885,7 @@ workgraph_ValidateLink(arg_kind, arg_from_item_key, arg_to_item_key, arg_edge_ke
        /\ (IF (packet.payload.kind # "Blocks") THEN TRUE ELSE ((packet.payload.reverse_path_key \in workgraph_blocks_reachability) = FALSE))
        /\ (IF (packet.payload.kind # "Parent") THEN TRUE ELSE ((packet.payload.reverse_path_key \in workgraph_parent_reachability) = FALSE))
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -832,7 +911,7 @@ workgraph_CloseOpenCompleted(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -859,7 +938,7 @@ workgraph_CloseInProgressCompleted(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -886,7 +965,7 @@ workgraph_CloseBlockedCompleted(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -912,7 +991,7 @@ workgraph_CloseOpenCancelled(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -938,7 +1017,7 @@ workgraph_CloseInProgressCancelled(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -964,7 +1043,7 @@ workgraph_CloseBlockedCancelled(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -990,7 +1069,7 @@ workgraph_CloseOpenFailed(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -1016,7 +1095,7 @@ workgraph_CloseInProgressFailed(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -1042,7 +1121,7 @@ workgraph_CloseBlockedFailed(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_916ca33d3d806740
+       /\ UnchangedFrame_7100cb53182ef0c4
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -1071,7 +1150,7 @@ workgraph_AddEvidenceOpen(arg_expected_revision, arg_evidence_kind, arg_confirmi
        /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
        /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
        /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
-       /\ UnchangedFrame_0c3d4796d87a9bb2
+       /\ UnchangedFrame_9379ef6d7816fcfa
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1099,7 +1178,7 @@ workgraph_AddEvidenceInProgress(arg_expected_revision, arg_evidence_kind, arg_co
        /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
        /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
        /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
-       /\ UnchangedFrame_0c3d4796d87a9bb2
+       /\ UnchangedFrame_9379ef6d7816fcfa
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1127,7 +1206,7 @@ workgraph_AddEvidenceBlocked(arg_expected_revision, arg_evidence_kind, arg_confi
        /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
        /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
        /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
-       /\ UnchangedFrame_0c3d4796d87a9bb2
+       /\ UnchangedFrame_9379ef6d7816fcfa
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1155,7 +1234,7 @@ workgraph_AddEvidenceCompleted(arg_expected_revision, arg_evidence_kind, arg_con
        /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
        /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
        /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
-       /\ UnchangedFrame_0c3d4796d87a9bb2
+       /\ UnchangedFrame_9379ef6d7816fcfa
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1183,7 +1262,7 @@ workgraph_AddEvidenceCancelled(arg_expected_revision, arg_evidence_kind, arg_con
        /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
        /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
        /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
-       /\ UnchangedFrame_0c3d4796d87a9bb2
+       /\ UnchangedFrame_9379ef6d7816fcfa
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1211,7 +1290,7 @@ workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confir
        /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
        /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
        /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
-       /\ UnchangedFrame_0c3d4796d87a9bb2
+       /\ UnchangedFrame_9379ef6d7816fcfa
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1230,7 +1309,7 @@ workgraph_ClassifyPublicErrorNotFoundAbsent(arg_kind) ==
        /\ workgraph_phase = "Absent"
        /\ (IF (packet.payload.kind = "NotFound") THEN TRUE ELSE (packet.payload.kind = "AttentionNotFound"))
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1249,7 +1328,7 @@ workgraph_ClassifyPublicErrorNotFoundOpen(arg_kind) ==
        /\ workgraph_phase = "Open"
        /\ (IF (packet.payload.kind = "NotFound") THEN TRUE ELSE (packet.payload.kind = "AttentionNotFound"))
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1268,7 +1347,7 @@ workgraph_ClassifyPublicErrorNotFoundInProgress(arg_kind) ==
        /\ workgraph_phase = "InProgress"
        /\ (IF (packet.payload.kind = "NotFound") THEN TRUE ELSE (packet.payload.kind = "AttentionNotFound"))
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1287,7 +1366,7 @@ workgraph_ClassifyPublicErrorNotFoundBlocked(arg_kind) ==
        /\ workgraph_phase = "Blocked"
        /\ (IF (packet.payload.kind = "NotFound") THEN TRUE ELSE (packet.payload.kind = "AttentionNotFound"))
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1306,7 +1385,7 @@ workgraph_ClassifyPublicErrorNotFoundCompleted(arg_kind) ==
        /\ workgraph_phase = "Completed"
        /\ (IF (packet.payload.kind = "NotFound") THEN TRUE ELSE (packet.payload.kind = "AttentionNotFound"))
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1325,7 +1404,7 @@ workgraph_ClassifyPublicErrorNotFoundCancelled(arg_kind) ==
        /\ workgraph_phase = "Cancelled"
        /\ (IF (packet.payload.kind = "NotFound") THEN TRUE ELSE (packet.payload.kind = "AttentionNotFound"))
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1344,7 +1423,7 @@ workgraph_ClassifyPublicErrorNotFoundFailed(arg_kind) ==
        /\ workgraph_phase = "Failed"
        /\ (IF (packet.payload.kind = "NotFound") THEN TRUE ELSE (packet.payload.kind = "AttentionNotFound"))
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1363,7 +1442,7 @@ workgraph_ClassifyPublicErrorConflictAbsent(arg_kind) ==
        /\ workgraph_phase = "Absent"
        /\ (IF (packet.payload.kind = "StaleRevision") THEN TRUE ELSE (packet.payload.kind = "Conflict"))
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1382,7 +1461,7 @@ workgraph_ClassifyPublicErrorConflictOpen(arg_kind) ==
        /\ workgraph_phase = "Open"
        /\ (IF (packet.payload.kind = "StaleRevision") THEN TRUE ELSE (packet.payload.kind = "Conflict"))
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1401,7 +1480,7 @@ workgraph_ClassifyPublicErrorConflictInProgress(arg_kind) ==
        /\ workgraph_phase = "InProgress"
        /\ (IF (packet.payload.kind = "StaleRevision") THEN TRUE ELSE (packet.payload.kind = "Conflict"))
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1420,7 +1499,7 @@ workgraph_ClassifyPublicErrorConflictBlocked(arg_kind) ==
        /\ workgraph_phase = "Blocked"
        /\ (IF (packet.payload.kind = "StaleRevision") THEN TRUE ELSE (packet.payload.kind = "Conflict"))
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1439,7 +1518,7 @@ workgraph_ClassifyPublicErrorConflictCompleted(arg_kind) ==
        /\ workgraph_phase = "Completed"
        /\ (IF (packet.payload.kind = "StaleRevision") THEN TRUE ELSE (packet.payload.kind = "Conflict"))
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1458,7 +1537,7 @@ workgraph_ClassifyPublicErrorConflictCancelled(arg_kind) ==
        /\ workgraph_phase = "Cancelled"
        /\ (IF (packet.payload.kind = "StaleRevision") THEN TRUE ELSE (packet.payload.kind = "Conflict"))
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1477,7 +1556,7 @@ workgraph_ClassifyPublicErrorConflictFailed(arg_kind) ==
        /\ workgraph_phase = "Failed"
        /\ (IF (packet.payload.kind = "StaleRevision") THEN TRUE ELSE (packet.payload.kind = "Conflict"))
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1496,7 +1575,7 @@ workgraph_ClassifyPublicErrorInvalidTransitionAbsent(arg_kind) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.kind = "InvalidTransition")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1515,7 +1594,7 @@ workgraph_ClassifyPublicErrorInvalidTransitionOpen(arg_kind) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.kind = "InvalidTransition")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1534,7 +1613,7 @@ workgraph_ClassifyPublicErrorInvalidTransitionInProgress(arg_kind) ==
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.kind = "InvalidTransition")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1553,7 +1632,7 @@ workgraph_ClassifyPublicErrorInvalidTransitionBlocked(arg_kind) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.kind = "InvalidTransition")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1572,7 +1651,7 @@ workgraph_ClassifyPublicErrorInvalidTransitionCompleted(arg_kind) ==
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.kind = "InvalidTransition")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1591,7 +1670,7 @@ workgraph_ClassifyPublicErrorInvalidTransitionCancelled(arg_kind) ==
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.kind = "InvalidTransition")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1610,7 +1689,7 @@ workgraph_ClassifyPublicErrorInvalidTransitionFailed(arg_kind) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.kind = "InvalidTransition")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1627,9 +1706,9 @@ workgraph_ClassifyPublicErrorInvalidArgumentsAbsent(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity"))))
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1646,9 +1725,9 @@ workgraph_ClassifyPublicErrorInvalidArgumentsOpen(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity"))))
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1665,9 +1744,9 @@ workgraph_ClassifyPublicErrorInvalidArgumentsInProgress(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity"))))
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1684,9 +1763,9 @@ workgraph_ClassifyPublicErrorInvalidArgumentsBlocked(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity"))))
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1703,9 +1782,9 @@ workgraph_ClassifyPublicErrorInvalidArgumentsCompleted(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity"))))
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1722,9 +1801,9 @@ workgraph_ClassifyPublicErrorInvalidArgumentsCancelled(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity"))))
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1741,9 +1820,9 @@ workgraph_ClassifyPublicErrorInvalidArgumentsFailed(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity"))))
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1762,7 +1841,7 @@ workgraph_ClassifyPublicErrorCapabilityUnavailableAbsent(arg_kind) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.kind = "UnsupportedBackend")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1781,7 +1860,7 @@ workgraph_ClassifyPublicErrorCapabilityUnavailableOpen(arg_kind) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.kind = "UnsupportedBackend")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1800,7 +1879,7 @@ workgraph_ClassifyPublicErrorCapabilityUnavailableInProgress(arg_kind) ==
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.kind = "UnsupportedBackend")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1819,7 +1898,7 @@ workgraph_ClassifyPublicErrorCapabilityUnavailableBlocked(arg_kind) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.kind = "UnsupportedBackend")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1838,7 +1917,7 @@ workgraph_ClassifyPublicErrorCapabilityUnavailableCompleted(arg_kind) ==
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.kind = "UnsupportedBackend")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1857,7 +1936,7 @@ workgraph_ClassifyPublicErrorCapabilityUnavailableCancelled(arg_kind) ==
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.kind = "UnsupportedBackend")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1876,7 +1955,7 @@ workgraph_ClassifyPublicErrorCapabilityUnavailableFailed(arg_kind) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.kind = "UnsupportedBackend")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1893,9 +1972,9 @@ workgraph_ClassifyPublicErrorStoreErrorAbsent(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1912,9 +1991,9 @@ workgraph_ClassifyPublicErrorStoreErrorOpen(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1931,9 +2010,9 @@ workgraph_ClassifyPublicErrorStoreErrorInProgress(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1950,9 +2029,9 @@ workgraph_ClassifyPublicErrorStoreErrorBlocked(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1969,9 +2048,9 @@ workgraph_ClassifyPublicErrorStoreErrorCompleted(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1988,9 +2067,9 @@ workgraph_ClassifyPublicErrorStoreErrorCancelled(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2007,9 +2086,9 @@ workgraph_ClassifyPublicErrorStoreErrorFailed(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
-       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired")))
+       /\ (IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch"))))
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2026,7 +2105,7 @@ workgraph_ClassifyTerminalityTerminalCompleted ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2043,7 +2122,7 @@ workgraph_ClassifyTerminalityTerminalCancelled ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2060,7 +2139,7 @@ workgraph_ClassifyTerminalityTerminalFailed ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2077,7 +2156,7 @@ workgraph_ClassifyTerminalityLiveAbsent ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2094,7 +2173,7 @@ workgraph_ClassifyTerminalityLiveOpen ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2111,7 +2190,7 @@ workgraph_ClassifyTerminalityLiveInProgress ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2128,7 +2207,7 @@ workgraph_ClassifyTerminalityLiveBlocked ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2147,7 +2226,7 @@ workgraph_ClassifyReadinessOpenOpen(arg_now_utc_ms, arg_child_join_satisfied) ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2166,7 +2245,7 @@ workgraph_ClassifyReadinessInProgressInProgress(arg_now_utc_ms, arg_child_join_s
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2185,7 +2264,7 @@ workgraph_ClassifyReadinessNotClaimableAbsent(arg_now_utc_ms, arg_child_join_sat
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2204,7 +2283,7 @@ workgraph_ClassifyReadinessNotClaimableBlocked(arg_now_utc_ms, arg_child_join_sa
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2223,7 +2302,7 @@ workgraph_ClassifyReadinessNotClaimableCompleted(arg_now_utc_ms, arg_child_join_
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2242,7 +2321,7 @@ workgraph_ClassifyReadinessNotClaimableCancelled(arg_now_utc_ms, arg_child_join_
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2261,7 +2340,7 @@ workgraph_ClassifyReadinessNotClaimableFailed(arg_now_utc_ms, arg_child_join_sat
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2281,7 +2360,7 @@ workgraph_ClassifyChildJoinAbsent(arg_active_child_count, arg_failed_child_count
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2301,7 +2380,7 @@ workgraph_ClassifyChildJoinOpen(arg_active_child_count, arg_failed_child_count, 
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2321,7 +2400,7 @@ workgraph_ClassifyChildJoinInProgress(arg_active_child_count, arg_failed_child_c
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2341,7 +2420,7 @@ workgraph_ClassifyChildJoinBlocked(arg_active_child_count, arg_failed_child_coun
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2361,7 +2440,7 @@ workgraph_ClassifyChildJoinCompleted(arg_active_child_count, arg_failed_child_co
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2381,7 +2460,7 @@ workgraph_ClassifyChildJoinCancelled(arg_active_child_count, arg_failed_child_co
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2401,7 +2480,7 @@ workgraph_ClassifyChildJoinFailed(arg_active_child_count, arg_failed_child_count
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2420,7 +2499,7 @@ workgraph_ClassifyBlockerSatisfactionAbsent(arg_blocker_present, arg_blocker_lif
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2439,7 +2518,7 @@ workgraph_ClassifyBlockerSatisfactionOpen(arg_blocker_present, arg_blocker_lifec
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2458,7 +2537,7 @@ workgraph_ClassifyBlockerSatisfactionInProgress(arg_blocker_present, arg_blocker
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2477,7 +2556,7 @@ workgraph_ClassifyBlockerSatisfactionBlocked(arg_blocker_present, arg_blocker_li
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2496,7 +2575,7 @@ workgraph_ClassifyBlockerSatisfactionCompleted(arg_blocker_present, arg_blocker_
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2515,7 +2594,7 @@ workgraph_ClassifyBlockerSatisfactionCancelled(arg_blocker_present, arg_blocker_
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2534,7 +2613,7 @@ workgraph_ClassifyBlockerSatisfactionFailed(arg_blocker_present, arg_blocker_lif
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2553,7 +2632,7 @@ workgraph_ClassifyCreateStatusAdmissionOpenAbsent(arg_requested_status) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2572,7 +2651,7 @@ workgraph_ClassifyCreateStatusAdmissionOpenOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2591,7 +2670,7 @@ workgraph_ClassifyCreateStatusAdmissionOpenInProgress(arg_requested_status) ==
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2610,7 +2689,7 @@ workgraph_ClassifyCreateStatusAdmissionOpenBlocked(arg_requested_status) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2629,7 +2708,7 @@ workgraph_ClassifyCreateStatusAdmissionOpenCompleted(arg_requested_status) ==
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2648,7 +2727,7 @@ workgraph_ClassifyCreateStatusAdmissionOpenCancelled(arg_requested_status) ==
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2667,7 +2746,7 @@ workgraph_ClassifyCreateStatusAdmissionOpenFailed(arg_requested_status) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2686,7 +2765,7 @@ workgraph_ClassifyCreateStatusAdmissionBlockedAbsent(arg_requested_status) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2705,7 +2784,7 @@ workgraph_ClassifyCreateStatusAdmissionBlockedOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2724,7 +2803,7 @@ workgraph_ClassifyCreateStatusAdmissionBlockedInProgress(arg_requested_status) =
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2743,7 +2822,7 @@ workgraph_ClassifyCreateStatusAdmissionBlockedBlocked(arg_requested_status) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2762,7 +2841,7 @@ workgraph_ClassifyCreateStatusAdmissionBlockedCompleted(arg_requested_status) ==
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2781,7 +2860,7 @@ workgraph_ClassifyCreateStatusAdmissionBlockedCancelled(arg_requested_status) ==
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2800,7 +2879,7 @@ workgraph_ClassifyCreateStatusAdmissionBlockedFailed(arg_requested_status) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2819,7 +2898,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedAbsentAbsent(arg_requested_status) 
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2838,7 +2917,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedAbsentOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2857,7 +2936,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedAbsentInProgress(arg_requested_stat
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2876,7 +2955,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedAbsentBlocked(arg_requested_status)
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2895,7 +2974,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCompleted(arg_requested_statu
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2914,7 +2993,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCancelled(arg_requested_statu
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2933,7 +3012,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedAbsentFailed(arg_requested_status) 
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2952,7 +3031,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedInProgressAbsent(arg_requested_stat
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2971,7 +3050,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedInProgressOpen(arg_requested_status
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2990,7 +3069,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedInProgressInProgress(arg_requested_
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3009,7 +3088,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedInProgressBlocked(arg_requested_sta
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3028,7 +3107,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCompleted(arg_requested_s
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3047,7 +3126,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCancelled(arg_requested_s
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3066,7 +3145,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedInProgressFailed(arg_requested_stat
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3085,7 +3164,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCompletedAbsent(arg_requested_statu
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3104,7 +3183,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCompletedOpen(arg_requested_status)
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3123,7 +3202,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCompletedInProgress(arg_requested_s
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3142,7 +3221,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCompletedBlocked(arg_requested_stat
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3161,7 +3240,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCompleted(arg_requested_st
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3180,7 +3259,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCancelled(arg_requested_st
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3199,7 +3278,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCompletedFailed(arg_requested_statu
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3218,7 +3297,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCancelledAbsent(arg_requested_statu
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3237,7 +3316,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCancelledOpen(arg_requested_status)
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3256,7 +3335,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCancelledInProgress(arg_requested_s
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3275,7 +3354,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCancelledBlocked(arg_requested_stat
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3294,7 +3373,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCompleted(arg_requested_st
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3313,7 +3392,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCancelled(arg_requested_st
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3332,7 +3411,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedCancelledFailed(arg_requested_statu
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3351,7 +3430,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedFailedAbsent(arg_requested_status) 
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3370,7 +3449,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedFailedOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3389,7 +3468,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedFailedInProgress(arg_requested_stat
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3408,7 +3487,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedFailedBlocked(arg_requested_status)
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3427,7 +3506,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedFailedCompleted(arg_requested_statu
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3446,7 +3525,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedFailedCancelled(arg_requested_statu
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3465,7 +3544,7 @@ workgraph_ClassifyCreateStatusAdmissionDeniedFailedFailed(arg_requested_status) 
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3484,7 +3563,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestAbsent(arg_completion
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3503,7 +3582,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestOpen(arg_completion_p
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3522,7 +3601,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestInProgress(arg_comple
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3541,7 +3620,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestBlocked(arg_completio
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3560,7 +3639,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestCompleted(arg_complet
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3579,7 +3658,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestCancelled(arg_complet
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3598,7 +3677,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSelfAttestFailed(arg_completion
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3617,7 +3696,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedAbsent(arg_complet
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3636,7 +3715,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedOpen(arg_completio
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3655,7 +3734,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedInProgress(arg_com
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3674,7 +3753,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedBlocked(arg_comple
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3693,7 +3772,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedCompleted(arg_comp
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3712,7 +3791,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedCancelled(arg_comp
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3731,7 +3810,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionHostConfirmedFailed(arg_complet
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3750,7 +3829,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedAbsent(arg_co
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3769,7 +3848,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedOpen(arg_comp
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3788,7 +3867,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedInProgress(ar
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3807,7 +3886,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedBlocked(arg_c
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3826,7 +3905,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCompleted(arg
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3845,7 +3924,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCancelled(arg
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3864,7 +3943,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedFailed(arg_co
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3883,7 +3962,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorAbsent(arg_completion
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3902,7 +3981,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorOpen(arg_completion_p
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3921,7 +4000,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorInProgress(arg_comple
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3940,7 +4019,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorBlocked(arg_completio
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3959,7 +4038,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorCompleted(arg_complet
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3978,7 +4057,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorCancelled(arg_complet
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3997,7 +4076,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionSupervisorFailed(arg_completion
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4016,7 +4095,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumAbsent(arg_comple
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4035,7 +4114,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumOpen(arg_completi
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4054,7 +4133,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumInProgress(arg_co
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4073,7 +4152,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumBlocked(arg_compl
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4092,7 +4171,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCompleted(arg_com
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4111,7 +4190,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCancelled(arg_com
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4130,7 +4209,7 @@ workgraph_ClassifyCreateCompletionPolicyAdmissionReviewerQuorumFailed(arg_comple
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4149,7 +4228,7 @@ workgraph_ClassifyCloseStatusAdmissionCompletedAbsent(arg_requested_status) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4168,7 +4247,7 @@ workgraph_ClassifyCloseStatusAdmissionCompletedOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4187,7 +4266,7 @@ workgraph_ClassifyCloseStatusAdmissionCompletedInProgress(arg_requested_status) 
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4206,7 +4285,7 @@ workgraph_ClassifyCloseStatusAdmissionCompletedBlocked(arg_requested_status) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4225,7 +4304,7 @@ workgraph_ClassifyCloseStatusAdmissionCompletedCompleted(arg_requested_status) =
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4244,7 +4323,7 @@ workgraph_ClassifyCloseStatusAdmissionCompletedCancelled(arg_requested_status) =
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4263,7 +4342,7 @@ workgraph_ClassifyCloseStatusAdmissionCompletedFailed(arg_requested_status) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Completed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4282,7 +4361,7 @@ workgraph_ClassifyCloseStatusAdmissionCancelledAbsent(arg_requested_status) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4301,7 +4380,7 @@ workgraph_ClassifyCloseStatusAdmissionCancelledOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4320,7 +4399,7 @@ workgraph_ClassifyCloseStatusAdmissionCancelledInProgress(arg_requested_status) 
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4339,7 +4418,7 @@ workgraph_ClassifyCloseStatusAdmissionCancelledBlocked(arg_requested_status) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4358,7 +4437,7 @@ workgraph_ClassifyCloseStatusAdmissionCancelledCompleted(arg_requested_status) =
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4377,7 +4456,7 @@ workgraph_ClassifyCloseStatusAdmissionCancelledCancelled(arg_requested_status) =
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4396,7 +4475,7 @@ workgraph_ClassifyCloseStatusAdmissionCancelledFailed(arg_requested_status) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Cancelled")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4415,7 +4494,7 @@ workgraph_ClassifyCloseStatusAdmissionFailedAbsent(arg_requested_status) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4434,7 +4513,7 @@ workgraph_ClassifyCloseStatusAdmissionFailedOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4453,7 +4532,7 @@ workgraph_ClassifyCloseStatusAdmissionFailedInProgress(arg_requested_status) ==
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4472,7 +4551,7 @@ workgraph_ClassifyCloseStatusAdmissionFailedBlocked(arg_requested_status) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4491,7 +4570,7 @@ workgraph_ClassifyCloseStatusAdmissionFailedCompleted(arg_requested_status) ==
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4510,7 +4589,7 @@ workgraph_ClassifyCloseStatusAdmissionFailedCancelled(arg_requested_status) ==
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4529,7 +4608,7 @@ workgraph_ClassifyCloseStatusAdmissionFailedFailed(arg_requested_status) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Failed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4548,7 +4627,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedAbsentAbsent(arg_requested_status) =
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4567,7 +4646,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedAbsentOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4586,7 +4665,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedAbsentInProgress(arg_requested_statu
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4605,7 +4684,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedAbsentBlocked(arg_requested_status) 
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4624,7 +4703,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedAbsentCompleted(arg_requested_status
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4643,7 +4722,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedAbsentCancelled(arg_requested_status
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4662,7 +4741,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedAbsentFailed(arg_requested_status) =
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Absent")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4681,7 +4760,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedOpenAbsent(arg_requested_status) ==
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4700,7 +4779,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedOpenOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4719,7 +4798,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedOpenInProgress(arg_requested_status)
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4738,7 +4817,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedOpenBlocked(arg_requested_status) ==
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4757,7 +4836,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedOpenCompleted(arg_requested_status) 
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4776,7 +4855,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedOpenCancelled(arg_requested_status) 
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4795,7 +4874,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedOpenFailed(arg_requested_status) ==
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Open")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4814,7 +4893,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedInProgressAbsent(arg_requested_statu
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4833,7 +4912,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedInProgressOpen(arg_requested_status)
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4852,7 +4931,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedInProgressInProgress(arg_requested_s
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4871,7 +4950,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedInProgressBlocked(arg_requested_stat
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4890,7 +4969,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedInProgressCompleted(arg_requested_st
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4909,7 +4988,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedInProgressCancelled(arg_requested_st
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4928,7 +5007,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedInProgressFailed(arg_requested_statu
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "InProgress")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4947,7 +5026,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedBlockedAbsent(arg_requested_status) 
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4966,7 +5045,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedBlockedOpen(arg_requested_status) ==
        /\ workgraph_phase = "Open"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4985,7 +5064,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedBlockedInProgress(arg_requested_stat
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5004,7 +5083,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedBlockedBlocked(arg_requested_status)
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5023,7 +5102,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedBlockedCompleted(arg_requested_statu
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5042,7 +5121,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedBlockedCancelled(arg_requested_statu
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5061,7 +5140,7 @@ workgraph_ClassifyCloseStatusAdmissionDeniedBlockedFailed(arg_requested_status) 
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.requested_status = "Blocked")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5080,7 +5159,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSelfAttestAbsent(arg_completion_pol
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5099,7 +5178,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSelfAttestOpen(arg_completion_polic
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5118,7 +5197,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSelfAttestInProgress(arg_completion
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5137,7 +5216,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSelfAttestBlocked(arg_completion_po
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5156,7 +5235,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCompleted(arg_completion_
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5175,7 +5254,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCancelled(arg_completion_
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5194,7 +5273,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSelfAttestFailed(arg_completion_pol
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "SelfAttest")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5213,7 +5292,7 @@ workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedAbsent(arg_completion_
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5232,7 +5311,7 @@ workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedOpen(arg_completion_po
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5251,7 +5330,7 @@ workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedInProgress(arg_complet
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5270,7 +5349,7 @@ workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedBlocked(arg_completion
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5289,7 +5368,7 @@ workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCompleted(arg_completi
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5308,7 +5387,7 @@ workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCancelled(arg_completi
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5327,7 +5406,7 @@ workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedFailed(arg_completion_
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "HostConfirmed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5346,7 +5425,7 @@ workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent(arg_comple
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5365,7 +5444,7 @@ workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen(arg_completi
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5384,7 +5463,7 @@ workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress(arg_co
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5403,7 +5482,7 @@ workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked(arg_compl
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5422,7 +5501,7 @@ workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted(arg_com
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5441,7 +5520,7 @@ workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled(arg_com
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5460,7 +5539,7 @@ workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed(arg_comple
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "PrincipalConfirmed")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5479,7 +5558,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSupervisorAbsent(arg_completion_pol
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5498,7 +5577,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSupervisorOpen(arg_completion_polic
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5517,7 +5596,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSupervisorInProgress(arg_completion
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5536,7 +5615,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSupervisorBlocked(arg_completion_po
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5555,7 +5634,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSupervisorCompleted(arg_completion_
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5574,7 +5653,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSupervisorCancelled(arg_completion_
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5593,7 +5672,7 @@ workgraph_ClassifyPublicConfirmationAdmissionSupervisorFailed(arg_completion_pol
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "Supervisor")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5612,7 +5691,7 @@ workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent(arg_completion
        /\ workgraph_phase = "Absent"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5631,7 +5710,7 @@ workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumOpen(arg_completion_p
        /\ workgraph_phase = "Open"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5650,7 +5729,7 @@ workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress(arg_comple
        /\ workgraph_phase = "InProgress"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5669,7 +5748,7 @@ workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked(arg_completio
        /\ workgraph_phase = "Blocked"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5688,7 +5767,7 @@ workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_complet
        /\ workgraph_phase = "Completed"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5707,7 +5786,7 @@ workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_complet
        /\ workgraph_phase = "Cancelled"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5726,7 +5805,7 @@ workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion
        /\ workgraph_phase = "Failed"
        /\ (packet.payload.completion_policy = "ReviewerQuorum")
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5747,7 +5826,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedAbsent(arg_requested
        /\ workgraph_phase = "Absent"
        /\ ((packet.payload.requested_completion_policy = workgraph_completion_policy) /\ (packet.payload.requested_completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.requested_completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5768,7 +5847,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedOpen(arg_requested_c
        /\ workgraph_phase = "Open"
        /\ ((packet.payload.requested_completion_policy = workgraph_completion_policy) /\ (packet.payload.requested_completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.requested_completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5789,7 +5868,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedInProgress(arg_reque
        /\ workgraph_phase = "InProgress"
        /\ ((packet.payload.requested_completion_policy = workgraph_completion_policy) /\ (packet.payload.requested_completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.requested_completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5810,7 +5889,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedBlocked(arg_requeste
        /\ workgraph_phase = "Blocked"
        /\ ((packet.payload.requested_completion_policy = workgraph_completion_policy) /\ (packet.payload.requested_completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.requested_completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5831,7 +5910,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedCompleted(arg_reques
        /\ workgraph_phase = "Completed"
        /\ ((packet.payload.requested_completion_policy = workgraph_completion_policy) /\ (packet.payload.requested_completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.requested_completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5852,7 +5931,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedCancelled(arg_reques
        /\ workgraph_phase = "Cancelled"
        /\ ((packet.payload.requested_completion_policy = workgraph_completion_policy) /\ (packet.payload.requested_completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.requested_completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5873,7 +5952,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionUnchangedFailed(arg_requested
        /\ workgraph_phase = "Failed"
        /\ ((packet.payload.requested_completion_policy = workgraph_completion_policy) /\ (packet.payload.requested_completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.requested_completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5894,7 +5973,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionChangedAbsent(arg_requested_c
        /\ workgraph_phase = "Absent"
        /\ (IF (packet.payload.requested_completion_policy # workgraph_completion_policy) THEN TRUE ELSE (IF (packet.payload.requested_completion_supervisor_owner_key # workgraph_completion_supervisor_owner_key) THEN TRUE ELSE (packet.payload.requested_completion_reviewer_quorum_threshold # workgraph_completion_reviewer_quorum_threshold)))
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5915,7 +5994,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionChangedOpen(arg_requested_com
        /\ workgraph_phase = "Open"
        /\ (IF (packet.payload.requested_completion_policy # workgraph_completion_policy) THEN TRUE ELSE (IF (packet.payload.requested_completion_supervisor_owner_key # workgraph_completion_supervisor_owner_key) THEN TRUE ELSE (packet.payload.requested_completion_reviewer_quorum_threshold # workgraph_completion_reviewer_quorum_threshold)))
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5936,7 +6015,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionChangedInProgress(arg_request
        /\ workgraph_phase = "InProgress"
        /\ (IF (packet.payload.requested_completion_policy # workgraph_completion_policy) THEN TRUE ELSE (IF (packet.payload.requested_completion_supervisor_owner_key # workgraph_completion_supervisor_owner_key) THEN TRUE ELSE (packet.payload.requested_completion_reviewer_quorum_threshold # workgraph_completion_reviewer_quorum_threshold)))
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5957,7 +6036,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionChangedBlocked(arg_requested_
        /\ workgraph_phase = "Blocked"
        /\ (IF (packet.payload.requested_completion_policy # workgraph_completion_policy) THEN TRUE ELSE (IF (packet.payload.requested_completion_supervisor_owner_key # workgraph_completion_supervisor_owner_key) THEN TRUE ELSE (packet.payload.requested_completion_reviewer_quorum_threshold # workgraph_completion_reviewer_quorum_threshold)))
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5978,7 +6057,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionChangedCompleted(arg_requeste
        /\ workgraph_phase = "Completed"
        /\ (IF (packet.payload.requested_completion_policy # workgraph_completion_policy) THEN TRUE ELSE (IF (packet.payload.requested_completion_supervisor_owner_key # workgraph_completion_supervisor_owner_key) THEN TRUE ELSE (packet.payload.requested_completion_reviewer_quorum_threshold # workgraph_completion_reviewer_quorum_threshold)))
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -5999,7 +6078,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionChangedCancelled(arg_requeste
        /\ workgraph_phase = "Cancelled"
        /\ (IF (packet.payload.requested_completion_policy # workgraph_completion_policy) THEN TRUE ELSE (IF (packet.payload.requested_completion_supervisor_owner_key # workgraph_completion_supervisor_owner_key) THEN TRUE ELSE (packet.payload.requested_completion_reviewer_quorum_threshold # workgraph_completion_reviewer_quorum_threshold)))
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6020,7 +6099,7 @@ workgraph_ClassifyCompletionPolicyMutationAdmissionChangedFailed(arg_requested_c
        /\ workgraph_phase = "Failed"
        /\ (IF (packet.payload.requested_completion_policy # workgraph_completion_policy) THEN TRUE ELSE (IF (packet.payload.requested_completion_supervisor_owner_key # workgraph_completion_supervisor_owner_key) THEN TRUE ELSE (packet.payload.requested_completion_reviewer_quorum_threshold # workgraph_completion_reviewer_quorum_threshold)))
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6043,7 +6122,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalRequiredAbsent(arg_completion_po
        /\ workgraph_phase = "Absent"
        /\ workgraph__confirmation_denies_principal_required(packet.payload.completion_policy, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6066,7 +6145,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalRequiredOpen(arg_completion_poli
        /\ workgraph_phase = "Open"
        /\ workgraph__confirmation_denies_principal_required(packet.payload.completion_policy, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6089,7 +6168,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalRequiredInProgress(arg_completio
        /\ workgraph_phase = "InProgress"
        /\ workgraph__confirmation_denies_principal_required(packet.payload.completion_policy, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6112,7 +6191,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalRequiredBlocked(arg_completion_p
        /\ workgraph_phase = "Blocked"
        /\ workgraph__confirmation_denies_principal_required(packet.payload.completion_policy, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6135,7 +6214,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalRequiredCompleted(arg_completion
        /\ workgraph_phase = "Completed"
        /\ workgraph__confirmation_denies_principal_required(packet.payload.completion_policy, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6158,7 +6237,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalRequiredCancelled(arg_completion
        /\ workgraph_phase = "Cancelled"
        /\ workgraph__confirmation_denies_principal_required(packet.payload.completion_policy, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6181,7 +6260,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalRequiredFailed(arg_completion_po
        /\ workgraph_phase = "Failed"
        /\ workgraph__confirmation_denies_principal_required(packet.payload.completion_policy, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6204,7 +6283,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchAbsent(arg_completio
        /\ workgraph_phase = "Absent"
        /\ workgraph__confirmation_denies_principal_kind_mismatch(packet.payload.completion_policy, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind)
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6227,7 +6306,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchOpen(arg_completion_
        /\ workgraph_phase = "Open"
        /\ workgraph__confirmation_denies_principal_kind_mismatch(packet.payload.completion_policy, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind)
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6250,7 +6329,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchInProgress(arg_compl
        /\ workgraph_phase = "InProgress"
        /\ workgraph__confirmation_denies_principal_kind_mismatch(packet.payload.completion_policy, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind)
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6273,7 +6352,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchBlocked(arg_completi
        /\ workgraph_phase = "Blocked"
        /\ workgraph__confirmation_denies_principal_kind_mismatch(packet.payload.completion_policy, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind)
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6296,7 +6375,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchCompleted(arg_comple
        /\ workgraph_phase = "Completed"
        /\ workgraph__confirmation_denies_principal_kind_mismatch(packet.payload.completion_policy, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind)
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6319,7 +6398,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchCancelled(arg_comple
        /\ workgraph_phase = "Cancelled"
        /\ workgraph__confirmation_denies_principal_kind_mismatch(packet.payload.completion_policy, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind)
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6342,7 +6421,7 @@ workgraph_ClassifyConfirmationAdmissionPrincipalKindMismatchFailed(arg_completio
        /\ workgraph_phase = "Failed"
        /\ workgraph__confirmation_denies_principal_kind_mismatch(packet.payload.completion_policy, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind)
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6365,7 +6444,7 @@ workgraph_ClassifyConfirmationAdmissionSupervisorMismatchAbsent(arg_completion_p
        /\ workgraph_phase = "Absent"
        /\ workgraph__confirmation_denies_supervisor_mismatch(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6388,7 +6467,7 @@ workgraph_ClassifyConfirmationAdmissionSupervisorMismatchOpen(arg_completion_pol
        /\ workgraph_phase = "Open"
        /\ workgraph__confirmation_denies_supervisor_mismatch(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6411,7 +6490,7 @@ workgraph_ClassifyConfirmationAdmissionSupervisorMismatchInProgress(arg_completi
        /\ workgraph_phase = "InProgress"
        /\ workgraph__confirmation_denies_supervisor_mismatch(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6434,7 +6513,7 @@ workgraph_ClassifyConfirmationAdmissionSupervisorMismatchBlocked(arg_completion_
        /\ workgraph_phase = "Blocked"
        /\ workgraph__confirmation_denies_supervisor_mismatch(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6457,7 +6536,7 @@ workgraph_ClassifyConfirmationAdmissionSupervisorMismatchCompleted(arg_completio
        /\ workgraph_phase = "Completed"
        /\ workgraph__confirmation_denies_supervisor_mismatch(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6480,7 +6559,7 @@ workgraph_ClassifyConfirmationAdmissionSupervisorMismatchCancelled(arg_completio
        /\ workgraph_phase = "Cancelled"
        /\ workgraph__confirmation_denies_supervisor_mismatch(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6503,7 +6582,7 @@ workgraph_ClassifyConfirmationAdmissionSupervisorMismatchFailed(arg_completion_p
        /\ workgraph_phase = "Failed"
        /\ workgraph__confirmation_denies_supervisor_mismatch(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key)
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6526,7 +6605,7 @@ workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyAbsent(arg_completion_poli
        /\ workgraph_phase = "Absent"
        /\ workgraph__confirmation_denies_self_attest_empty(packet.payload.completion_policy, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6549,7 +6628,7 @@ workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyOpen(arg_completion_policy
        /\ workgraph_phase = "Open"
        /\ workgraph__confirmation_denies_self_attest_empty(packet.payload.completion_policy, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6572,7 +6651,7 @@ workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyInProgress(arg_completion_
        /\ workgraph_phase = "InProgress"
        /\ workgraph__confirmation_denies_self_attest_empty(packet.payload.completion_policy, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6595,7 +6674,7 @@ workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyBlocked(arg_completion_pol
        /\ workgraph_phase = "Blocked"
        /\ workgraph__confirmation_denies_self_attest_empty(packet.payload.completion_policy, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6618,7 +6697,7 @@ workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyCompleted(arg_completion_p
        /\ workgraph_phase = "Completed"
        /\ workgraph__confirmation_denies_self_attest_empty(packet.payload.completion_policy, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6641,7 +6720,7 @@ workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyCancelled(arg_completion_p
        /\ workgraph_phase = "Cancelled"
        /\ workgraph__confirmation_denies_self_attest_empty(packet.payload.completion_policy, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6664,7 +6743,7 @@ workgraph_ClassifyConfirmationAdmissionSelfAttestEmptyFailed(arg_completion_poli
        /\ workgraph_phase = "Failed"
        /\ workgraph__confirmation_denies_self_attest_empty(packet.payload.completion_policy, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6687,7 +6766,7 @@ workgraph_ClassifyConfirmationAdmissionEvidenceKindAbsent(arg_completion_policy,
        /\ workgraph_phase = "Absent"
        /\ workgraph__confirmation_denies_evidence_kind(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6710,7 +6789,7 @@ workgraph_ClassifyConfirmationAdmissionEvidenceKindOpen(arg_completion_policy, a
        /\ workgraph_phase = "Open"
        /\ workgraph__confirmation_denies_evidence_kind(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6733,7 +6812,7 @@ workgraph_ClassifyConfirmationAdmissionEvidenceKindInProgress(arg_completion_pol
        /\ workgraph_phase = "InProgress"
        /\ workgraph__confirmation_denies_evidence_kind(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6756,7 +6835,7 @@ workgraph_ClassifyConfirmationAdmissionEvidenceKindBlocked(arg_completion_policy
        /\ workgraph_phase = "Blocked"
        /\ workgraph__confirmation_denies_evidence_kind(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6779,7 +6858,7 @@ workgraph_ClassifyConfirmationAdmissionEvidenceKindCompleted(arg_completion_poli
        /\ workgraph_phase = "Completed"
        /\ workgraph__confirmation_denies_evidence_kind(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6802,7 +6881,7 @@ workgraph_ClassifyConfirmationAdmissionEvidenceKindCancelled(arg_completion_poli
        /\ workgraph_phase = "Cancelled"
        /\ workgraph__confirmation_denies_evidence_kind(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6825,7 +6904,7 @@ workgraph_ClassifyConfirmationAdmissionEvidenceKindFailed(arg_completion_policy,
        /\ workgraph_phase = "Failed"
        /\ workgraph__confirmation_denies_evidence_kind(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6848,7 +6927,7 @@ workgraph_ClassifyConfirmationAdmissionAdmittedAbsent(arg_completion_policy, arg
        /\ workgraph_phase = "Absent"
        /\ workgraph__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Absent"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6871,7 +6950,7 @@ workgraph_ClassifyConfirmationAdmissionAdmittedOpen(arg_completion_policy, arg_c
        /\ workgraph_phase = "Open"
        /\ workgraph__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Open"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6894,7 +6973,7 @@ workgraph_ClassifyConfirmationAdmissionAdmittedInProgress(arg_completion_policy,
        /\ workgraph_phase = "InProgress"
        /\ workgraph__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "InProgress"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6917,7 +6996,7 @@ workgraph_ClassifyConfirmationAdmissionAdmittedBlocked(arg_completion_policy, ar
        /\ workgraph_phase = "Blocked"
        /\ workgraph__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Blocked"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6940,7 +7019,7 @@ workgraph_ClassifyConfirmationAdmissionAdmittedCompleted(arg_completion_policy, 
        /\ workgraph_phase = "Completed"
        /\ workgraph__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Completed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6963,7 +7042,7 @@ workgraph_ClassifyConfirmationAdmissionAdmittedCancelled(arg_completion_policy, 
        /\ workgraph_phase = "Cancelled"
        /\ workgraph__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Cancelled"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -6986,13 +7065,71 @@ workgraph_ClassifyConfirmationAdmissionAdmittedFailed(arg_completion_policy, arg
        /\ workgraph_phase = "Failed"
        /\ workgraph__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind)
        /\ workgraph_phase' = "Failed"
-       /\ UnchangedFrame_e8333ccf3574a1f1
+       /\ UnchangedFrame_817bb7f71a278cf1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "ConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyConfirmationAdmissionAdmittedFailed"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyConfirmationAdmissionAdmittedFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_CreateOpenRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "CreateOpen"
+       /\ packet.payload.due_at_utc_ms = arg_due_at_utc_ms
+       /\ packet.payload.not_before_utc_ms = arg_not_before_utc_ms
+       /\ packet.payload.snoozed_until_utc_ms = arg_snoozed_until_utc_ms
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ packet.payload.completion_supervisor_owner_key = arg_completion_supervisor_owner_key
+       /\ packet.payload.completion_reviewer_quorum_threshold = arg_completion_reviewer_quorum_threshold
+       /\ packet.payload.unresolved_blocker_count = arg_unresolved_blocker_count
+       /\ packet.payload.failed_child_join_policy = arg_failed_child_join_policy
+       /\ packet.payload.cancelled_child_join_policy = arg_cancelled_child_join_policy
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.admission_request_digest = arg_admission_request_digest
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None)))
+       /\ workgraph_phase' = "Absent"
+       /\ UnchangedFrame_817bb7f71a278cf1
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "UnpairedAdmissionIdentityRejected", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CreateOpenRejectedUnpairedAdmission"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "CreateOpenRejectedUnpairedAdmission", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_CreateBlockedRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "CreateBlocked"
+       /\ packet.payload.due_at_utc_ms = arg_due_at_utc_ms
+       /\ packet.payload.not_before_utc_ms = arg_not_before_utc_ms
+       /\ packet.payload.snoozed_until_utc_ms = arg_snoozed_until_utc_ms
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ packet.payload.completion_supervisor_owner_key = arg_completion_supervisor_owner_key
+       /\ packet.payload.completion_reviewer_quorum_threshold = arg_completion_reviewer_quorum_threshold
+       /\ packet.payload.unresolved_blocker_count = arg_unresolved_blocker_count
+       /\ packet.payload.failed_child_join_policy = arg_failed_child_join_policy
+       /\ packet.payload.cancelled_child_join_policy = arg_cancelled_child_join_policy
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.admission_request_digest = arg_admission_request_digest
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None)))
+       /\ workgraph_phase' = "Absent"
+       /\ UnchangedFrame_817bb7f71a278cf1
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "UnpairedAdmissionIdentityRejected", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CreateBlockedRejectedUnpairedAdmission"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "CreateBlockedRejectedUnpairedAdmission", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -7046,12 +7183,12 @@ attention_PauseActive(arg_expected_revision, arg_until_utc_ms) ==
        /\ attention_phase' = "Paused"
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = packet.payload.until_utc_ms
-       /\ UnchangedFrame_c53dfbacdd5606f2
+       /\ UnchangedFrame_d944b7c26a50a63a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "PauseActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "PauseActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "PauseActive", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Paused"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7068,12 +7205,12 @@ attention_PausePaused(arg_expected_revision, arg_until_utc_ms) ==
        /\ attention_phase' = "Paused"
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = packet.payload.until_utc_ms
-       /\ UnchangedFrame_c53dfbacdd5606f2
+       /\ UnchangedFrame_d944b7c26a50a63a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "PausePaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionPaused", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "PausePaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "PausePaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Paused"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7089,12 +7226,12 @@ attention_ResumePaused(arg_expected_revision) ==
        /\ attention_phase' = "Active"
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = None
-       /\ UnchangedFrame_c53dfbacdd5606f2
+       /\ UnchangedFrame_d944b7c26a50a63a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionResumed", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "ResumePaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionResumed", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "ResumePaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "ResumePaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Active"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7114,12 +7251,12 @@ attention_SupersedeActive(arg_expected_revision, arg_superseded_by_binding_key, 
        /\ attention_paused_until_utc_ms' = None
        /\ attention_superseded_by_binding_key' = Some(packet.payload.superseded_by_binding_key)
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_308f57ef3f613b48
+       /\ UnchangedFrame_11dcc4b801d594cc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedeActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedeActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "SupersedeActive", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Superseded"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7139,12 +7276,12 @@ attention_SupersedePaused(arg_expected_revision, arg_superseded_by_binding_key, 
        /\ attention_paused_until_utc_ms' = None
        /\ attention_superseded_by_binding_key' = Some(packet.payload.superseded_by_binding_key)
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_308f57ef3f613b48
+       /\ UnchangedFrame_11dcc4b801d594cc
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedePaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionSuperseded", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "SupersedePaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "SupersedePaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Superseded"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7162,12 +7299,12 @@ attention_StopActive(arg_expected_revision, arg_at_utc_ms) ==
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = None
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_a1bc6bd970b1daa3
+       /\ UnchangedFrame_30c4158f34254c67
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "StopActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "StopActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "StopActive", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7185,12 +7322,12 @@ attention_StopPaused(arg_expected_revision, arg_at_utc_ms) ==
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = None
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UnchangedFrame_a1bc6bd970b1daa3
+       /\ UnchangedFrame_30c4158f34254c67
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> (attention_revision) + 1], effect_id |-> (model_step_count + 1), source_transition |-> "StopPaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionStopped", payload |-> [revision |-> ((attention_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "StopPaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "StopPaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -7203,7 +7340,7 @@ attention_ClassifyEligibilityActive(arg_now_utc_ms) ==
        /\ ~HigherPriorityReady("attention_authority")
        /\ attention_phase = "Active"
        /\ attention_phase' = "Active"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7222,7 +7359,7 @@ attention_ClassifyEligibilityPausedElapsed(arg_now_utc_ms) ==
        /\ attention_phase = "Paused"
        /\ ((attention_paused_until_utc_ms # None) /\ ((IF "value" \in DOMAIN attention_paused_until_utc_ms THEN attention_paused_until_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))
        /\ attention_phase' = "Paused"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7241,7 +7378,7 @@ attention_ClassifyEligibilityPausedPending(arg_now_utc_ms) ==
        /\ attention_phase = "Paused"
        /\ (IF (attention_paused_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN attention_paused_until_utc_ms THEN attention_paused_until_utc_ms["value"] ELSE None) > packet.payload.now_utc_ms))
        /\ attention_phase' = "Paused"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7259,7 +7396,7 @@ attention_ClassifyEligibilitySuperseded(arg_now_utc_ms) ==
        /\ ~HigherPriorityReady("attention_authority")
        /\ attention_phase = "Superseded"
        /\ attention_phase' = "Superseded"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7277,7 +7414,7 @@ attention_ClassifyEligibilityStopped(arg_now_utc_ms) ==
        /\ ~HigherPriorityReady("attention_authority")
        /\ attention_phase = "Stopped"
        /\ attention_phase' = "Stopped"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7296,7 +7433,7 @@ attention_ClassifyAuthorityActive(arg_mode, arg_delegated_authority) ==
        /\ ~HigherPriorityReady("attention_authority")
        /\ attention_phase = "Active"
        /\ attention_phase' = "Active"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7315,7 +7452,7 @@ attention_ClassifyAuthorityPaused(arg_mode, arg_delegated_authority) ==
        /\ ~HigherPriorityReady("attention_authority")
        /\ attention_phase = "Paused"
        /\ attention_phase' = "Paused"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7334,7 +7471,7 @@ attention_ClassifyAuthoritySuperseded(arg_mode, arg_delegated_authority) ==
        /\ ~HigherPriorityReady("attention_authority")
        /\ attention_phase = "Superseded"
        /\ attention_phase' = "Superseded"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7353,7 +7490,7 @@ attention_ClassifyAuthorityStopped(arg_mode, arg_delegated_authority) ==
        /\ ~HigherPriorityReady("attention_authority")
        /\ attention_phase = "Stopped"
        /\ attention_phase' = "Stopped"
-       /\ UnchangedFrame_e6ba31d3f853e7c8
+       /\ UnchangedFrame_9be966d09f8bc94c
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -7366,6 +7503,191 @@ attention_ClassifyAuthorityStopped(arg_mode, arg_delegated_authority) ==
 attention_live_has_no_terminal_time == (IF ((attention_phase # "Active") /\ (attention_phase # "Paused")) THEN TRUE ELSE (attention_terminal_at_utc_ms = None))
 attention_paused_has_pause_state == (IF (attention_phase = "Paused") THEN TRUE ELSE (attention_paused_until_utc_ms = None))
 attention_superseded_records_successor == (IF (attention_phase # "Superseded") THEN TRUE ELSE (attention_superseded_by_binding_key # None))
+
+admission_BindKeyed(arg_admission_key, arg_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "Bind"
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.request_digest = arg_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Absent"
+       /\ ((packet.payload.admission_key # None) /\ (packet.payload.request_digest # None))
+       /\ admission_phase' = "Admitted"
+       /\ admission_admission_key' = packet.payload.admission_key
+       /\ admission_request_digest' = packet.payload.request_digest
+       /\ UnchangedFrame_a13929a02412779a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "Bound", payload |-> [keyed |-> TRUE], effect_id |-> (model_step_count + 1), source_transition |-> "BindKeyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "BindKeyed", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Admitted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_BindUnkeyed(arg_admission_key, arg_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "Bind"
+       /\ packet.payload.admission_key = arg_admission_key
+       /\ packet.payload.request_digest = arg_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Absent"
+       /\ ((packet.payload.admission_key = None) /\ (packet.payload.request_digest = None))
+       /\ admission_phase' = "Unkeyed"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "Bound", payload |-> [keyed |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "BindUnkeyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "BindUnkeyed", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Unkeyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_ClassifyAdmissionReplayExactUnkeyed(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Unkeyed"
+       /\ ((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest = Some(packet.payload.requested_request_digest)))
+       /\ admission_phase' = "Unkeyed"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "Replayed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayExactUnkeyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayExactUnkeyed", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Unkeyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_ClassifyAdmissionReplayExactAdmitted(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Admitted"
+       /\ ((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest = Some(packet.payload.requested_request_digest)))
+       /\ admission_phase' = "Admitted"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "Replayed"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayExactAdmitted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayExactAdmitted", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Admitted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_ClassifyAdmissionReplayConflictUnkeyed(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Unkeyed"
+       /\ ((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest # Some(packet.payload.requested_request_digest)))
+       /\ admission_phase' = "Unkeyed"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayConflictUnkeyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayConflictUnkeyed", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Unkeyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_ClassifyAdmissionReplayConflictAdmitted(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Admitted"
+       /\ ((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest # Some(packet.payload.requested_request_digest)))
+       /\ admission_phase' = "Admitted"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayConflictAdmitted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayConflictAdmitted", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Admitted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_ClassifyAdmissionReplayKeyMismatchAbsent(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Absent"
+       /\ (admission_admission_key # Some(packet.payload.requested_admission_key))
+       /\ admission_phase' = "Absent"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "KeyMismatch"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayKeyMismatchAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayKeyMismatchAbsent", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_ClassifyAdmissionReplayKeyMismatchUnkeyed(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Unkeyed"
+       /\ (admission_admission_key # Some(packet.payload.requested_admission_key))
+       /\ admission_phase' = "Unkeyed"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "KeyMismatch"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayKeyMismatchUnkeyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayKeyMismatchUnkeyed", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Unkeyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_ClassifyAdmissionReplayKeyMismatchAdmitted(arg_requested_admission_key, arg_requested_request_digest) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "admission"
+       /\ packet.variant = "ClassifyAdmissionReplay"
+       /\ packet.payload.requested_admission_key = arg_requested_admission_key
+       /\ packet.payload.requested_request_digest = arg_requested_request_digest
+       /\ ~HigherPriorityReady("admission_authority")
+       /\ admission_phase = "Admitted"
+       /\ (admission_admission_key # Some(packet.payload.requested_admission_key))
+       /\ admission_phase' = "Admitted"
+       /\ UnchangedFrame_0cc14d477c087f31
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "admission", variant |-> "AdmissionReplayClassified", payload |-> [admission |-> "KeyMismatch"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAdmissionReplayKeyMismatchAdmitted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "admission", transition |-> "ClassifyAdmissionReplayKeyMismatchAdmitted", actor |-> "admission_authority", step |-> (model_step_count + 1), from_phase |-> admission_phase, to_phase |-> "Admitted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+admission_admitted_has_identity == (IF (admission_phase # "Admitted") THEN TRUE ELSE ((admission_admission_key # None) /\ (admission_request_digest # None)))
+admission_non_admitted_has_no_identity == (IF (admission_phase = "Admitted") THEN TRUE ELSE ((admission_admission_key = None) /\ (admission_request_digest = None)))
 
 workgraph__entry_packet__claim_time_window_eligible(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, now_utc_ms) == ((IF (arg_due_at_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_due_at_utc_ms THEN arg_due_at_utc_ms["value"] ELSE None) <= now_utc_ms)) /\ (IF (arg_not_before_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_not_before_utc_ms THEN arg_not_before_utc_ms["value"] ELSE None) <= now_utc_ms)) /\ (IF (arg_snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN arg_snoozed_until_utc_ms THEN arg_snoozed_until_utc_ms["value"] ELSE None) <= now_utc_ms)))
 
@@ -7390,8 +7712,8 @@ workgraph__entry_packet__completion_policy_escalation_admissible(current_policy,
 workgraph__entry_packet__confirmation_admits(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == ((workgraph__entry_packet__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_self_attest_empty(arg_completion_policy, supplied_evidence_kind) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) = FALSE))
 
 EntryPacketAdmissible_workgraph(packet) ==
-    \/ /\ (packet.variant = "CreateOpen") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold))
-    \/ /\ (packet.variant = "CreateBlocked") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold))
+    \/ /\ (packet.variant = "CreateOpen") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ ((IF ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest # None))))
+    \/ /\ (packet.variant = "CreateBlocked") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ ((IF ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest # None))))
     \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
     \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
     \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
@@ -7449,13 +7771,13 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((packet.payload.kind = "InvalidTransition"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.kind = "InvalidTransition"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((packet.payload.kind = "InvalidTransition"))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (IF (packet.payload.kind = "AttentionTargetRealmMismatch") THEN TRUE ELSE (packet.payload.kind = "UnpairedAdmissionIdentity")))))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.kind = "UnsupportedBackend"))
@@ -7463,13 +7785,13 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((packet.payload.kind = "UnsupportedBackend"))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (packet.payload.kind = "NamespaceAssignmentRequired"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "Store") THEN TRUE ELSE (IF (packet.payload.kind = "BackingStoreUnavailable") THEN TRUE ELSE (IF (packet.payload.kind = "NamespaceAssignmentRequired") THEN TRUE ELSE (packet.payload.kind = "SchemaMismatch")))))
     \/ /\ (packet.variant = "ClassifyTerminality") /\ (workgraph_phase = "Completed")
     \/ /\ (packet.variant = "ClassifyTerminality") /\ (workgraph_phase = "Cancelled")
     \/ /\ (packet.variant = "ClassifyTerminality") /\ (workgraph_phase = "Failed")
@@ -7722,6 +8044,8 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "ClassifyConfirmationAdmission") /\ (workgraph_phase = "Completed") /\ (workgraph__entry_packet__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind))
     \/ /\ (packet.variant = "ClassifyConfirmationAdmission") /\ (workgraph_phase = "Cancelled") /\ (workgraph__entry_packet__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind))
     \/ /\ (packet.variant = "ClassifyConfirmationAdmission") /\ (workgraph_phase = "Failed") /\ (workgraph__entry_packet__confirmation_admits(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.requested_principal_owner_key, packet.payload.requested_principal_kind, packet.payload.supplied_evidence_kind))
+    \/ /\ (packet.variant = "CreateOpen") /\ (workgraph_phase = "Absent") /\ ((IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None))))
+    \/ /\ (packet.variant = "CreateBlocked") /\ (workgraph_phase = "Absent") /\ ((IF ((packet.payload.admission_key # None) /\ (packet.payload.admission_request_digest = None)) THEN TRUE ELSE ((packet.payload.admission_key = None) /\ (packet.payload.admission_request_digest # None))))
 
 attention__entry_packet__attention_can_close_own_review_item(mode, delegated_authority) == ((IF (mode = "Review") THEN TRUE ELSE (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
 
@@ -7767,10 +8091,22 @@ EntryPacketAdmissible_attention(packet) ==
     \/ /\ (packet.variant = "ClassifyAttentionAuthority") /\ (attention_phase = "Superseded")
     \/ /\ (packet.variant = "ClassifyAttentionAuthority") /\ (attention_phase = "Stopped")
 
+EntryPacketAdmissible_admission(packet) ==
+    \/ /\ (packet.variant = "Bind") /\ (admission_phase = "Absent") /\ (((packet.payload.admission_key # None) /\ (packet.payload.request_digest # None)))
+    \/ /\ (packet.variant = "Bind") /\ (admission_phase = "Absent") /\ (((packet.payload.admission_key = None) /\ (packet.payload.request_digest = None)))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Unkeyed") /\ (((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest = Some(packet.payload.requested_request_digest))))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Admitted") /\ (((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest = Some(packet.payload.requested_request_digest))))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Unkeyed") /\ (((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest # Some(packet.payload.requested_request_digest))))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Admitted") /\ (((admission_admission_key = Some(packet.payload.requested_admission_key)) /\ (admission_request_digest # Some(packet.payload.requested_request_digest))))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Absent") /\ ((admission_admission_key # Some(packet.payload.requested_admission_key)))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Unkeyed") /\ ((admission_admission_key # Some(packet.payload.requested_admission_key)))
+    \/ /\ (packet.variant = "ClassifyAdmissionReplay") /\ (admission_phase = "Admitted") /\ ((admission_admission_key # Some(packet.payload.requested_admission_key)))
+
 EntryPacketAdmissible(packet) ==
     CASE
       packet.machine = "workgraph" -> EntryPacketAdmissible_workgraph(packet)
       [] packet.machine = "attention" -> EntryPacketAdmissible_attention(packet)
+      [] packet.machine = "admission" -> EntryPacketAdmissible_admission(packet)
       [] OTHER -> FALSE
 
 DeliverQueuedRoute ==
@@ -7781,7 +8117,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UnchangedFrame_e27b33fd9decab38
+       /\ UnchangedFrame_4d20e403b6d6ed10
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -7803,35 +8139,219 @@ WitnessInjectNext_close_stops_attention_route ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_bff1428bb627c135
+    /\ UnchangedFrame_f4be6c91654670cd
+
+WitnessInjectNext_keyed_admission_replay_classification ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f4be6c91654670cd
+
+WitnessInjectNext_unkeyed_admission_replay_is_key_mismatch ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f4be6c91654670cd
+
+WitnessInjectNext_unpaired_create_open_admission_rejected ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f4be6c91654670cd
+
+WitnessInjectNext_unpaired_create_blocked_admission_rejected ==
+    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input
+        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>
+    IN
+    /\ witness_current_script_input # None
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ EntryPacketAdmissible(next_script_input)
+    /\ Len(pending_inputs) = 0
+    /\ Len(pending_routes) = 0
+    /\ Len(witness_remaining_script_inputs) > 0
+    /\ pending_inputs' = Append(pending_inputs, next_script_input)
+    /\ observed_inputs' = observed_inputs \cup {next_script_input}
+    /\ witness_current_script_input' = next_script_input
+    /\ witness_remaining_script_inputs' = next_remaining_script_inputs
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f4be6c91654670cd
 
 WitnessScriptComplete_close_stops_attention_route ==
     /\ Len(witness_remaining_script_inputs) = 0
     /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
     /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
     /\ \E packet \in delivered_routes : packet.route = "work_item_close_stops_attention"
     /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
     /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CloseOpenCompleted")
     /\ (\E packet \in observed_transitions : /\ packet.machine = "attention" /\ packet.transition = "StopActive")
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CloseOpenCompleted" /\ later.machine = "attention" /\ later.transition = "StopActive" /\ earlier.step < later.step)
+
+WitnessScriptComplete_keyed_admission_replay_classification ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindKeyed")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayExactAdmitted")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayConflictAdmitted")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAdmitted")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindKeyed" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindKeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayExactAdmitted" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayExactAdmitted" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayConflictAdmitted" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayConflictAdmitted" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchAdmitted" /\ earlier.step < later.step)
+
+WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindUnkeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed" /\ earlier.step < later.step)
+
+WitnessScriptComplete_unpaired_create_open_admission_rejected ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAbsent")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpenRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayKeyMismatchAbsent" /\ later.machine = "workgraph" /\ later.transition = "CreateOpenRejectedUnpairedAdmission" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpenRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateOpen" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+
+WitnessScriptComplete_unpaired_create_blocked_admission_rejected ==
+    /\ Len(witness_remaining_script_inputs) = 0
+    /\ ~(witness_current_script_input \in SeqElements(pending_inputs))
+    /\ Len(pending_routes) = 0
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlockedRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlocked")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlockedRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateBlocked" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlocked" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
 
 WitnessNoPrematureStutter_close_stops_attention_route ==
     \/ WitnessScriptComplete_close_stops_attention_route
     \/ model_step_count' # model_step_count
 
+WitnessNoPrematureStutter_keyed_admission_replay_classification ==
+    \/ WitnessScriptComplete_keyed_admission_replay_classification
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_unkeyed_admission_replay_is_key_mismatch ==
+    \/ WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_unpaired_create_open_admission_rejected ==
+    \/ WitnessScriptComplete_unpaired_create_open_admission_rejected
+    \/ model_step_count' # model_step_count
+
+WitnessNoPrematureStutter_unpaired_create_blocked_admission_rejected ==
+    \/ WitnessScriptComplete_unpaired_create_blocked_admission_rejected
+    \/ model_step_count' # model_step_count
+
 WitnessSatisfiedStutter_close_stops_attention_route ==
     /\ WitnessScriptComplete_close_stops_attention_route
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
     /\ \E packet \in delivered_routes : packet.route = "work_item_close_stops_attention"
     /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
     /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CloseOpenCompleted")
     /\ (\E packet \in observed_transitions : /\ packet.machine = "attention" /\ packet.transition = "StopActive")
     /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CloseOpenCompleted" /\ later.machine = "attention" /\ later.transition = "StopActive" /\ earlier.step < later.step)
     /\ UNCHANGED vars
 
+WitnessSatisfiedStutter_keyed_admission_replay_classification ==
+    /\ WitnessScriptComplete_keyed_admission_replay_classification
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindKeyed")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayExactAdmitted")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayConflictAdmitted")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAdmitted")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindKeyed" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindKeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayExactAdmitted" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayExactAdmitted" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayConflictAdmitted" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayConflictAdmitted" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchAdmitted" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_unkeyed_admission_replay_is_key_mismatch ==
+    /\ WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindUnkeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_unpaired_create_open_admission_rejected ==
+    /\ WitnessScriptComplete_unpaired_create_open_admission_rejected
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAbsent")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpenRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayKeyMismatchAbsent" /\ later.machine = "workgraph" /\ later.transition = "CreateOpenRejectedUnpairedAdmission" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpenRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateOpen" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
+WitnessSatisfiedStutter_unpaired_create_blocked_admission_rejected ==
+    /\ WitnessScriptComplete_unpaired_create_blocked_admission_rejected
+    /\ \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlockedRejectedUnpairedAdmission")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlocked")
+    /\ (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlockedRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateBlocked" /\ earlier.step < later.step)
+    /\ (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlocked" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+    /\ UNCHANGED vars
+
 CoreNext ==
     \/ DeliverQueuedRoute
-    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy)
-    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy)
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateOpen(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateInProgress(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateBlocked(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
@@ -8162,6 +8682,8 @@ CoreNext ==
     \/ \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedCompleted(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind)
     \/ \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedCancelled(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind)
     \/ \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_principal_kind \in OptionWorkOwnerKindValues : \E arg_supplied_evidence_kind \in WorkConfirmationEvidenceObservationValues : workgraph_ClassifyConfirmationAdmissionAdmittedFailed(arg_completion_policy, arg_completion_supervisor_owner_key, arg_requested_principal_owner_key, arg_requested_principal_kind, arg_supplied_evidence_kind)
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateOpenRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
+    \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : \E arg_failed_child_join_policy \in FailedChildJoinPolicyValues : \E arg_cancelled_child_join_policy \in CancelledChildJoinPolicyValues : \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_admission_request_digest \in OptionWorkAdmissionDigestRefValues : workgraph_CreateBlockedRejectedUnpairedAdmission(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count, arg_failed_child_join_policy, arg_cancelled_child_join_policy, arg_admission_key, arg_admission_request_digest)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision)
@@ -8178,6 +8700,15 @@ CoreNext ==
     \/ \E arg_mode \in WorkAttentionModeValues : \E arg_delegated_authority \in AttentionDelegatedAuthorityValues : attention_ClassifyAuthorityPaused(arg_mode, arg_delegated_authority)
     \/ \E arg_mode \in WorkAttentionModeValues : \E arg_delegated_authority \in AttentionDelegatedAuthorityValues : attention_ClassifyAuthoritySuperseded(arg_mode, arg_delegated_authority)
     \/ \E arg_mode \in WorkAttentionModeValues : \E arg_delegated_authority \in AttentionDelegatedAuthorityValues : attention_ClassifyAuthorityStopped(arg_mode, arg_delegated_authority)
+    \/ \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_request_digest \in OptionWorkAdmissionDigestRefValues : admission_BindKeyed(arg_admission_key, arg_request_digest)
+    \/ \E arg_admission_key \in OptionWorkAdmissionKeyRefValues : \E arg_request_digest \in OptionWorkAdmissionDigestRefValues : admission_BindUnkeyed(arg_admission_key, arg_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayExactUnkeyed(arg_requested_admission_key, arg_requested_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayExactAdmitted(arg_requested_admission_key, arg_requested_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayConflictUnkeyed(arg_requested_admission_key, arg_requested_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayConflictAdmitted(arg_requested_admission_key, arg_requested_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayKeyMismatchAbsent(arg_requested_admission_key, arg_requested_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayKeyMismatchUnkeyed(arg_requested_admission_key, arg_requested_request_digest)
+    \/ \E arg_requested_admission_key \in WorkAdmissionKeyRefValues : \E arg_requested_request_digest \in WorkAdmissionDigestRefValues : admission_ClassifyAdmissionReplayKeyMismatchAdmitted(arg_requested_admission_key, arg_requested_request_digest)
     \/ QuiescentStutter
 
 InjectNext ==
@@ -8188,23 +8719,67 @@ Next ==
 
 WitnessNext_close_stops_attention_route ==
     \/ DeliverQueuedRoute
-    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpen(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpen(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "Bind" /\ admission_BindUnkeyed(witness_packet.payload.admission_key, witness_packet.payload.request_digest)
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CloseCompleted" /\ workgraph_CloseOpenCompleted(witness_packet.payload.expected_revision, witness_packet.payload.at_utc_ms)
     \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "attention" /\ witness_packet.variant = "Stop" /\ attention_StopActive(witness_packet.payload.expected_revision, witness_packet.payload.at_utc_ms)
     \/ WitnessSatisfiedStutter_close_stops_attention_route
     \/ WitnessInjectNext_close_stops_attention_route
 
+WitnessNext_keyed_admission_replay_classification ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpen(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "Bind" /\ admission_BindKeyed(witness_packet.payload.admission_key, witness_packet.payload.request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "ClassifyAdmissionReplay" /\ admission_ClassifyAdmissionReplayExactAdmitted(witness_packet.payload.requested_admission_key, witness_packet.payload.requested_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "ClassifyAdmissionReplay" /\ admission_ClassifyAdmissionReplayConflictAdmitted(witness_packet.payload.requested_admission_key, witness_packet.payload.requested_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "ClassifyAdmissionReplay" /\ admission_ClassifyAdmissionReplayKeyMismatchAdmitted(witness_packet.payload.requested_admission_key, witness_packet.payload.requested_request_digest)
+    \/ WitnessSatisfiedStutter_keyed_admission_replay_classification
+    \/ WitnessInjectNext_keyed_admission_replay_classification
 
+WitnessNext_unkeyed_admission_replay_is_key_mismatch ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpen(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "Bind" /\ admission_BindUnkeyed(witness_packet.payload.admission_key, witness_packet.payload.request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "ClassifyAdmissionReplay" /\ admission_ClassifyAdmissionReplayKeyMismatchUnkeyed(witness_packet.payload.requested_admission_key, witness_packet.payload.requested_request_digest)
+    \/ WitnessSatisfiedStutter_unkeyed_admission_replay_is_key_mismatch
+    \/ WitnessInjectNext_unkeyed_admission_replay_is_key_mismatch
+
+WitnessNext_unpaired_create_open_admission_rejected ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "ClassifyAdmissionReplay" /\ admission_ClassifyAdmissionReplayKeyMismatchAbsent(witness_packet.payload.requested_admission_key, witness_packet.payload.requested_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpenRejectedUnpairedAdmission(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateOpen" /\ workgraph_CreateOpen(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "Bind" /\ admission_BindUnkeyed(witness_packet.payload.admission_key, witness_packet.payload.request_digest)
+    \/ WitnessSatisfiedStutter_unpaired_create_open_admission_rejected
+    \/ WitnessInjectNext_unpaired_create_open_admission_rejected
+
+WitnessNext_unpaired_create_blocked_admission_rejected ==
+    \/ DeliverQueuedRoute
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateBlocked" /\ workgraph_CreateBlockedRejectedUnpairedAdmission(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "workgraph" /\ witness_packet.variant = "CreateBlocked" /\ workgraph_CreateBlocked(witness_packet.payload.due_at_utc_ms, witness_packet.payload.not_before_utc_ms, witness_packet.payload.snoozed_until_utc_ms, witness_packet.payload.completion_policy, witness_packet.payload.completion_supervisor_owner_key, witness_packet.payload.completion_reviewer_quorum_threshold, witness_packet.payload.unresolved_blocker_count, witness_packet.payload.failed_child_join_policy, witness_packet.payload.cancelled_child_join_policy, witness_packet.payload.admission_key, witness_packet.payload.admission_request_digest)
+    \/ \E witness_packet \in SeqElements(pending_inputs) : /\ witness_packet.machine = "admission" /\ witness_packet.variant = "Bind" /\ admission_BindUnkeyed(witness_packet.payload.admission_key, witness_packet.payload.request_digest)
+    \/ WitnessSatisfiedStutter_unpaired_create_blocked_admission_rejected
+    \/ WitnessInjectNext_unpaired_create_blocked_admission_rejected
+
+
+work_item_create_routes_to_admission_bind == \E route_name \in RouteNames : /\ RouteSource(route_name) = "workgraph" /\ RouteEffect(route_name) = "Created" /\ RouteTargetMachine(route_name) = "admission" /\ RouteTargetInput(route_name) = "Bind"
+admission_bind_originates_from_work_item_create == \A input_packet \in observed_inputs : ((input_packet.machine = "admission" /\ input_packet.variant = "Bind" /\ input_packet.source_route = "work_item_create_binds_admission") => (/\ input_packet.source_kind = "route" /\ input_packet.source_machine = "workgraph" /\ input_packet.source_effect = "Created" /\ \E effect_packet \in emitted_effects : /\ effect_packet.machine = "workgraph" /\ effect_packet.variant = "Created" /\ effect_packet.effect_id = input_packet.effect_id /\ \E route_packet \in RoutePackets : /\ route_packet.route = "work_item_create_binds_admission" /\ route_packet.source_machine = "workgraph" /\ route_packet.effect = "Created" /\ route_packet.target_machine = "admission" /\ route_packet.target_input = "Bind" /\ route_packet.effect_id = input_packet.effect_id /\ route_packet.payload = input_packet.payload))
 closed_work_item_routes_to_attention_stop == \E route_name \in RouteNames : /\ RouteSource(route_name) = "workgraph" /\ RouteEffect(route_name) = "Closed" /\ RouteTargetMachine(route_name) = "attention" /\ RouteTargetInput(route_name) = "Stop"
 attention_stop_originates_from_work_item_close == \A input_packet \in observed_inputs : ((input_packet.machine = "attention" /\ input_packet.variant = "Stop" /\ input_packet.source_route = "work_item_close_stops_attention") => (/\ input_packet.source_kind = "route" /\ input_packet.source_machine = "workgraph" /\ input_packet.source_effect = "Closed" /\ \E effect_packet \in emitted_effects : /\ effect_packet.machine = "workgraph" /\ effect_packet.variant = "Closed" /\ effect_packet.effect_id = input_packet.effect_id /\ \E route_packet \in RoutePackets : /\ route_packet.route = "work_item_close_stops_attention" /\ route_packet.source_machine = "workgraph" /\ route_packet.effect = "Closed" /\ route_packet.target_machine = "attention" /\ route_packet.target_input = "Stop" /\ route_packet.effect_id = input_packet.effect_id /\ route_packet.payload = input_packet.payload))
 
+RouteObserved_work_item_create_binds_admission == \E packet \in delivered_routes : packet.route = "work_item_create_binds_admission"
+RouteCoverage_work_item_create_binds_admission == (RouteObserved_work_item_create_binds_admission \/ ~RouteObserved_work_item_create_binds_admission)
 RouteObserved_work_item_close_stops_attention == \E packet \in delivered_routes : packet.route = "work_item_close_stops_attention"
 RouteCoverage_work_item_close_stops_attention == (RouteObserved_work_item_close_stops_attention \/ ~RouteObserved_work_item_close_stops_attention)
-CoverageInstrumentation == RouteCoverage_work_item_close_stops_attention
+CoverageInstrumentation == RouteCoverage_work_item_create_binds_admission /\ RouteCoverage_work_item_close_stops_attention
 
 CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
 DeepStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 2 /\ Cardinality(workgraph_topology_edge_keys) <= 2 /\ Cardinality(workgraph_blocks_reachability) <= 2 /\ Cardinality(workgraph_parent_reachability) <= 2 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 2 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 2
-WitnessStateConstraint_close_stops_attention_route == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 3 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+WitnessStateConstraint_close_stops_attention_route == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 4 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+WitnessStateConstraint_keyed_admission_replay_classification == /\ model_step_count <= 9 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 9 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+WitnessStateConstraint_unkeyed_admission_replay_is_key_mismatch == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 6 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+WitnessStateConstraint_unpaired_create_open_admission_rejected == /\ model_step_count <= 16 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 8 /\ Cardinality(observed_transitions) <= 16 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+WitnessStateConstraint_unpaired_create_blocked_admission_rejected == /\ model_step_count <= 16 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 8 /\ Cardinality(observed_transitions) <= 16 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
 
 Spec ==
     /\ Init
@@ -8214,12 +8789,62 @@ WitnessSpec_close_stops_attention_route ==
     /\ WitnessInit_close_stops_attention_route
     /\ [] [WitnessNext_close_stops_attention_route]_vars
 
+WitnessSpec_keyed_admission_replay_classification ==
+    /\ WitnessInit_keyed_admission_replay_classification
+    /\ [] [WitnessNext_keyed_admission_replay_classification]_vars
+
+WitnessSpec_unkeyed_admission_replay_is_key_mismatch ==
+    /\ WitnessInit_unkeyed_admission_replay_is_key_mismatch
+    /\ [] [WitnessNext_unkeyed_admission_replay_is_key_mismatch]_vars
+
+WitnessSpec_unpaired_create_open_admission_rejected ==
+    /\ WitnessInit_unpaired_create_open_admission_rejected
+    /\ [] [WitnessNext_unpaired_create_open_admission_rejected]_vars
+
+WitnessSpec_unpaired_create_blocked_admission_rejected ==
+    /\ WitnessInit_unpaired_create_blocked_admission_rejected
+    /\ [] [WitnessNext_unpaired_create_blocked_admission_rejected]_vars
+
+WitnessRouteObserved_close_stops_attention_route_work_item_create_binds_admission == WitnessScriptComplete_close_stops_attention_route => (RouteObserved_work_item_create_binds_admission)
 WitnessRouteObserved_close_stops_attention_route_work_item_close_stops_attention == WitnessScriptComplete_close_stops_attention_route => (RouteObserved_work_item_close_stops_attention)
 WitnessTransitionObserved_close_stops_attention_route_workgraph_CreateOpen == WitnessScriptComplete_close_stops_attention_route => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+WitnessTransitionObserved_close_stops_attention_route_admission_BindUnkeyed == WitnessScriptComplete_close_stops_attention_route => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
 WitnessTransitionObserved_close_stops_attention_route_workgraph_CloseOpenCompleted == WitnessScriptComplete_close_stops_attention_route => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CloseOpenCompleted")
 WitnessTransitionObserved_close_stops_attention_route_attention_StopActive == WitnessScriptComplete_close_stops_attention_route => (\E packet \in observed_transitions : /\ packet.machine = "attention" /\ packet.transition = "StopActive")
 WitnessTransitionOrder_close_stops_attention_route_1 == WitnessScriptComplete_close_stops_attention_route => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CloseOpenCompleted" /\ later.machine = "attention" /\ later.transition = "StopActive" /\ earlier.step < later.step)
+WitnessRouteObserved_keyed_admission_replay_classification_work_item_create_binds_admission == WitnessScriptComplete_keyed_admission_replay_classification => (RouteObserved_work_item_create_binds_admission)
+WitnessTransitionObserved_keyed_admission_replay_classification_workgraph_CreateOpen == WitnessScriptComplete_keyed_admission_replay_classification => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+WitnessTransitionObserved_keyed_admission_replay_classification_admission_BindKeyed == WitnessScriptComplete_keyed_admission_replay_classification => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindKeyed")
+WitnessTransitionObserved_keyed_admission_replay_classification_admission_ClassifyAdmissionReplayExactAdmitted == WitnessScriptComplete_keyed_admission_replay_classification => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayExactAdmitted")
+WitnessTransitionObserved_keyed_admission_replay_classification_admission_ClassifyAdmissionReplayConflictAdmitted == WitnessScriptComplete_keyed_admission_replay_classification => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayConflictAdmitted")
+WitnessTransitionObserved_keyed_admission_replay_classification_admission_ClassifyAdmissionReplayKeyMismatchAdmitted == WitnessScriptComplete_keyed_admission_replay_classification => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAdmitted")
+WitnessTransitionOrder_keyed_admission_replay_classification_1 == WitnessScriptComplete_keyed_admission_replay_classification => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindKeyed" /\ earlier.step < later.step)
+WitnessTransitionOrder_keyed_admission_replay_classification_2 == WitnessScriptComplete_keyed_admission_replay_classification => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindKeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayExactAdmitted" /\ earlier.step < later.step)
+WitnessTransitionOrder_keyed_admission_replay_classification_3 == WitnessScriptComplete_keyed_admission_replay_classification => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayExactAdmitted" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayConflictAdmitted" /\ earlier.step < later.step)
+WitnessTransitionOrder_keyed_admission_replay_classification_4 == WitnessScriptComplete_keyed_admission_replay_classification => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayConflictAdmitted" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchAdmitted" /\ earlier.step < later.step)
+WitnessRouteObserved_unkeyed_admission_replay_is_key_mismatch_work_item_create_binds_admission == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (RouteObserved_work_item_create_binds_admission)
+WitnessTransitionObserved_unkeyed_admission_replay_is_key_mismatch_workgraph_CreateOpen == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+WitnessTransitionObserved_unkeyed_admission_replay_is_key_mismatch_admission_BindUnkeyed == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+WitnessTransitionObserved_unkeyed_admission_replay_is_key_mismatch_admission_ClassifyAdmissionReplayKeyMismatchUnkeyed == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed")
+WitnessTransitionOrder_unkeyed_admission_replay_is_key_mismatch_1 == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+WitnessTransitionOrder_unkeyed_admission_replay_is_key_mismatch_2 == WitnessScriptComplete_unkeyed_admission_replay_is_key_mismatch => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "BindUnkeyed" /\ later.machine = "admission" /\ later.transition = "ClassifyAdmissionReplayKeyMismatchUnkeyed" /\ earlier.step < later.step)
+WitnessRouteObserved_unpaired_create_open_admission_rejected_work_item_create_binds_admission == WitnessScriptComplete_unpaired_create_open_admission_rejected => (RouteObserved_work_item_create_binds_admission)
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_admission_ClassifyAdmissionReplayKeyMismatchAbsent == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "ClassifyAdmissionReplayKeyMismatchAbsent")
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_workgraph_CreateOpenRejectedUnpairedAdmission == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpenRejectedUnpairedAdmission")
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_workgraph_CreateOpen == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")
+WitnessTransitionObserved_unpaired_create_open_admission_rejected_admission_BindUnkeyed == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+WitnessTransitionOrder_unpaired_create_open_admission_rejected_1 == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "admission" /\ earlier.transition = "ClassifyAdmissionReplayKeyMismatchAbsent" /\ later.machine = "workgraph" /\ later.transition = "CreateOpenRejectedUnpairedAdmission" /\ earlier.step < later.step)
+WitnessTransitionOrder_unpaired_create_open_admission_rejected_2 == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpenRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateOpen" /\ earlier.step < later.step)
+WitnessTransitionOrder_unpaired_create_open_admission_rejected_3 == WitnessScriptComplete_unpaired_create_open_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateOpen" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
+WitnessRouteObserved_unpaired_create_blocked_admission_rejected_work_item_create_binds_admission == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (RouteObserved_work_item_create_binds_admission)
+WitnessTransitionObserved_unpaired_create_blocked_admission_rejected_workgraph_CreateBlockedRejectedUnpairedAdmission == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlockedRejectedUnpairedAdmission")
+WitnessTransitionObserved_unpaired_create_blocked_admission_rejected_workgraph_CreateBlocked == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateBlocked")
+WitnessTransitionObserved_unpaired_create_blocked_admission_rejected_admission_BindUnkeyed == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E packet \in observed_transitions : /\ packet.machine = "admission" /\ packet.transition = "BindUnkeyed")
+WitnessTransitionOrder_unpaired_create_blocked_admission_rejected_1 == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlockedRejectedUnpairedAdmission" /\ later.machine = "workgraph" /\ later.transition = "CreateBlocked" /\ earlier.step < later.step)
+WitnessTransitionOrder_unpaired_create_blocked_admission_rejected_2 == WitnessScriptComplete_unpaired_create_blocked_admission_rejected => (\E earlier \in observed_transitions, later \in observed_transitions : /\ earlier.machine = "workgraph" /\ earlier.transition = "CreateBlocked" /\ later.machine = "admission" /\ later.transition = "BindUnkeyed" /\ earlier.step < later.step)
 
+THEOREM Spec => []work_item_create_routes_to_admission_bind
+THEOREM Spec => []admission_bind_originates_from_work_item_create
 THEOREM Spec => []closed_work_item_routes_to_attention_stop
 THEOREM Spec => []attention_stop_originates_from_work_item_close
 THEOREM Spec => []workgraph_absent_has_zero_revision
@@ -8236,5 +8861,7 @@ THEOREM Spec => []workgraph_non_reviewer_quorum_policy_has_no_threshold
 THEOREM Spec => []attention_live_has_no_terminal_time
 THEOREM Spec => []attention_paused_has_pause_state
 THEOREM Spec => []attention_superseded_records_successor
+THEOREM Spec => []admission_admitted_has_identity
+THEOREM Spec => []admission_non_admitted_has_no_identity
 
 =============================================================================

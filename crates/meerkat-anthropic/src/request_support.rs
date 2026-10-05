@@ -35,6 +35,47 @@ pub(crate) fn provider_tag_rejection(
         .anthropic_provider_tag_rejection(tag)
 }
 
+/// Why a forced tool choice (`any` or a named tool) is refused locally for
+/// this request, or `None` to send it: explicit thinking (Anthropic rejects
+/// a forced call under extended thinking), or a cataloged model proven to
+/// reject forced choices. Unproven and uncatalogued models send it.
+pub(crate) fn forced_tool_choice_refusal(
+    model: &str,
+    tag: Option<&meerkat_core::lifecycle::run_primitive::AnthropicProviderTag>,
+) -> Option<meerkat_llm_core::ToolChoiceRefusal> {
+    if tag.is_some_and(|tag| tag.thinking.is_some() || tag.thinking_budget_tokens.is_some()) {
+        return Some(meerkat_llm_core::ToolChoiceRefusal::ForcedToolWithThinking);
+    }
+    meerkat_models::capabilities_for(Provider::Anthropic, model)
+        .is_some_and(|caps| !caps.supports_forced_tool_choice)
+        .then_some(meerkat_llm_core::ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice)
+}
+
+/// The typed refusal for Anthropic's own rejection of a forced tool choice:
+/// a 400 `invalid_request_error` whose message starts `tool_choice:` and says
+/// the choice is not supported, on a request that forced a call. Anything
+/// else stays the generic HTTP classification.
+pub(crate) fn provider_forced_tool_choice_rejection(
+    request: &meerkat_llm_core::LlmRequest,
+    status: u16,
+    body: &str,
+) -> Option<meerkat_llm_core::LlmError> {
+    if status != 400 || !request.tool_choice.forces_a_tool_call() {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = body.get("error")?;
+    let message = error.get("message")?.as_str()?;
+    (error.get("type")?.as_str()? == "invalid_request_error"
+        && message.starts_with("tool_choice:")
+        && message.contains("not supported"))
+    .then(|| meerkat_llm_core::LlmError::ToolChoiceUnsupported {
+        provider: "anthropic".to_owned(),
+        choice: request.tool_choice.clone(),
+        reason: meerkat_llm_core::ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

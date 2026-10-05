@@ -112,7 +112,11 @@ on:
 #   - every re-run attempt (run_attempt > 1). A superseded commit that turns
 #     out to be needed (a tag on it, or bisecting a red main) gets its
 #     attestation with `gh run rerun <id>`, and that attempt runs to the end;
-#   - workflow_dispatch runs.
+#   - workflow_dispatch runs;
+#   - every push to a release/** integration branch. Each merge there needs
+#     its own verdict: with superseding, a busy merge train cancelled every
+#     run after 21d00220a (#1575) and about 15 merges went without full CI,
+#     hiding the public_broker_* failure #1556 introduced.
 # A cancelled run never reaches the CI gate (it runs under !cancelled()), so
 # it leaves no exact-tree attestation; require_ci_green only accepts a run
 # that completed with success. A per-ref group with cancellation for every
@@ -122,13 +126,13 @@ concurrency:
   group: >-
     ${{
       github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) ||
-      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')) && format('main-{0}-superseded', github.ref_name) ||
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v') && !startsWith(github.ref, 'refs/heads/release/')) && format('main-{0}-superseded', github.ref_name) ||
       format('main-{0}-{1}', github.ref_name, github.sha)
     }}
   cancel-in-progress: >-
     ${{
       github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v'))
+      (github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v') && !startsWith(github.ref, 'refs/heads/release/'))
     }}
 
 permissions:
@@ -378,6 +382,9 @@ jobs:
 
       - name: Retired session-control routes stay retired
         run: make session-control-gate
+
+      - name: Turbo S scenarios carry no soft checks
+        run: make turbo-s-oracle-gate
 
       - name: Deprecated backend stays unreferenced
         run: make deprecated-backend-gate
@@ -658,6 +665,14 @@ jobs:
           # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
           # is exported only when the row sets one.
           if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
+          # Tests of crates that dev-depend on mcp-test-server spawn this exact
+          # fixture and fail without it (mcp_test_server::fixture_binary).
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then
+            export MEERKAT_MCP_TEST_SERVER="${fixture}"
+            echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -725,19 +740,34 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
-      - name: Integration tests (tests/*.rs binaries of the suite package)
+      - name: Integration tests (tests/*.rs binaries of the suite package, or its named targets)
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
+          # A suite may name its test targets; otherwise every tests/*.rs one.
+          TESTS: ${{ matrix.tests }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in an integration lane"; exit 1; }
+          if [[ -n "${TESTS}" ]]; then
+            read -r -a test_flags <<<"${TESTS}"
+          else
+            test_flags=(--test '*')
+          fi
           # --no-tests=fail: a suite whose package lost its tests/ binaries
           # must be removed from INTEGRATION_SUITES, not pass silently.
+          # Tests of crates that dev-depend on mcp-test-server spawn this exact
+          # fixture and fail without it (mcp_test_server::fixture_binary).
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then
+            export MEERKAT_MCP_TEST_SERVER="${fixture}"
+            echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
+          fi
           # shellcheck disable=SC2086
           # Status level slow: the suites hold known heavy tests with exact-case
           # timeout overrides in .config/nextest.toml; their durations stay visible.
-          ./scripts/repo-cargo nextest run ${PACKAGES} --test '*' --profile ci-pr \
+          ./scripts/repo-cargo nextest run ${PACKAGES} "${test_flags[@]}" --profile ci-pr \
             --no-tests=fail --no-fail-fast --status-level slow --final-status-level slow
 
       - name: Upload sccache server log
@@ -811,6 +841,14 @@ jobs:
           # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
           # is exported only when the row sets one.
           if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
+          # Tests of crates that dev-depend on mcp-test-server spawn this exact
+          # fixture and fail without it (mcp_test_server::fixture_binary).
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then
+            export MEERKAT_MCP_TEST_SERVER="${fixture}"
+            echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -879,6 +917,13 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" && -n "${ARCHIVE}" ]] || { echo "::error::empty archived unit lane"; exit 1; }
+          # Built into the target directory, the fixture rides in the archive
+          # (archive.include, .config/nextest.toml) and sits next to the
+          # extracted test binaries' deps/, where
+          # mcp_test_server::fixture_binary() resolves it.
+          # shellcheck disable=SC2086
+          fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+          if [[ -n "${fixture}" ]]; then echo "mcp-test-server fixture (archived): ${fixture}"; fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest archive ${PACKAGES} --lib --bins \
             --archive-file "${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
@@ -893,7 +938,7 @@ jobs:
           [[ "${PARTITIONS}" =~ ^[0-9]+$ ]] && (( PARTITIONS >= 2 )) || { echo "::error::archived lane without a partition count"; exit 1; }
           archive="${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
           list() {
-            cargo nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
+            cargo-nextest nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
               --profile ci-pr --message-format oneline "$@" | LC_ALL=C sort
           }
           list > "${RUNNER_TEMP}/all.txt"
@@ -913,9 +958,14 @@ jobs:
       - name: Upload nextest archive
         uses: actions/upload-artifact@v7
         with:
-          name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Keyed by run, not attempt: re-running only a failed partition job
+          # (attempt 2+) does not re-run this build job, so the partition must
+          # find the archive an earlier attempt uploaded. A full re-run rebuilds
+          # and replaces it.
+          name: nextest-${{ matrix.archive }}-${{ github.run_id }}
           path: ${{ runner.temp }}/nextest-${{ matrix.archive }}.tar.zst
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
       - name: Upload sccache server log
@@ -953,7 +1003,7 @@ jobs:
       - name: Download nextest archive
         uses: actions/download-artifact@v5
         with:
-          name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: nextest-${{ matrix.archive }}-${{ github.run_id }}
           path: ${{ runner.temp }}/nextest-archive
 
       - name: Unit tests (archived lane partition)
@@ -971,7 +1021,7 @@ jobs:
           # does not apply outside cargo builds, so its test-thread stack is
           # exported here, and an explicit row stack overrides it.
           export RUST_MIN_STACK="${MIN_STACK:-8388608}"
-          cargo nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-${ARCHIVE}.tar.zst" \
+          cargo-nextest nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-${ARCHIVE}.tar.zst" \
             --workspace-remap "${GITHUB_WORKSPACE}" --partition "${PARTITION}" --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
 

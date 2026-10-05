@@ -239,6 +239,14 @@ pub fn workgraph_platform_capability_manifest(
         .collect()
 }
 
+/// The names of every WorkGraph tool, including the attention-scoped ones
+/// only a runtime-scoped surface advertises.
+pub fn workgraph_tool_names() -> Vec<&'static str> {
+    WorkGraphToolContract::iter()
+        .map(|contract| contract.name())
+        .collect()
+}
+
 pub fn workgraph_tools_list() -> Vec<Value> {
     WorkGraphToolContract::iter()
         .map(|contract| tool(contract.name(), contract.description(), contract.schema()))
@@ -472,13 +480,15 @@ fn map_error(error: WorkGraphError) -> WorkGraphToolError {
         WorkGraphError::InvalidTransition(_) => WorkGraphToolErrorCode::InvalidTransition,
         WorkGraphError::InvalidInput(_)
         | WorkGraphError::InvalidTimestampMillis { .. }
-        | WorkGraphError::AttentionTargetRealmMismatch { .. } => {
+        | WorkGraphError::AttentionTargetRealmMismatch { .. }
+        | WorkGraphError::UnpairedAdmissionIdentity { .. } => {
             WorkGraphToolErrorCode::InvalidArguments
         }
         WorkGraphError::UnsupportedBackend(_) => WorkGraphToolErrorCode::CapabilityUnavailable,
         WorkGraphError::Store(_)
         | WorkGraphError::BackingStoreUnavailable { .. }
-        | WorkGraphError::NamespaceAssignmentRequired { .. } => WorkGraphToolErrorCode::StoreError,
+        | WorkGraphError::NamespaceAssignmentRequired { .. }
+        | WorkGraphError::SchemaMismatch { .. } => WorkGraphToolErrorCode::StoreError,
     };
     WorkGraphToolError::new(code, error.to_string())
 }
@@ -911,6 +921,15 @@ mod tests {
     use crate::{MemoryWorkGraphStore, WorkGraphService, WorkNamespace};
 
     use super::*;
+
+    #[test]
+    fn tool_names_match_the_tool_definitions() {
+        let defined: Vec<String> = workgraph_tools_list()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(defined, workgraph_tool_names());
+    }
 
     #[tokio::test]
     async fn workgraph_tools_create_and_ready_round_trip() {

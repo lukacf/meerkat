@@ -397,6 +397,52 @@ impl AgentToolDispatcher for McpProvenanceFilter {
 // Mob tool dispatcher
 // ---------------------------------------------------------------------------
 
+/// The tool names of each bundle `profile` resolves to, from the same
+/// registered bundles [`compose_external_tools_for_profile`] composes.
+pub(crate) fn resolve_profile_bundle_tools(
+    profile: &crate::profile::Profile,
+    tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
+) -> BTreeMap<String, meerkat_core::ToolNameSet> {
+    profile
+        .tools
+        .rust_bundles
+        .iter()
+        .filter_map(|name| {
+            tool_bundles.get(name).map(|dispatcher| {
+                // Deferred catalog tools are composed like visible ones, so
+                // they are deniable the same way.
+                let names = dispatcher
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .chain(
+                        dispatcher
+                            .tool_catalog()
+                            .iter()
+                            .map(|entry| entry.tool.name.clone()),
+                    )
+                    .collect();
+                (name.clone(), names)
+            })
+        })
+        .collect()
+}
+
+/// Record a build's resolved bundle tools as bundle vocabularies on its
+/// declared tool restriction, so the profile's deny list may name them.
+pub(crate) fn attach_declared_bundle_tools(
+    config: &mut meerkat::AgentBuildConfig,
+    bundle_tools: BTreeMap<String, meerkat_core::ToolNameSet>,
+) {
+    if let Some(restriction) = config.declared_tool_restriction.as_mut() {
+        restriction.vocabulary.extend(
+            bundle_tools
+                .into_iter()
+                .map(|(bundle, names)| (meerkat_core::ToolVocabularySource::Bundle(bundle), names)),
+        );
+    }
+}
+
 pub(super) fn compose_external_tools_for_profile(
     profile: &crate::profile::Profile,
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -444,11 +490,13 @@ pub(super) fn compose_external_tools_for_profile(
     }
 
     for name in &profile.tools.rust_bundles {
-        let dispatcher = tool_bundles.get(name).cloned().ok_or_else(|| {
-            MobError::Internal(format!(
-                "tool bundle '{name}' is not registered on this mob builder"
-            ))
-        })?;
+        let dispatcher =
+            tool_bundles
+                .get(name)
+                .cloned()
+                .ok_or_else(|| MobError::ToolBundleUnavailable {
+                    bundle: name.clone(),
+                })?;
         dispatchers.push(dispatcher);
     }
 
@@ -843,6 +891,49 @@ impl MobOperatorToolDispatcher {
             );
         }
     }
+}
+
+/// Names of the mob operator tools a `mob` profile's members mount as external
+/// tools, for the profile's declared tool restriction.
+/// The mob operator tool names, on every target. The remote flavor a placed
+/// member reaches through the upcall surface (native only) names the same
+/// tools; `member_upcall` pins that it stays within this set.
+pub(crate) fn mob_operator_tool_names() -> meerkat_core::ToolNameSet {
+    local_operator_tool_defs()
+        .iter()
+        .map(|tool| meerkat_core::ToolName::new(tool.name.to_string()))
+        .collect()
+}
+
+/// The agent-facing mob tool names (`delegate`, `mob_create`, `fork_off`,
+/// ...). Owned here so a profile's deny list can name them even on a build
+/// that does not mount them; meerkat-mob-mcp pins its agent tool surface to
+/// this set.
+pub const AGENT_MOB_TOOL_NAMES: &[&str] = &[
+    "delegate",
+    "conclude_objective",
+    "fork_off",
+    "council",
+    "mob_create",
+    "mob_destroy",
+    "mob_spawn_member",
+    "mob_retire_member",
+    "mob_check_member",
+    "mob_list_members",
+    "mob_list",
+    "mob_wire",
+    "mob_unwire",
+    "mob_profile_create",
+    "mob_profile_get",
+    "mob_profile_list",
+    "mob_profile_update",
+    "mob_profile_delete",
+    "mob_profile_list_sources",
+];
+
+/// [`AGENT_MOB_TOOL_NAMES`] as a name set.
+pub fn agent_mob_tool_names() -> meerkat_core::ToolNameSet {
+    AGENT_MOB_TOOL_NAMES.iter().copied().collect()
 }
 
 /// The member-session operator tool definitions, local flavor: exactly what

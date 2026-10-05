@@ -309,6 +309,17 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # (durable_in_turn_steer_audit.sh, live_context_outbox_audit.sh) require it
 # before they accept a run. live_context_outbox_audit.sh also requires each of
 # its goals to be reported violated, so the fake reports those too.
+# live_unregister_cleanup_audit.sh also walks a TLC state-graph dump
+# (-dump dot <base>), so the fake writes a one-state graph whose state is
+# unregistered.
+# live_media_health_audit.sh also requires a non-empty trace for each goal and
+# firing run, so the fake prints one trace state.
+# live_context_causal_tail_batch_audit.sh requires its four goals violated,
+# and with --mutants each seeded defect's property violated.
+# run_start_hold_audit.sh requires each of its seven reachability witnesses
+# to be reported violated.
+# live_delegation_worker_start_after_close_audit.sh requires its two goals to
+# be reported violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -322,6 +333,43 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalNotDelivered is violated."' \
   'echo "Error: Invariant NotGoalMaterialConflict is violated."' \
   'echo "Error: Invariant NotGoalMissing is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRefused is violated."' \
+  'echo "Error: Invariant AuditNeverDeliveredWithQueuedReplay is violated."' \
+  'echo "Error: Invariant AuditNeverBatchAuthorized is violated."' \
+  'echo "Error: Invariant AuditNeverBatchDelivered is violated."' \
+  'echo "Error: Invariant AuditNeverBatchRejected is violated."' \
+  'echo "Error: Invariant AuditNeverRedeliveredAfterReject is violated."' \
+  'echo "Error: Action property AuditPendingRunSkipsNoQueuedRow is violated."' \
+  'echo "Error: Action property AuditPendingRunCoversOnlyHeardSpeechReplays is violated."' \
+  'echo "Error: Action property AuditResolveIsPinned is violated."' \
+  'echo "Error: Invariant live_context_outbox_is_above_every_seed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedRuns is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRunFinishesThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetiredDrainRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRegisteredHeldRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStillHeldRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStoppedHoldSurvivesResume is violated."' \
+  'echo "Error: Action property AuditNeverUnregisters is violated."' \
+  'echo "Error: Action property AuditNeverUnregistersWithPreparation is violated."' \
+  'echo "Error: Invariant AuditNeverCancelsRecovery is violated."' \
+  'prev=""; for a in "$@"; do if [ "$prev" = "dot" ]; then printf "%s\n" "1 [label=\"\\n/\\\\ session_id = [tag |-> \\\"none\\\"]\"]" > "$a.dot"; fi; prev="$a"; done' \
+  'echo "Error: Invariant NotGoalAudible is violated."' \
+  'echo "Error: Invariant AuditNeverResolvedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverSettledAfterClose is violated."' \
+  'echo "Error: Invariant NotGoalSilentReopen is violated."' \
+  'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
+  'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
+  'echo "Error: Invariant NotGoalReRegisteredSilentReopen is violated."' \
+  'echo "Error: Invariant NotGoalUnregisteredAfterFault is violated."' \
+  'echo "Error: Action property NeverRequestAttached is violated."' \
+  'echo "Error: Action property NeverRequestRunning is violated."' \
+  'echo "Error: Action property NeverAudibleAttached is violated."' \
+  'echo "Error: Action property NeverAudibleRunning is violated."' \
+  'echo "Error: Action property NeverSilentReopenAttached is violated."' \
+  'echo "Error: Action property NeverSilentReopenRunning is violated."' \
+  'echo "Error: Action property NeverSilentExhaustedAttached is violated."' \
+  'echo "Error: Action property NeverSilentExhaustedRunning is violated."' \
+  'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 
@@ -363,6 +411,32 @@ if PATH="$tlc_env_tmp:$PATH" \
   ok "direct TLC witness preserves explicit stack policy on both JVM layers without duplicating defaults"
 else
   bad "direct TLC witness replaced explicit stack policy, duplicated JVM defaults, or left the launcher layer inconsistent"
+fi
+
+# The lane runs as parts (Bazel runs each as its own target): every hand
+# audit runs in exactly one audit shard, the machine-verify part runs none,
+# and the shards together run exactly the audits of the whole lane.
+lane_part_output() {
+  PATH="$tlc_env_tmp:$PATH" \
+    TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+    TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+    bash crates/xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" "$@" 2>&1
+}
+audit_lines() { grep -E '^running bounded .* TLC audit$' | sort; }
+if all_out="$(lane_part_output)" \
+  && a_out="$(lane_part_output --part audits-a)" \
+  && b_out="$(lane_part_output --part audits-b)" \
+  && mv_out="$(lane_part_output --part machine-verify)" \
+  && [ -n "$(printf '%s\n' "$a_out" | audit_lines)" ] \
+  && [ -n "$(printf '%s\n' "$b_out" | audit_lines)" ] \
+  && [ -z "$(printf '%s\n' "$mv_out" | audit_lines)" ] \
+  && printf '%s\n' "$mv_out" | grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' \
+  && ! printf '%s\n' "$a_out" "$b_out" | grep -Fq 'running bounded adaptive_mob_bundle' \
+  && [ -z "$(comm -12 <(printf '%s\n' "$a_out" | audit_lines) <(printf '%s\n' "$b_out" | audit_lines))" ] \
+  && [ "$( (printf '%s\n' "$a_out"; printf '%s\n' "$b_out") | audit_lines)" = "$(printf '%s\n' "$all_out" | audit_lines)" ]; then
+  ok "TLC lane parts: each hand audit runs in exactly one shard, machine-verify runs none, and the shards cover the whole lane"
+else
+  bad "TLC lane parts drop, duplicate, or misplace a hand audit, or the machine-verify part runs one"
 fi
 
 echo ""

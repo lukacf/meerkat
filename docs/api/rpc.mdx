@@ -151,6 +151,7 @@ of this full catalog.
 | `turn/stop_run` | Turn | `StopRunParams` | `StopRunResult` | Stop one exact run and terminalize every contributor bound to it |
 | `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live channel; optionally bound its serialized seed messages |
 | `live/webrtc/answer` | Live | `LiveWebrtcAnswerParams` | `LiveWebrtcAnswerResult` | Answer a browser WebRTC offer for an already-open live channel |
+| `live/media_health` | Live | `LiveMediaHealthParams` | `LiveMediaHealthResult` | Report decoded-audio counters for the output a live/media_health_requested notification named |
 | `live/status` | Live | `LiveChannelParams` | `LiveStatusResult` | Get the status of a live channel |
 | `live/close` | Live | `LiveChannelParams` | `LiveCloseResult` | Close a live channel |
 | `live/send_input` | Live | `LiveSendInputParams` | `LiveSendInputResult` | Send an audio, text, or model-supported image chunk to a live channel |
@@ -257,12 +258,13 @@ of this full catalog.
 | `auth/profile/get` | Auth | `BindingIdParams` | `WireAuthProfileDetail` | Resolve one binding's auth profile with an optional profile override |
 | `auth/profile/create` | Auth | `CreateProfileParams` | `WireAuthProfileCreated` | Store direct credentials for a configured auth binding |
 | `auth/profile/delete` | Auth | `BindingIdParams` | `WireAuthProfileCleared` | Clear credentials for a configured auth binding |
-| `auth/login/start` | Auth | `LoginStartParams` | `WireLoginStart` | Begin an OAuth login; returns authorize_url, state, redirect_uri, and provider (PKCE verifier stays server-side) |
-| `auth/login/complete` | Auth | `LoginCompleteParams` | `WireLoginReady` | Exchange authorization code for tokens; persists to TokenStore |
+| `auth/login/start` | Auth | `LoginStartParams` | `WireLoginStart` | Begin an OAuth login for a provider binding or an MCP server (`{"mcp": {...}}`); returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent |
+| `auth/login/complete` | Auth | `LoginCompleteParams` | `WireLoginReady` | Exchange authorization code for tokens; persists to TokenStore. For an MCP target, issuer, client and resource come from the admitted attempt named by `state` |
+| `auth/login/cancel` | Auth | `LoginCancelParams` | `WireLoginCancelled` | Retire a pending MCP OAuth attempt by its state |
 | `auth/login/device_start` | Auth | `DeviceStartParams` | `WireDeviceStart` | Begin device-code OAuth; returns user_code + verification URL |
 | `auth/login/device_complete` | Auth | `DeviceCompleteParams` | `WireDeviceCompleteResult` | Single-poll completion for a device-code OAuth login |
 | `auth/login/provision_api_key` | Auth | `ProvisionApiKeyParams` | `WireProvisionApiKeyResult` | Console-OAuth → API key provisioning (Anthropic oauth_to_api_key) |
-| `auth/status/get` | Auth | `BindingIdParams` | `WireAuthStatusDetail` | Get binding-resolved auth status with an optional profile override |
+| `auth/status/get` | Auth | `AuthStatusParams` | `WireAuthStatusResult` | Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target (`{"mcp": {...}}`) |
 | `auth/logout` | Auth | `BindingIdParams` | `WireAuthProfileCleared` | Revoke + remove persisted credentials |
 | `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
 | `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |
@@ -2306,6 +2308,7 @@ transport details.
 |--------|---------|
 | `live/open` | Open a live channel; optional positive `seed_max_chars` bounds serialized whole-turn seed messages |
 | `live/webrtc/answer` | Answer a browser WebRTC offer for an already-open live channel |
+| `live/media_health` | Report decoded-audio counters for the output a `live/media_health_requested` notification named; a `media_fault` verdict means the runtime closed the channel |
 | `live/status` | Get the status of a live channel |
 | `live/close` | Close a live channel |
 | `live/send_input` | Send an audio, text, or model-supported image chunk to a live channel |
@@ -2314,6 +2317,14 @@ transport details.
 | `live/truncate` | Truncate assistant output at a client-tracked playback cursor |
 | `live/playback_complete` | Report completed client playback for one generated assistant output |
 | `live/refresh` | Apply mutable session config (instructions/tools/audio) to an open channel; config-only, does not replay history; identity swaps and canonical transcript/user-content rewrites return typed reopen-required errors |
+
+Public Live WebRTC channels also send the notification
+`live/assistant_playback_hint { channel_id, hint: "duck" | "restore" }`: duck
+local assistant playback while assistant audio overlaps the user's speech,
+restore it afterwards. It is purely additive (clients that ignore it
+behave as before); see
+[Barge-in playback hint](/guides/realtime#barge-in-playback-hint) for the
+recommended client policy.
 
 WebSocket calls require `--live-ws <addr>`. WebRTC open/answer requires a build
 with the `live-webrtc` feature and startup with `--live-webrtc`. If both are
@@ -2850,6 +2861,7 @@ live transport's realtime observations. See
 | `provider_cache_breakpoints_discarded` | Cache evidence no longer binds to the committed transcript; cache reuse is reduced without itself failing the turn |
 | `boundary_append_applied` | A durable steer's typed appends were written into the running turn at a model boundary; carries `run_id`, `input_id`, model-projected `content`, `append_count`, optional canonical `notices`, and optional application-time `transcript_start` offset |
 | `boundary_appends_discarded` | Exact discarded application facts (`session_id`, `run_id`, `input_ids`), published after any required requeue persistence succeeds |
+| `live_channel_closed` | One of the session's live channels closed; published after every committed close with `session_id`, `channel_id`, a typed `reason` (`LiveChannelCloseReason`) and `reopen_recommended` |
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_callback_pending` | Interaction reached a callback boundary and is waiting for tool results |
 | `interaction_failed` | Interaction-scoped stream failed |
@@ -2860,6 +2872,22 @@ the same session, run, and input, and against canonical transcript history.
 A run terminal alone does not prove that an append was discarded. A discard
 does not terminalize the input or invalidate its later application in another
 run; canonical retained history remains authoritative.
+
+`live_channel_closed` tells every session observer why a live channel closed
+without polling `live/status`. `reason` is one of:
+
+| Reason | Meaning |
+|--------|---------|
+| `client_requested` | A caller asked to close the channel (`live/close`, a member host close, or the client's own close request on the channel transport) |
+| `client_disconnected` | The client's transport went away (socket or peer connection lost) |
+| `provider_closed` | The provider ended the session |
+| `error` | A terminal adapter, provider or transport protocol error, including a configuration the provider rejected |
+| `media_fault` | The channel's first assistant output had a non-empty transcript but the client decoded no audible audio for it |
+| `replaced` | The runtime retired the channel for a replacement (context or result recovery reopens the session on a fresh channel) |
+| `open_abandoned` | The channel's open was abandoned before it activated |
+
+`reopen_recommended` is true only for a `media_fault` while the session's one
+reopen is still available; the reopened channel keeps its retained context.
 
 `stream_truncated` is subscriber-local. It reports UI-ring lag, not an
 EventStore projection result. Use `events/list_since` or `events/snapshot`

@@ -18,6 +18,11 @@ const manifest = JSON.parse(fs.readFileSync(path.join(fixtureRoot, 'manifest.jso
 const PROTOCOLS = new Set(['experimental', 'public']);
 const protocol = parseProtocol(process.argv.slice(2));
 const captureEvidence = process.argv.includes('--capture-evidence');
+// The client's assistant playback gate (#1638): the policy of the TS SDK's
+// `applyLiveAssistantPlaybackHint` (sdks/typescript/src/live_webrtc.ts),
+// kept equal to its constants by a parity test. A `duck` hint silences the
+// assistant's remote audio at the user's speech onset; `restore` returns it.
+const ASSISTANT_PLAYBACK_GATE = { duckedGain: 0, unityGain: 1, timeConstantS: 0.01 };
 let browser;
 let page;
 
@@ -63,7 +68,7 @@ async function prepare(command) {
     // the end of the spoken part of a fixture (100/32768).
     fixture_silence: 0.0031,
   };
-  const offerSdp = await page.evaluate(async ({ fixtures, protocol, captureEvidence, energyConfig }) => {
+  const offerSdp = await page.evaluate(async ({ fixtures, protocol, captureEvidence, energyConfig, playbackGate }) => {
     const t0 = performance.now();
     const nowMs = () => Math.round(performance.now() - t0);
     const audioContext = new AudioContext({ sampleRate: 24_000 });
@@ -107,6 +112,11 @@ async function prepare(command) {
       nonSilentFrames: 0,
       maxRms: 0,
       sources: [],
+      // One gate per remote track, ahead of its playback output and every
+      // level measurement, so what the timeline calls audible is what the
+      // user hears through the gate.
+      gates: [],
+      playbackHint: 'restore',
     };
     // One shared analyser for the 100 ms energy windows; every remote track
     // feeds it so the timeline sees the assistant regardless of renegotiation.
@@ -118,14 +128,21 @@ async function prepare(command) {
       const stream = new MediaStream([event.track]);
       const playback = document.createElement('audio');
       playback.autoplay = true;
+      // The element keeps the remote track flowing; what is heard is the
+      // gated Web Audio path below.
+      playback.muted = true;
       playback.srcObject = event.streams[0] || stream;
       document.body.append(playback);
       playback.play().catch(() => {});
       const source = audioContext.createMediaStreamSource(stream);
+      const gate = audioContext.createGain();
+      gate.gain.value = remoteAudio.playbackHint === 'duck' ? playbackGate.duckedGain : playbackGate.unityGain;
+      source.connect(gate);
+      remoteAudio.gates.push(gate);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
-      source.connect(analyser);
-      source.connect(energyAnalyser);
+      gate.connect(analyser);
+      gate.connect(energyAnalyser);
       analyser.connect(audioContext.destination);
       const samples = new Float32Array(analyser.fftSize);
       const timer = setInterval(() => {
@@ -176,6 +193,22 @@ async function prepare(command) {
     });
     globalThis.__gptLivePeer = {
       audioContext,
+      // Apply one `live/assistant_playback_hint` to every remote track's
+      // gate, exactly as the SDK's applyLiveAssistantPlaybackHint does.
+      setAssistantPlaybackHint(hint) {
+        if (hint !== 'duck' && hint !== 'restore') return;
+        remoteAudio.playbackHint = hint;
+        const target = hint === 'duck' ? playbackGate.duckedGain : playbackGate.unityGain;
+        const now = audioContext.currentTime;
+        for (const gate of remoteAudio.gates) {
+          gate.gain.cancelScheduledValues(now);
+          gate.gain.setTargetAtTime(target, now, playbackGate.timeConstantS);
+        }
+        globalThis.__gptLivePeer.pushTimeline('playback_hint', { hint });
+        // Journal every applied hint, for every scenario (not only those that
+        // dump the timeline), with the media counters at that moment.
+        globalThis.__gptLivePeer.recordEvidence?.({ kind: 'playback_hint', hint, browser_ms: performance.now() });
+      },
       channel,
       destination,
       events: [],
@@ -191,8 +224,16 @@ async function prepare(command) {
       evidence: { enabled: captureEvidence, pending: 0, count: 0, failed: false, chain: Promise.resolve(), timer: null },
       // Ordered {t_ms, kind, detail} observations, bounded.
       timeline: [],
-      // Soft faults the scenario asserts on ({overlap:{ms}} / {duplicate_readout:{text}}).
+      // Soft faults the scenario asserts on ({overlap:{ms}}).
       faults: [],
+      // Readout records, one per response: the assistant output transcript
+      // between consecutive response boundaries (a user transcript delta, a
+      // commentary append, a delegation). Output pauses do not split a
+      // response. `stutters` are sentences of 3 or more normalized words the
+      // response spoke more than once (a measurement). The duplicate-readout
+      // rule itself lives in the Rust scenario, which joins these records
+      // with the delegation results delivered on the sideband.
+      readouts: { closed: [], open: { text: '', opened_by: 'connect', opened_ms: null, last_output_ms: null } },
       energy: {
         threshold: energyConfig.threshold,
         window_ms: energyConfig.window_ms,
@@ -336,7 +377,10 @@ async function prepare(command) {
       const ended = new Promise((resolve) => {
         source.onended = () => {
           state.playing.delete(id);
-          const facts = play.overlap_ms > 0 ? state.overlapFacts(id, play.started_ms) : null;
+          // Facts on every fixture end, overlapped or not: a barge-in that
+          // lands just after the assistant went quiet still needs its
+          // talk-over-start check (verdict 5e6cdc16 S103 run 4).
+          const facts = state.overlapFacts(id, play.started_ms);
           state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms, facts });
           if (play.overlap_ms > play.overlap_bound_ms) {
             state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms, facts } });
@@ -386,23 +430,46 @@ async function prepare(command) {
     };
 
     // ---- responses and duplicate readouts ------------------------------
-    const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    // Same normalization and sentence split as the Rust readout rule
+    // (`normalize_words`, `readout_sentences`).
+    const normalizeWords = (text) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const readoutSentences = (text) => text.split(/[\n.!?]/)
+      .map(normalizeWords)
+      .filter((sentence) => sentence.split(' ').length >= 3);
+    const readoutRecord = (open, index, closed) => {
+      const counts = new Map();
+      for (const sentence of readoutSentences(open.text)) counts.set(sentence, (counts.get(sentence) ?? 0) + 1);
+      const stutters = [...counts].filter(([, count]) => count >= 2).map(([sentence]) => sentence);
+      return {
+        index, opened_by: open.opened_by, opened_ms: open.opened_ms, ...closed,
+        last_output_ms: open.last_output_ms ?? null, text: open.text, stutters,
+      };
+    };
+    // Close the open response at a boundary event (`kind`) arriving at `t`.
+    // An empty response leaves no record; the next one opens at the boundary.
+    state.closeReadout = (t, kind) => {
+      const readouts = state.readouts;
+      if (readouts.open.text.trim()) {
+        if (readouts.closed.length >= 2000) {
+          readouts.overflow = true;
+        } else {
+          readouts.closed.push(readoutRecord(readouts.open, readouts.closed.length, { closed_by: kind, closed_ms: t }));
+        }
+      }
+      readouts.open = { text: '', opened_by: kind, opened_ms: t, last_output_ms: null };
+    };
+    state.readoutSnapshot = () => {
+      const readouts = state.readouts;
+      const records = readouts.closed.slice();
+      if (readouts.open.text.trim()) {
+        records.push(readoutRecord(readouts.open, records.length, { closed_by: null, closed_ms: null }));
+      }
+      return { records, overflow: readouts.overflow === true };
+    };
     state.finishResponse = ({ flushed = false } = {}) => {
       const text = state.response.text;
       if (!text.trim()) return;
-      const seen = new Map();
-      for (const sentence of text.split(/(?<=[.!?])\s+/)) {
-        const normalized = normalizeSentence(sentence);
-        if (normalized.split(' ').length < 5) continue;
-        seen.set(normalized, (seen.get(normalized) ?? 0) + 1);
-      }
-      for (const [sentence, count] of seen) {
-        if (count >= 2) {
-          state.pushFault({ duplicate_readout: { text: sentence.slice(0, 200), response: state.response.index } });
-        }
-      }
-      // The text travels with the entry so scenarios can check a readout for
-      // repeated lines (short brief lines fall under the 5-word floor above).
+      // The text travels with the entry so scenarios can check a readout.
       state.pushTimeline('response_end', { index: state.response.index, chars: text.length, text: text.slice(0, 8000), flushed });
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
@@ -445,7 +512,20 @@ async function prepare(command) {
         case 'now':
           return true;
         case 'first_assistant_audio':
-          if (item.allow_active && item.armed_active) return true;
+          // Already-speaking assistant: fire only while it is voicing (an
+          // active window within the last energy window). `assistant_active`
+          // stays true through the end hysteresis after the last voiced
+          // window, so armed in that tail it is a finished burst; wait for
+          // the next burst start instead of barging in on silence (Turbo S
+          // S103 soak 65b7a5c3 R6: armed 681 ms after the last active window).
+          if (
+            item.allow_active &&
+            item.armed_active &&
+            energy.last_active_ms !== null &&
+            t - energy.last_active_ms <= energy.window_ms
+          ) {
+            return true;
+          }
           return energy.first_assistant_audio_ms.some((start) => start >= item.armed_ms);
         case 'assistant_quiet': {
           const spoke = item.armed_active || (energy.last_active_ms !== null && energy.last_active_ms >= item.armed_ms);
@@ -587,6 +667,18 @@ async function prepare(command) {
       }
       state.events.push(parsed);
       const t = nowMs();
+      // A provider acknowledgement of a client append, stamped with the
+      // media counters at the moment the peer saw it: the exact baseline for
+      // "speech after this context reached the model" (S97's result readout).
+      if (captureEvidence && typeof parsed?.type === 'string' && parsed.type.endsWith('.appended')) {
+        state.recordEvidence({
+          kind: 'appended',
+          event_type: parsed.type,
+          client_event_id: typeof parsed.client_event_id === 'string' ? parsed.client_event_id : null,
+          event_index: state.events.length - 1,
+          browser_ms: performance.now(),
+        });
+      }
       const isInputDelta = protocol === 'public'
         ? parsed?.type === 'session.input_transcript.delta'
         : parsed?.type === 'input_transcript.added';
@@ -644,6 +736,15 @@ async function prepare(command) {
         if (state.responseTextStarts[state.response.index] === undefined) state.responseTextStarts[state.response.index] = t;
         if (state.response.text.length < 20000) state.response.text += delta;
         if (state.outputLog.length < 20000) state.outputLog.push({ t, text: delta });
+        if (state.readouts.open.text.length < 200000) state.readouts.open.text += delta;
+        // Arrival of the response's latest output: a result is voiced when
+        // speech follows its delivery, even inside a response opened before.
+        if (delta.trim()) state.readouts.open.last_output_ms = t;
+      }
+      if (protocol === 'public' && (isInputDelta
+        || parsed?.type === 'session.commentary.appended'
+        || parsed?.type === 'session.delegation.created')) {
+        state.closeReadout(t, parsed.type);
       }
       if (parsed?.type === 'session.delegation.created') {
         if (state.delegationTimes.length < 2000) state.delegationTimes.push(t);
@@ -713,7 +814,7 @@ async function prepare(command) {
       ]);
     }
     return peer.localDescription?.sdp;
-  }, { fixtures, protocol, captureEvidence, energyConfig });
+  }, { fixtures, protocol, captureEvidence, energyConfig, playbackGate: ASSISTANT_PLAYBACK_GATE });
   return { offer_sdp: offerSdp, protocol, fixtures: Object.keys(fixtures) };
 }
 
@@ -942,6 +1043,7 @@ async function snapshot() {
       barge_in: state.bargeIn,
       timeline: state.timeline,
       faults: state.faults,
+      readouts: state.readoutSnapshot(),
       energy: {
         threshold: state.energy.threshold,
         window_ms: state.energy.window_ms,
@@ -1006,6 +1108,16 @@ for await (const line of lines) {
   let command;
   try {
     command = JSON.parse(line);
+    // A playback hint (#1638) is fire-and-forget: applied at once and never
+    // answered, so it cannot disturb the request/response commands.
+    if (command?.type === 'playback_hint' && command.id === undefined) {
+      if (page) {
+        await page
+          .evaluate((hint) => globalThis.__gptLivePeer?.setAssistantPlaybackHint(hint), command.hint)
+          .catch(() => {});
+      }
+      continue;
+    }
     const result = await handle(command);
     process.stdout.write(`${JSON.stringify({ id: command.id, result })}\n`);
   } catch (error) {

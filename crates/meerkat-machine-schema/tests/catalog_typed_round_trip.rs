@@ -87,6 +87,7 @@ fn canonical_machine_slug_snapshot() {
             "WorkAttentionLifecycleMachine".to_string(),
             "WorkExecutionLifecycleMachine".to_string(),
             "WorkGraphLifecycleMachine".to_string(),
+            "WorkItemAdmissionMachine".to_string(),
         ],
         "canonical machine slug set — bump when intentionally adding/removing a kernel"
     );

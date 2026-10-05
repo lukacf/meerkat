@@ -473,12 +473,18 @@ async fn response_after_completed_turn_wakes() {
 async fn peer_lifecycle_accepts_as_requests() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
-    // Silent intents (mob.peer_added) are PeerInput with Request convention
+    // A lifecycle-classed request (mob.peer_added) projects as a one-way
+    // lifecycle notice (#1608) that keeps the peer-request admission row.
     let req1 = make_request("peer-1", "mob.peer_added");
     let input1 = runtime_input_for_interaction(&req1, &rid());
 
     if let Input::Peer(ref p) = input1 {
-        assert!(matches!(p.convention, Some(PeerConvention::Request { .. })));
+        assert!(matches!(
+            p.convention,
+            Some(PeerConvention::Lifecycle {
+                kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded
+            })
+        ));
     }
 
     // Policy: peer_request + idle → StageRunStart + WakeIfIdle

@@ -176,7 +176,7 @@ struct Owned {
 }
 
 impl Owned {
-    // Same custody pattern as Toolkit's existing realization tests. Every
+    // Same custody pattern as the existing downstream realization tests. Every
     // fixture task is retained and each join is attempted even after a panic.
     async fn finish(mut self, body: std::thread::Result<()>) {
         let mut errors = vec![];

@@ -293,6 +293,39 @@ pub fn format_peer_request_projection(
     )
 }
 
+/// Canonical model-facing text projection for a one-way peer lifecycle notice
+/// (member-kickoff status). Unlike a request it names no request id and asks
+/// for no reply: the notice is status the agent may use, not work it owes.
+pub fn format_peer_lifecycle_projection(
+    from_peer_id: Option<PeerId>,
+    display_name: Option<&str>,
+    kind: &str,
+    params: &Value,
+) -> String {
+    let params_str = if params.is_null() || matches!(params, Value::Object(map) if map.is_empty()) {
+        String::new()
+    } else {
+        format!(
+            "\nParams: {}",
+            serde_json::to_string_pretty(params).unwrap_or_default()
+        )
+    };
+    let display_name = display_name.map(str::trim).filter(|name| !name.is_empty());
+    let sender = match (from_peer_id, display_name) {
+        (Some(peer_id), Some(name)) => format!("peer_id {peer_id} (display_name: {name})"),
+        (Some(peer_id), None) => format!("peer_id {peer_id}"),
+        (None, Some(name)) => name.to_string(),
+        (None, None) => "peer".to_string(),
+    };
+    format!(
+        "Peer lifecycle notice from {sender}\n\
+         Kind: {kind}{params_str}\n\
+         \n\
+         This is a one-way status notice, not a request. There is nothing to \
+         answer: do not call send_response or send_message for it."
+    )
+}
+
 /// Canonical model-facing text projection for a peer response.
 pub fn format_peer_response_projection(
     from_peer: &str,
@@ -345,10 +378,10 @@ pub enum PeerInputClass {
     PeerLifecycleRetired,
     /// Peer unwired lifecycle event.
     PeerLifecycleUnwired,
-    /// Member kickoff failed lifecycle event.
-    PeerLifecycleKickoffFailed,
-    /// Member kickoff cancelled lifecycle event.
-    PeerLifecycleKickoffCancelled,
+    /// Member kickoff status notice (any `mob.kickoff_*` lifecycle kind; the
+    /// classification's `lifecycle_kind` names which). Visible to the
+    /// receiving agent, never a request: no inbound request record, no reply.
+    PeerLifecycleKickoff,
     /// A request whose intent is in the silent-intents set (inline-only, no LLM turn).
     SilentRequest,
     /// An ack envelope (filtered at ingress, never reaches agent loop).
@@ -374,8 +407,7 @@ const fn peer_input_class_actionable_grouping(class: PeerInputClass) -> bool {
             | PeerInputClass::ResponseProgress
             | PeerInputClass::ResponseTerminal
             | PeerInputClass::PlainEvent
-            | PeerInputClass::PeerLifecycleKickoffFailed
-            | PeerInputClass::PeerLifecycleKickoffCancelled
+            | PeerInputClass::PeerLifecycleKickoff
     )
 }
 
@@ -760,6 +792,18 @@ pub fn render_peer_ingress_admitted_text(
                     params,
                 )
             }
+        }
+        // Topology notices are consumed silently; only the visible kickoff
+        // notices render model-facing text.
+        PeerIngressEnvelopeKind::Lifecycle { kind, params }
+            if classification.class == PeerInputClass::PeerLifecycleKickoff =>
+        {
+            format_peer_lifecycle_projection(
+                Some(facts.from_peer_id),
+                Some(&facts.from_peer),
+                kind.as_str(),
+                params,
+            )
         }
         PeerIngressEnvelopeKind::Lifecycle { .. } => String::new(),
         PeerIngressEnvelopeKind::Response {
@@ -1412,8 +1456,8 @@ mod tests {
     }
 
     /// Parity: the core-side actionable grouping mirror must agree with the
-    /// MeerkatMachine PeerIngress grouping for every one of the 12
-    /// `PeerInputClass` variants (the 7-of-12 actionable set). The machine
+    /// MeerkatMachine PeerIngress grouping for every one of the 11
+    /// `PeerInputClass` variants (the 6-of-11 actionable set). The machine
     /// emits the live `actionable` bit; this asserts the mirror used by the
     /// `PeerIngressClassification` constructors stays in lock-step with that
     /// grouping so neither drifts.
@@ -1427,8 +1471,7 @@ mod tests {
             (PeerInputClass::ResponseProgress, true),
             (PeerInputClass::ResponseTerminal, true),
             (PeerInputClass::PlainEvent, true),
-            (PeerInputClass::PeerLifecycleKickoffFailed, true),
-            (PeerInputClass::PeerLifecycleKickoffCancelled, true),
+            (PeerInputClass::PeerLifecycleKickoff, true),
             (PeerInputClass::PeerLifecycleAdded, false),
             (PeerInputClass::PeerLifecycleRetired, false),
             (PeerInputClass::PeerLifecycleUnwired, false),
@@ -1451,8 +1494,7 @@ mod tests {
                 | PeerInputClass::ResponseProgress
                 | PeerInputClass::ResponseTerminal
                 | PeerInputClass::PlainEvent
-                | PeerInputClass::PeerLifecycleKickoffFailed
-                | PeerInputClass::PeerLifecycleKickoffCancelled
+                | PeerInputClass::PeerLifecycleKickoff
                 | PeerInputClass::PeerLifecycleAdded
                 | PeerInputClass::PeerLifecycleRetired
                 | PeerInputClass::PeerLifecycleUnwired

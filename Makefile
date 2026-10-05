@@ -17,7 +17,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit audit-generated-headers semver-breaks protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release
+.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit audit-generated-headers semver-breaks protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
 
 # Default target
 all: ci
@@ -171,6 +171,10 @@ test-feature-matrix-lib:
 	$(CARGO) check -p meerkat --no-default-features --features skills
 	$(CARGO) check -p meerkat --no-default-features --features skills,comms
 	$(CARGO) check -p meerkat --features all-providers,comms,mcp
+	# Facade persistence without jsonl-store while meerkat-store/jsonl is on,
+	# as feature unification from any sibling crate does: the backend match
+	# must stay exhaustive with its typed refusal arm (E0004 otherwise).
+	$(CARGO) check -p meerkat --no-default-features --features session-store,meerkat-store/jsonl
 	$(CARGO) check -p meerkat-mob --no-default-features
 	$(CARGO) check -p meerkat-mob --no-default-features --features runtime-adapter
 	$(CARGO) nextest run -p meerkat --features all-providers,comms,mcp
@@ -256,20 +260,23 @@ path-classifier-selftest:
 	@echo "$(GREEN)Self-testing path classifiers and gate wiring...$(NC)"
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
 	@bash scripts/tests/ci_pr_classification_base_test.sh
+	@bash scripts/tests/buildbuddy_launcher_env_test.sh
+	@bash scripts/tests/live_gate_selftest.sh
 
 cargo-agent-gate: rust-lane-doctor
 	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"
 	@scripts/cargo-agent-gate $(AGENT_GATE_ARGS)
 
+agent-gate: SHELL := /bin/bash
 agent-gate:
-	@. ./scripts/build-backend-env; \
+	@set -e; . ./scripts/build-backend-env; \
 	if meerkat_buildbuddy_enabled; then \
 		$(MAKE) buildbuddy-doctor; \
 	else \
 		$(MAKE) rust-lane-doctor; \
 	fi
 	@$(MAKE) docs-check
-	@echo "$(GREEN)Running agent changed-path gate...$(NC)"
+	@printf '%b\n' "$(GREEN)Running agent changed-path gate...$(NC)"
 	@scripts/agent-gate $(AGENT_GATE_ARGS)
 
 buildbuddy-install:
@@ -378,12 +385,12 @@ buildbuddy-ci-full-warm: buildbuddy-doctor
 	@scripts/buildbuddy-ci-full --warm
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: docs-check fmt-check verify-lock-consistency verify-bazel-locks legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-packaging-contract check-rust-release-packaging machine-check-drift machine-authority-docs-gate runtime-authority-bypass storage-ambient-gate lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity seam-inventory rmat-audit audit-generated-headers audit protocol-check-drift semver-breaks-selftest path-classifier-selftest
+ci: docs-check fmt-check verify-lock-consistency verify-bazel-locks legacy-surface-gate session-control-gate turbo-s-oracle-gate deprecated-backend-gate bridge-no-responsestatus-gate sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-packaging-contract check-rust-release-packaging machine-check-drift machine-authority-docs-gate runtime-authority-bypass storage-ambient-gate lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity seam-inventory rmat-audit audit-generated-headers audit protocol-check-drift semver-breaks-selftest path-classifier-selftest
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: docs-check fmt-check verify-lock-consistency verify-bazel-locks legacy-surface-gate session-control-gate deprecated-backend-gate bridge-no-responsestatus-gate sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-packaging-contract check-rust-release-packaging machine-check-drift machine-authority-docs-gate runtime-authority-bypass storage-ambient-gate lint test-unit test-int e2e-fast e2e-system test-minimal seam-inventory rmat-audit audit-generated-headers audit protocol-check-drift semver-breaks-selftest path-classifier-selftest
+ci-smoke: docs-check fmt-check verify-lock-consistency verify-bazel-locks legacy-surface-gate session-control-gate turbo-s-oracle-gate deprecated-backend-gate bridge-no-responsestatus-gate sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-packaging-contract check-rust-release-packaging machine-check-drift machine-authority-docs-gate runtime-authority-bypass storage-ambient-gate lint test-unit test-int e2e-fast e2e-system test-minimal seam-inventory rmat-audit audit-generated-headers audit protocol-check-drift semver-breaks-selftest path-classifier-selftest
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
@@ -400,6 +407,10 @@ legacy-surface-inventory:
 session-control-gate:
 	@echo "$(GREEN)Checking retired session-control public names...$(NC)"
 	@scripts/session_control_public_name_scan.sh
+
+turbo-s-oracle-gate:
+	@echo "$(GREEN)Checking Turbo S scenarios for soft checks...$(NC)"
+	@scripts/turbo-s-oracle-gate
 
 deprecated-backend-gate:
 	@echo "$(GREEN)Checking for deprecated backend references...$(NC)"

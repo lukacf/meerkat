@@ -1329,9 +1329,12 @@ impl TrustedPeerDescriptor {
 
 /// One-way peer lifecycle notification kind.
 ///
-/// These notifications are control-plane topology updates, not correlated
-/// peer work requests. They intentionally do not create request/response
-/// lifecycles and must never require an LLM-authored reply.
+/// These notifications are control-plane updates (topology changes and
+/// member-kickoff status), not correlated peer work requests. They
+/// intentionally do not create request/response lifecycles and must never
+/// require an LLM-authored reply. Topology kinds are consumed silently by the
+/// receiver; kickoff kinds are projected to the receiving agent as visible
+/// lifecycle notices.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PeerLifecycleKind {
@@ -1348,6 +1351,27 @@ pub enum PeerLifecycleKind {
     /// signal.
     #[serde(rename = "mob.dismiss")]
     Dismiss,
+    /// A member's kickoff is queued behind its start gate.
+    ///
+    /// The six kickoff kinds are visible member-status notices, not requests:
+    /// the receiver records nothing to answer and owes no reply.
+    #[serde(rename = "mob.kickoff_pending")]
+    KickoffPending,
+    /// A member's kickoff turn is being started.
+    #[serde(rename = "mob.kickoff_starting")]
+    KickoffStarting,
+    /// A member's kickoff turn started.
+    #[serde(rename = "mob.kickoff_started")]
+    KickoffStarted,
+    /// A member's kickoff is waiting on its callback.
+    #[serde(rename = "mob.kickoff_callback_pending")]
+    KickoffCallbackPending,
+    /// A member's kickoff failed.
+    #[serde(rename = "mob.kickoff_failed")]
+    KickoffFailed,
+    /// A member's kickoff was cancelled.
+    #[serde(rename = "mob.kickoff_cancelled")]
+    KickoffCancelled,
 }
 
 impl PeerLifecycleKind {
@@ -1357,7 +1381,26 @@ impl PeerLifecycleKind {
             Self::PeerRetired => "mob.peer_retired",
             Self::PeerUnwired => "mob.peer_unwired",
             Self::Dismiss => "mob.dismiss",
+            Self::KickoffPending => "mob.kickoff_pending",
+            Self::KickoffStarting => "mob.kickoff_starting",
+            Self::KickoffStarted => "mob.kickoff_started",
+            Self::KickoffCallbackPending => "mob.kickoff_callback_pending",
+            Self::KickoffFailed => "mob.kickoff_failed",
+            Self::KickoffCancelled => "mob.kickoff_cancelled",
         }
+    }
+
+    /// Whether this is one of the member-kickoff status notices.
+    pub const fn is_kickoff(self) -> bool {
+        matches!(
+            self,
+            Self::KickoffPending
+                | Self::KickoffStarting
+                | Self::KickoffStarted
+                | Self::KickoffCallbackPending
+                | Self::KickoffFailed
+                | Self::KickoffCancelled
+        )
     }
 }
 

@@ -145,6 +145,164 @@ pub struct MachineSchema {
     /// `CompositionSchema.deep_domain_overrides`; absent keys use the codegen
     /// default deep cardinality.
     pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
+    /// TLC payload domains for individual unsigned input fields. Model-checker
+    /// configuration only: the generated Rust machine, its guards, updates and
+    /// invariants are unchanged. A field without a declaration explores the
+    /// default unsigned domain (`0..2`).
+    pub input_field_domains: Vec<InputFieldDomain>,
+}
+
+/// The largest unsigned value a TLC model can hold (TLC integers are signed
+/// 32-bit). Declared input samples above it are refused.
+pub const TLC_MAX_UNSIGNED_INPUT_SAMPLE: u64 = 2_147_483_647;
+
+/// TLC payload domain for one unsigned field of one input variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputFieldDomain {
+    pub input: InputVariantId,
+    pub field: FieldId,
+    pub domain: InputFieldDomainKind,
+}
+
+/// How a declared input field domain is explored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputFieldDomainKind {
+    /// Explore these values in addition to the default unsigned domain
+    /// (`0..2`). Use it for inputs whose interesting values lie above the
+    /// default, e.g. a revision that is only accepted from 3 upward.
+    AdditionalValues(std::collections::BTreeSet<u64>),
+    /// Explore exactly the current value of this state field, which must have
+    /// the input field's type. Use it for inputs that echo machine state back,
+    /// such as an `expected_revision` that must equal `revision`.
+    StateField(FieldId),
+}
+
+/// Why an input field domain declaration is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputFieldDomainError {
+    /// The input variant has no such field.
+    UnknownField,
+    /// The field is not `u32` or `u64`.
+    NotUnsigned,
+    /// No transition binds this field of this input, so the domain would
+    /// never be explored.
+    Unused,
+    /// The same input field is declared twice.
+    Duplicate,
+    /// An `AdditionalValues` declaration lists no values.
+    EmptyValues,
+    /// A value exceeds [`TLC_MAX_UNSIGNED_INPUT_SAMPLE`].
+    ValueOutOfRange { value: u64 },
+    /// A `StateField` declaration names a field the state does not have.
+    UnknownStateField { state_field: String },
+    /// A `StateField` declaration names a state field of a different type.
+    StateFieldTypeMismatch { state_field: String },
+    /// The input is a TLC representative input, whose payload is already
+    /// sampled as one typed value per field.
+    RepresentativeInput,
+}
+
+impl fmt::Display for InputFieldDomainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownField => f.write_str("the input has no such field"),
+            Self::NotUnsigned => f.write_str("the field is not u32 or u64"),
+            Self::Unused => f.write_str("no transition binds this field"),
+            Self::Duplicate => f.write_str("the field is declared more than once"),
+            Self::EmptyValues => f.write_str("no additional values are listed"),
+            Self::ValueOutOfRange { value } => write!(
+                f,
+                "value {value} exceeds the TLC maximum {TLC_MAX_UNSIGNED_INPUT_SAMPLE}"
+            ),
+            Self::UnknownStateField { state_field } => {
+                write!(f, "the state has no field `{state_field}`")
+            }
+            Self::StateFieldTypeMismatch { state_field } => {
+                write!(f, "state field `{state_field}` has a different type")
+            }
+            Self::RepresentativeInput => f.write_str("the input is a TLC representative input"),
+        }
+    }
+}
+
+impl MachineSchema {
+    /// The declared TLC domain for one input field, if any.
+    pub fn input_field_domain(&self, input: &str, field: &str) -> Option<&InputFieldDomainKind> {
+        self.input_field_domains
+            .iter()
+            .find(|domain| domain.input.as_str() == input && domain.field.as_str() == field)
+            .map(|domain| &domain.domain)
+    }
+
+    fn validate_input_field_domains(&self) -> Result<(), MachineSchemaError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for declaration in &self.input_field_domains {
+            let refuse = |reason| MachineSchemaError::InvalidInputFieldDomain {
+                variant: declaration.input.as_str().to_owned(),
+                field: declaration.field.as_str().to_owned(),
+                reason,
+            };
+            let variant = self
+                .inputs
+                .variant_named(declaration.input.as_str())
+                .map_err(|_| MachineSchemaError::UnknownInputVariant {
+                    variant: declaration.input.as_str().to_owned(),
+                })?;
+            let field = variant
+                .fields
+                .iter()
+                .find(|field| field.name == declaration.field)
+                .ok_or_else(|| refuse(InputFieldDomainError::UnknownField))?;
+            if !matches!(field.ty, TypeRef::U32 | TypeRef::U64) {
+                return Err(refuse(InputFieldDomainError::NotUnsigned));
+            }
+            if !seen.insert((declaration.input.as_str(), declaration.field.as_str())) {
+                return Err(refuse(InputFieldDomainError::Duplicate));
+            }
+            if self.tlc_representative_inputs.contains(&declaration.input) {
+                return Err(refuse(InputFieldDomainError::RepresentativeInput));
+            }
+            let bound = self.transitions.iter().any(|transition| {
+                matches!(&transition.on, TriggerMatch::Input { variant, bindings }
+                    if *variant == declaration.input && bindings.contains(&declaration.field))
+            });
+            if !bound {
+                return Err(refuse(InputFieldDomainError::Unused));
+            }
+            match &declaration.domain {
+                InputFieldDomainKind::AdditionalValues(values) => {
+                    if values.is_empty() {
+                        return Err(refuse(InputFieldDomainError::EmptyValues));
+                    }
+                    if let Some(value) = values
+                        .iter()
+                        .copied()
+                        .find(|value| *value > TLC_MAX_UNSIGNED_INPUT_SAMPLE)
+                    {
+                        return Err(refuse(InputFieldDomainError::ValueOutOfRange { value }));
+                    }
+                }
+                InputFieldDomainKind::StateField(state_field) => {
+                    let state = self
+                        .state
+                        .fields
+                        .iter()
+                        .find(|candidate| candidate.name == *state_field)
+                        .ok_or_else(|| {
+                            refuse(InputFieldDomainError::UnknownStateField {
+                                state_field: state_field.as_str().to_owned(),
+                            })
+                        })?;
+                    if state.ty != field.ty {
+                        return Err(refuse(InputFieldDomainError::StateFieldTypeMismatch {
+                            state_field: state_field.as_str().to_owned(),
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl MachineSchema {
@@ -471,6 +629,8 @@ impl MachineSchema {
                 );
             }
         }
+
+        self.validate_input_field_domains()?;
 
         let transition_names: IndexSet<&str> = self
             .transitions
@@ -1990,38 +2150,116 @@ fn unique_names<'a>(
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MachineSchemaError {
-    DuplicateName { kind: &'static str, name: String },
+    DuplicateName {
+        kind: &'static str,
+        name: String,
+    },
     EmptyName(&'static str),
-    UnknownPhase { phase: String },
-    UnknownField { field: String },
-    MissingInitializer { field: String },
-    UnknownInputVariant { variant: String },
-    UnknownSurfaceOnlyInputVariant { variant: String },
-    UnknownRuntimeInternalInputVariant { variant: String },
-    UnknownTlcRepresentativeInputVariant { variant: String },
-    TlcRepresentativeInputWithoutTransition { variant: String },
-    TlcRepresentativeInputNotStateIndependent { variant: String, transition: String },
-    UnknownSignalVariant { variant: String },
-    UnknownEffectVariant { variant: String },
-    UnknownHelper { helper: String },
-    UnknownBinding { binding: String },
-    UnknownVariant { variant: String },
-    UnknownVariantField { variant: String, field: String },
-    UnknownEffectDispositionVariant { variant: String },
-    DuplicateEffectDisposition { variant: String },
-    MissingEffectDisposition { variant: String },
-    HandoffProtocolOnRoutedEffect { variant: String },
-    SurfaceOnlyInputHasTransition { variant: String, transition: String },
-    DuplicateNamedTypeBinding { name: String },
-    MissingNamedTypeBinding { name: String },
-    MissingStringEnumBinding { name: String },
-    UnknownStringEnumVariant { enum_name: String, variant: String },
-    InvalidStringEnumBinding { name: String, reason: String },
-    UnknownCommandPlanInput { plan: String, input: String },
-    UnknownCommandPlanSignal { plan: String, signal: String },
-    UnknownCommandPlanTransition { plan: String, transition: String },
-    UnknownCommandPlanEffect { plan: String, effect: String },
-    UnknownCommandPlanClosureEffect { plan: String, effect: String },
+    UnknownPhase {
+        phase: String,
+    },
+    UnknownField {
+        field: String,
+    },
+    MissingInitializer {
+        field: String,
+    },
+    UnknownInputVariant {
+        variant: String,
+    },
+    UnknownSurfaceOnlyInputVariant {
+        variant: String,
+    },
+    UnknownRuntimeInternalInputVariant {
+        variant: String,
+    },
+    UnknownTlcRepresentativeInputVariant {
+        variant: String,
+    },
+    TlcRepresentativeInputWithoutTransition {
+        variant: String,
+    },
+    TlcRepresentativeInputNotStateIndependent {
+        variant: String,
+        transition: String,
+    },
+    InvalidInputFieldDomain {
+        variant: String,
+        field: String,
+        reason: InputFieldDomainError,
+    },
+    UnknownSignalVariant {
+        variant: String,
+    },
+    UnknownEffectVariant {
+        variant: String,
+    },
+    UnknownHelper {
+        helper: String,
+    },
+    UnknownBinding {
+        binding: String,
+    },
+    UnknownVariant {
+        variant: String,
+    },
+    UnknownVariantField {
+        variant: String,
+        field: String,
+    },
+    UnknownEffectDispositionVariant {
+        variant: String,
+    },
+    DuplicateEffectDisposition {
+        variant: String,
+    },
+    MissingEffectDisposition {
+        variant: String,
+    },
+    HandoffProtocolOnRoutedEffect {
+        variant: String,
+    },
+    SurfaceOnlyInputHasTransition {
+        variant: String,
+        transition: String,
+    },
+    DuplicateNamedTypeBinding {
+        name: String,
+    },
+    MissingNamedTypeBinding {
+        name: String,
+    },
+    MissingStringEnumBinding {
+        name: String,
+    },
+    UnknownStringEnumVariant {
+        enum_name: String,
+        variant: String,
+    },
+    InvalidStringEnumBinding {
+        name: String,
+        reason: String,
+    },
+    UnknownCommandPlanInput {
+        plan: String,
+        input: String,
+    },
+    UnknownCommandPlanSignal {
+        plan: String,
+        signal: String,
+    },
+    UnknownCommandPlanTransition {
+        plan: String,
+        transition: String,
+    },
+    UnknownCommandPlanEffect {
+        plan: String,
+        effect: String,
+    },
+    UnknownCommandPlanClosureEffect {
+        plan: String,
+        effect: String,
+    },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -2049,6 +2287,14 @@ impl fmt::Display for MachineSchemaError {
             Self::UnknownTlcRepresentativeInputVariant { variant } => {
                 write!(f, "unknown TLC representative input variant `{variant}`")
             }
+            Self::InvalidInputFieldDomain {
+                variant,
+                field,
+                reason,
+            } => write!(
+                f,
+                "invalid TLC domain for input field `{variant}.{field}`: {reason}"
+            ),
             Self::TlcRepresentativeInputWithoutTransition { variant } => {
                 write!(
                     f,
@@ -2536,6 +2782,7 @@ mod tests {
         for required in [
             "StageSpawnRunning",
             "CompleteSpawnRunning",
+            "CompleteSpawnStopped",
             "CompleteSpawnLateArrivalRunning",
             "CompleteSpawnLateArrivalStopped",
             "CompleteSpawnLateArrivalCompleted",

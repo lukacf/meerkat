@@ -168,6 +168,7 @@ fn initialized_test_comms_dsl(session_id: &str) -> Arc<meerkat_runtime::HandleDs
                 session_id.to_string(),
             ),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )
@@ -660,6 +661,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
                 "c002b-{suffix}"
             )),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )
@@ -803,6 +805,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
                 "c002c-{suffix}"
             )),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )
@@ -928,6 +931,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
                 "c002d-{suffix}"
             )),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )

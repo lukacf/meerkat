@@ -64,8 +64,8 @@ pub use ledger::{
     verify_released_schema_structure,
 };
 pub use profile::{
-    ConnectionProfile, JournalPolicy, OpenOptions, SHARED_BUSY_TIMEOUT, WriteContact,
-    begin_immediate, open, open_with,
+    ConnectionProfile, DatabaseFileIdentity, JournalPolicy, OpenOptions, SHARED_BUSY_TIMEOUT,
+    WriteContact, begin_immediate, open, open_with, validate_database_file,
 };
 /// The connection type [`open`] returns, so callers can name it without
 /// taking their own direct `rusqlite` dependency.

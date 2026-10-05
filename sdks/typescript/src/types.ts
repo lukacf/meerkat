@@ -175,6 +175,12 @@ export interface BlobPayload {
 export interface TurnToolOverlay {
   readonly allowedTools?: readonly string[];
   readonly blockedTools?: readonly string[];
+  /**
+   * Tool choice for this turn's model requests, in order: entry `k` applies
+   * to the run's `k`-th provider call, and every call after the plan is
+   * exhausted is `{ mode: "auto" }`. Run-local; never persisted.
+   */
+  readonly toolChoicePlan?: readonly Generated.ToolChoice[];
 }
 
 /** Result of an agent session creation or turn. */
@@ -949,7 +955,16 @@ export interface CommsPeerMessageCommand {
 export interface CommsPeerLifecycleCommand {
   kind: "peer_lifecycle";
   to: string;
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  lifecycle_kind:
+    | "mob.peer_added"
+    | "mob.peer_retired"
+    | "mob.peer_unwired"
+    | "mob.kickoff_pending"
+    | "mob.kickoff_starting"
+    | "mob.kickoff_started"
+    | "mob.kickoff_callback_pending"
+    | "mob.kickoff_failed"
+    | "mob.kickoff_cancelled";
   params: Generated.CommsPeerLifecycleParams;
 }
 

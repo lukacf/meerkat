@@ -1362,3 +1362,694 @@ async fn in_session_model_switch_via_turn_start() {
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }
+
+// Issue 1451: actual TCP callback ownership regressions.
+mod tcp_callback_ownership {
+    //! Issue 1451: real TCP connections must not share callback ownership.
+    //! The provider is scripted; RPC, session, Agent, dispatcher and TCP owners are real.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::large_futures
+    )]
+
+    use async_trait::async_trait;
+    use futures::FutureExt;
+    use meerkat::AgentFactory;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::{
+        BlobStore, Config, ConfigRuntime, ConfigStore, MemoryConfigStore, Message, StopReason,
+        ToolResult,
+    };
+    use meerkat_rpc::{
+        server::{ServerError, serve_tcp_connection},
+        session_runtime::SessionRuntime,
+    };
+    use serde_json::{Value, json};
+    use std::{
+        collections::{HashMap, VecDeque},
+        panic::AssertUnwindSafe,
+        pin::Pin,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::{TcpListener, TcpStream, tcp::OwnedWriteHalf},
+        sync::{Semaphore, mpsc},
+        task::JoinHandle,
+    };
+
+    const LIMIT: Duration = Duration::from_secs(10);
+
+    #[derive(Clone)]
+    enum Step {
+        Load {
+            tool: &'static str,
+            call_id: &'static str,
+        },
+        Call {
+            tool: &'static str,
+            call_id: &'static str,
+        },
+        Finish {
+            gate: Option<Arc<Semaphore>>,
+        },
+    }
+    /// The deferred create prompt the harness sends, as the runtime merges it
+    /// into the first turn's user message.
+    const DEFERRED_CREATE_PROMPT_PREFIX: &str = "deferred bootstrap\n\n";
+    #[derive(Debug)]
+    struct Seen {
+        /// The exact last user message of the model request.
+        raw_prompt: String,
+        /// The plan key it matched (`raw_prompt` minus the exact deferred
+        /// create prefix, when present).
+        prompt: String,
+        tools: Vec<String>,
+        results: Vec<ToolResult>,
+    }
+    struct ScriptedProvider {
+        plans: Mutex<HashMap<String, VecDeque<Step>>>,
+        seen: mpsc::UnboundedSender<Seen>,
+    }
+    impl ScriptedProvider {
+        fn plan(&self, prompt: &str, steps: impl IntoIterator<Item = Step>) {
+            assert!(
+                self.plans
+                    .lock()
+                    .unwrap()
+                    .insert(prompt.into(), steps.into_iter().collect())
+                    .is_none()
+            );
+        }
+    }
+    #[async_trait]
+    impl LlmClient for ScriptedProvider {
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let prompt = request
+                .messages
+                .iter()
+                .rev()
+                .find_map(|m| match m {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .expect("real user prompt");
+            // A deferred session/create merges its exact create prompt into
+            // the first turn's user message. Strip exactly that prefix (and
+            // nothing else) to recover the planned turn key; any other prompt
+            // change stays visible as an unplanned request.
+            let raw_prompt = prompt;
+            let prompt = raw_prompt
+                .strip_prefix(DEFERRED_CREATE_PROMPT_PREFIX)
+                .unwrap_or(&raw_prompt)
+                .to_owned();
+            eprintln!("scripted provider receipt: raw_prompt={raw_prompt:?} plan_key={prompt:?}");
+            let step = self
+                .plans
+                .lock()
+                .unwrap()
+                .get_mut(&prompt)
+                .expect("no unplanned session request")
+                .pop_front()
+                .expect("no extra model attempt");
+            let results = request
+                .messages
+                .iter()
+                .flat_map(|m| match m {
+                    Message::ToolResults { results, .. } => results.clone(),
+                    _ => vec![],
+                })
+                .collect();
+            self.seen
+                .send(Seen {
+                    raw_prompt,
+                    prompt: prompt.clone(),
+                    tools: request.tools.iter().map(|t| t.name.to_string()).collect(),
+                    results,
+                })
+                .unwrap();
+            Box::pin(async_stream::stream! {
+                let stop_reason = match step {
+                    Step::Load { tool, call_id } => {
+                        yield Ok(LlmEvent::ToolCallComplete { id: call_id.into(), name: "tool_catalog_load".into(), args: json!({"names":[tool]}), meta: None });
+                        StopReason::ToolUse
+                    }
+                    Step::Call { tool, call_id } => {
+                        yield Ok(LlmEvent::ToolCallComplete { id: call_id.into(), name: tool.into(), args: json!({}), meta: None });
+                        StopReason::ToolUse
+                    }
+                    Step::Finish { gate } => {
+                        if let Some(gate) = gate { gate.acquire().await.unwrap().forget(); }
+                        yield Ok(LlmEvent::TextDelta { delta: format!("finished:{prompt}"), meta: None });
+                        StopReason::EndTurn
+                    }
+                };
+                // Matches the existing RPC scripted-provider fixture's attribution.
+                let provider = if request.model.starts_with("claude-") { meerkat_core::Provider::Anthropic }
+                    else if request.model.starts_with("gpt-") || request.model.starts_with("o1-") { meerkat_core::Provider::OpenAI }
+                    else if request.model.starts_with("gemini-") { meerkat_core::Provider::Gemini }
+                    else { meerkat_core::Provider::Other };
+                yield Ok(LlmEvent::UsageUpdate { usage: meerkat_core::TurnUsage::host_declared(provider, &request.model, meerkat_core::Usage::default()) });
+                yield Ok(LlmEvent::Done { outcome: LlmDoneOutcome::Success { stop_reason } });
+            })
+        }
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    struct Connection {
+        writer: OwnedWriteHalf,
+        frames: mpsc::UnboundedReceiver<Value>,
+        reader_task: JoinHandle<()>,
+    }
+    impl Drop for Connection {
+        fn drop(&mut self) {
+            self.reader_task.abort();
+        }
+    }
+    impl Connection {
+        async fn send(&mut self, frame: Value) {
+            self.writer
+                .write_all(format!("{frame}\n").as_bytes())
+                .await
+                .unwrap();
+            self.writer.flush().await.unwrap();
+        }
+        async fn next_significant(&mut self) -> Value {
+            tokio::time::timeout(LIMIT, async {
+                loop {
+                    let frame = self
+                        .frames
+                        .recv()
+                        .await
+                        .expect("TCP closed before expected frame");
+                    if !frame["id"].is_null() {
+                        return frame;
+                    }
+                }
+            })
+            .await
+            .expect("bounded TCP response/callback wait")
+        }
+        async fn response(&mut self, id: u64) -> Value {
+            let frame = self.next_significant().await;
+            assert_eq!(
+                frame["id"],
+                json!(id),
+                "unexpected callback/response: {frame}"
+            );
+            assert!(frame["error"].is_null(), "RPC error: {frame}");
+            frame["result"].clone()
+        }
+        async fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
+            self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+                .await;
+            self.response(id).await
+        }
+        async fn register(&mut self, tool: &str) {
+            let result = self.request(2, "tools/register", json!({"tools":[{"name":tool,"description":"connection-owned synthetic callback","input_schema":{"type":"object","properties":{}}}]})).await;
+            assert!(result["registered"].as_u64().unwrap() > 0);
+        }
+        async fn create(&mut self) -> String {
+            self.request(3, "session/create", json!({"prompt":"deferred bootstrap","initial_turn":"deferred","enable_builtins":false,"enable_shell":false,"enable_memory":false,"enable_mob":false})).await["session_id"].as_str().unwrap().to_owned()
+        }
+        async fn start(&mut self, session: &str, prompt: &str) {
+            self.send(json!({"jsonrpc":"2.0","id":4,"method":"turn/start","params":{"session_id":session,"prompt":prompt}})).await;
+        }
+        async fn answer(&mut self, callback: &Value, content: &str) {
+            assert_eq!(callback["method"], "tool/execute", "{callback}");
+            self.send(json!({"jsonrpc":"2.0","id":callback["id"],"result":{"content":content,"is_error":false}})).await;
+        }
+    }
+    struct Harness {
+        _temp: tempfile::TempDir,
+        runtime: Arc<SessionRuntime>,
+        config: Arc<dyn ConfigStore>,
+        provider: Arc<ScriptedProvider>,
+        seen: mpsc::UnboundedReceiver<Seen>,
+        servers: Vec<Option<JoinHandle<Result<(), ServerError>>>>,
+    }
+    impl Harness {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let (tx, seen) = mpsc::unbounded_channel();
+            let provider = Arc::new(ScriptedProvider {
+                plans: Mutex::new(HashMap::new()),
+                seen: tx,
+            });
+            let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+            let blobs: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+            let runtime = SessionRuntime::new(
+                AgentFactory::new(temp.path().join("sessions")),
+                Config::default(),
+                10,
+                meerkat::PersistenceBundle::new(
+                    store,
+                    Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                    blobs,
+                ),
+                meerkat_rpc::router::NotificationSink::noop(),
+            );
+            let config: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+                Config::default(),
+                meerkat_models::canonical(),
+            ));
+            runtime.set_default_llm_client(Some(provider.clone()));
+            runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+                config.clone(),
+                temp.path().join("config_state.json"),
+            )));
+            Self {
+                _temp: temp,
+                runtime: Arc::new(runtime),
+                config,
+                provider,
+                seen,
+                servers: vec![],
+            }
+        }
+        async fn connect(&mut self) -> (usize, Connection) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let stream = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (accepted, _) = listener.accept().await.unwrap();
+            let runtime = self.runtime.clone();
+            let config = self.config.clone();
+            let index = self.servers.len();
+            self.servers.push(Some(tokio::spawn(serve_tcp_connection(
+                accepted, runtime, config, None,
+            ))));
+            let (reader, writer) = stream.into_split();
+            let (tx, frames) = mpsc::unbounded_channel();
+            let reader_task = tokio::spawn(async move {
+                let mut lines = BufReader::new(reader).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    if tx.send(serde_json::from_str(&line).unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut connection = Connection {
+                writer,
+                frames,
+                reader_task,
+            };
+            connection.request(1, "initialize", json!({})).await;
+            (index, connection)
+        }
+        async fn seen(&mut self, prompt: &str) -> Seen {
+            let seen = tokio::time::timeout(LIMIT, self.seen.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                seen.prompt, prompt,
+                "plan key mismatch; raw request prompt: {:?}",
+                seen.raw_prompt
+            );
+            seen
+        }
+        async fn disconnected(&mut self, index: usize) {
+            let mut server = self.servers[index].take().unwrap();
+            match tokio::time::timeout(LIMIT, &mut server).await {
+                // The owner closes either on EOF (Ok) or on its first write to
+                // the socket the client already closed (observed: BrokenPipe,
+                // surfaced as Transport(Io)). Every other error (parse, size,
+                // write timeout, other I/O) fails with its real details.
+                Ok(result) => match result.unwrap() {
+                    Ok(()) => {}
+                    Err(ServerError::Transport(meerkat_rpc::transport::TransportError::Io(
+                        error,
+                    ))) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    Err(other) => panic!("TCP owner failed: {other:?}"),
+                },
+                Err(_) => {
+                    server.abort();
+                    let _ = server.await;
+                    panic!("TCP owner did not close");
+                }
+            }
+        }
+        async fn clean(&mut self) {
+            for server in &mut self.servers {
+                if let Some(server) = server.take() {
+                    server.abort();
+                    let _ = server.await;
+                }
+            }
+            tokio::time::timeout(LIMIT, self.runtime.try_shutdown())
+                .await
+                .expect("bounded runtime cleanup")
+                .unwrap();
+        }
+        fn exhausted(&self) {
+            assert!(
+                self.provider
+                    .plans
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .all(VecDeque::is_empty)
+            );
+        }
+    }
+    fn finish() -> Step {
+        Step::Finish { gate: None }
+    }
+    fn assert_result(seen: &Seen, id: &str, expected: &str) {
+        let results: Vec<_> = seen
+            .results
+            .iter()
+            .filter(|r| r.tool_use_id == id)
+            .collect();
+        assert_eq!(results.len(), 1, "{seen:?}");
+        assert!(!results[0].is_error, "{seen:?}");
+        assert_eq!(results[0].text_content(), expected);
+    }
+    fn assert_catalog_load(seen: &Seen, id: &str, tool: &str) {
+        let results: Vec<_> = seen
+            .results
+            .iter()
+            .filter(|r| r.tool_use_id == id)
+            .collect();
+        assert_eq!(results.len(), 1, "{seen:?}");
+        assert!(!results[0].is_error, "{seen:?}");
+        let payload: Value = serde_json::from_str(&results[0].text_content()).unwrap();
+        assert_eq!(payload["catalog_exact"], true, "{payload}");
+        let resolutions = payload["resolutions"].as_array().unwrap();
+        assert_eq!(resolutions.len(), 1, "{payload}");
+        assert_eq!(resolutions[0]["name"], tool, "{payload}");
+        assert_eq!(resolutions[0]["accepted"], true, "{payload}");
+        assert!(resolutions[0]["rejected_reason"].is_null(), "{payload}");
+        // Both newly accepted deferred loads and accepted inline no-ops are valid.
+    }
+    async fn run_case(case: u8) {
+        let mut h = Harness::new();
+        let result = AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(50), async {
+            match case {
+                0 => registry_case(&mut h).await,
+                1 => route_case(&mut h).await,
+                2 => disconnect_case(&mut h, false).await,
+                3 => disconnect_case(&mut h, true).await,
+                _ => unreachable!(),
+            }
+            h.exhausted();
+        }))
+        .catch_unwind()
+        .await;
+        h.clean().await;
+        match result {
+            Ok(result) => result.expect("bounded complete scenario"),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    async fn registry_case(h: &mut Harness) {
+        for prompt in ["a-before-b", "a-after-b", "b-positive"] {
+            h.provider.plan(prompt, [finish()]);
+        }
+        let (_, mut a) = h.connect().await;
+        a.register("a_lookup").await;
+        let first = a.create().await;
+        a.start(&first, "a-before-b").await;
+        a.response(4).await;
+        let before = h.seen("a-before-b").await;
+        assert!(
+            before.tools.iter().any(|t| t == "a_lookup"),
+            "positive: {before:?}"
+        );
+        let (_, mut b) = h.connect().await;
+        b.register("b_lookup").await;
+        let later = a.create().await;
+        a.start(&later, "a-after-b").await;
+        a.response(4).await;
+        let after = h.seen("a-after-b").await;
+        let b_session = b.create().await;
+        b.start(&b_session, "b-positive").await;
+        b.response(4).await;
+        let b_seen = h.seen("b-positive").await;
+        assert!(
+            b_seen.tools.iter().any(|t| t == "b_lookup"),
+            "positive: {b_seen:?}"
+        );
+        assert!(!b_seen.tools.iter().any(|t| t == "a_lookup"), "{b_seen:?}");
+        assert!(
+            after.tools.iter().any(|t| t == "a_lookup"),
+            "B cleared A's registry: {after:?}"
+        );
+        assert!(
+            !after.tools.iter().any(|t| t == "b_lookup"),
+            "B's tools leaked to A: {after:?}"
+        );
+    }
+    async fn route_case(h: &mut Harness) {
+        h.provider.plan(
+            "route-a",
+            [
+                Step::Load {
+                    tool: "a_lookup",
+                    call_id: "load-a",
+                },
+                Step::Call {
+                    tool: "a_lookup",
+                    call_id: "call-a",
+                },
+                finish(),
+            ],
+        );
+        h.provider.plan(
+            "route-b",
+            [
+                Step::Load {
+                    tool: "b_lookup",
+                    call_id: "load-b",
+                },
+                Step::Call {
+                    tool: "b_lookup",
+                    call_id: "call-b",
+                },
+                finish(),
+            ],
+        );
+        let (_, mut a) = h.connect().await;
+        let (_, mut b) = h.connect().await;
+        // Register after both constructors so the baseline reaches actual misrouting,
+        // independently of the previous test's registry-reset failure.
+        a.register("a_lookup").await;
+        b.register("b_lookup").await;
+        let a_session = a.create().await;
+        a.start(&a_session, "route-a").await;
+        let a_initial = h.seen("route-a").await;
+        assert!(
+            a_initial
+                .tools
+                .iter()
+                .any(|name| name == "tool_catalog_load"),
+            "{a_initial:?}"
+        );
+        let a_loaded = h.seen("route-a").await;
+        assert_catalog_load(&a_loaded, "load-a", "a_lookup");
+        assert!(
+            a_loaded.tools.iter().any(|name| name == "a_lookup"),
+            "real catalog load: {a_loaded:?}"
+        );
+        let (owner, callback) = tokio::select! {
+            frame = a.next_significant() => ("A", frame),
+            frame = b.next_significant() => ("B", frame),
+        };
+        assert_eq!(callback["params"]["name"], "a_lookup", "{callback}");
+        assert_eq!(callback["params"]["tool_use_id"], "call-a", "{callback}");
+        // Finish the synthetic operation even on the wrong baseline route so B's
+        // positive and A's actual retained result are checked before the RED oracle.
+        if owner == "A" {
+            a.answer(&callback, "a-synthetic-result").await;
+        } else {
+            b.answer(&callback, "a-synthetic-result").await;
+        }
+        a.response(4).await;
+        assert_result(&h.seen("route-a").await, "call-a", "a-synthetic-result");
+        let b_session = b.create().await;
+        b.start(&b_session, "route-b").await;
+        let b_initial = h.seen("route-b").await;
+        assert!(
+            b_initial
+                .tools
+                .iter()
+                .any(|name| name == "tool_catalog_load"),
+            "{b_initial:?}"
+        );
+        let b_loaded = h.seen("route-b").await;
+        assert_catalog_load(&b_loaded, "load-b", "b_lookup");
+        assert!(
+            b_loaded.tools.iter().any(|name| name == "b_lookup"),
+            "real catalog load: {b_loaded:?}"
+        );
+        let callback_b = b.next_significant().await;
+        assert_eq!(callback_b["params"]["name"], "b_lookup");
+        b.answer(&callback_b, "b-synthetic-result").await;
+        b.response(4).await;
+        assert_result(&h.seen("route-b").await, "call-b", "b-synthetic-result");
+        assert_eq!(
+            owner, "A",
+            "A's real callback arrived on B's TCP connection: {callback}"
+        );
+    }
+    /// `require_completion_after_eof` additionally asserts that A's accepted
+    /// turn completes after its connection closed (T3b, issue #1458).
+    async fn disconnect_case(h: &mut Harness, require_completion_after_eof: bool) {
+        let finish_a = Arc::new(Semaphore::new(0));
+        h.provider.plan(
+            "orphan-a",
+            [
+                Step::Call {
+                    tool: "a_lookup",
+                    call_id: "orphan-call-a",
+                },
+                Step::Finish {
+                    gate: Some(finish_a.clone()),
+                },
+            ],
+        );
+        h.provider.plan(
+            "reconnected-b",
+            [
+                Step::Call {
+                    tool: "b_lookup",
+                    call_id: "new-call-b",
+                },
+                finish(),
+            ],
+        );
+        h.provider.plan("warm-a", [finish()]);
+        let (a_index, mut a) = h.connect().await;
+        a.register("a_lookup").await;
+        let a_session = a.create().await;
+        // Materialize A's session with one completed turn first, so the
+        // orphaned turn runs on a live session rather than a deferred
+        // first-turn promotion (whose request owns the pending session).
+        a.start(&a_session, "warm-a").await;
+        a.response(4).await;
+        h.seen("warm-a").await;
+        a.start(&a_session, "orphan-a").await;
+        h.seen("orphan-a").await;
+        let old_callback = a.next_significant().await;
+        assert_eq!(old_callback["params"]["tool_use_id"], "orphan-call-a");
+        assert_eq!(old_callback["id"], "srv-0");
+        drop(a);
+        h.disconnected(a_index).await;
+        // Reaching the next actual model request after EOF proves accepted A work
+        // survived its request/connection owner. Keep its final stream pending.
+        let a_continuation = h.seen("orphan-a").await;
+        let (_, mut b) = h.connect().await;
+        b.register("b_lookup").await;
+        let b_session = b.create().await;
+        b.start(&b_session, "reconnected-b").await;
+        h.seen("reconnected-b").await;
+        let new_callback = b.next_significant().await;
+        assert_eq!(
+            new_callback["params"]["tool_use_id"], "new-call-b",
+            "A callback escaped to B: {new_callback}"
+        );
+        assert_eq!(
+            new_callback["id"], old_callback["id"],
+            "exercise real reused callback sequence ID"
+        );
+        b.answer(&new_callback, "B-ONLY-RESPONSE").await;
+        b.response(4).await;
+        assert_result(
+            &h.seen("reconnected-b").await,
+            "new-call-b",
+            "B-ONLY-RESPONSE",
+        );
+        // A's continuation after EOF carries exactly one failed result for its
+        // orphaned call, typed with the existing tool-unavailability contract.
+        // Baseline emitted execution_failed; this is a distinct improvement,
+        // not proof of ID crossover.
+        let results: Vec<_> = a_continuation
+            .results
+            .iter()
+            .filter(|r| r.tool_use_id == "orphan-call-a")
+            .collect();
+        assert_eq!(results.len(), 1, "{a_continuation:?}");
+        assert!(results[0].is_error);
+        let payload: Value = serde_json::from_str(&results[0].text_content()).unwrap();
+        assert_eq!(
+            payload["error"], "tool_unavailable",
+            "closed owner needs typed local feedback: {payload}"
+        );
+        let sid = meerkat_core::SessionId::parse(&a_session).unwrap();
+        let read_history = |h: &Harness| {
+            let runtime = h.runtime.clone();
+            let sid = sid.clone();
+            async move {
+                let history = runtime
+                    .read_session_history_rich(&sid, Default::default())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                serde_json::to_value(history).unwrap()
+            }
+        };
+        let history = read_history(&*h).await;
+        assert!(
+            !history.to_string().contains("B-ONLY-RESPONSE"),
+            "B settled A: {history}"
+        );
+        finish_a.add_permits(1);
+        if !require_completion_after_eof {
+            return;
+        }
+        let history = tokio::time::timeout(LIMIT, async {
+            loop {
+                let value = read_history(&*h).await;
+                if value.to_string().contains("finished:orphan-a") {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("A accepted work finishes after EOF");
+        assert!(
+            !history.to_string().contains("B-ONLY-RESPONSE"),
+            "B settled A: {history}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_callback_registry_stays_with_registering_connection() {
+        run_case(0).await;
+    }
+    #[tokio::test]
+    async fn tcp_callback_for_new_a_session_never_routes_to_b() {
+        run_case(1).await;
+    }
+    #[tokio::test]
+    async fn tcp_callback_disconnect_and_reused_id_keep_old_work_isolated() {
+        run_case(2).await;
+    }
+    /// T3b: the same disconnect scenario, additionally requiring A's accepted
+    /// turn to complete after its connection closed. A clean EOF aborts the
+    /// connection's in-flight turn/start after the server's 5 s graceful
+    /// window, so A's gated final stream never commits; that behaviour is
+    /// issue #1458, separate from callback ownership.
+    #[tokio::test]
+    #[ignore = "#1458: TCP EOF aborts the connection's in-flight turn/start; out of scope for #1451"]
+    async fn tcp_callback_disconnected_owner_accepted_work_finishes_after_eof() {
+        run_case(3).await;
+    }
+}

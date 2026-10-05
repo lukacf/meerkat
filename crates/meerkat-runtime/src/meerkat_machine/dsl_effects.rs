@@ -462,7 +462,7 @@ impl MeerkatMachine {
         if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
             return Err(error);
         }
-        let (previous_snapshot, effects) = {
+        let (previous_snapshot, effects, state_changed) = {
             let mut authority = entry
                 .dsl_authority
                 .lock()
@@ -479,8 +479,19 @@ impl MeerkatMachine {
                 authority.state(),
                 &effects,
             );
-            (previous_snapshot, effects)
+            let state_changed = previous_snapshot.state() != authority.state();
+            (previous_snapshot, effects, state_changed)
         };
+        // A transition that leaves the machine state unchanged (an
+        // observation that only emits effects) is not a commit: no guard
+        // reads anything it wrote, so waking waiters on it would only let
+        // them retry into the same refusal, and a waiter whose retry applies
+        // such an observation would wake itself in a hot loop.
+        if state_changed {
+            entry
+                .dsl_commits
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
         let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         // Terminal recording currently emits a local-only authority receipt.
@@ -525,7 +536,7 @@ impl MeerkatMachine {
         if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
             return Err(error.to_string());
         }
-        let (previous_snapshot, effects) = {
+        let (previous_snapshot, effects, state_changed) = {
             let mut authority = entry
                 .dsl_authority
                 .lock()
@@ -540,8 +551,19 @@ impl MeerkatMachine {
                 authority.state(),
                 &effects,
             );
-            (previous_snapshot, effects)
+            let state_changed = previous_snapshot.state() != authority.state();
+            (previous_snapshot, effects, state_changed)
         };
+        // A transition that leaves the machine state unchanged (an
+        // observation that only emits effects) is not a commit: no guard
+        // reads anything it wrote, so waking waiters on it would only let
+        // them retry into the same refusal, and a waiter whose retry applies
+        // such an observation would wake itself in a hot loop.
+        if state_changed {
+            entry
+                .dsl_commits
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
         let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         if let Err(error) = self
@@ -632,7 +654,7 @@ impl MeerkatMachine {
             ));
         }
         Self::resolve_routed_entry_runtime_epoch(&mut input, &entry.epoch_id);
-        let (previous_snapshot, effects) = {
+        let (previous_snapshot, effects, state_changed) = {
             let mut authority = entry
                 .dsl_authority
                 .lock()
@@ -647,8 +669,19 @@ impl MeerkatMachine {
                 authority.state(),
                 &effects,
             );
-            (previous_snapshot, effects)
+            let state_changed = previous_snapshot.state() != authority.state();
+            (previous_snapshot, effects, state_changed)
         };
+        // A transition that leaves the machine state unchanged (an
+        // observation that only emits effects) is not a commit: no guard
+        // reads anything it wrote, so waking waiters on it would only let
+        // them retry into the same refusal, and a waiter whose retry applies
+        // such an observation would wake itself in a hot loop.
+        if state_changed {
+            entry
+                .dsl_commits
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
         let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         if let Err(error) = self

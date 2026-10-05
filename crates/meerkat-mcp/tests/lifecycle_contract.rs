@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,30 +9,6 @@ use meerkat_core::event::ToolConfigChangeOperation;
 use meerkat_core::handles::ExternalToolSurfaceHandle;
 use meerkat_mcp::{McpLifecycleAction, McpLifecyclePhase, McpRouter, McpRouterAdapter};
 use meerkat_runtime::RuntimeExternalToolSurfaceHandle;
-
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-fn test_server_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("workspace root")
-        .join("target")
-        .join("debug")
-        .join("mcp-test-server")
-}
-
-fn skip_if_no_test_server() -> Option<PathBuf> {
-    let path = test_server_path();
-    if path.exists() {
-        Some(path)
-    } else {
-        eprintln!(
-            "Skipping lifecycle contract: mcp-test-server not built. Run `cargo build -p mcp-test-server` first."
-        );
-        None
-    }
-}
 
 fn test_server_config(name: &str, path: &Path) -> McpServerConfig {
     McpServerConfig::stdio(
@@ -151,12 +127,9 @@ async fn wait_for_router_action(
 }
 
 #[tokio::test]
-#[ignore = "integration-real: requires mcp-test-server binary and real process spawning"]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 async fn lifecycle_contract_add_and_reload_emit_pending_then_applied_actions() {
-    let Some(server_path) = skip_if_no_test_server() else {
-        return;
-    };
+    let server_path = mcp_test_server::fixture_binary();
 
     let adapter = generated_adapter();
 
@@ -214,12 +187,9 @@ async fn lifecycle_contract_add_and_reload_emit_pending_then_applied_actions() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: requires mcp-test-server binary and real process spawning"]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 async fn lifecycle_contract_remove_emits_draining_then_applied_and_forced_actions() {
-    let Some(server_path) = skip_if_no_test_server() else {
-        return;
-    };
+    let server_path = mcp_test_server::fixture_binary();
 
     let adapter = generated_adapter();
     adapter

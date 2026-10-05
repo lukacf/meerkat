@@ -25,6 +25,7 @@ from .types import (
     ArtifactRecord,
     AttentionListRequest,
     AttentionListResult,
+    AuthStatusParams,
     BindingIdParams,
     BlobGetParams,
     BlobPayload,
@@ -90,6 +91,8 @@ from .types import (
     LiveCommitInputParams,
     LiveCommitInputResult,
     LiveInterruptResult,
+    LiveMediaHealthParams,
+    LiveMediaHealthResult,
     LiveOpenParams,
     LiveOpenResult,
     LivePlaybackCompleteParams,
@@ -102,6 +105,7 @@ from .types import (
     LiveTruncateResult,
     LiveWebrtcAnswerParams,
     LiveWebrtcAnswerResult,
+    LoginCancelParams,
     LoginCompleteParams,
     LoginStartParams,
     McpAddParams,
@@ -266,9 +270,10 @@ from .types import (
     WireAuthProfileCreated,
     WireAuthProfileDetail,
     WireAuthProfilesList,
-    WireAuthStatusDetail,
+    WireAuthStatusResult,
     WireDeviceCompleteResult,
     WireDeviceStart,
+    WireLoginCancelled,
     WireLoginReady,
     WireLoginStart,
     WireProvisionApiKeyResult,
@@ -734,6 +739,14 @@ class RpcRequest(Protocol):
     @overload
     def __call__(
         self,
+        method: Literal["auth/login/cancel"],
+        params: LoginCancelParams,
+        /,
+    ) -> Awaitable[WireLoginCancelled]: ...
+
+    @overload
+    def __call__(
+        self,
         method: Literal["auth/login/device_start"],
         params: DeviceStartParams,
         /,
@@ -759,9 +772,9 @@ class RpcRequest(Protocol):
     def __call__(
         self,
         method: Literal["auth/status/get"],
-        params: BindingIdParams,
+        params: AuthStatusParams,
         /,
-    ) -> Awaitable[WireAuthStatusDetail]: ...
+    ) -> Awaitable[WireAuthStatusResult]: ...
 
     @overload
     def __call__(
@@ -1122,6 +1135,14 @@ class RpcRequest(Protocol):
         params: LiveWebrtcAnswerParams,
         /,
     ) -> Awaitable[LiveWebrtcAnswerResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["live/media_health"],
+        params: LiveMediaHealthParams,
+        /,
+    ) -> Awaitable[LiveMediaHealthResult]: ...
 
     @overload
     def __call__(

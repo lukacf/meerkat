@@ -115,6 +115,7 @@ fn schema() -> MachineSchema {
         named_types: vec![],
         ci_step_limit: None,
         deep_domain_overrides: Default::default(),
+        input_field_domains: Default::default(),
     }
 }
 

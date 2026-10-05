@@ -76,7 +76,10 @@ experimental-gpt-live = [
 ]
 
 [dev-dependencies]
+# OAuth-protected MCP fixture for the MCP OAuth canaries (test-only).
+meerkat = { workspace = true, features = ["test-mcp-oauth-fixtures"] }
 meerkat-llm-core = { workspace = true }
+mcp-test-server = { path = "../../tests/fixtures/mcp-test-server" } # test-only fixture binary resolver; never a published runtime dependency
 # Durable event-store trait for seeding a session's committed log in the ATIF
 # export contract battery.
 meerkat-session = { workspace = true, features = ["session-store"] }

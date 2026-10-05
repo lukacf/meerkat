@@ -44,6 +44,20 @@ filegroup(
 
 
 
+exports_files(
+
+    [
+        "src/public_live.rs",
+    ],
+
+    visibility = [
+        "//tests/integration:__pkg__",
+    ],
+
+)
+
+
+
 rust_library(
     name = "meerkat_openai",
     aliases = aliases(package_name = "crates/meerkat-openai"),

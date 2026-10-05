@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Print the absolute path of the exact mcp-test-server binary that
-# meerkat-mcp's form-elicitation tests spawn via MEERKAT_MCP_TEST_SERVER.
+# Print the absolute path of the exact mcp-test-server binary that tests of
+# crates dev-depending on mcp-test-server spawn via MEERKAT_MCP_TEST_SERVER.
 #
-# The tests never search PATH or guess a target directory: they require this
-# variable to name the exact fixture binary. Bazel sets it from runfiles
-# (crates/meerkat-mcp/BUILD.bazel). This script is the Cargo counterpart:
-# Cargo test lanes call it and export the result before running nextest.
+# The tests resolve the fixture through mcp_test_server::fixture_binary(): this
+# variable, else the path this script builds it to; they fail, never skip,
+# when neither resolves. Bazel sets the variable from runfiles for every test
+# of such a crate (scripts/generate-bazel-rust-builds.mjs). This script is the
+# Cargo counterpart: Cargo test lanes call it and export the result before
+# running nextest.
 #
 # - An explicitly set MEERKAT_MCP_TEST_SERVER is printed unchanged.
 # - Otherwise the fixture is built with the caller's cargo (default
@@ -13,18 +15,61 @@
 #   profile as the test build) and the executable path is read from cargo's
 #   own artifact message.
 #
+# - With `--if-needed <cargo package flags>` (`-p NAME`, `--workspace`,
+#   `--exclude NAME`; other flags such as `--features LIST` are ignored), it
+#   prints nothing and builds nothing unless a selected package dev-depends on
+#   mcp-test-server.
+#
 # Usage:
 #   MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
 #   export MEERKAT_MCP_TEST_SERVER
+#
+#   fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
+#   if [[ -n "${fixture}" ]]; then export MEERKAT_MCP_TEST_SERVER="${fixture}"; fi
 set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cargo_bin="${CARGO:-$root/scripts/repo-cargo}"
+
+if [[ "${1:-}" == "--if-needed" ]]; then
+  shift
+  "$cargo_bin" metadata --format-version=1 --no-deps | python3 -c '
+import json
+import sys
+
+args = sys.argv[1:]
+selected, excluded, workspace = set(), set(), False
+index = 0
+while index < len(args):
+    arg = args[index]
+    if arg in ("-p", "--package", "--exclude") and index + 1 < len(args):
+        (excluded if arg == "--exclude" else selected).add(args[index + 1])
+        index += 2
+        continue
+    if arg.startswith("--package="):
+        selected.add(arg.split("=", 1)[1])
+    elif arg.startswith("--exclude="):
+        excluded.add(arg.split("=", 1)[1])
+    elif arg == "--workspace":
+        workspace = True
+    index += 1
+packages = json.load(sys.stdin)["packages"]
+needed = any(
+    (package["name"] in selected or (workspace and package["name"] not in excluded))
+    and any(
+        dep["name"] == "mcp-test-server" and dep.get("kind") == "dev"
+        for dep in package["dependencies"]
+    )
+    for package in packages
+)
+sys.exit(0 if needed else 1)
+' "$@" || exit 0
+fi
 
 if [[ -n "${MEERKAT_MCP_TEST_SERVER:-}" ]]; then
   printf '%s\n' "$MEERKAT_MCP_TEST_SERVER"
   exit 0
 fi
-
-root="$(cd "$(dirname "$0")/.." && pwd)"
-cargo_bin="${CARGO:-$root/scripts/repo-cargo}"
 
 messages="$(
   "$cargo_bin" build -p mcp-test-server --bin mcp-test-server --locked \

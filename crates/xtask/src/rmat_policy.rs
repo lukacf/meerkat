@@ -534,6 +534,15 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
             // via the same service driver path.
             vec!["crates/meerkat-schedule/src/service.rs"]
         }
+        ("WorkGraphLifecycleMachine", "WorkItemAdmissionMachine") => {
+            // The WorkGraph machine shell realizes the Created -> Bind route
+            // while building the item, and the store commits the item and its
+            // admission identity in one transaction.
+            vec![
+                "crates/meerkat-workgraph/src/machine.rs",
+                "crates/meerkat-workgraph/src/store.rs",
+            ]
+        }
         ("WorkGraphLifecycleMachine", "WorkAttentionLifecycleMachine") => {
             // Work item closure fans out to co-resident attention bindings via
             // the WorkGraph service and commits the item/attention transition

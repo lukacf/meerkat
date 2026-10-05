@@ -688,6 +688,10 @@ pub struct LiveSidebandNarrationAuthority {
     binding: ProviderWebrtcBinding,
     attempt: LiveSidebandAppendAttempt,
     consumed: Arc<AtomicBool>,
+    /// The narration ends its delegation without a result (its work failed
+    /// or could not start): the provider session stops naming the
+    /// delegation as still running.
+    ends_delegation: bool,
 }
 
 impl fmt::Debug for LiveSidebandNarrationAuthority {
@@ -715,7 +719,18 @@ impl LiveSidebandNarrationAuthority {
                 "narration:{narration_id}"
             ))?,
             consumed: Arc::new(AtomicBool::new(false)),
+            ends_delegation: false,
         })
+    }
+
+    /// Mark the narration as ending its delegation without a result. Set
+    /// only by the generated narration authority, from its typed kind.
+    #[cfg(feature = "__meerkat-generated-authority-bridge")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __ending_the_delegation(mut self) -> Self {
+        self.ends_delegation = true;
+        self
     }
 
     fn consume_once(&self) -> Result<(), LiveSidebandCommandError> {
@@ -723,6 +738,38 @@ impl LiveSidebandNarrationAuthority {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| ())
             .map_err(|_| LiveSidebandCommandError::AuthorityAlreadyConsumed)
+    }
+}
+
+/// A templated narration sentence that introduces a delegation's result and
+/// travels inside that result's release instead of as its own append
+/// ([`LiveSidebandCommand::announced_by`]). Sent separately, "Finished ...
+/// The result follows." sat committed at the provider for the round trip of
+/// its own acknowledgement before the result was released, and the voice
+/// answered in that gap with an invented value (Turbo S S101: "Two." for a
+/// "0" result). Built only by consuming a generated narration authority, so
+/// the sentence is still machine-authorized narration, never result text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveSidebandAnnouncement {
+    text: String,
+}
+
+impl LiveSidebandAnnouncement {
+    /// Consume `authority` (one-shot, exactly as
+    /// [`LiveSidebandCommand::narrate_delegation`] would) for an announcement
+    /// carried by a result release.
+    pub fn from_narration(
+        authority: LiveSidebandNarrationAuthority,
+        text: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let text = require_sideband_text(text)?;
+        authority.consume_once()?;
+        Ok(Self { text })
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -757,12 +804,17 @@ enum LiveSidebandCommandKind {
         delegation: LiveSidebandDelegationRef,
         disposition: LiveResultDisposition,
         text: String,
+        /// See [`LiveSidebandCommand::awaiting_peer_replies`].
+        awaiting_peer_replies: Vec<String>,
+        /// See [`LiveSidebandCommand::announced_by`].
+        announcement: Option<String>,
     },
     NarrateDelegation {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
         delegation: LiveSidebandDelegationRef,
         text: String,
+        ends_delegation: bool,
     },
 }
 
@@ -805,6 +857,13 @@ pub enum LiveSidebandProviderCommand {
         delegation: LiveSidebandDelegationRef,
         disposition: LiveResultDisposition,
         text: String,
+        /// Members the delegated work asked and whose answers have not
+        /// arrived (see [`LiveSidebandCommand::awaiting_peer_replies`]).
+        awaiting_peer_replies: Vec<String>,
+        /// Narration that introduces the result, delivered in the result's
+        /// own provider event, ahead of the result text (see
+        /// [`LiveSidebandCommand::announced_by`]).
+        announcement: Option<String>,
     },
     /// Templated executor-state narration for one exact delegation. It is
     /// lowered like a delegation-scoped commentary append and never carries
@@ -814,6 +873,8 @@ pub enum LiveSidebandProviderCommand {
         attempt: LiveSidebandAppendAttempt,
         delegation: LiveSidebandDelegationRef,
         text: String,
+        /// The narration ends the delegation without a result.
+        ends_delegation: bool,
     },
 }
 
@@ -933,8 +994,43 @@ impl LiveSidebandCommand {
                 delegation,
                 disposition,
                 text,
+                awaiting_peer_replies: Vec::new(),
+                announcement: None,
             },
         })
+    }
+
+    /// Mark a result release with the members its delegated work asked and
+    /// whose answers have not arrived: outbound peer requests the worker's
+    /// session sent with no terminal response committed. The result then
+    /// reports only that they were asked, so the provider is told their
+    /// answers are still pending ahead of it. Display labels only, never
+    /// authority; a non-release command is returned unchanged.
+    #[must_use]
+    pub fn awaiting_peer_replies(mut self, peers: Vec<String>) -> Self {
+        if let LiveSidebandCommandKind::ReleaseDelegation {
+            awaiting_peer_replies,
+            ..
+        } = &mut self.kind
+        {
+            *awaiting_peer_replies = peers;
+        }
+        self
+    }
+
+    /// Carry the narration that introduces this result inside the result's
+    /// release, so the provider receives the announcement and the result in
+    /// one event and never holds the announcement without its result. A
+    /// non-release command is returned unchanged.
+    #[must_use]
+    pub fn announced_by(mut self, announcement: LiveSidebandAnnouncement) -> Self {
+        if let LiveSidebandCommandKind::ReleaseDelegation {
+            announcement: slot, ..
+        } = &mut self.kind
+        {
+            *slot = Some(announcement.text);
+        }
+        self
     }
 
     /// Templated executor-state narration for one exact delegation. Consumes
@@ -950,6 +1046,7 @@ impl LiveSidebandCommand {
             binding,
             attempt,
             consumed: _,
+            ends_delegation,
         } = authority;
         Ok(Self {
             kind: LiveSidebandCommandKind::NarrateDelegation {
@@ -957,12 +1054,21 @@ impl LiveSidebandCommand {
                 attempt,
                 delegation,
                 text,
+                ends_delegation,
             },
         })
     }
 
     /// Commentary, delegation results, and delegation narration are spoken
     /// aloud by the provider; thinking and instructions appends are quiet.
+    /// Whether this command releases a delegation's result (not a
+    /// narration or a context append): its acknowledgement is the moment
+    /// the provider holds the result.
+    #[must_use]
+    pub fn is_result_release(&self) -> bool {
+        matches!(self.kind, LiveSidebandCommandKind::ReleaseDelegation { .. })
+    }
+
     #[must_use]
     pub fn is_spoken(&self) -> bool {
         matches!(
@@ -1043,23 +1149,29 @@ impl LiveSidebandCommand {
                 delegation,
                 disposition,
                 text,
+                awaiting_peer_replies,
+                announcement,
             } => LiveSidebandProviderCommand::ReleaseDelegationContext {
                 binding,
                 attempt,
                 delegation,
                 disposition,
                 text,
+                awaiting_peer_replies,
+                announcement,
             },
             LiveSidebandCommandKind::NarrateDelegation {
                 binding,
                 attempt,
                 delegation,
                 text,
+                ends_delegation,
             } => LiveSidebandProviderCommand::NarrateDelegationContext {
                 binding,
                 attempt,
                 delegation,
                 text,
+                ends_delegation,
             },
         }
     }
@@ -1109,6 +1221,13 @@ pub struct LiveProviderInputLatency {
 #[derive(Clone, PartialEq, Eq)]
 pub enum LiveSidebandObservationKind {
     SessionReady,
+    /// The user's speech and audible assistant audio overlap (a barge-in,
+    /// either side starting), read from the provider's reflected input and
+    /// output audio (#1638). A client
+    /// ducks assistant playback on it. Never a channel error.
+    UserSpeechOverAssistant,
+    /// Ends a [`Self::UserSpeechOverAssistant`]: a client restores playback.
+    AssistantPlaybackRestorable,
     /// Provider input-transcript transport detail. This is not canonical user
     /// transcript authority; only an exact user-role turn terminal can emit
     /// the parent-session final.
@@ -1204,6 +1323,8 @@ impl fmt::Debug for LiveSidebandObservationKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self {
             Self::SessionReady => "session_ready",
+            Self::UserSpeechOverAssistant => "user_speech_over_assistant",
+            Self::AssistantPlaybackRestorable => "assistant_playback_restorable",
             Self::UserTranscriptFragment { .. } => "user_transcript_fragment",
             Self::TurnStarted { .. } => "turn_started",
             Self::TurnSnapshotDelta { .. } => "turn_snapshot_delta",
@@ -1580,6 +1701,164 @@ mod tests {
         );
     }
 
+    /// A release marked with the members its work asked and whose answers
+    /// have not arrived carries exactly those labels to the provider
+    /// adapter; any other command ignores the mark.
+    #[test]
+    fn result_release_carries_the_members_still_owing_a_reply() {
+        let authority = LiveSidebandReleaseAuthority::from_test_machine(
+            binding(),
+            23,
+            LiveResultDisposition::DeferredContext,
+        );
+        let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+            "delegation:2".to_string(),
+            "provider-delegation-secret".to_string(),
+        )
+        .expect("opaque provider delegation");
+        let command = LiveSidebandCommand::release_delegation_context(
+            authority,
+            delegation,
+            "I asked analyst-pemberton what time it is.",
+        )
+        .expect("one result-context delivery")
+        .awaiting_peer_replies(vec!["analyst-pemberton".to_string()]);
+        assert!(matches!(
+            command.__into_provider_command(),
+            LiveSidebandProviderCommand::ReleaseDelegationContext {
+                awaiting_peer_replies,
+                ..
+            } if awaiting_peer_replies == ["analyst-pemberton"]
+        ));
+    }
+
+    /// A narration authority marked as ending its delegation (the runtime
+    /// marks a Failed narration) carries that through the command to the
+    /// provider session; an ordinary narration does not.
+    #[test]
+    fn a_narration_that_ends_its_delegation_says_so_to_the_provider_session() {
+        for ends in [true, false] {
+            let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation:4".to_string(),
+                "provider-delegation-secret".to_string(),
+            )
+            .expect("opaque provider delegation");
+            let authority = LiveSidebandNarrationAuthority {
+                binding: binding(),
+                attempt: LiveSidebandAppendAttempt("narration:operation-4:failed".to_string()),
+                consumed: Arc::new(AtomicBool::new(false)),
+                ends_delegation: ends,
+            };
+            let command = LiveSidebandCommand::narrate_delegation(
+                authority,
+                delegation,
+                "Voice request \"x\" could not be completed.",
+            )
+            .expect("one narration");
+            assert!(matches!(
+                command.__into_provider_command(),
+                LiveSidebandProviderCommand::NarrateDelegationContext { ends_delegation, .. }
+                    if ends_delegation == ends
+            ));
+        }
+    }
+
+    /// An announcement built from a narration authority rides inside the
+    /// result release it introduces (one provider command, so one provider
+    /// event), consumes that authority exactly once, and is ignored by any
+    /// command that is not a result release.
+    #[test]
+    fn result_release_carries_its_announcement_in_the_same_command() {
+        let narration = |attempt: &str| LiveSidebandNarrationAuthority {
+            binding: binding(),
+            attempt: LiveSidebandAppendAttempt(attempt.to_string()),
+            ends_delegation: false,
+            consumed: Arc::new(AtomicBool::new(false)),
+        };
+        let delegation = || {
+            LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation:4".to_string(),
+                "provider-delegation-secret".to_string(),
+            )
+            .expect("opaque provider delegation")
+        };
+        let authority = narration("narration:completed");
+        let announcement = LiveSidebandAnnouncement::from_narration(
+            authority.clone(),
+            "Finished voice request: \"count the files\". The result follows.",
+        )
+        .expect("announcement");
+        assert_eq!(
+            LiveSidebandAnnouncement::from_narration(authority, "again").err(),
+            Some(LiveSidebandCommandError::AuthorityAlreadyConsumed),
+            "the narration authority is one-shot"
+        );
+        let command = LiveSidebandCommand::release_delegation_context(
+            LiveSidebandReleaseAuthority::from_test_machine(
+                binding(),
+                41,
+                LiveResultDisposition::DeferredContext,
+            ),
+            delegation(),
+            "0",
+        )
+        .expect("one result-context delivery")
+        .announced_by(announcement.clone());
+        assert!(matches!(
+            command.__into_provider_command(),
+            LiveSidebandProviderCommand::ReleaseDelegationContext {
+                text,
+                announcement: Some(announced),
+                ..
+            } if text == "0"
+                && announced == "Finished voice request: \"count the files\". The result follows."
+        ));
+        let narration_command = LiveSidebandCommand::narrate_delegation(
+            narration("narration:other"),
+            delegation(),
+            "x",
+        )
+        .expect("narration")
+        .announced_by(announcement);
+        assert!(matches!(
+            narration_command.__into_provider_command(),
+            LiveSidebandProviderCommand::NarrateDelegationContext { .. }
+        ));
+    }
+
+    /// Only a result release is marked as one: its acknowledgement is the
+    /// moment the provider holds the delegation's result.
+    #[test]
+    fn only_a_result_release_is_a_result_release() {
+        let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+            "delegation:3".to_string(),
+            "provider-delegation-secret".to_string(),
+        )
+        .expect("opaque provider delegation");
+        let release = LiveSidebandCommand::release_delegation_context(
+            LiveSidebandReleaseAuthority::from_test_machine(
+                binding(),
+                31,
+                LiveResultDisposition::DeferredContext,
+            ),
+            delegation,
+            "the result",
+        )
+        .expect("one result-context delivery");
+        assert!(release.is_result_release());
+        let context = LiveSidebandCommand::append_session_context(
+            LiveSidebandAppendAuthority {
+                binding: binding(),
+                attempt: LiveSidebandAppendAttempt("a-context-row".to_string()),
+                cursor: 33,
+                consumed: Arc::new(AtomicBool::new(false)),
+            },
+            "a context row",
+        )
+        .expect("one context append");
+        assert!(!context.is_result_release());
+    }
+
     #[test]
     fn result_release_is_context_only_without_canonical_cursor_and_consumes_once() {
         let authority = LiveSidebandReleaseAuthority::from_test_machine(
@@ -1605,8 +1884,9 @@ mod tests {
             LiveSidebandProviderCommand::ReleaseDelegationContext {
                 disposition: LiveResultDisposition::DeferredContext,
                 text,
+                awaiting_peer_replies,
                 ..
-            } if text == "executor result for model context only"
+            } if text == "executor result for model context only" && awaiting_peer_replies.is_empty()
         ));
         assert_eq!(
             LiveSidebandCommand::release_delegation_context(

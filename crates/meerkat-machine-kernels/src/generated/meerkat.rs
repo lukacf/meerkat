@@ -4423,6 +4423,8 @@ pub enum LiveContextRowDisposition {
     ReplayRuntimeWork,
     #[serde(rename = "ReassertAssistantOutput")]
     ReassertAssistantOutput,
+    #[serde(rename = "ReplayTextChat")]
+    ReplayTextChat,
 }
 impl LiveContextRowDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -4434,6 +4436,7 @@ impl LiveContextRowDisposition {
             Self::ReassertCausalTail => "ReassertCausalTail",
             Self::ReplayRuntimeWork => "ReplayRuntimeWork",
             Self::ReassertAssistantOutput => "ReassertAssistantOutput",
+            Self::ReplayTextChat => "ReplayTextChat",
         }
     }
 }
@@ -4448,6 +4451,7 @@ impl std::convert::TryFrom<&str> for LiveContextRowDisposition {
             "ReassertCausalTail" => Ok(Self::ReassertCausalTail),
             "ReplayRuntimeWork" => Ok(Self::ReplayRuntimeWork),
             "ReassertAssistantOutput" => Ok(Self::ReassertAssistantOutput),
+            "ReplayTextChat" => Ok(Self::ReplayTextChat),
             other => Err(format!("invalid LiveContextRowDisposition value `{other}`")),
         }
     }
@@ -4483,12 +4487,15 @@ pub enum LiveContextRowSource {
     Conversation,
     #[serde(rename = "RuntimeWork")]
     RuntimeWork,
+    #[serde(rename = "TextChat")]
+    TextChat,
 }
 impl LiveContextRowSource {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Conversation => "Conversation",
             Self::RuntimeWork => "RuntimeWork",
+            Self::TextChat => "TextChat",
         }
     }
 }
@@ -4498,6 +4505,7 @@ impl std::convert::TryFrom<&str> for LiveContextRowSource {
         match value {
             "Conversation" => Ok(Self::Conversation),
             "RuntimeWork" => Ok(Self::RuntimeWork),
+            "TextChat" => Ok(Self::TextChat),
             other => Err(format!("invalid LiveContextRowSource value `{other}`")),
         }
     }
@@ -7195,6 +7203,8 @@ pub enum PeerIngressInputClass {
     Ack,
     #[serde(rename = "PlainEvent")]
     PlainEvent,
+    #[serde(rename = "PeerLifecycleKickoff")]
+    PeerLifecycleKickoff,
 }
 impl PeerIngressInputClass {
     pub fn as_str(&self) -> &'static str {
@@ -7209,6 +7219,7 @@ impl PeerIngressInputClass {
             Self::SilentRequest => "SilentRequest",
             Self::Ack => "Ack",
             Self::PlainEvent => "PlainEvent",
+            Self::PeerLifecycleKickoff => "PeerLifecycleKickoff",
         }
     }
 }
@@ -7226,6 +7237,7 @@ impl std::convert::TryFrom<&str> for PeerIngressInputClass {
             "SilentRequest" => Ok(Self::SilentRequest),
             "Ack" => Ok(Self::Ack),
             "PlainEvent" => Ok(Self::PlainEvent),
+            "PeerLifecycleKickoff" => Ok(Self::PeerLifecycleKickoff),
             other => Err(format!("invalid PeerIngressInputClass value `{other}`")),
         }
     }
@@ -7263,6 +7275,18 @@ pub enum PeerIngressLifecycleClass {
     PeerRetired,
     #[serde(rename = "PeerUnwired")]
     PeerUnwired,
+    #[serde(rename = "KickoffPending")]
+    KickoffPending,
+    #[serde(rename = "KickoffStarting")]
+    KickoffStarting,
+    #[serde(rename = "KickoffStarted")]
+    KickoffStarted,
+    #[serde(rename = "KickoffCallbackPending")]
+    KickoffCallbackPending,
+    #[serde(rename = "KickoffFailed")]
+    KickoffFailed,
+    #[serde(rename = "KickoffCancelled")]
+    KickoffCancelled,
 }
 impl PeerIngressLifecycleClass {
     pub fn as_str(&self) -> &'static str {
@@ -7270,6 +7294,12 @@ impl PeerIngressLifecycleClass {
             Self::PeerAdded => "PeerAdded",
             Self::PeerRetired => "PeerRetired",
             Self::PeerUnwired => "PeerUnwired",
+            Self::KickoffPending => "KickoffPending",
+            Self::KickoffStarting => "KickoffStarting",
+            Self::KickoffStarted => "KickoffStarted",
+            Self::KickoffCallbackPending => "KickoffCallbackPending",
+            Self::KickoffFailed => "KickoffFailed",
+            Self::KickoffCancelled => "KickoffCancelled",
         }
     }
 }
@@ -7280,6 +7310,12 @@ impl std::convert::TryFrom<&str> for PeerIngressLifecycleClass {
             "PeerAdded" => Ok(Self::PeerAdded),
             "PeerRetired" => Ok(Self::PeerRetired),
             "PeerUnwired" => Ok(Self::PeerUnwired),
+            "KickoffPending" => Ok(Self::KickoffPending),
+            "KickoffStarting" => Ok(Self::KickoffStarting),
+            "KickoffStarted" => Ok(Self::KickoffStarted),
+            "KickoffCallbackPending" => Ok(Self::KickoffCallbackPending),
+            "KickoffFailed" => Ok(Self::KickoffFailed),
+            "KickoffCancelled" => Ok(Self::KickoffCancelled),
             other => Err(format!("invalid PeerIngressLifecycleClass value `{other}`")),
         }
     }
@@ -9759,6 +9795,56 @@ impl From<&str> for RunId {
 impl std::fmt::Display for RunId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RunStartHoldReason {
+    #[default]
+    #[serde(rename = "MobStop")]
+    MobStop,
+    #[serde(rename = "ToolsNotPublished")]
+    ToolsNotPublished,
+}
+impl RunStartHoldReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobStop => "MobStop",
+            Self::ToolsNotPublished => "ToolsNotPublished",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RunStartHoldReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobStop" => Ok(Self::MobStop),
+            "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
+            other => Err(format!("invalid RunStartHoldReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RunStartHoldReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RunStartHoldReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -13655,6 +13741,7 @@ pub struct State {
     pub input_live_boundary_join_run: std::collections::BTreeMap<String, RunId>,
     pub input_live_boundary_join_phase: std::collections::BTreeMap<String, LiveBoundaryJoinPhase>,
     pub run_stop_requested: Option<RunId>,
+    pub run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
@@ -13897,6 +13984,10 @@ pub struct State {
     pub live_channel_status_observation_sequence_by_channel:
         std::collections::BTreeMap<String, u64>,
     pub live_channel_status_by_channel: std::collections::BTreeMap<String, LiveChannelPublicStatus>,
+    pub live_media_health_requested_output_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_media_health_judged_channels: std::collections::BTreeSet<String>,
+    pub live_media_fault_reopen_recommended_by_channel: std::collections::BTreeMap<String, bool>,
+    pub live_media_fault_reopens_by_session: std::collections::BTreeMap<String, u64>,
     pub session_event_stream_open_result_sequence: u64,
     pub session_event_stream_close_result_sequence: u64,
     pub session_event_stream_terminal_sequence: u64,
@@ -14448,6 +14539,7 @@ impl std::fmt::Debug for State {
                 &self.input_live_boundary_join_phase,
             )
             .field("run_stop_requested", &self.run_stop_requested)
+            .field("run_start_holds", &self.run_start_holds)
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field("op_statuses", &self.op_statuses)
             .field("op_completion_seq", &self.op_completion_seq)
@@ -15202,6 +15294,22 @@ impl std::fmt::Debug for State {
                 &self.live_channel_status_by_channel,
             )
             .field(
+                "live_media_health_requested_output_by_channel",
+                &self.live_media_health_requested_output_by_channel,
+            )
+            .field(
+                "live_media_health_judged_channels",
+                &self.live_media_health_judged_channels,
+            )
+            .field(
+                "live_media_fault_reopen_recommended_by_channel",
+                &self.live_media_fault_reopen_recommended_by_channel,
+            )
+            .field(
+                "live_media_fault_reopens_by_session",
+                &self.live_media_fault_reopens_by_session,
+            )
+            .field(
                 "session_event_stream_open_result_sequence",
                 &self.session_event_stream_open_result_sequence,
             )
@@ -15493,6 +15601,7 @@ pub mod inputs {
     pub struct RegisterSession {
         pub session_id: SessionId,
         pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub initial_run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeDurableTailRecovery {
@@ -15657,6 +15766,14 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelAfterBoundary {
         pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldRunStarts {
+        pub reason: RunStartHoldReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseRunStarts {
+        pub reason: RunStartHoldReason,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelAfterBoundaryForRun {
@@ -17393,6 +17510,17 @@ pub mod inputs {
         pub next_cursor: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveContextCausalTailBatch {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub append_id: String,
+        pub previous_cursor: u64,
+        pub next_cursor: u64,
+        pub tail_cursors: std::collections::BTreeSet<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueLiveContextRow {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -17626,6 +17754,25 @@ pub mod inputs {
         pub status_observation_sequence: u64,
         pub degradation_reason: Option<LiveChannelDegradationReason>,
         pub degradation_detail: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestLiveMediaHealth {
+        pub session_id: String,
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub output_id: String,
+        pub assistant_transcript_nonempty: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveLiveChannelMediaHealth {
+        pub session_id: String,
+        pub channel_id: String,
+        pub output_id: String,
+        pub decoded_frames: u64,
+        pub audible_frames: u64,
+        pub max_rms_micros: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrain {
@@ -18107,6 +18254,8 @@ pub enum Input {
     StopCurrentRunForRun(inputs::StopCurrentRunForRun),
     ResolveUserInterruptPublicResult(inputs::ResolveUserInterruptPublicResult),
     CancelAfterBoundary(inputs::CancelAfterBoundary),
+    HoldRunStarts(inputs::HoldRunStarts),
+    ReleaseRunStarts(inputs::ReleaseRunStarts),
     CancelAfterBoundaryForRun(inputs::CancelAfterBoundaryForRun),
     AbortCancelAfterBoundaryDispatch(inputs::AbortCancelAfterBoundaryDispatch),
     StagePersistentFilter(inputs::StagePersistentFilter),
@@ -18375,6 +18524,7 @@ pub enum Input {
     ResolveLiveContextBootstrapAppend(inputs::ResolveLiveContextBootstrapAppend),
     FailLiveContextPreparation(inputs::FailLiveContextPreparation),
     AuthorizeLiveContextAppend(inputs::AuthorizeLiveContextAppend),
+    AuthorizeLiveContextCausalTailBatch(inputs::AuthorizeLiveContextCausalTailBatch),
     EnqueueLiveContextRow(inputs::EnqueueLiveContextRow),
     AdvanceLiveContextCanonicalCoverage(inputs::AdvanceLiveContextCanonicalCoverage),
     ResolveLiveContextAppend(inputs::ResolveLiveContextAppend),
@@ -18403,6 +18553,8 @@ pub enum Input {
     RecordMobEventStreamTerminated(inputs::RecordMobEventStreamTerminated),
     ResolveMobEventStreamClose(inputs::ResolveMobEventStreamClose),
     RecordLiveChannelStatus(inputs::RecordLiveChannelStatus),
+    RequestLiveMediaHealth(inputs::RequestLiveMediaHealth),
+    ObserveLiveChannelMediaHealth(inputs::ObserveLiveChannelMediaHealth),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
     StageVisibilityFilter(inputs::StageVisibilityFilter),
@@ -18525,6 +18677,8 @@ impl Input {
                 InputKind::ResolveUserInterruptPublicResult
             }
             Self::CancelAfterBoundary(_) => InputKind::CancelAfterBoundary,
+            Self::HoldRunStarts(_) => InputKind::HoldRunStarts,
+            Self::ReleaseRunStarts(_) => InputKind::ReleaseRunStarts,
             Self::CancelAfterBoundaryForRun(_) => InputKind::CancelAfterBoundaryForRun,
             Self::AbortCancelAfterBoundaryDispatch(_) => {
                 InputKind::AbortCancelAfterBoundaryDispatch
@@ -18905,6 +19059,9 @@ impl Input {
             }
             Self::FailLiveContextPreparation(_) => InputKind::FailLiveContextPreparation,
             Self::AuthorizeLiveContextAppend(_) => InputKind::AuthorizeLiveContextAppend,
+            Self::AuthorizeLiveContextCausalTailBatch(_) => {
+                InputKind::AuthorizeLiveContextCausalTailBatch
+            }
             Self::EnqueueLiveContextRow(_) => InputKind::EnqueueLiveContextRow,
             Self::AdvanceLiveContextCanonicalCoverage(_) => {
                 InputKind::AdvanceLiveContextCanonicalCoverage
@@ -18943,6 +19100,8 @@ impl Input {
             Self::RecordMobEventStreamTerminated(_) => InputKind::RecordMobEventStreamTerminated,
             Self::ResolveMobEventStreamClose(_) => InputKind::ResolveMobEventStreamClose,
             Self::RecordLiveChannelStatus(_) => InputKind::RecordLiveChannelStatus,
+            Self::RequestLiveMediaHealth(_) => InputKind::RequestLiveMediaHealth,
+            Self::ObserveLiveChannelMediaHealth(_) => InputKind::ObserveLiveChannelMediaHealth,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
             Self::StageVisibilityFilter(_) => InputKind::StageVisibilityFilter,
@@ -19084,6 +19243,8 @@ pub enum InputKind {
     StopCurrentRunForRun,
     ResolveUserInterruptPublicResult,
     CancelAfterBoundary,
+    HoldRunStarts,
+    ReleaseRunStarts,
     CancelAfterBoundaryForRun,
     AbortCancelAfterBoundaryDispatch,
     StagePersistentFilter,
@@ -19344,6 +19505,7 @@ pub enum InputKind {
     ResolveLiveContextBootstrapAppend,
     FailLiveContextPreparation,
     AuthorizeLiveContextAppend,
+    AuthorizeLiveContextCausalTailBatch,
     EnqueueLiveContextRow,
     AdvanceLiveContextCanonicalCoverage,
     ResolveLiveContextAppend,
@@ -19370,6 +19532,8 @@ pub enum InputKind {
     RecordMobEventStreamTerminated,
     ResolveMobEventStreamClose,
     RecordLiveChannelStatus,
+    RequestLiveMediaHealth,
+    ObserveLiveChannelMediaHealth,
     SpawnDrain,
     StopDrain,
     StageVisibilityFilter,
@@ -19605,6 +19769,16 @@ pub mod effects {
     pub struct RequestCancellationAtBoundary {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BoundaryCancelAlreadyPending {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunStartsHeld {
+        pub current_run: Option<RunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunStartsReleased {
+        pub queued: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunStartHeld {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WakeInterrupt {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -20865,6 +21039,21 @@ pub mod effects {
         pub status_observation_sequence: u64,
         pub degradation_reason: Option<LiveChannelDegradationReason>,
         pub degradation_detail: Option<String>,
+        pub media_fault_reopen_recommended: Option<bool>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveMediaHealthRequested {
+        pub session_id: String,
+        pub channel_id: String,
+        pub output_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveChannelMediaHealthJudged {
+        pub session_id: String,
+        pub channel_id: String,
+        pub output_id: String,
+        pub media_faulted: bool,
+        pub reopen_recommended: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeTranscriptAppended {
@@ -21158,6 +21347,9 @@ pub enum Effect {
     TurnCheckCompaction(effects::TurnCheckCompaction),
     RequestCancellationAtBoundary(effects::RequestCancellationAtBoundary),
     BoundaryCancelAlreadyPending(effects::BoundaryCancelAlreadyPending),
+    RunStartsHeld(effects::RunStartsHeld),
+    RunStartsReleased(effects::RunStartsReleased),
+    RunStartHeld(effects::RunStartHeld),
     WakeInterrupt(effects::WakeInterrupt),
     CommittedVisibleSetPublished(effects::CommittedVisibleSetPublished),
     RuntimeNotice(effects::RuntimeNotice),
@@ -21352,6 +21544,8 @@ pub enum Effect {
     MobEventStreamTerminalResolved(effects::MobEventStreamTerminalResolved),
     MobEventStreamCloseResolved(effects::MobEventStreamCloseResolved),
     LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
+    LiveMediaHealthRequested(effects::LiveMediaHealthRequested),
+    LiveChannelMediaHealthJudged(effects::LiveChannelMediaHealthJudged),
     RealtimeTranscriptAppended(effects::RealtimeTranscriptAppended),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
@@ -21418,6 +21612,9 @@ pub enum EffectKind {
     TurnCheckCompaction,
     RequestCancellationAtBoundary,
     BoundaryCancelAlreadyPending,
+    RunStartsHeld,
+    RunStartsReleased,
+    RunStartHeld,
     WakeInterrupt,
     CommittedVisibleSetPublished,
     RuntimeNotice,
@@ -21606,6 +21803,8 @@ pub enum EffectKind {
     MobEventStreamTerminalResolved,
     MobEventStreamCloseResolved,
     LiveChannelStatusResolved,
+    LiveMediaHealthRequested,
+    LiveChannelMediaHealthJudged,
     RealtimeTranscriptAppended,
     PeerIngressClassified,
     PeerResponseReplyClassified,
@@ -22454,6 +22653,27 @@ pub enum TransitionId {
     AbortCancelAfterBoundaryDispatchRetired,
     AbortCancelAfterBoundaryDispatchStopped,
     AbortCancelAfterBoundaryDispatchDestroyed,
+    HoldRunStartsInitializing,
+    HoldRunStartsIdle,
+    HoldRunStartsAttached,
+    HoldRunStartsRunning,
+    HoldRunStartsRetired,
+    HoldRunStartsStopped,
+    HoldRunStartsInertDestroyed,
+    ReleaseRunStartsLastInitializing,
+    ReleaseRunStartsLastIdle,
+    ReleaseRunStartsLastAttached,
+    ReleaseRunStartsLastRunning,
+    ReleaseRunStartsLastRetired,
+    ReleaseRunStartsLastStopped,
+    ReleaseRunStartsLastDestroyed,
+    ReleaseRunStartsStillHeldInitializing,
+    ReleaseRunStartsStillHeldIdle,
+    ReleaseRunStartsStillHeldAttached,
+    ReleaseRunStartsStillHeldRunning,
+    ReleaseRunStartsStillHeldRetired,
+    ReleaseRunStartsStillHeldStopped,
+    ReleaseRunStartsStillHeldDestroyed,
     BoundaryAppliedPublish,
     PublishCommittedVisibleSetIdle,
     PublishCommittedVisibleSetAttached,
@@ -22892,6 +23112,8 @@ pub enum TransitionId {
     ClassifyExternalEnvelopeLifecycleUnwiredStopped,
     ClassifyExternalEnvelopeLifecycleUnwiredAttached,
     ClassifyExternalEnvelopeLifecycleUnwiredRunning,
+    ClassifyExternalEnvelopeLifecycleKickoffAttached,
+    ClassifyExternalEnvelopeLifecycleKickoffRunning,
     ClassifyExternalEnvelopeResponseAcceptedAttached,
     ClassifyExternalEnvelopeResponseAcceptedRunning,
     ClassifyExternalEnvelopeResponseCompletedAttached,
@@ -22921,14 +23143,22 @@ pub enum TransitionId {
     ClassifyPeerResponseReplyFailedRetired,
     ClassifyPeerResponseReplyFailedStopped,
     PrepareIdle,
+    PrepareHeldIdle,
     PrepareAttached,
+    PrepareHeldAttached,
     DrainQueuedRunRetired,
+    DrainQueuedRunHeldRetired,
     StartConversationRunIdleWithBinding,
+    StartConversationRunHeldIdle,
     StartConversationRunInitializing,
+    StartConversationRunHeldInitializing,
     StartConversationRunAttached,
+    StartConversationRunHeldAttached,
     StartConversationRunRunning,
     StartImmediateAppendInitializing,
+    StartImmediateAppendHeldInitializing,
     StartImmediateAppendAttached,
+    StartImmediateAppendHeldAttached,
     StartImmediateAppendRunning,
     PrimitiveAppliedConversation,
     PrimitiveAppliedImmediateCompleted,
@@ -23701,6 +23931,9 @@ pub enum TransitionId {
     AuthorizeLiveContextAppendIdle,
     AuthorizeLiveContextAppendAttached,
     AuthorizeLiveContextAppendRunning,
+    AuthorizeLiveContextCausalTailBatchIdle,
+    AuthorizeLiveContextCausalTailBatchAttached,
+    AuthorizeLiveContextCausalTailBatchRunning,
     AuthorizeLiveContextAppendSupersededIdle,
     AuthorizeLiveContextAppendSupersededAttached,
     AuthorizeLiveContextAppendSupersededRunning,
@@ -23905,6 +24138,14 @@ pub enum TransitionId {
     RecordLiveChannelStatusRunning,
     RecordLiveChannelStatusRetired,
     RecordLiveChannelStatusStopped,
+    RequestLiveMediaHealthAttached,
+    RequestLiveMediaHealthRunning,
+    ObserveLiveChannelMediaHealthAudibleAttached,
+    ObserveLiveChannelMediaHealthAudibleRunning,
+    ObserveLiveChannelMediaHealthSilentReopenAttached,
+    ObserveLiveChannelMediaHealthSilentReopenRunning,
+    ObserveLiveChannelMediaHealthSilentExhaustedAttached,
+    ObserveLiveChannelMediaHealthSilentExhaustedRunning,
     ResolveWaitAllAdmissionDuplicateRejectedIdle,
     ResolveWaitAllAdmissionDuplicateRejectedAttached,
     ResolveWaitAllAdmissionDuplicateRejectedRunning,
@@ -24805,6 +25046,7 @@ pub fn initial_state() -> State {
         input_live_boundary_join_run: Default::default(),
         input_live_boundary_join_phase: Default::default(),
         run_stop_requested: None,
+        run_start_holds: Default::default(),
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),
@@ -25003,6 +25245,10 @@ pub fn initial_state() -> State {
         live_channel_status_result_sequence: 0,
         live_channel_status_observation_sequence_by_channel: Default::default(),
         live_channel_status_by_channel: Default::default(),
+        live_media_health_requested_output_by_channel: Default::default(),
+        live_media_health_judged_channels: Default::default(),
+        live_media_fault_reopen_recommended_by_channel: Default::default(),
+        live_media_fault_reopens_by_session: Default::default(),
         session_event_stream_open_result_sequence: 0,
         session_event_stream_close_result_sequence: 0,
         session_event_stream_terminal_sequence: 0,

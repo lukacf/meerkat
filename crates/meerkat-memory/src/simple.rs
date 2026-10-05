@@ -44,11 +44,15 @@ impl SimpleMemoryStore {
                 let (scope, content, metadata) = request.into_parts();
                 // Store-side include/exclude gate (#319): skip content the
                 // producer marked non-indexable (Excluded), index the rest.
-                content.is_indexable().then(|| MemoryEntry {
-                    scope,
-                    content: content.into_indexable_text(),
-                    metadata,
-                })
+                // `normalized` also excludes empty or whitespace-only text.
+                match content.normalized() {
+                    meerkat_core::MemoryIndexableContent::Indexable(content) => Some(MemoryEntry {
+                        scope,
+                        content,
+                        metadata,
+                    }),
+                    meerkat_core::MemoryIndexableContent::Excluded(_) => None,
+                }
             })
             .collect();
         (receipt_scope, entries)

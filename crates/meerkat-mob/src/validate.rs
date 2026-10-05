@@ -70,6 +70,10 @@ pub enum DiagnosticCode {
     UnknownProfileKey,
     /// A runtime or profile model-fallback configuration is invalid.
     InvalidModelFallback,
+    /// A `tools.deny` entry is empty or contains whitespace, so it cannot
+    /// name a tool. Whether a well-formed name belongs to the profile's
+    /// composed tool families is checked when a member is built.
+    MalformedToolDeny,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -98,6 +102,7 @@ impl fmt::Display for DiagnosticCode {
                 "invalid_inline_peer_notification_threshold"
             }
             Self::UnknownModel => "unknown_model",
+            Self::MalformedToolDeny => "malformed_tool_deny",
             Self::InvalidCustomModel => "invalid_custom_model",
             Self::InvalidImageGenerationProvider => "invalid_image_generation_provider",
             Self::JsonOutputWithoutSchema => "json_output_without_schema",
@@ -213,6 +218,22 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     code: DiagnosticCode::MissingSkillRef,
                     message: format!("skill '{skill_ref}' is not defined"),
                     location: Some(format!("profiles.{}.skills[{}]", name.as_str(), i)),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
+        }
+
+        // A deny entry must be a well-formed tool name; whether a member's
+        // composed families provide it is checked when the member is built.
+        for (i, entry) in profile.tools.deny.iter().enumerate() {
+            if entry.trim().is_empty() || entry.chars().any(char::is_whitespace) {
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::MalformedToolDeny,
+                    message: format!(
+                        "profiles.{} tools.deny[{i}] {entry:?} is not a tool name",
+                        name.as_str()
+                    ),
+                    location: Some(format!("profiles.{}.tools.deny[{i}]", name.as_str())),
                     severity: DiagnosticSeverity::Error,
                 });
             }
@@ -572,6 +593,47 @@ mod tests {
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingSkillRef);
         assert!(diagnostics[0].message.contains("nonexistent-skill"));
         assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn test_malformed_tool_deny_entries_are_rejected() {
+        let mut def = valid_definition();
+        def.profiles
+            .get_mut(&ProfileName::from("lead"))
+            .unwrap()
+            .as_inline_mut()
+            .unwrap()
+            .tools
+            .deny = vec![
+            "mob_wire".to_string(),
+            String::new(),
+            "mob unwire".to_string(),
+        ];
+
+        let diagnostics = validate_definition(&def);
+        let malformed: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::MalformedToolDeny)
+            .collect();
+        assert_eq!(malformed.len(), 2, "unexpected: {diagnostics:?}");
+        assert_eq!(
+            malformed[0].location.as_deref(),
+            Some("profiles.lead.tools.deny[1]")
+        );
+        assert_eq!(
+            malformed[1].location.as_deref(),
+            Some("profiles.lead.tools.deny[2]")
+        );
+        assert!(
+            malformed
+                .iter()
+                .all(|d| d.severity == DiagnosticSeverity::Error)
+        );
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "a well-formed name is not a diagnostic"
+        );
     }
 
     #[test]

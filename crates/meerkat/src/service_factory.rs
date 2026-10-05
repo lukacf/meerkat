@@ -98,6 +98,9 @@ fn build_agent_error_to_session_error(
         BuildAgentError::LlmClient(error) => {
             SessionError::build_llm_identity_unresolvable(error.to_string())
         }
+        BuildAgentError::DeclaredToolUnknown(unknown) => SessionError::Agent(
+            meerkat_core::error::AgentError::DeclaredToolUnknown(unknown),
+        ),
         other => SessionError::Agent(meerkat_core::error::AgentError::BuildError(
             other.to_string(),
         )),
@@ -594,6 +597,10 @@ impl SessionAgent for FactoryAgent {
 
     fn visible_tool_defs(&self) -> Vec<meerkat_core::ToolDef> {
         self.agent.visible_tool_defs()
+    }
+
+    fn visible_tool_defs_shared(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        self.agent.visible_tool_defs_shared()
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
@@ -1206,6 +1213,17 @@ impl FactoryAgentBuilder {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(RealmInheritance::new(source, head));
+        self
+    }
+
+    /// Install the factory's default MCP credential source
+    /// (see [`AgentFactory::mcp_auth_resolver`]).
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub fn with_mcp_auth_resolver(
+        mut self,
+        resolver: Arc<dyn meerkat_mcp::McpAuthResolver>,
+    ) -> Self {
+        self.factory = self.factory.mcp_auth_resolver(resolver);
         self
     }
 

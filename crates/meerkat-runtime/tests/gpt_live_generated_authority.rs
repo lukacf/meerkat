@@ -1299,7 +1299,53 @@ fn later_heard_user_speech_supersedes_a_held_typed_row() {
     );
 }
 
-/// Replayed heard speech waits for the provider turn boundary: a burst of
+/// S99 with the text chat (#1623): a host-typed row queues as the quiet
+/// ReplayTextChat and is still a typed row, so later heard user speech
+/// supersedes it through the same generated edge.
+#[test]
+fn later_heard_user_speech_supersedes_a_held_text_chat_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "typed",
+        4,
+        mm::LiveContextRowSource::TextChat,
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["typed"],
+        mm::LiveContextRowDisposition::ReplayTextChat
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "spoken",
+        5,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some("heard-user"),
+    );
+    assert!(authorize_superseded_flag(&mut authority, "typed", 4));
+}
+
+/// A text-chat row with only the assistant's own speech after it is not
+/// superseded: it is authorized as ordinary quiet text-chat context.
+#[test]
+fn later_assistant_output_does_not_supersede_a_text_chat_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "typed",
+        4,
+        mm::LiveContextRowSource::TextChat,
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "assistant",
+        5,
+        mm::LiveContextRowDisposition::AssistantObservation,
+        Some("heard-assistant"),
+    );
+    assert!(!authorize_superseded_flag(&mut authority, "typed", 4));
+}
+
 /// replays while the model talks made it react to each (S99). Only replayed
 /// runtime work output is admitted mid-turn.
 #[test]
@@ -1651,7 +1697,11 @@ fn observation_admission_rejects_wrong_namespace_fence_and_closed_scope() {
 }
 
 #[test]
-fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() {
+/// The causal live tail heard while the summary was pending is reasserted
+/// after it in canonical order, and a delegation result follows the summary's
+/// acknowledgement, not the tail: results are not held behind replays of the
+/// user's own speech.
+fn bootstrap_causal_live_tail_is_reasserted_and_results_follow_the_summary_ack() {
     let mut authority = opened_authority();
     stage_bootstrap(&mut authority, 3);
     activate_bootstrap(&mut authority);
@@ -1681,27 +1731,46 @@ fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() 
         mm::LiveContextRowDisposition::ReassertCausalTail
     );
     authorize_bootstrap(&mut authority, 3);
+    let readiness = |authority: &mut mm::MeerkatMachineAuthority| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
+                session_id: SESSION.into(),
+                channel_id: CHANNEL.into(),
+            },
+        )
+        .expect("result barrier")
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm::MeerkatMachineEffect::LiveContextDeliveryReadinessObserved {
+                readiness, ..
+            } => Some(readiness),
+            _ => None,
+        })
+        .expect("readiness observation")
+    };
+    assert_eq!(
+        readiness(&mut authority),
+        mm::LiveContextDeliveryReadiness::Pending,
+        "results wait for the summary's acknowledgement"
+    );
     resolve_bootstrap(
         &mut authority,
         3,
         mm::LiveContextAppendObservation::Delivered,
     )
     .expect("exact ACK");
-    let observed = apply(
-        &mut authority,
-        mm::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
-            session_id: SESSION.into(),
-            channel_id: CHANNEL.into(),
-        },
-    )
-    .expect("result barrier");
-    assert!(observed.into_effects().iter().any(|effect| matches!(
-        effect,
-        mm::MeerkatMachineEffect::LiveContextDeliveryReadinessObserved {
-            readiness: mm::LiveContextDeliveryReadiness::Pending,
-            ..
-        }
-    )));
+    assert_eq!(
+        authority.state().live_context_queued_append_by_cursor.len(),
+        2,
+        "the causal tail is still queued"
+    );
+    assert_eq!(
+        readiness(&mut authority),
+        mm::LiveContextDeliveryReadiness::Ready,
+        "results follow the summary's acknowledgement, not the queued tail"
+    );
     assert!(
         apply(
             &mut authority,
@@ -2336,6 +2405,41 @@ fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
     let effects = authorize_row(&mut authority, "merged-result-reply", 0)
         .expect("the first turn finished; the quiet row is admitted");
     assert!(authorized(&effects, "merged-result-reply"));
+}
+
+/// A text-chat row is quiet: it neither starts the conversation nor is
+/// appended into silence, and like a voiced typed row it waits for the turn
+/// boundary (never mid-utterance), then is admitted.
+#[test]
+fn text_chat_row_waits_for_the_conversation_and_the_turn_boundary() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "typed",
+        1,
+        mm::LiveContextRowSource::TextChat,
+    );
+    assert_eq!(conversation_start(&authority), None);
+    let effects = authorize_row(&mut authority, "typed", 0).expect("typed deferral");
+    assert!(deferred(&effects, "typed"));
+    start_user_turn(&mut authority, "first-user-turn");
+    let effects =
+        authorize_row(&mut authority, "typed", 0).expect("typed deferral during the user's turn");
+    assert!(deferred(&effects, "typed"));
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: "first-user-turn".to_string(),
+        },
+    )
+    .expect("the user's first turn finishes");
+    let effects = authorize_row(&mut authority, "typed", 0).expect("admitted after the turn");
+    assert!(authorized(&effects, "typed"));
 }
 
 /// Replayed runtime work output is admitted during the user phase of a
@@ -7527,4 +7631,261 @@ fn cancellation_resolution_is_accepted_after_the_worker_terminal_races_it() {
             "no cancellation authority means no cancellation resolution"
         );
     }
+}
+
+fn request_media_health(
+    authority: &mut mm::MeerkatMachineAuthority,
+    output_id: &str,
+    assistant_transcript_nonempty: bool,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RequestLiveMediaHealth {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            output_id: output_id.to_string(),
+            assistant_transcript_nonempty,
+        },
+    )
+}
+
+fn observe_media_health(
+    authority: &mut mm::MeerkatMachineAuthority,
+    output_id: &str,
+    audible_frames: u64,
+    max_rms_micros: u64,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ObserveLiveChannelMediaHealth {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            output_id: output_id.to_string(),
+            decoded_frames: 48_000,
+            audible_frames,
+            max_rms_micros,
+        },
+    )
+}
+
+fn media_health_judged(transition: &mm::MeerkatMachineTransition) -> Option<(bool, bool)> {
+    transition.effects().iter().find_map(|effect| match effect {
+        mm::MeerkatMachineEffect::LiveChannelMediaHealthJudged {
+            channel_id,
+            output_id,
+            media_faulted,
+            reopen_recommended,
+            ..
+        } if channel_id == CHANNEL && output_id == "output-1" => {
+            Some((*media_faulted, *reopen_recommended))
+        }
+        _ => None,
+    })
+}
+
+/// A live channel serves an attached runtime: the media-health edges run in
+/// Attached and Running only.
+fn opened_attached_authority() -> mm::MeerkatMachineAuthority {
+    let mut state = opened_authority().state().clone();
+    state.lifecycle_phase = mm::MeerkatPhase::Attached;
+    mm::MeerkatMachineAuthority::recover_from_state(state)
+        .expect("seed state satisfies generated invariants")
+}
+
+/// The runtime requests media health for a channel's first assistant output
+/// only, only for a non-empty transcript on the exact active binding, and
+/// judges exactly that output once.
+#[test]
+fn media_health_judges_only_the_first_output_of_an_active_channel_once() {
+    let mut authority = opened_attached_authority();
+    assert!(
+        request_media_health(&mut authority, "output-1", true).is_err(),
+        "a channel without an active execution binding is never judged"
+    );
+    bind_only(&mut authority);
+    assert!(
+        request_media_health(&mut authority, "output-1", false).is_err(),
+        "an output with an empty transcript proves nothing about media"
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::RequestLiveMediaHealth {
+                session_id: SESSION.to_string(),
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: mm::Generation(generation().0 + 1),
+                output_id: "output-1".to_string(),
+                assistant_transcript_nonempty: true,
+            },
+        )
+        .is_err(),
+        "a stale runtime generation cannot request"
+    );
+    let requested =
+        request_media_health(&mut authority, "output-1", true).expect("first output requested");
+    assert!(requested.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveMediaHealthRequested { channel_id, output_id, .. }
+            if channel_id == CHANNEL && output_id == "output-1"
+    )));
+    assert!(
+        request_media_health(&mut authority, "output-2", true).is_err(),
+        "only the channel's first output is judged"
+    );
+    assert!(
+        observe_media_health(&mut authority, "output-2", 10, 50_000).is_err(),
+        "a report for an output the runtime never requested is refused"
+    );
+    let judged =
+        observe_media_health(&mut authority, "output-1", 10, 50_000).expect("audible report");
+    assert_eq!(media_health_judged(&judged), Some((false, false)));
+    assert!(
+        observe_media_health(&mut authority, "output-1", 0, 0).is_err(),
+        "an output is judged once"
+    );
+    assert!(
+        authority
+            .state()
+            .live_media_fault_reopen_recommended_by_channel
+            .is_empty()
+    );
+}
+
+/// An output with a transcript but no audible frame is a media fault. The
+/// session's first fault recommends a reopen, and the channel's status
+/// carries the fact when it reports closed.
+#[test]
+fn a_silent_first_output_is_a_media_fault_that_recommends_one_reopen() {
+    let mut authority = opened_attached_authority();
+    bind_only(&mut authority);
+    request_media_health(&mut authority, "output-1", true).expect("requested");
+    let judged = observe_media_health(&mut authority, "output-1", 0, 400).expect("silent report");
+    assert_eq!(media_health_judged(&judged), Some((true, true)));
+    assert_eq!(
+        authority
+            .state()
+            .live_media_fault_reopens_by_session
+            .get(SESSION)
+            .copied(),
+        Some(1)
+    );
+    let status = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: CHANNEL.to_string(),
+            status: mm::LiveChannelPublicStatus::Closed,
+            status_observation_sequence: 7,
+            degradation_reason: None,
+            degradation_detail: None,
+        },
+    )
+    .expect("closed status");
+    assert!(status.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveChannelStatusResolved {
+            media_fault_reopen_recommended: Some(true),
+            ..
+        }
+    )));
+}
+
+/// A media fault after the session spent its reopen closes without the
+/// recommendation, so a broken media path never loops.
+#[test]
+fn a_second_media_fault_on_a_session_does_not_recommend_another_reopen() {
+    let mut state = opened_attached_authority().state().clone();
+    state
+        .live_media_fault_reopens_by_session
+        .insert(SESSION.to_string(), 1);
+    let mut authority = mm::MeerkatMachineAuthority::recover_from_state(state)
+        .expect("seed state satisfies generated invariants");
+    bind_only(&mut authority);
+    request_media_health(&mut authority, "output-1", true).expect("requested");
+    let judged = observe_media_health(&mut authority, "output-1", 0, 0).expect("silent report");
+    assert_eq!(media_health_judged(&judged), Some((true, false)));
+    assert_eq!(
+        authority
+            .state()
+            .live_media_fault_reopen_recommended_by_channel
+            .get(CHANNEL)
+            .copied(),
+        Some(false)
+    );
+}
+
+/// Media health is per session lifetime: once the runtime stops and the
+/// stopped session resumes with a fresh runtime binding, the media-health
+/// state is cleared and a new first output earns the reopen again.
+#[test]
+fn a_resumed_session_earns_its_media_fault_reopen_again() {
+    let mut authority = opened_attached_authority();
+    bind_only(&mut authority);
+    request_media_health(&mut authority, "output-1", true).expect("requested");
+    let first = observe_media_health(&mut authority, "output-1", 0, 0).expect("silent");
+    assert_eq!(media_health_judged(&first), Some((true, true)));
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::StopRuntimeExecutor {
+            reason: "stop".to_string(),
+        },
+    )
+    .expect("stop requested");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RuntimeExecutorExited,
+    )
+    .expect("executor exits to stopped");
+    assert_eq!(authority.state().lifecycle_phase, mm::MeerkatPhase::Stopped);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RegisterSession {
+            session_id: mm::SessionId(SESSION.to_string()),
+            runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
+        },
+    )
+    .expect("the stopped session resumes");
+    let state = authority.state();
+    assert!(state.live_media_fault_reopens_by_session.is_empty());
+    assert!(
+        state
+            .live_media_fault_reopen_recommended_by_channel
+            .is_empty()
+    );
+    assert!(state.live_media_health_judged_channels.is_empty());
+    assert!(
+        state
+            .live_media_health_requested_output_by_channel
+            .is_empty()
+    );
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: Some(generation()),
+            runtime_epoch_id: None,
+            session_id: mm::SessionId(SESSION.to_string()),
+        },
+    )
+    .expect("a fresh runtime binding");
+    request_media_health(&mut authority, "output-2", true)
+        .expect("the new lifetime's first output is requested");
+    let second = observe_media_health(&mut authority, "output-2", 0, 0).expect("silent again");
+    assert!(second.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveChannelMediaHealthJudged {
+            output_id,
+            media_faulted: true,
+            reopen_recommended: true,
+            ..
+        } if output_id == "output-2"
+    )));
 }

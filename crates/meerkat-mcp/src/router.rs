@@ -6,6 +6,7 @@
 //! bound handle fails closed for lifecycle mutations until that owner is
 //! supplied.
 
+use crate::connection::StdioChildCustody;
 use crate::external_tool_surface_authority::{
     ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput,
     ExternalToolSurfacePhase, ExternalToolSurfaceTransition, RemovalTimingInfo, StagedSurfaceOp,
@@ -17,7 +18,7 @@ use crate::generated::{
 };
 use crate::{McpAuthResolver, McpConnection, McpError};
 use async_trait::async_trait;
-use meerkat_auth_core::McpAuthMode;
+use meerkat_auth_core::{McpAuthMode, McpServerIdentity};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 use meerkat_core::McpServerConfig;
@@ -31,6 +32,7 @@ use meerkat_core::handles::{
     ExternalToolSurfaceTransition as CoreSurfaceTransition, McpServerLifecycleHandle,
     SurfaceDiagnosticSnapshot, SurfaceSnapshot,
 };
+use meerkat_core::mcp_config::McpTransportConfig;
 use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
 use meerkat_core::{
@@ -1030,14 +1032,28 @@ pub struct McpRouter {
     pending_obligations: HashMap<String, SurfaceCompletionObligation>,
     /// Background connect-and-enumerate tasks this router spawned. The router
     /// owns them: `shutdown` aborts and joins every one still running, so no
-    /// connect attempt outlives the router, and dropping an attempt triggers
-    /// the kill of the stdio child it owns. The child's exit then follows
-    /// asynchronously; shutdown does not wait for it. Finished tasks are
-    /// reaped as new ones are spawned.
+    /// connect attempt outlives the router. Finished tasks are reaped as new
+    /// ones are spawned.
     connect_tasks: tokio::task::JoinSet<()>,
+    /// Custody of the stdio server process of every connect attempt whose
+    /// result the router has not processed yet, keyed by surface and pending
+    /// task sequence. The process is deposited here before its handshake, so
+    /// `shutdown` terminates it and observes its exit even when the attempt is
+    /// aborted mid-handshake.
+    pending_child_custody: HashMap<(String, u64), StdioChildCustody>,
+    /// Connection closes the router started (remove, reload, replace, and
+    /// rejected completions). Finished closes are reaped on each effect pass;
+    /// `shutdown` joins the rest, so every closed server has exited by the
+    /// time it returns. Dropping the router without `shutdown` aborts them;
+    /// the custody's drop fallback then kills each server without observing
+    /// its exit.
+    closing: tokio::task::JoinSet<Result<(), (String, McpError)>>,
     pending_snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
     /// Queued canonical lifecycle deltas for async completions.
     completed_updates: VecDeque<CompletedLifecycleUpdate>,
+    /// Host-channel status: servers whose latest connection attempt ended in
+    /// [`McpError::AuthorizationRequired`]. Never projected to the agent.
+    awaiting_authorization: BTreeMap<String, McpServerIdentity>,
     /// Optional session-scoped MCP server lifecycle handle
     /// (Phase 5G / T5g). When bound, every handshake event mirrors into
     /// the session's MeerkatMachine DSL `mcp_server_states`. Standalone
@@ -1052,6 +1068,60 @@ pub struct McpRouter {
     mcp_auth_mode: McpAuthMode,
     mcp_auth_resolver: Option<Arc<dyn McpAuthResolver>>,
     client_service_factory: Option<Arc<dyn crate::McpClientServiceFactory>>,
+    /// Bumped whenever the router makes progress a waiter could be blocked
+    /// on: a tool call finishing (a draining server's in-flight count drops)
+    /// or a connect attempt delivering its result. [`McpProgressWait`]
+    /// subscribes before reading state, so no progress is missed.
+    progress: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Connect attempts spawned, and those that have delivered their result
+    /// to the pending channel (counted by the attempt before it signals
+    /// `progress`).
+    connect_attempts_spawned: u64,
+    connect_results_delivered: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// A typed wait for MCP router progress, taken under the router lock and
+/// awaited without it: it resolves when a tool call finishes or a connect
+/// result arrives after it was taken, at its deadline (the earliest removal
+/// timeout of a draining server), or at once when progress is already
+/// possible.
+#[derive(Debug)]
+pub(crate) struct McpProgressWait {
+    progress: Option<tokio::sync::watch::Receiver<u64>>,
+    deadline: Option<Instant>,
+}
+
+impl McpProgressWait {
+    fn ready() -> Self {
+        Self {
+            progress: None,
+            deadline: None,
+        }
+    }
+
+    /// Wait for progress, the wait's own deadline, or `limit`, whichever
+    /// comes first.
+    pub(crate) async fn wait(self, limit: Option<tokio::time::Instant>) {
+        let Some(mut progress) = self.progress else {
+            return;
+        };
+        let deadline = match (self.deadline.map(tokio::time::Instant::from_std), limit) {
+            (Some(own), Some(limit)) => Some(own.min(limit)),
+            (own, limit) => own.or(limit),
+        };
+        let changed = progress.changed();
+        match deadline {
+            Some(deadline) => {
+                tokio::select! {
+                    _ = changed => {}
+                    () = tokio::time::sleep_until(deadline) => {}
+                }
+            }
+            None => {
+                let _ = changed.await;
+            }
+        }
+    }
 }
 
 impl McpRouter {
@@ -1066,12 +1136,18 @@ impl McpRouter {
             pending_rx: Mutex::new(rx),
             pending_obligations: HashMap::new(),
             connect_tasks: tokio::task::JoinSet::new(),
+            pending_child_custody: HashMap::new(),
+            closing: tokio::task::JoinSet::new(),
             pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
+            awaiting_authorization: BTreeMap::new(),
             mcp_lifecycle_handle: Arc::new(StdRwLock::new(None)),
             mcp_auth_mode: McpAuthMode::Stored,
             mcp_auth_resolver: None,
             client_service_factory: None,
+            progress: Arc::new(tokio::sync::watch::Sender::new(0)),
+            connect_attempts_spawned: 0,
+            connect_results_delivered: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1314,6 +1390,8 @@ impl McpRouter {
             return Err(error.into());
         }
         self.staged_payloads.remove(&server_name);
+        // An accepted removal withdraws any pending human-authorization ask.
+        self.awaiting_authorization.remove(&server_name);
         Ok(())
     }
 
@@ -1460,6 +1538,7 @@ impl McpRouter {
         config: Option<&McpServerConfig>,
         snapshot_alignment: &mut Option<SurfaceSnapshotAlignmentObligation>,
     ) {
+        self.reap_closing();
         // Extract obligation tokens from ScheduleSurfaceCompletion effects
         // before iterating — these are consumed by spawn_pending.
         let core_effects = core_surface_effects(effects);
@@ -1518,14 +1597,11 @@ impl McpRouter {
                     ));
                 }
                 ExternalToolSurfaceEffect::CloseSurfaceConnection { surface_id } => {
-                    if let Some(entry) = self.servers.get_mut(&surface_id.0) {
-                        let conn = entry.connection.take();
-                        let name = surface_id.0.clone();
-                        tokio::spawn(async move {
-                            Self::close_entry_connection(name, conn).await;
-                        });
+                    let conn = self.servers.get_mut(&surface_id.0).and_then(|entry| {
                         entry.tools.clear();
-                    }
+                        entry.connection.take()
+                    });
+                    self.spawn_close(surface_id.0.clone(), conn);
                     // K14: the close effect comes from an already-accepted
                     // surface transition, so it must execute; a rejected
                     // lifecycle mirror apply propagates as a typed Failed
@@ -1541,6 +1617,7 @@ impl McpRouter {
                             .with_detail(Some(error.to_string())),
                         });
                     }
+                    self.awaiting_authorization.remove(&surface_id.0);
                     delta.removed_servers.push(surface_id.0.clone());
                 }
                 ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
@@ -1556,29 +1633,49 @@ impl McpRouter {
         self.pending_obligations
             .insert(server_name, obligation.clone());
 
+        let stdio_custody = matches!(config.transport, McpTransportConfig::Stdio(_)).then(|| {
+            let custody = StdioChildCustody::default();
+            self.pending_child_custody.insert(
+                (
+                    obligation.surface_id.clone(),
+                    obligation.pending_task_sequence,
+                ),
+                custody.clone(),
+            );
+            custody
+        });
         let tx = self.pending_tx.clone();
+        let progress = Arc::clone(&self.progress);
+        let delivered = Arc::clone(&self.connect_results_delivered);
+        self.connect_attempts_spawned = self.connect_attempts_spawned.wrapping_add(1);
         let auth_mode = self.mcp_auth_mode;
         let auth_resolver = self.mcp_auth_resolver.clone();
         let client_factory = self.client_service_factory.clone();
         // Reap tasks that already finished so the owned set stays bounded.
         while self.connect_tasks.try_join_next().is_some() {}
         self.connect_tasks.spawn(async move {
-            let result = McpConnection::connect_and_enumerate_with_services(
+            let result = McpConnection::connect_and_enumerate_with_custody(
                 &config,
                 auth_mode,
                 auth_resolver,
                 client_factory,
+                stdio_custody,
             )
             .await;
-            if let Err(error) = tx.send(PendingResult { obligation, result }).await {
+            let sent = tx.send(PendingResult { obligation, result }).await;
+            delivered.fetch_add(1, Ordering::AcqRel);
+            progress.send_modify(|seen| *seen = seen.wrapping_add(1));
+            if let Err(error) = sent {
+                // The router is gone; this task is the result's last owner.
                 let server_name = error.0.obligation.surface_id.clone();
-                McpRouter::close_result_connection_if_present(server_name, error.0.result);
+                McpRouter::close_result_connection_if_present(server_name, error.0.result).await;
             }
         });
     }
 
     /// Drain completed pending results from the background channel.
     fn drain_pending(&mut self) {
+        self.reap_closing();
         let results: Vec<PendingResult> = {
             let mut rx = match self.pending_rx.lock() {
                 Ok(guard) => guard,
@@ -1618,6 +1715,19 @@ impl McpRouter {
     ) -> Option<SurfaceSnapshotAlignmentObligation> {
         let PendingResult { obligation, result } = result;
         let server_name = obligation.surface_id.clone();
+        // The result (a connection, or an error after the process exited) now
+        // carries the process; the attempt's custody entry is done.
+        self.pending_child_custody
+            .remove(&(server_name.clone(), obligation.pending_task_sequence));
+        match &result {
+            Err(McpError::AuthorizationRequired { target }) => {
+                self.awaiting_authorization
+                    .insert(server_name.clone(), (**target).clone());
+            }
+            _ => {
+                self.awaiting_authorization.remove(&server_name);
+            }
+        }
 
         match result {
             Ok((conn, tools)) => {
@@ -1654,16 +1764,7 @@ impl McpRouter {
                         // canonical lifecycle channel (the same channel
                         // background connection failures use).
                         if let Err(error) = self.notify_lifecycle_connected(&server_name) {
-                            let name = server_name.clone();
-                            tokio::spawn(async move {
-                                if let Err(close_error) = conn.close().await {
-                                    tracing::debug!(
-                                        "Error closing MCP connection '{}' after rejected lifecycle mirror apply: {}",
-                                        name,
-                                        close_error
-                                    );
-                                }
-                            });
+                            self.spawn_close(server_name.clone(), Some(conn));
                             self.completed_updates.push_back(CompletedLifecycleUpdate {
                                 action: McpLifecycleAction::new(
                                     server_name,
@@ -1680,10 +1781,7 @@ impl McpRouter {
                             && let Some(old_entry) = self.servers.get_mut(&server_name)
                         {
                             let old_conn = old_entry.connection.take();
-                            let name = server_name.clone();
-                            tokio::spawn(async move {
-                                Self::close_entry_connection(name, old_conn).await;
-                            });
+                            self.spawn_close(server_name.clone(), old_conn);
                         }
 
                         // Install the new entry (or replace existing).
@@ -1698,11 +1796,7 @@ impl McpRouter {
                         if let Some(old_entry) = self.servers.insert(server_name.clone(), new_entry)
                             && obligation.operation == ExternalToolSurfaceDeltaOperation::Add
                         {
-                            let old_name = old_entry.config.name.clone();
-                            let old_conn = old_entry.connection;
-                            tokio::spawn(async move {
-                                Self::close_entry_connection(old_name, old_conn).await;
-                            });
+                            self.spawn_close(old_entry.config.name, old_entry.connection);
                         }
 
                         self.completed_updates.push_back(CompletedLifecycleUpdate {
@@ -1721,16 +1815,7 @@ impl McpRouter {
                             error = %e,
                             "Surface owner rejected PendingSucceeded"
                         );
-                        let name = server_name;
-                        tokio::spawn(async move {
-                            if let Err(e) = conn.close().await {
-                                tracing::debug!(
-                                    "Error closing rejected MCP connection '{}': {}",
-                                    name,
-                                    e
-                                );
-                            }
-                        });
+                        self.spawn_close(server_name, Some(conn));
                         None
                     }
                 }
@@ -1814,6 +1899,17 @@ impl McpRouter {
                 snapshot_alignment
             }
         }
+    }
+
+    /// Host-channel status: the MCP targets whose latest connection attempt is
+    /// waiting for a human to authorize them through the host's browser
+    /// channel (see `McpOAuthAuthority::login_start`). This is a host query,
+    /// not an agent event: it carries only the typed target, never an
+    /// authorize URL, state or code. A later successful attempt or removal
+    /// clears the entry. It reflects background results already drained by
+    /// the normal lifecycle polling; it drains nothing itself.
+    pub fn servers_awaiting_authorization(&self) -> Vec<McpServerIdentity> {
+        self.awaiting_authorization.values().cloned().collect()
     }
 
     /// Drain pending results and return queued canonical lifecycle actions.
@@ -2013,6 +2109,8 @@ impl McpRouter {
             if degraded {
                 delta.degraded_removals.push(server_name);
             }
+            self.progress
+                .send_modify(|seen| *seen = seen.wrapping_add(1));
         }
         Ok(())
     }
@@ -2046,20 +2144,45 @@ impl McpRouter {
         }
     }
 
-    fn close_result_connection_if_present(
+    async fn close_result_connection_if_present(
         server_name: String,
         result: Result<(McpConnection, Vec<Arc<ToolDef>>), McpError>,
     ) {
         if let Ok((conn, _)) = result {
-            tokio::spawn(async move {
-                if let Err(error) = conn.close().await {
-                    tracing::debug!(
-                        "Error closing stale MCP connection '{}': {}",
-                        server_name,
-                        error
-                    );
-                }
-            });
+            Self::close_entry_connection(server_name, Some(conn)).await;
+        }
+    }
+
+    /// Close `conn` in a router-owned task: the router does not block on the
+    /// close, and `shutdown` joins it.
+    fn spawn_close(&mut self, server_name: String, conn: Option<McpConnection>) {
+        let Some(conn) = conn else {
+            return;
+        };
+        self.reap_closing();
+        self.closing
+            .spawn(async move { conn.close().await.map_err(|error| (server_name, error)) });
+    }
+
+    /// Reap finished closes so the set stays bounded in a long-lived router.
+    fn reap_closing(&mut self) {
+        while let Some(joined) = self.closing.try_join_next() {
+            Self::report_close(joined);
+        }
+    }
+
+    fn report_close(joined: Result<Result<(), (String, McpError)>, tokio::task::JoinError>) {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err((server, error))) => {
+                tracing::warn!(server = %server, error = %error, "MCP connection close failed");
+            }
+            Err(error) if error.is_panic() => {
+                tracing::error!(error = %error, "MCP connection close task panicked");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "MCP connection close task was cancelled");
+            }
         }
     }
 
@@ -2295,6 +2418,50 @@ impl McpRouter {
         !self.surface_owner.removing_surfaces().is_empty()
     }
 
+    /// What the removal drain waits on next: `None` when no server is
+    /// draining; otherwise a wait that resolves at once if a draining server
+    /// can finalize now (no call in flight, or its removal timeout passed),
+    /// else on the next finished call or the earliest removal timeout.
+    pub(crate) fn removal_progress_wait(&self) -> Option<McpProgressWait> {
+        let removing = self.surface_owner.removing_surfaces();
+        if removing.is_empty() {
+            return None;
+        }
+        let progress = self.progress.subscribe();
+        let now = Instant::now();
+        let mut deadline: Option<Instant> = None;
+        for sid in &removing {
+            if self.surface_owner.inflight_call_count(sid) == 0 {
+                return Some(McpProgressWait::ready());
+            }
+            if let Some(timing) = self.surface_owner.removal_timing(sid) {
+                if now >= timing.timeout_at {
+                    return Some(McpProgressWait::ready());
+                }
+                deadline = Some(deadline.map_or(timing.timeout_at, |d| d.min(timing.timeout_at)));
+            }
+        }
+        Some(McpProgressWait {
+            progress: Some(progress),
+            deadline,
+        })
+    }
+
+    /// Whether a spawned connect attempt has not yet delivered its result.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn connect_results_outstanding(&self) -> bool {
+        self.connect_results_delivered.load(Ordering::Acquire) != self.connect_attempts_spawned
+    }
+
+    /// A wait for the next connect result (or finished call); taken before
+    /// reading pending state, so a result delivered after the read is seen.
+    pub(crate) fn progress_wait(&self) -> McpProgressWait {
+        McpProgressWait {
+            progress: Some(self.progress.subscribe()),
+            deadline: None,
+        }
+    }
+
     /// List all visible tools from active servers.
     pub fn list_tools(&self) -> &[Arc<ToolDef>] {
         self.projection.visible_tools.as_ref()
@@ -2369,12 +2536,15 @@ impl McpRouter {
         // Fail closed (matching CallStarted): a rejected CallFinished is
         // authoritative divergence, not a benign no-op. Surface the tool
         // result only when the surface owner accepts the finish.
-        if let Err(error) = self
+        let finished = self
             .surface_owner
             .apply(ExternalToolSurfaceInput::CallFinished {
                 surface_id: sid.clone(),
-            })
-        {
+            });
+        // A draining server may now have no call in flight.
+        self.progress
+            .send_modify(|seen| *seen = seen.wrapping_add(1));
+        if let Err(error) = finished {
             return Err(McpError::ServerUnavailable {
                 server: server_name.clone(),
                 state: format!("Surface owner rejected CallFinished: {error}"),
@@ -2397,17 +2567,21 @@ impl McpRouter {
         let (replacement_tx, _replacement_rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
         let old_pending_tx = std::mem::replace(&mut self.pending_tx, replacement_tx);
         drop(old_pending_tx);
-        // Abort and join every connect task still running. Dropping an
-        // aborted task's future drops its connection attempt, which triggers
-        // the stdio child's kill: rmcp hands the child to its own async kill
-        // task, and kill-on-drop covers the case where that task never runs.
-        // The child exits shortly after; shutdown does not await its exit.
+        // Abort and join every connect task still running, then terminate the
+        // stdio process of every attempt whose result was never processed.
+        // The custody outlives the aborted attempt, so its process has exited
+        // by the time terminate returns.
         self.connect_tasks.abort_all();
         while let Some(joined) = self.connect_tasks.join_next().await {
             if let Err(error) = joined
                 && error.is_panic()
             {
                 tracing::warn!("MCP connect task panicked before shutdown: {error}");
+            }
+        }
+        for ((server, _), custody) in std::mem::take(&mut self.pending_child_custody) {
+            if let Some(Err(error)) = custody.terminate().await {
+                tracing::warn!(server = %server, error = %error, "failed to reap MCP stdio server process");
             }
         }
         // Drain any completion payloads that arrived after pending_tx drop.
@@ -2436,34 +2610,61 @@ impl McpRouter {
         for (_, entry) in servers {
             Self::close_entry_connection(entry.config.name, entry.connection).await;
         }
+        while let Some(joined) = self.closing.join_next().await {
+            Self::report_close(joined);
+        }
         let _ = self.publish_projection_snapshot();
     }
 
+    /// Test hook: set a server's in-flight call count, through the surface
+    /// owner like real calls. Fails closed when the server is not installed
+    /// or the owner rejects a call transition (the session machine accepts
+    /// calls only while attached or running), instead of leaving the shell
+    /// and the owner disagreeing about the count.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_inflight_calls_for_testing(&mut self, server_name: &str, count: usize) {
+    pub fn set_inflight_calls_for_testing(
+        &mut self,
+        server_name: &str,
+        count: usize,
+    ) -> Result<(), McpError> {
         let sid = SurfaceId::from(server_name);
-        if let Some(entry) = self.servers.get_mut(server_name) {
-            let current = entry.active_calls.load(Ordering::Acquire);
-            entry.active_calls.store(count, Ordering::Release);
-            // Sync owner inflight count to match the shell's test override.
-            if count > current {
-                for _ in current..count {
-                    let _ = self
-                        .surface_owner
-                        .apply(ExternalToolSurfaceInput::CallStarted {
-                            surface_id: sid.clone(),
-                        });
+        let entry = self
+            .servers
+            .get_mut(server_name)
+            .ok_or_else(|| McpError::ServerNotFound(server_name.to_string()))?;
+        let current = entry.active_calls.load(Ordering::Acquire);
+        let input = |started: bool| {
+            if started {
+                ExternalToolSurfaceInput::CallStarted {
+                    surface_id: sid.clone(),
                 }
             } else {
-                for _ in count..current {
-                    let _ = self
-                        .surface_owner
-                        .apply(ExternalToolSurfaceInput::CallFinished {
-                            surface_id: sid.clone(),
-                        });
+                ExternalToolSurfaceInput::CallFinished {
+                    surface_id: sid.clone(),
                 }
             }
+        };
+        let (started, steps) = if count > current {
+            (true, count - current)
+        } else {
+            (false, current - count)
+        };
+        for _ in 0..steps {
+            self.surface_owner.apply(input(started)).map_err(|error| {
+                McpError::ServerUnavailable {
+                    server: server_name.to_string(),
+                    state: format!("surface owner rejected the test call transition: {error}"),
+                }
+            })?;
+            if started {
+                entry.active_calls.fetch_add(1, Ordering::AcqRel);
+            } else {
+                entry.active_calls.fetch_sub(1, Ordering::AcqRel);
+            }
         }
+        self.progress
+            .send_modify(|seen| *seen = seen.wrapping_add(1));
+        Ok(())
     }
 }
 
@@ -2529,39 +2730,10 @@ mod tests {
     use meerkat_core::ExternalToolSurfaceFailureCause;
     use meerkat_core::event::ToolConfigChangeOperation;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn async_connect_test_timeout() -> Duration {
         Duration::from_secs((McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS as u64) + 5)
-    }
-
-    fn test_server_path() -> PathBuf {
-        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-            return PathBuf::from(target_dir).join("debug/mcp-test-server");
-        }
-
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let workspace_root = PathBuf::from(manifest_dir)
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root")
-            .to_path_buf();
-        workspace_root
-            .join("target")
-            .join("debug")
-            .join("mcp-test-server")
-    }
-
-    fn skip_if_no_test_server() -> Option<PathBuf> {
-        let path = test_server_path();
-        if path.exists() {
-            Some(path)
-        } else {
-            eprintln!(
-                "Skipping: mcp-test-server not built. Run `cargo build -p mcp-test-server` first."
-            );
-            None
-        }
     }
 
     fn test_server_config(name: &str, path: &Path) -> McpServerConfig {
@@ -3284,9 +3456,7 @@ mod tests {
     /// fail-closed `CallStarted` rejection path.
     #[tokio::test]
     async fn call_finished_rejection_fails_closed_not_returning_result() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router =
             McpRouter::new_with_surface_handle(Arc::new(RejectCallFinishedSurfaceHandle::new()));
@@ -3904,9 +4074,7 @@ mod tests {
 
     #[tokio::test]
     async fn staged_add_remove_reload_transitions() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
 
@@ -3943,9 +4111,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_is_immediately_hidden_on_boundary_apply() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
         router
@@ -3963,11 +4129,44 @@ mod tests {
         assert!(!has_echo_after, "tool should be hidden immediately");
     }
 
+    /// Removing a server closes its connection in a router-owned task, which
+    /// `shutdown` joins: the removed server and its process group have exited
+    /// when shutdown returns. (Fails-old: the close was a detached task, and
+    /// rmcp waited up to 3 s after EOF before killing only the direct child.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn removed_stdio_server_has_exited_when_shutdown_returns() {
+        use crate::stdio_test_fixture::{PidReport, process_exited, sh_mcp_server_args};
+        let mut report = PidReport::new("removed-group");
+        let mut router = generated_handle_owner_router();
+        let config = McpServerConfig::stdio(
+            "eof-ignoring",
+            "/bin/sh",
+            sh_mcp_server_args(Some(report.path())),
+            HashMap::new(),
+        );
+        let (added, pids) = tokio::join!(router.add_server(config), report.pids());
+        added.expect("add_server");
+        let (wrapper, server) = (pids[0], pids[1]);
+
+        router.stage_remove("eof-ignoring").expect("stage remove");
+        let result = router.apply_staged().await.expect("apply remove");
+        assert_eq!(result.delta.removed_servers, vec!["eof-ignoring"]);
+        router.shutdown().await;
+
+        assert!(
+            process_exited(wrapper),
+            "removed stdio server {wrapper} outlived router shutdown"
+        );
+        assert!(
+            process_exited(server),
+            "removed stdio server's grandchild {server} outlived router shutdown"
+        );
+    }
+
     #[tokio::test]
     async fn removing_state_rejects_new_calls_and_drains_inflight() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router_with_timeout(Duration::from_secs(60));
         router
@@ -3975,7 +4174,9 @@ mod tests {
             .await
             .expect("add_server");
 
-        router.set_inflight_calls_for_testing("test-server", 1);
+        router
+            .set_inflight_calls_for_testing("test-server", 1)
+            .expect("set inflight calls");
         router.stage_remove("test-server").expect("stage remove");
         let result = router.apply_staged().await.expect("apply remove");
 
@@ -3997,7 +4198,9 @@ mod tests {
             "removing surfaces should be absent from the published routing snapshot, got {err:?}"
         );
 
-        router.set_inflight_calls_for_testing("test-server", 0);
+        router
+            .set_inflight_calls_for_testing("test-server", 0)
+            .expect("set inflight calls");
         let result = router
             .apply_staged()
             .await
@@ -4009,9 +4212,7 @@ mod tests {
 
     #[tokio::test]
     async fn removal_timeout_forces_close_and_reports_degraded_signal() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router_with_timeout(Duration::from_millis(10));
         router
@@ -4019,7 +4220,9 @@ mod tests {
             .await
             .expect("add_server");
 
-        router.set_inflight_calls_for_testing("test-server", 1);
+        router
+            .set_inflight_calls_for_testing("test-server", 1)
+            .expect("set inflight calls");
         router.stage_remove("test-server").expect("stage remove");
         let result = router.apply_staged().await.expect("apply remove start");
         assert!(result.delta.removed_servers.is_empty());
@@ -4037,10 +4240,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn awaiting_authorization_is_host_status_not_an_agent_notice_payload() {
+        use crate::connection::tests::{FakeMcpAuthResolver, spawn_http_mcp_server};
+
+        let (url, _state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("guarded", url, HashMap::new());
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        let resolver =
+            Arc::new(FakeMcpAuthResolver::new(None, "unused").with_human_authorization_required());
+        let mut router =
+            generated_handle_owner_router().with_mcp_auth(McpAuthMode::Interactive, Some(resolver));
+        router.stage_add(config).expect("stage add");
+        router.apply_staged().await.expect("apply staged add");
+
+        let deadline = Instant::now() + async_connect_test_timeout();
+        let mut failed_detail = None;
+        while failed_detail.is_none() {
+            let ext = router.take_external_updates();
+            failed_detail = ext
+                .notices
+                .into_iter()
+                .find(|n| n.target == "guarded" && n.phase == McpLifecyclePhase::Failed)
+                .map(|n| format!("{n:?}"));
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for background MCP connect"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(router.servers_awaiting_authorization(), vec![target]);
+        let detail = failed_detail.unwrap_or_default();
+        for secret in ["authorize", "state=", "code=", "code_challenge"] {
+            assert!(!detail.contains(secret), "{secret:?} leaked: {detail}");
+        }
+
+        router.stage_remove("guarded").expect("stage remove");
+        router.apply_staged().await.expect("apply staged remove");
+        assert!(router.servers_awaiting_authorization().is_empty());
+    }
+
+    #[tokio::test]
     async fn apply_staged_add_is_non_blocking() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
         router
@@ -4103,9 +4344,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_remove_add_discards_stale_generation() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_handle_owner_router();
 

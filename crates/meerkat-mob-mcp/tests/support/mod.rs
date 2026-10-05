@@ -59,10 +59,10 @@ pub enum ScriptedTurn {
 }
 
 /// A release gate a scripted turn blocks on.
-#[derive(Default)]
 pub struct TurnGate {
     open: std::sync::Mutex<Option<tokio::sync::watch::Sender<bool>>>,
-    entered: AtomicUsize,
+    /// Turns that have reached the gate; a watch, so waiters wake on entry.
+    entered: tokio::sync::watch::Sender<usize>,
 }
 
 impl TurnGate {
@@ -70,7 +70,7 @@ impl TurnGate {
         let (tx, _rx) = tokio::sync::watch::channel(false);
         Arc::new(Self {
             open: std::sync::Mutex::new(Some(tx)),
-            entered: AtomicUsize::new(0),
+            entered: tokio::sync::watch::Sender::new(0),
         })
     }
 
@@ -87,33 +87,43 @@ impl TurnGate {
     pub fn open(&self) {
         let guard = self.open.lock().unwrap();
         if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(true);
+            // `send` drops the value when no turn has subscribed yet;
+            // `send_replace` stores it for turns that subscribe later.
+            tx.send_replace(true);
         }
     }
 
     /// How many turns have reached the gate.
     pub fn entered(&self) -> usize {
-        self.entered.load(Ordering::SeqCst)
+        *self.entered.borrow()
     }
 
-    /// Wait until at least `count` turns have reached the gate.
+    /// Wait until at least `count` turns have reached the gate. Woken by each
+    /// entry; the bound is a hang guard only.
     pub async fn wait_entered(&self, count: usize) {
-        for _ in 0..600 {
-            if self.entered() >= count {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        panic!(
+        let mut entered = self.entered.subscribe();
+        let reached = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            entered.wait_for(|entered| *entered >= count),
+        )
+        .await;
+        assert!(
+            matches!(reached, Ok(Ok(_))),
             "only {} turn(s) reached the gate, expected {count}",
             self.entered()
         );
     }
 
+    /// Record a turn reaching the gate, waking [`Self::wait_entered`].
+    fn note_entered(&self) {
+        self.entered
+            .send_modify(|entered| *entered = entered.saturating_add(1));
+    }
+
     /// Block the current task until [`Self::open`] is called.
     pub async fn wait(&self) {
-        self.entered.fetch_add(1, Ordering::SeqCst);
         let mut rx = self.receiver();
+        self.note_entered();
         while !*rx.borrow_and_update() {
             if rx.changed().await.is_err() {
                 break;
@@ -207,8 +217,10 @@ impl LlmClient for ScriptedCouncilClient {
             ScriptedTurn::Gated(gate, text) => {
                 let model = request.model.clone();
                 let released = async move {
-                    gate.entered.fetch_add(1, Ordering::SeqCst);
+                    // Subscribe before announcing entry, so an `open` woken
+                    // by the announcement is always seen.
                     let mut rx = gate.receiver();
+                    gate.note_entered();
                     while !*rx.borrow_and_update() {
                         if rx.changed().await.is_err() {
                             break;
@@ -240,8 +252,10 @@ impl LlmClient for ScriptedCouncilClient {
             }
             ScriptedTurn::GatedFail(gate, reason) => {
                 let released = async move {
-                    gate.entered.fetch_add(1, Ordering::SeqCst);
+                    // Subscribe before announcing entry, so an `open` woken
+                    // by the announcement is always seen.
                     let mut rx = gate.receiver();
+                    gate.note_entered();
                     while !*rx.borrow_and_update() {
                         if rx.changed().await.is_err() {
                             break;
@@ -452,6 +466,14 @@ impl CouncilFixture {
             FixtureRuntime::RuntimeBacked,
             None,
         )
+    }
+
+    /// [`Self::new_runtime_backed`] with [`Self::new_with`]'s customization.
+    pub fn new_runtime_backed_with(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
+    ) -> Self {
+        Self::build(script, customize, FixtureRuntime::RuntimeBacked, None)
     }
 
     /// A fixture whose mob state has NO runtime adapter: the host shape that

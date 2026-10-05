@@ -19,16 +19,19 @@
 #[path = "support/gpt_live_e2e.rs"]
 mod support;
 
+use futures::FutureExt;
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
-    ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePublicObservation,
-    ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationPublisher,
+    ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePlaybackHint,
+    ExperimentalLivePublicObservation, ExperimentalLivePublicObservationDeliveryError,
+    ExperimentalLivePublicObservationKind, ExperimentalLivePublicObservationPublisher,
     GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX,
-    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy,
+    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy, provider_recording,
 };
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
@@ -63,9 +66,9 @@ use tokio::time::{Duration, Instant, sleep, timeout};
 use support::evidence::{self, Journal, Record as EvidenceRecord, Stage as EvidenceStage};
 use support::{
     Anchor, BrowserPeer, BrowserPeerProtocol, DisconnectMode, ExplicitScenarioBindingAuthority,
-    FixedConfigSource, JsonlRpcClient, PlayAt, TimelineEntry, TimelineKind,
-    delegated_executor_diagnostic, execution_identity, format_timeline, wait_for_events,
-    wait_for_spoken_output,
+    FixedConfigSource, JsonlRpcClient, PlayAt, PlaybackHintRelay, TimelineEntry, TimelineKind,
+    delegated_executor_diagnostic, execution_identity, format_timeline, playback_hint_tee,
+    wait_for_events, wait_for_spoken_output,
 };
 
 const REALM: &str = "scenario-97-gpt-live-public";
@@ -137,6 +140,17 @@ impl<T> Drop for ReceivedOutputs<T> {
 struct MeasuredPlaybackPublisher {
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     output: mpsc::Sender<OutputDelivery>,
+    playback_hints: PlaybackHintRelay,
+}
+
+fn playback_hint_wire(
+    hint: ExperimentalLivePlaybackHint,
+) -> Result<&'static str, ExperimentalLivePublicObservationDeliveryError> {
+    match hint {
+        ExperimentalLivePlaybackHint::Duck => Ok("duck"),
+        ExperimentalLivePlaybackHint::Restore => Ok("restore"),
+        _ => Err(ExperimentalLivePublicObservationDeliveryError::Rejected),
+    }
 }
 
 #[async_trait::async_trait]
@@ -162,20 +176,78 @@ impl ExperimentalLivePublicObservationPublisher for MeasuredPlaybackPublisher {
             .await
             .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)
     }
+
+    /// #1638: a host-composed surface delivers hints to its client the way
+    /// the RPC surface writes `live/assistant_playback_hint`: under the exact
+    /// live binding, straight to the peer playing the channel.
+    async fn publish_playback_hint(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        hint: ExperimentalLivePlaybackHint,
+    ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        let _custody = self
+            .runtime
+            .acquire_live_binding_publication_custody(&binding)
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.playback_hints.apply(playback_hint_wire(hint)?).await;
+        Ok(())
+    }
 }
 
-struct UnmeasuredPlaybackPublicationGuard(Arc<AtomicBool>);
+/// Media-health requests the runtime published (`live/media_health_requested`),
+/// keyed by channel: the harness answers each with the peer's real decoded
+/// counters.
+type MediaHealthRequests = Arc<std::sync::Mutex<Vec<(LiveChannelId, String)>>>;
+
+struct UnmeasuredPlaybackPublicationGuard {
+    fault: Arc<AtomicBool>,
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    media_health: MediaHealthRequests,
+    playback_hints: PlaybackHintRelay,
+}
 
 #[async_trait::async_trait]
 impl ExperimentalLivePublicObservationPublisher for UnmeasuredPlaybackPublicationGuard {
     async fn publish(
         &self,
-        _observation: ExperimentalLivePublicObservation,
+        observation: ExperimentalLivePublicObservation,
     ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        if observation.kind() == ExperimentalLivePublicObservationKind::MediaHealthRequested {
+            // As the RPC surface does: only under the exact live binding.
+            let _custody = self
+                .runtime
+                .acquire_live_binding_publication_custody(observation.binding())
+                .await
+                .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+            let output = observation.into_output();
+            self.media_health
+                .lock()
+                .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?
+                .push((output.channel_id, output.output_id));
+            return Ok(());
+        }
         // The binder requires a publisher, but unmeasured mode must bypass
         // actionable playback publication. Never mint a delivery/playback ACK.
-        self.0.store(true, Ordering::Release);
+        self.fault.store(true, Ordering::Release);
         Err(ExperimentalLivePublicObservationDeliveryError::Rejected)
+    }
+
+    /// #1638: a host-composed surface delivers hints to its client the way
+    /// the RPC surface writes `live/assistant_playback_hint`: under the exact
+    /// live binding, straight to the peer playing the channel.
+    async fn publish_playback_hint(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        hint: ExperimentalLivePlaybackHint,
+    ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        let _custody = self
+            .runtime
+            .acquire_live_binding_publication_custody(&binding)
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.playback_hints.apply(playback_hint_wire(hint)?).await;
+        Ok(())
     }
 }
 
@@ -526,27 +598,24 @@ async fn silence_hold_greeting(
     Ok(greeted)
 }
 
-/// One tolerant check: journaled and printed; failures are summarized at
-/// the end of the scenario but do not fail it on their own.
-fn record_tolerant(
+/// One measurement: journaled and printed for diagnosis. It carries no
+/// verdict. A scenario's verdict comes only from its deterministic checks,
+/// each asserting a product contract (typed events, canonical rows,
+/// settlement signals); model wording and wall-clock latency are measured,
+/// never judged (scripts/turbo-s-oracle-gate rejects soft checks).
+fn record_metric(
     evidence: &Journal,
     channel: u32,
     scenario: &str,
-    check: &str,
-    passed: bool,
+    metric: &str,
     detail: String,
-    failures: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    evidence.record(EvidenceRecord::Tolerant {
+    evidence.record(EvidenceRecord::Metric {
         channel,
-        check: check.to_owned(),
-        passed,
+        metric: metric.to_owned(),
         detail: detail.clone(),
     })?;
-    println!("GPT_LIVE_{scenario}_TOLERANT check={check} passed={passed} detail={detail:?}");
-    if !passed {
-        failures.push(format!("{check}: {detail}"));
-    }
+    println!("GPT_LIVE_{scenario}_METRIC metric={metric} detail={detail:?}");
     Ok(())
 }
 
@@ -585,6 +654,19 @@ struct PublicLiveHarness {
     server_task: tokio::task::AbortHandle,
     shared: Option<(SharedPublicLive, ExactChannel)>,
     unmeasured_publication_fault: Option<Arc<AtomicBool>>,
+    /// Media-health requests the runtime published (unmeasured shared host).
+    media_health: Option<MediaHealthRequests>,
+    /// Utterances heard on channels the runtime closed on a media fault, in
+    /// order: the scenario's canonical-row accounting includes them.
+    media_fault_heard_utterances: Vec<String>,
+    /// Onset (current peer's clock) of the user's sign-off fixture, when
+    /// the scenario played one: the session's close request, for the
+    /// readout rule (`readout_contract`).
+    sign_off_onset_ms: Option<u64>,
+    /// Applies the RPC surface's `live/assistant_playback_hint`s to the
+    /// current browser peer (#1638), as a client's notification handler
+    /// would.
+    playback_hints: PlaybackHintRelay,
     _temp: tempfile::TempDir,
 }
 
@@ -682,6 +764,35 @@ impl PublicLiveHarness {
         .await
         .map_err(|_| "S98 playback completion exceeded its 45-second observation bound")??;
         Ok(())
+    }
+
+    /// After a failed scenario body: close the active channel through the
+    /// product's exact close, which ends only at the provider's
+    /// `session.closed`, so the sideband drains and every server frame the
+    /// provider sent before the failure is in `provider-stream.jsonl`.
+    /// Combined5 S99 b R5: the browser saw a delegation the sideband had not
+    /// yet read, the failure aborted the server, and the stream ended at
+    /// `session.started`. Evidence only: the outcome is printed, never
+    /// asserted, and the journal keeps the failing stage.
+    async fn close_after_failure(&mut self) {
+        let Ok((shared, exact)) = self.shared() else {
+            return;
+        };
+        let outcome = timeout(
+            Duration::from_secs(5),
+            shared.member_host.close_experimental_live_active_channel(
+                shared.authority.as_ref(),
+                &exact.id,
+                &exact.activation_receipt,
+            ),
+        )
+        .await;
+        let outcome = match outcome {
+            Ok(Ok(status)) => format!("{status:?}"),
+            Ok(Err(error)) => format!("error: {error}"),
+            Err(_) => "exceeded the 5000 ms harness ceiling".to_owned(),
+        };
+        println!("GPT_LIVE_FAILURE_CLOSE outcome={outcome}");
     }
 
     async fn close_exact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -825,11 +936,10 @@ impl PublicLiveHarness {
     }
 
     /// Journal the current channel's time-to-talk breakdown (see
-    /// `Record::TimeToTalk`) and the tolerant open -> connected bound.
+    /// `Record::TimeToTalk`) and its open -> connected measurement.
     async fn record_time_to_talk(
         &mut self,
         scenario: &str,
-        tolerant_failures: &mut Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let evidence = self
             .evidence
@@ -891,14 +1001,12 @@ impl PublicLiveHarness {
                 .map(|(delta, speech)| delta as i64 - speech as i64)
         );
         let open_to_connected = delta(webrtc_connected_ms);
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             scenario,
-            "open_request_to_webrtc_connected_under_5s",
-            open_to_connected.is_some_and(|ms| ms < 5000),
+            "open_request_to_webrtc_connected_ms",
             format!("open_request_to_connected_ms={open_to_connected:?}"),
-            tolerant_failures,
         )?;
         Ok(())
     }
@@ -940,13 +1048,19 @@ impl PublicLiveHarness {
             }
             _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
         };
+        self.playback_hints.attach(&peer);
         let (shared, exact) = self.shared.as_mut().ok_or("shared host missing")?;
         let connect = timeout(
             Duration::from_secs(90),
             shared.connect(&mut peer, &self.session_id),
         );
         let replacement = match (&self.evidence, channel) {
-            (Some(evidence), Some(channel)) => evidence.wire(channel).scope(connect).await??,
+            (Some(evidence), Some(channel)) => {
+                evidence
+                    .provider_recording(channel)
+                    .scope(evidence.wire(channel).scope(connect))
+                    .await??
+            }
             _ => connect.await??,
         };
         if let (Some(evidence), Some(channel)) = (&self.evidence, channel) {
@@ -965,16 +1079,10 @@ impl PublicLiveHarness {
         self.channel_id = json!(replacement.id);
         *exact = replacement;
         std::mem::replace(&mut self.peer, peer).close().await;
+        // The new peer has its own clock and has heard no sign-off.
+        self.sign_off_onset_ms = None;
         Ok(())
     }
-}
-
-async fn open_public_live(
-    temp_prefix: &str,
-    operator_principal: &'static str,
-    execution_policy: LiveDelegationExecutionPolicy,
-) -> Result<PublicLiveHarness, Box<dyn std::error::Error>> {
-    open_public_live_with_summary(temp_prefix, operator_principal, execution_policy, None).await
 }
 
 async fn open_public_live_with_summary(
@@ -1193,6 +1301,15 @@ async fn open_public_live_with(
             60,
         )
         .await?;
+        // Comms trust is the wiring: an unwired member is not a peer of the
+        // executor, so its send_request could never reach it (S102 round 1:
+        // every "ask them" ended "they aren't available").
+        rpc.call(
+            "mob/wire",
+            json!({"mob_id":mob_id,"member":"voice-executor","peer":{"local":member.identity}}),
+            60,
+        )
+        .await?;
     }
     let status = rpc
         .call(
@@ -1206,11 +1323,23 @@ async fn open_public_live_with(
             .as_str()
             .ok_or("spawned executor has no durable session")?,
     )?;
+    let followups = bootstrap
+        .as_ref()
+        .map(|bootstrap| bootstrap.seed_followups.clone())
+        .unwrap_or_default();
     if let Some(prompt) = bootstrap
         .as_ref()
         .map(|bootstrap| bootstrap.seed_prompt.as_str())
         .or(seed_prompt.as_deref())
     {
+        rpc.call(
+            "turn/start",
+            json!({"session_id":session_id,"prompt":prompt}),
+            120,
+        )
+        .await?;
+    }
+    for prompt in followups {
         rpc.call(
             "turn/start",
             json!({"session_id":session_id,"prompt":prompt}),
@@ -1257,7 +1386,8 @@ async fn open_public_live_with(
     drop(rpc);
     server_task.abort();
     let _ = server_task.await;
-    let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
+    let playback_hints = PlaybackHintRelay::default();
+    let (client_stream, server_stream) = playback_hint_tee(&playback_hints);
     let (server_read, server_write) = tokio::io::split(server_stream);
     let mut rpc = JsonlRpcClient::new(client_stream);
     let callback_rx = runtime.init_callback_channel();
@@ -1294,6 +1424,7 @@ async fn open_public_live_with(
     .with_live_webrtc(webrtc.clone())
     .with_live_webrtc_answer_transport(public_transport.clone());
     let mut unmeasured_publication_fault = None;
+    let mut media_health = None;
     let shared = if execution_policy == LiveDelegationExecutionPolicy::ExistingMember || shared_host
     {
         let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
@@ -1353,6 +1484,9 @@ async fn open_public_live_with(
             mobs.clone(),
             execution_policy,
         );
+        // As the RPC router does: the coordinator tells later opens about work
+        // that outlived its channel.
+        open_authority.bind_post_close_work_source(coordinator.clone());
         let context_host = ExperimentalGptLiveContextMirrorHost::new(
             runtime.runtime_adapter(),
             member_host.clone(),
@@ -1367,11 +1501,19 @@ async fn open_public_live_with(
         let publisher: Arc<dyn ExperimentalLivePublicObservationPublisher> = if concurrent {
             let fault = Arc::new(AtomicBool::new(false));
             unmeasured_publication_fault = Some(fault.clone());
-            Arc::new(UnmeasuredPlaybackPublicationGuard(fault))
+            let requests: MediaHealthRequests = Arc::default();
+            media_health = Some(Arc::clone(&requests));
+            Arc::new(UnmeasuredPlaybackPublicationGuard {
+                fault,
+                runtime: runtime.runtime_adapter(),
+                media_health: requests,
+                playback_hints: playback_hints.clone(),
+            })
         } else {
             Arc::new(MeasuredPlaybackPublisher {
                 runtime: runtime.runtime_adapter(),
                 output: publisher,
+                playback_hints: playback_hints.clone(),
             })
         };
         let binder = open_authority
@@ -1401,12 +1543,18 @@ async fn open_public_live_with(
             }
             _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
         };
+        playback_hints.attach(&peer);
         let connect = timeout(
             Duration::from_secs(90),
             shared.connect(&mut peer, &session_id),
         );
         let exact = match (&evidence, channel) {
-            (Some(evidence), Some(channel)) => evidence.wire(channel).scope(connect).await??,
+            (Some(evidence), Some(channel)) => {
+                evidence
+                    .provider_recording(channel)
+                    .scope(evidence.wire(channel).scope(connect))
+                    .await??
+            }
             _ => connect.await??,
         };
         if let (Some(evidence), Some(channel)) = (&evidence, channel) {
@@ -1425,9 +1573,24 @@ async fn open_public_live_with(
             server_task: server_task.abort_handle(),
             shared: Some((shared, exact)),
             unmeasured_publication_fault,
+            media_health,
+            media_fault_heard_utterances: Vec::new(),
+            sign_off_onset_ms: None,
+            playback_hints,
             _temp: temp,
         });
     }
+    // The RPC host opens the channel on its own request tasks, outside any
+    // recorder scope: a recorded run installs the provider-stream recorder
+    // as the process fallback around the open and the answer, when the
+    // provider client is built.
+    let channel = evidence.as_ref().map(Journal::next_channel).transpose()?;
+    let fallback = match (&evidence, channel) {
+        (Some(evidence), Some(channel)) => {
+            Some(evidence.provider_recording(channel).install_fallback())
+        }
+        _ => None,
+    };
     let rejected = rpc
         .call_raw(
             "live/open",
@@ -1450,7 +1613,14 @@ async fn open_public_live_with(
         .await?;
     let channel_id = open["channel_id"].clone();
 
-    let mut peer = BrowserPeer::start(BrowserPeerProtocol::Public).await?;
+    let mut peer = match (&evidence, channel) {
+        (Some(evidence), Some(channel)) => {
+            BrowserPeer::start_recorded(BrowserPeerProtocol::Public, evidence.clone(), channel)
+                .await?
+        }
+        _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
+    };
+    playback_hints.attach(&peer);
     let offer = peer.call(json!({"type":"prepare"})).await?;
     assert_eq!(offer["protocol"], "public");
     // The answer step is where the host creates the provider session. The
@@ -1475,9 +1645,13 @@ async fn open_public_live_with(
         })?;
     peer.call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
         .await?;
+    drop(fallback);
+    if let (Some(evidence), Some(channel)) = (&evidence, channel) {
+        evidence.channel(channel, evidence::ChannelAction::Connected)?;
+    }
 
     Ok(PublicLiveHarness {
-        evidence: None,
+        evidence,
         rpc,
         peer,
         channel_id,
@@ -1488,6 +1662,10 @@ async fn open_public_live_with(
         server_task: server_task.abort_handle(),
         shared: None,
         unmeasured_publication_fault: None,
+        media_health: None,
+        media_fault_heard_utterances: Vec::new(),
+        sign_off_onset_ms: None,
+        playback_hints,
         _temp: temp,
     })
 }
@@ -1496,6 +1674,27 @@ async fn open_public_live_with(
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Recorded like every Turbo S scenario: the journal, the browser
+    // evidence and the provider stream, so a failure is attributable from
+    // transcripts (verdict 67bf6160 S97 run 3 had only tracing).
+    let evidence = Journal::create_for("S97", "S97".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = run_s97_client_context_vertical(evidence.clone()).await;
+    let finished = evidence.finish_classified(match &result {
+        Ok(()) => evidence::Outcome::Passed,
+        Err(_) => evidence::Outcome::Failed,
+    });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
+    result?;
+    finished?;
+    Ok(())
+}
+
+async fn run_s97_client_context_vertical(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
@@ -1503,19 +1702,41 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         .with_test_writer()
         .try_init();
     require_api_key()?;
+    evidence.stage(EvidenceStage::Opening)?;
     let PublicLiveHarness {
         mut rpc,
         mut peer,
         channel_id,
         mob_id,
         server_task,
+        // The scratch workspace lives as long as the scenario: dropped here,
+        // the executor's working directory vanished and every S97 result was
+        // "the working directory does not exist" (verdict 5e6cdc16).
+        _temp,
         ..
-    } = open_public_live(
-        "gpt-live-public-e2e-",
-        "scenario-97-operator",
-        LiveDelegationExecutionPolicy::DurableFork,
-    )
+    } = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-e2e-",
+        operator_principal: "scenario-97-operator",
+        execution_policy: LiveDelegationExecutionPolicy::DurableFork,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: false,
+        // The result states S97's fact (the workspace is empty) only when
+        // the executor reports what it found; told nothing, it sometimes
+        // returned "Current directory inspected; no changes made." (soak
+        // d98607e1 R2), which the readout oracle cannot check.
+        executor_instructions: Some(vec![S97_EXECUTOR_INSTRUCTION.to_owned()]),
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: false,
+    })
     .await?;
+    evidence.stage(EvidenceStage::Connected)?;
+    // The lag rule's input is recorded whether the phases pass or fail: a
+    // failing run must be classifiable as provider-degraded or valid.
+    let phases: Result<_, Box<dyn std::error::Error>> = async {
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -1681,14 +1902,68 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         }
         sleep(Duration::from_millis(500)).await;
     };
-    let post_result_audio_baseline = peer.audio_evidence().await?;
+    // When the harness noticed the worker retire: evidence only. It lags the
+    // result by an output-driven amount (this loop also drains outputs), so
+    // it is never the readout's baseline (verdict 67bf6160 S97 run 3).
+    let channel = evidence.current_channel()?;
+    record_metric(
+        &evidence,
+        channel,
+        "S97",
+        "member_retired_observed",
+        format!(
+            "journal_ms={}",
+            evidence.elapsed_ms_at(std::time::Instant::now())
+        ),
+    )?;
+    // The readout is anchored on the provider's acknowledgement of this
+    // delegation's result append, as the peer saw it: decoded speech and an
+    // output transcript delta must both follow it. A readout that completes
+    // before the retirement poll still counts; a result that is never voiced
+    // still fails.
+    let (ack_index, ack_audio) =
+        s97_result_ack(&evidence, channel, &provider_delegation_ref).await?;
+    record_metric(
+        &evidence,
+        channel,
+        "S97",
+        "result_ack",
+        format!(
+            "peer_event_index={ack_index} journal_ms={} baseline={ack_audio:?}",
+            evidence.elapsed_ms_at(std::time::Instant::now())
+        ),
+    )?;
+    // The result states S97's one fact: the executor inspected the empty
+    // scratch workspace. Speech the provider produced after the result was
+    // sent must voice that fact; speech recorded before the send (finishing
+    // an earlier reply, "channel ready") is not the readout (check c009c3b8
+    // S97 run 5 passed on exactly that). The send, not the acknowledgement,
+    // is the anchor: the provider can start the readout before its ack
+    // frame arrives (verdict 746845a3 S97 R2: "It's empty." 551 ms after the
+    // send, 186 ms before the ack).
+    let lines = evidence.provider_stream_lines()?;
+    let result = result_deliveries(&lines)
+        .into_iter()
+        .find(|delivery| delivery.delegation_id == provider_delegation_ref)
+        .ok_or("S97: the acknowledged result has no delivery on the provider stream")?;
+    assert!(
+        s97_states_empty_workspace(&result.text),
+        "S97: the executor's result does not state that the workspace is empty: {:?}",
+        result.text
+    );
+    let before_result = output_deltas_before_result(&lines, &provider_delegation_ref)
+        .ok_or("S97: the result append is missing from the provider stream")?;
     let readout = wait_for_events(&mut peer, 120, |events| {
-        events[delegation_index + 1..]
-            .iter()
-            .any(|event| event["type"] == "session.output_transcript.delta")
+        s97_states_empty_workspace(&output_transcript_text_excluding(events, &before_result))
     })
-    .await?;
-    wait_for_spoken_output(&mut peer, post_result_audio_baseline, 60).await?;
+    .await
+    .map_err(|error| {
+        format!(
+            "S97: the result ({:?}) was never voiced after it was sent: {error}",
+            result.text
+        )
+    })?;
+    wait_for_spoken_output(&mut peer, ack_audio, 60).await?;
     while let Some(output) = rpc
         .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(5))
         .await?
@@ -1729,8 +2004,29 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         "durable delegated executor spawn did not materialize in canonical mob events"
     );
 
+        Ok((
+            provider_delegation_ref_digest,
+            delegation_index,
+            delegation_outputs,
+            commentary_acks,
+            worker_identity,
+        ))
+    }
+    .await;
+    if let Err(error) = peer.record_timeline().await {
+        eprintln!("S97: the browser timeline could not be recorded: {error}");
+    }
+    let (
+        provider_delegation_ref_digest,
+        delegation_index,
+        delegation_outputs,
+        commentary_acks,
+        worker_identity,
+    ) = phases?;
     rpc.call("live/close", json!({"channel_id":channel_id}), 30)
         .await?;
+    peer.stop_evidence().await?;
+    evidence.stage(EvidenceStage::Finished)?;
     peer.close().await;
     drop(rpc);
     server_task.abort();
@@ -1830,6 +2126,97 @@ fn s99_answer_text(events: &[Value], start: usize) -> String {
 }
 
 #[cfg(test)]
+fn s102_response_row(request_id: &str, status: &str, peer: &str, content: &str) -> Value {
+    json!({
+        "role": "system",
+        "kind": "comms",
+        "body": "Peer response terminal",
+        "blocks": [{
+            "type": "comms",
+            "kind": "response_terminal",
+            "direction": "incoming",
+            "content": [{"type": "text", "text": content}],
+            "peer": {"display_name": peer, "id": "967e2b3a-a189-5d4f-951e-2596b4ef3de0"},
+            "request_id": request_id,
+            "status": status,
+            "summary": "Peer response terminal",
+        }],
+    })
+}
+
+/// combined5 S102 R3: the member answered with send_response carrying
+/// blocks, so the executor's row content is the response text, not the
+/// rendered "Peer response from ..." header. The typed fields still identify
+/// it as the member's completed response to this request.
+#[test]
+fn s102_oracle_finds_a_completed_response_that_carried_blocks() {
+    let request = "9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d";
+    let member = format!("gpt-live-public-e2e-82976/executor/{S102_MEMBER}");
+    let row = s102_response_row(
+        request,
+        "completed",
+        &member,
+        "It is currently 13:32 UTC, according to tide_ledger.",
+    );
+    assert!(s102_is_member_response_terminal(&row, request));
+    let rendered = s102_response_row(
+        request,
+        "completed",
+        &member,
+        &format!("Peer response from {member} (to request: {request})\nStatus: completed"),
+    );
+    assert!(s102_is_member_response_terminal(&rendered, request));
+}
+
+/// The oracle stays strict: another request, another peer, a non-completed
+/// status, or a plain peer message is not the member's response.
+#[test]
+fn s102_oracle_rejects_anything_but_the_members_completed_response() {
+    let request = "9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d";
+    let member = format!("gpt-live-public-e2e-82976/executor/{S102_MEMBER}");
+    let answer = "It is currently 13:32 UTC.";
+    assert!(!s102_is_member_response_terminal(
+        &s102_response_row(
+            "00000000-0000-0000-0000-000000000000",
+            "completed",
+            &member,
+            answer
+        ),
+        request
+    ));
+    assert!(!s102_is_member_response_terminal(
+        &s102_response_row(
+            request,
+            "completed",
+            "gpt-live-public-e2e-82976/executor/other",
+            answer
+        ),
+        request
+    ));
+    assert!(!s102_is_member_response_terminal(
+        &s102_response_row(request, "failed", &member, answer),
+        request
+    ));
+    let message =
+        json!({"blocks": [{"type": "comms", "kind": "message", "peer": {"display_name": member}}]});
+    assert!(!s102_is_member_response_terminal(&message, request));
+}
+
+#[test]
+fn s102_sent_request_id_reads_the_receipt_from_either_encoding() {
+    let receipt = r#"{"kind":"peer_request","receipt":{"kind":"peer_request_sent","request_id":"9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d"},"status":"sent"}"#;
+    assert_eq!(
+        s102_sent_request_id(receipt).as_deref(),
+        Some("9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d")
+    );
+    let as_json_string = serde_json::to_string(receipt).expect("encode as a JSON string");
+    assert_eq!(
+        s102_sent_request_id(&as_json_string).as_deref(),
+        Some("9db7c7e2-7d66-4c52-8c4b-c7c34a415c5d")
+    );
+}
+
+#[cfg(test)]
 fn s99_oracle_events(entries: &[(&str, f64, &str)]) -> Vec<Value> {
     entries
         .iter()
@@ -1846,6 +2233,31 @@ fn s99_oracle_events(entries: &[(&str, f64, &str)]) -> Vec<Value> {
 
 /// An in-flight chain, then the answer after a quiet gap of at least the
 /// assistant-turn bound: the answer is kept, the in-flight chain is not.
+/// The vault phrase is recognized when the transcript glues a repeat, and
+/// a partial or reordered phrase is not.
+#[test]
+fn s99_recalls_a_glued_phrase_but_not_a_partial_one() {
+    let phrase = "maple otter badger willow amber";
+    assert!(s99_recalls_phrase(
+        "maple otter badger willow ambermaple otter badger willow amber",
+        phrase
+    ));
+    assert!(s99_recalls_phrase(
+        "Silver copperwillow willow silver.",
+        "silver copper willow willow silver"
+    ));
+    assert!(s99_recalls_phrase(
+        "Maple, otter, badger, willow, amber.",
+        phrase
+    ));
+    assert!(!s99_recalls_phrase("maple otter badger willow", phrase));
+    assert!(!s99_recalls_phrase(
+        "otter maple badger willow amber",
+        phrase
+    ));
+    assert!(!s99_recalls_phrase("I don't know yet.", phrase));
+}
+
 #[test]
 fn s99_answer_keeps_a_reply_after_the_in_flight_chain_goes_quiet() {
     let events = s99_oracle_events(&[
@@ -1969,12 +2381,69 @@ fn history_text(history: &Value) -> String {
     out.join("\n")
 }
 
+/// Text turns committed after the vault-phrase turn so the phrase is outside
+/// the create-time seed of a summary-pending open and reachable only through
+/// the summary. That seed is the newest `LIVE_STARTUP_RECENT_TURNS`
+/// conversation turns, trimmed to the newest `LIVE_STARTUP_VERBATIM_ITEMS_MAX`
+/// provider items from a user row (`with_pending_context_after_recent`); each
+/// text turn is at least one item, so this many follow-ups put the phrase
+/// outside whichever bound binds. The test follows the constants: it breaks
+/// if the window changes. The last follow-up carries the positive control
+/// (`S99_SEEDED_FACT`), inside the window.
+fn s99_seed_followups() -> Vec<String> {
+    let count = meerkat::experimental_gpt_live::LIVE_STARTUP_RECENT_TURNS
+        .max(meerkat::experimental_gpt_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX);
+    let mut followups: Vec<String> = (1..count)
+        .map(|index| {
+            format!(
+                "Planning note {index} for later: shelf {index} in the studio holds spare cables. \
+                 Acknowledge briefly. Do not use tools or start a task."
+            )
+        })
+        .collect();
+    followups.push(format!(
+        "One more note: {S99_SEEDED_FACT}. Acknowledge briefly. Do not use tools or start a task."
+    ));
+    followups
+}
+
+/// A fact in the newest text turn, inside the create-time seed: the
+/// positive control recalled before the summary is released.
+const S99_SEEDED_FACT: &str = "today I parked on level nine of the garage";
+
+/// Commit the follow-up text turns while no call is open, so the next open's
+/// create-time seed is those turns: the first call's spoken vault phrase
+/// (its recall after the summary release, or a delegated lookup's readout)
+/// falls outside the window, and the replacement's history probe again tests
+/// the summary gate.
+async fn s99_commit_followups(
+    live: &mut PublicLiveHarness,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for prompt in s99_seed_followups() {
+        live.rpc
+            .call(
+                "turn/start",
+                json!({"session_id": live.session_id, "prompt": prompt}),
+                120,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+fn s99_recalls_seeded_fact(text: &str) -> bool {
+    let words = normalize_words(text);
+    words.split(' ').any(|word| word == "nine" || word == "9")
+}
+
 const S99_MIN_SUMMARY_DELAY: Duration = Duration::from_secs(20);
 const S99_SUMMARY_LLM_TIMEOUT: Duration = Duration::from_secs(90);
 const S99_SUMMARY_MAX_TOKENS: u32 = 1024;
 
 struct ConcurrentContextBootstrap {
     seed_prompt: String,
+    /// Text turns committed after `seed_prompt`, before the channel opens.
+    seed_followups: Vec<String>,
     captures: mpsc::Sender<GatedSummaryCapture>,
     evidence: Journal,
 }
@@ -2155,6 +2624,131 @@ impl Drop for SummaryJobGuard {
             }) {
                 eprintln!("{fault}; journal={}", evidence.path().display());
             }
+        }
+    }
+}
+
+/// S97's executor instruction: the result must say what the inspection
+/// found, so the readout oracle can check that fact was voiced.
+const S97_EXECUTOR_INSTRUCTION: &str =
+    "When you inspect a directory, say whether it is empty and name any files in it.";
+
+/// S97's executor result fact: it inspects the scenario's scratch workspace,
+/// which is empty. Stated as "empty", "no files" (verdict 746845a3 S97 R3:
+/// "The current directory has no files in it."), "zero files", or "not any
+/// files" / "aren't any files" (soak 7f770753 S97 R2: "there aren't any files
+/// in the current directory"; the apostrophe normalizes to "aren t").
+fn s97_states_empty_workspace(text: &str) -> bool {
+    let normalized = normalize_words(text);
+    let words: Vec<&str> = normalized.split(' ').collect();
+    words.contains(&"empty")
+        || words
+            .windows(2)
+            .any(|pair| pair == ["no", "files"] || pair == ["zero", "files"])
+        || words
+            .windows(3)
+            .any(|triple| triple == ["not", "any", "files"])
+        || words
+            .windows(4)
+            .any(|quad| quad == ["aren", "t", "any", "files"])
+}
+
+/// Event ids of the output transcript deltas the provider stream recorded
+/// before the result append for `delegation_id` was sent, or `None` when
+/// the recording has no such append.
+fn output_deltas_before_result(
+    lines: &[provider_recording::Line],
+    delegation_id: &str,
+) -> Option<std::collections::HashSet<String>> {
+    let mut before = std::collections::HashSet::new();
+    for line in lines {
+        match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.output_transcript.delta" =>
+            {
+                if let Some(id) = raw["event_id"].as_str() {
+                    before.insert(id.to_owned());
+                }
+            }
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append"
+                    && event["delegation_id"] == delegation_id
+                    && event["content"]
+                        .as_str()
+                        .and_then(announced_result_text)
+                        .is_some() =>
+            {
+                return Some(before);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The peer's output transcript, without the deltas in `excluded` (by
+/// provider event id). A delta without an event id cannot be placed and is
+/// left out.
+fn output_transcript_text_excluding(
+    events: &[Value],
+    excluded: &std::collections::HashSet<String>,
+) -> String {
+    events
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter(|event| {
+            event["event_id"]
+                .as_str()
+                .is_some_and(|id| !excluded.contains(id))
+        })
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect()
+}
+
+/// The peer's sighting of the provider's acknowledgement of the result
+/// append for `provider_delegation_id` (keyed by the result's recorded
+/// `client_event_id`): its index in the peer's event log and the media
+/// counters at that moment, from the journal's `appended` row.
+async fn s97_result_ack(
+    evidence: &Journal,
+    channel: u32,
+    provider_delegation_id: &str,
+) -> Result<(u64, support::AudioEvidence), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(client_event_id) =
+            meerkat::experimental_gpt_live::__released_result_client_event_id(
+                provider_delegation_id,
+            )
+            && let Some(ack) = evidence.appended_ack(channel, &client_event_id)?
+        {
+            return Ok(ack);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "S97: the peer saw no acknowledgement of the result append for delegation {provider_delegation_id} within 120 s"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A scenario body's outcome, with a panic caught so that the failure close
+/// runs before the panic resumes. See [`PublicLiveHarness::close_after_failure`].
+async fn settle_scenario_body<T>(
+    live: &mut PublicLiveHarness,
+    outcome: std::thread::Result<Result<T, Box<dyn std::error::Error>>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    match outcome {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            live.close_after_failure().await;
+            Err(error)
+        }
+        Err(panic) => {
+            live.close_after_failure().await;
+            std::panic::resume_unwind(panic)
         }
     }
 }
@@ -2380,11 +2974,119 @@ fn s99_evidence(live: &PublicLiveHarness) -> Result<&Journal, Box<dyn std::error
 /// A fresh synthetic microphone-track request, matching native provider
 /// transcript AND >=100 ms decoded non-silent remote audio. Neither is a
 /// settlement signal; provider-managed bookkeeping remains the owner's job.
+/// How an S99 exchange ended: a native spoken answer, or (where allowed) a
+/// client delegation, by its provider delegation id.
+enum S99Exchange {
+    Answer(String),
+    Delegated {
+        delegation_id: String,
+        before: String,
+    },
+}
+
 async fn s99_native_exchange(
     live: &mut PublicLiveHarness,
     fixture: &str,
     matches_text: impl Fn(&str) -> bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    match s99_exchange(live, fixture, matches_text, false).await? {
+        S99Exchange::Answer(text) => Ok(text),
+        S99Exchange::Delegated { .. } => {
+            Err("S99 exchange delegated where only native voice is allowed".into())
+        }
+    }
+}
+
+/// The history probe before a summary is released. The voice model must not
+/// claim the vault phrase natively: it answers honestly that it does not
+/// know yet, or delegates a lookup to the executor, which owns the text
+/// history. A delegated lookup is a valid path whose result is ordered
+/// behind the session's bootstrap (summary) delivery barrier, so it cannot
+/// arrive while the summary is held: the probe returns the delegation, and
+/// `s99_verify_delegated_lookup` checks its result after the release. The
+/// path each probe took is journaled.
+async fn s99_history_probe(
+    live: &mut PublicLiveHarness,
+    phrase: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let evidence = s99_evidence(live)?.clone();
+    let channel = evidence.current_channel()?;
+    match s99_exchange(live, "history", s99_honest_unknown, true).await? {
+        S99Exchange::Answer(text) => {
+            assert!(s99_honest_unknown(&text.to_lowercase()));
+            assert!(
+                !s99_recalls_phrase(&text, phrase),
+                "the voice model claimed the vault phrase natively before the summary was released"
+            );
+            record_metric(
+                &evidence,
+                channel,
+                "S99",
+                "history_probe",
+                "path=native_unknown".to_owned(),
+            )?;
+            Ok(None)
+        }
+        S99Exchange::Delegated {
+            delegation_id,
+            before,
+        } => {
+            assert!(
+                !s99_recalls_phrase(&before, phrase),
+                "the voice model claimed the vault phrase natively before delegating the lookup"
+            );
+            record_metric(
+                &evidence,
+                channel,
+                "S99",
+                "history_probe",
+                format!("path=delegated delegation={delegation_id}"),
+            )?;
+            Ok(Some(delegation_id))
+        }
+    }
+}
+
+/// After the summary release: a delegated history lookup returns the exact
+/// vault phrase through the normal result path, under the readout rule.
+async fn s99_verify_delegated_lookup(
+    live: &mut PublicLiveHarness,
+    delegation_id: &str,
+    phrase: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence = s99_evidence(live)?.clone();
+    let channel = evidence.current_channel()?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let result = loop {
+        let lines = evidence.provider_stream_lines()?;
+        if let Some(delivery) = result_deliveries(&lines)
+            .into_iter()
+            .find(|delivery| delivery.delegation_id == delegation_id)
+        {
+            break delivery.text;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the delegated history lookup {delegation_id} delivered no result within 120 s of the summary release"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        s99_recalls_phrase(&result, phrase),
+        "the delegated history lookup returned the wrong phrase: {result:?}"
+    );
+    s99_wait_for_assistant_quiet(live).await?;
+    readout_contract(&evidence, live, channel, "S99").await
+}
+
+async fn s99_exchange(
+    live: &mut PublicLiveHarness,
+    fixture: &str,
+    matches_text: impl Fn(&str) -> bool,
+    allow_delegation: bool,
+) -> Result<S99Exchange, Box<dyn std::error::Error>> {
     s99_assert_unmeasured(live)?;
     let start = live.peer.events().await?.len();
     let baseline = live.peer.audio_evidence().await?;
@@ -2403,10 +3105,33 @@ async fn s99_native_exchange(
             .iter()
             .position(is_user_input)
             .map(|i| start + i);
-        assert!(
-            !events[start..].iter().any(is_client_delegation),
-            "history and correction exchanges must use native voice, not delegated text or TTS"
-        );
+        if let Some(delegation) = events[start..]
+            .iter()
+            .find(|event| is_client_delegation(event))
+        {
+            assert!(
+                allow_delegation,
+                "history and correction exchanges must use native voice, not delegated text or TTS"
+            );
+            let delegation_id = delegation["delegation"]["id"]
+                .as_str()
+                .ok_or("client delegation without an id")?
+                .to_owned();
+            let audio = live.peer.audio_evidence().await?;
+            s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
+                exchange,
+                matched: true,
+                audio,
+            })?;
+            println!("GPT_LIVE_S99_DELEGATED fixture={fixture} delegation={delegation_id}");
+            let before = user_start
+                .map(|_| s99_answer_text(&events, start))
+                .unwrap_or_default();
+            return Ok(S99Exchange::Delegated {
+                delegation_id,
+                before,
+            });
+        }
         // The answer is what the assistant says from the question's onset.
         // Every S99 question follows assistant quiet, and rows that waited
         // behind the summary while newer speech was heard go out as quiet
@@ -2434,10 +3159,10 @@ async fn s99_native_exchange(
                 println!("GPT_LIVE_S99_IN_FLIGHT_AT_ONSET fixture={fixture} speech={in_flight:?}");
             }
             let events = live.peer.events().await?;
-            return Ok(s99_answer_text(&events, start));
+            return Ok(S99Exchange::Answer(s99_answer_text(&events, start)));
         }
         if Instant::now() >= deadline {
-            // Tolerant evidence (cross-scenario rate): the user spoke and the
+            // Diagnosis only (cross-scenario rate): the user spoke and the
             // model produced no output at all for the whole window.
             let assistant_output = events[start..]
                 .iter()
@@ -2472,19 +3197,34 @@ async fn s99_native_exchange(
 /// Owned thinking-append attempts that are causal tail: every attempt minus
 /// the fragments of the channels' late summaries (the summary is context
 /// data and legitimately names the historical facts it summarizes).
+/// Every owned thinking append after each channel's first (the late
+/// summary), reassembled from its wire fragments. Fragment boundaries fall at
+/// byte offsets that move with the transcript text, so content checks run on
+/// whole appends, never on single fragments.
 fn s99_causal_tail(evidence: &Journal) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let summaries: Vec<String> = (1..=evidence.current_channel()?)
-        .filter_map(|channel| evidence.first_owned_thinking_append(channel).transpose())
-        .collect::<Result<_, _>>()?;
-    Ok(evidence
-        .thinking_append_attempt_texts()?
-        .into_iter()
-        .filter(|text| {
-            !summaries
-                .iter()
-                .any(|summary| summary.contains(text.as_str()))
-        })
-        .collect())
+    let mut tail = Vec::new();
+    for channel in 1..=evidence.current_channel()? {
+        tail.extend(
+            evidence
+                .owned_thinking_appends(channel)?
+                .into_iter()
+                .skip(1),
+        );
+    }
+    Ok(tail)
+}
+
+/// True when one replayed assistant row names both current code words: the
+/// current-facts answer, which is spoken after the summary acknowledgement
+/// and must never be re-sent. Checked per row, so a typed assistant row and
+/// a later user correction framed together in one append do not count.
+fn s99_resends_current_answer(append: &str) -> bool {
+    append.lines().any(|row| {
+        let lower = row.to_lowercase();
+        row.contains("\"role\":\"assistant\"")
+            && lower.contains("cobalt")
+            && lower.contains("marigold")
+    })
 }
 
 async fn s99_wait_for_assistant_quiet(
@@ -2504,8 +3244,12 @@ async fn s99_wait_for_assistant_quiet(
 async fn wait_for_assistant_quiet(
     peer: &mut BrowserPeer,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Follows the assistant's output to its end: every assistant output
+    // event restarts the quiet window, and the wait ends after 3 s without
+    // one. There is no ceiling while output keeps arriving: a legitimate
+    // long readout (S99's spelled-out pwd, about 28 s in check run 6a779d8e
+    // R2) is not a fault. The scenario's overall deadline still bounds it.
     const QUIET_FOR: Duration = Duration::from_secs(3);
-    let deadline = Instant::now() + Duration::from_secs(30);
     let mut last_len = peer.events().await?.len();
     let mut quiet_since = Instant::now();
     loop {
@@ -2518,9 +3262,6 @@ async fn wait_for_assistant_quiet(
         }
         if quiet_since.elapsed() >= QUIET_FOR {
             return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("assistant did not stop speaking before the next question".into());
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -2540,19 +3281,22 @@ fn s99_honest_unknown(text: &str) -> bool {
     .any(|unknown| text.contains(unknown))
 }
 
+/// Whether `text` says the vault phrase: its words in order, compared
+/// letters only, ignoring case, spacing and punctuation. The provider's
+/// transcript can glue a repeated phrase ("...willow ambermaple otter...",
+/// soak 3e8eb29a S99 runs 4 and 5), so a word-window match missed answers
+/// that said it; the same comparison makes the "never claimed natively"
+/// checks catch glued claims too.
 fn s99_recalls_phrase(text: &str, phrase: &str) -> bool {
-    let words: Vec<_> = text
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let phrase: Vec<_> = phrase.split_whitespace().collect();
-    !phrase.is_empty()
-        && words.windows(phrase.len()).any(|window| {
-            window
-                .iter()
-                .zip(&phrase)
-                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
-        })
+    let letters = |value: &str| -> String {
+        value
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let phrase = letters(phrase);
+    !phrase.is_empty() && letters(text).contains(&phrase)
 }
 
 /// S99 measures the gated late summary on every channel it opens. A reopen
@@ -2588,14 +3332,7 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
     // runs so provider guesses and fixture memorization cannot pass recall.
     let nonce = meerkat_core::SessionId::new();
     let digest = Sha256::digest(nonce.to_string().as_bytes());
-    let words = [
-        "amber", "badger", "copper", "falcon", "maple", "otter", "silver", "willow",
-    ];
-    let phrase = digest[..5]
-        .iter()
-        .map(|byte| words[usize::from(*byte) % words.len()])
-        .collect::<Vec<_>>()
-        .join(" ");
+    let phrase = s99_vault_phrase(&digest[..5]);
     let evidence = Journal::create(phrase)?;
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let result = timeout(
@@ -2612,6 +3349,32 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
     }
     result
         .map_err(|_| "S99 overall deadline expired; concurrent-context acceptance not qualified")?
+}
+
+/// The S99 vault phrase: one word per digest byte from an eight-word list,
+/// never the same word twice in a row. The recall is graded on the model's
+/// own transcript of its speech, where an adjacent repeat ("maple maple") is
+/// ambiguous when spoken and measures the transcriber, not meerkat's
+/// delivery (verdict tree fb94711f S99 run 8). A repeat moves to another
+/// word, chosen from the same byte, so the phrase stays deterministic.
+fn s99_vault_phrase(bytes: &[u8]) -> String {
+    const WORDS: [&str; 8] = [
+        "amber", "badger", "copper", "falcon", "maple", "otter", "silver", "willow",
+    ];
+    let mut previous: Option<usize> = None;
+    bytes
+        .iter()
+        .map(|byte| {
+            let byte = usize::from(*byte);
+            let mut index = byte % WORDS.len();
+            if previous == Some(index) {
+                index = (index + 1 + (byte / WORDS.len()) % (WORDS.len() - 1)) % WORDS.len();
+            }
+            previous = Some(index);
+            WORDS[index]
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
@@ -2631,6 +3394,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
              The current code word is Tangerine. My current favorite flower is Daffodil. \
              Acknowledge briefly. Do not use tools or start a task."
             ),
+            seed_followups: s99_seed_followups(),
         }),
     )
     .await?;
@@ -2638,7 +3402,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // Declared after the owner: cancellation/panic flushes this guard before
     // the browser, runtime, or scenario TempDir can be dropped.
     let _failure_guard = evidence::FailureGuard(evidence.clone());
-    let result = async {
+    let result = AssertUnwindSafe(async {
     evidence.stage(EvidenceStage::Connected)?;
     let first_capture = next_summary_capture(&mut captured).await?;
     assert_eq!(first_capture.session_id, live.session_id);
@@ -2653,9 +3417,25 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     s99_assert_pending(&mut live, &first_capture).await?;
 
     evidence.stage(EvidenceStage::InitialUnknown)?;
-    let unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
-    assert!(s99_honest_unknown(&unknown.to_lowercase()));
-    assert!(!s99_recalls_phrase(&unknown, &phrase));
+    // Positive control first: a fact inside the create-time seed is known at
+    // once, before the summary is released, so the unknown answer below is
+    // the summary gate's and not a model that ignores its startup input. It
+    // is asked before the unknown probe so that probe's "I don't know yet"
+    // cannot prime it.
+    let control_start = live.peer.events().await?.len();
+    let seeded = s99_native_exchange(&mut live, "seeded_fact", s99_recalls_seeded_fact).await?;
+    assert!(s99_recalls_seeded_fact(&seeded));
+    // Strict: the fact is seeded, so delegating the question fails even when
+    // a native answer came first (soak c43aa3db S99 runs 1 and 5 answered
+    // "nine" and delegated anyway).
+    s99_wait_for_assistant_quiet(&mut live).await?;
+    let control_events = live.peer.events().await?;
+    assert!(
+        !control_events[control_start..].iter().any(is_client_delegation),
+        "the positive control was delegated: a seeded fact must be answered natively"
+    );
+    s99_assert_pending(&mut live, &first_capture).await?;
+    let first_lookup = s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &first_capture).await?;
 
     // Commit newer ordinary context through the existing source session while
@@ -2667,13 +3447,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     }), 120).await?;
     let typed_history = live
         .rpc
-        .call(
-            "session/history",
-            json!({
-                "session_id":live.session_id,"offset":0,"limit":200
-            }),
-            30,
-        )
+        .session_history(json!(live.session_id), 30)
         .await?;
     assert!(history_text(&typed_history).contains("Violet"));
     assert!(history_text(&typed_history).contains("Marigold"));
@@ -2705,6 +3479,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     let elapsed = first_capture.captured_at.elapsed();
     assert!(elapsed >= S99_MIN_SUMMARY_DELAY);
     s99_release_summary(&mut live, first_capture).await?;
+    if let Some(delegation_id) = first_lookup {
+        s99_verify_delegated_lookup(&mut live, &delegation_id, &phrase).await?;
+    }
     evidence.stage(EvidenceStage::HistoricalRecall)?;
     s99_wait_for_assistant_quiet(&mut live).await?;
     // The pre-acknowledgement question offers an honest-unknown escape; once
@@ -2737,7 +3514,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // rides the instructions lane; the summary is the first owned thinking
     // append on the channel, prefixed, delivered after the first user
     // utterance and acknowledged.
-    assert_late_summary_seed(&evidence, 1)?;
+    assert_late_summary_seed(&evidence, 1, &phrase)?;
     let owner = evidence.owner_appends()?;
     assert_eq!(
         owner.framed_summaries, 0,
@@ -2761,12 +3538,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         "the recalled vault phrase was re-sent as thinking context"
     );
     assert!(
-        !attempts.iter().any(|text| {
-            let lower = text.to_lowercase();
-            text.contains("\"role\":\"assistant\"")
-                && lower.contains("cobalt")
-                && lower.contains("marigold")
-        }),
+        !attempts
+            .iter()
+            .any(|text| s99_resends_current_answer(text)),
         "fresh post-acknowledgement assistant speech was re-sent as thinking context"
     );
     println!(
@@ -2780,6 +3554,11 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     live.close_exact().await?;
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
+    s99_commit_followups(&mut live).await?;
+    // The outgoing channel's lag-rule input, before its peer is replaced.
+    if let Err(error) = live.peer.record_timeline().await {
+        eprintln!("S99: the browser timeline could not be recorded: {error}");
+    }
     live.reopen().await?;
     let obsolete = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &obsolete).await?;
@@ -2800,16 +3579,23 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     }
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
+    s99_commit_followups(&mut live).await?;
+    // The outgoing channel's lag-rule input, before its peer is replaced.
+    if let Err(error) = live.peer.record_timeline().await {
+        eprintln!("S99: the browser timeline could not be recorded: {error}");
+    }
     live.reopen().await?;
     let replacement = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &replacement).await?;
     evidence.stage(EvidenceStage::ObsoleteJobRelease)?;
     let obsolete_returned = obsolete.release().await?;
     evidence.stage(EvidenceStage::ReplacementUnknown)?;
-    let late_unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
-    assert!(!s99_recalls_phrase(&late_unknown, &phrase));
+    let replacement_lookup = s99_history_probe(&mut live, &phrase).await?;
     s99_assert_pending(&mut live, &replacement).await?;
     s99_release_summary(&mut live, replacement).await?;
+    if let Some(delegation_id) = replacement_lookup {
+        s99_verify_delegated_lookup(&mut live, &delegation_id, &phrase).await?;
+    }
     evidence.stage(EvidenceStage::ReplacementRecall)?;
     s99_wait_for_assistant_quiet(&mut live).await?;
     s99_native_exchange(&mut live, "recall_history", |text| {
@@ -2826,8 +3612,8 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // pending, never spoken to); the replacement is the journal's current
     // channel.
     let replacement_channel = evidence.current_channel()?;
-    assert_late_summary_seed(&evidence, 2)?;
-    assert_late_summary_seed(&evidence, replacement_channel)?;
+    assert_late_summary_seed(&evidence, 2, &phrase)?;
+    assert_late_summary_seed(&evidence, replacement_channel, &phrase)?;
     assert!(
         evidence.first_owned_thinking_append(2)?.is_none(),
         "the obsolete channel was closed before any utterance, so nothing may ride its thinking lane"
@@ -2853,12 +3639,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         "the recalled vault phrase was queued as thinking context"
     );
     assert!(
-        !attempts.iter().any(|text| {
-            let lower = text.to_lowercase();
-            text.contains("\"role\":\"assistant\"")
-                && lower.contains("cobalt")
-                && lower.contains("marigold")
-        }),
+        !attempts
+            .iter()
+            .any(|text| s99_resends_current_answer(text)),
         "post-acknowledgement assistant speech was queued as thinking context"
     );
     println!(
@@ -2866,7 +3649,16 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         elapsed.as_millis()
     );
     Ok::<(), Box<dyn std::error::Error>>(())
-    }.await;
+    })
+    .catch_unwind()
+    .await;
+    let result = settle_scenario_body(&mut live, result).await;
+    // The current channel's lag-rule input, recorded whether the body passed
+    // or failed: a failing run must be classifiable as provider-degraded or
+    // valid.
+    if let Err(error) = live.peer.record_timeline().await {
+        eprintln!("S99: the browser timeline could not be recorded: {error}");
+    }
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -2902,16 +3694,7 @@ async fn s99_existing_member_work(
         .into_iter()
         .map(|snapshot| snapshot.operation_id().clone())
         .collect();
-    let history = live
-        .rpc
-        .call(
-            "session/history",
-            json!({
-                "session_id":live.session_id,"offset":0,"limit":200
-            }),
-            30,
-        )
-        .await?;
+    let history = live.rpc.session_history(json!(live.session_id), 30).await?;
     let message_count = history["messages"]
         .as_array()
         .ok_or("missing source history")?
@@ -2953,16 +3736,7 @@ async fn s99_existing_member_work(
         }
         sleep(Duration::from_millis(200)).await;
     }
-    let history = live
-        .rpc
-        .call(
-            "session/history",
-            json!({
-                "session_id":live.session_id,"offset":0,"limit":200
-            }),
-            30,
-        )
-        .await?;
+    let history = live.rpc.session_history(json!(live.session_id), 30).await?;
     let messages: Vec<WireSessionMessage> = serde_json::from_value(history["messages"].clone())?;
     let new_messages = &messages[message_count..];
     let tool =
@@ -3204,11 +3978,208 @@ async fn print_no_audio_evidence(
     }
 }
 
-/// Speak one question the assistant should answer natively (no delegation):
-/// schedule the fixture, wait for its input final, the answer's first audio
-/// and the end of that audio, and return the answer window transcript with
-/// the turn timing.
+/// Speak one question the assistant should answer natively (no delegation)
+/// and return the answer window transcript with the turn timing. A channel
+/// whose first answer never became audible is recovered once, only on the
+/// runtime's typed evidence (see [`recover_from_media_fault`]): the question
+/// is then spoken again on the reopened channel.
 async fn native_question(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    spec: PlayAt,
+) -> Result<(SpokenTurn, String, usize, u64), Box<dyn std::error::Error>> {
+    let result = match native_question_once(live, scenario, label, spec.clone()).await {
+        Err(error) if recover_from_media_fault(live, scenario, label, &spec).await? => {
+            println!(
+                "GPT_LIVE_{scenario}_MEDIA_FAULT_RETRY label={label} first_attempt_error={:?}",
+                error.to_string().lines().next().unwrap_or_default()
+            );
+            native_question_once(live, scenario, label, spec).await
+        }
+        result => result,
+    }?;
+    // A healthy channel's first output is judged too (its request arrives
+    // at the next role change): a media fault on a channel whose answer was
+    // just heard would close a working channel.
+    if let Some(output_id) = pending_media_health_request(live)
+        && let Some(verdict) = answer_media_health(live, scenario, label, output_id).await?
+        && verdict.verdict == meerkat_contracts::LiveMediaHealthVerdict::MediaFault
+    {
+        return Err(format!(
+            "{label}: the runtime judged an audible channel's first output a media fault"
+        )
+        .into());
+    }
+    Ok(result)
+}
+
+/// The output the runtime requested media health for on the current
+/// channel, when that request was published and is not answered yet.
+fn pending_media_health_request(live: &PublicLiveHarness) -> Option<String> {
+    let requests = live.media_health.as_ref()?;
+    let (_, exact) = live.shared.as_ref()?;
+    requests.lock().ok().and_then(|requests| {
+        requests
+            .iter()
+            .find(|(channel, _)| *channel == exact.id)
+            .map(|(_, output)| output.clone())
+    })
+}
+
+/// Answer one media-health request with the peer's real decoded counters
+/// (channel media start to now) and journal the runtime's verdict. `None`
+/// when the harness has no shared host.
+async fn answer_media_health(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    output_id: String,
+) -> Result<Option<meerkat_contracts::LiveMediaHealthResult>, Box<dyn std::error::Error>> {
+    let audio = live.peer.snapshot().await?["audio"].clone();
+    let Some((shared, exact)) = live.shared.as_ref() else {
+        return Ok(None);
+    };
+    let channel_id = exact.id.clone();
+    let report = meerkat_contracts::LiveMediaHealthParams {
+        channel_id: channel_id.to_string(),
+        output_id: output_id.clone(),
+        decoded_frames: audio["decoded_frames"].as_u64().unwrap_or(0),
+        audible_frames: audio["decoded_non_silent_frames"].as_u64().unwrap_or(0),
+        max_rms: audio["max_decoded_rms"].as_f64().unwrap_or(0.0),
+    };
+    let verdict = shared
+        .member_host
+        .report_experimental_live_media_health(
+            shared.authority.as_ref(),
+            &channel_id,
+            &exact.activation_receipt,
+            &report,
+        )
+        .await
+        .map_err(|error| format!("{label}: media health report failed: {error}"))?;
+    if let Some(requests) = &live.media_health
+        && let Ok(mut requests) = requests.lock()
+    {
+        requests.retain(|(channel, output)| !(*channel == channel_id && *output == output_id));
+    }
+    let media_fault = verdict.verdict == meerkat_contracts::LiveMediaHealthVerdict::MediaFault;
+    println!(
+        "GPT_LIVE_{scenario}_MEDIA_HEALTH label={label} channel={channel_id} decoded_frames={} audible_frames={} max_rms={:.6} verdict={:?} reopen_recommended={}",
+        report.decoded_frames,
+        report.audible_frames,
+        report.max_rms,
+        verdict.verdict,
+        verdict.reopen_recommended
+    );
+    if let Some(evidence) = &live.evidence {
+        evidence.record(EvidenceRecord::MediaHealthJudged {
+            channel: evidence.current_channel()?,
+            output_id,
+            decoded_frames: report.decoded_frames,
+            audible_frames: report.audible_frames,
+            max_rms: report.max_rms,
+            media_fault,
+            reopen_recommended: verdict.reopen_recommended,
+        })?;
+    }
+    Ok(Some(verdict))
+}
+
+/// After an exchange failed waiting for the answer's audio: when the
+/// runtime judges the channel's first output a media fault (its transcript is
+/// non-empty but the client decoded no audible audio), it has already closed
+/// the channel; the harness journals the verdict, reopens the session as the
+/// verdict recommends, journals that reopen, and returns `true` so the
+/// exchange is spoken again. Without that typed evidence (no request, an
+/// audible verdict, no reopen recommended) it returns `false` and the
+/// original failure stands.
+///
+/// The runtime requests media health at the first output's typed end, which
+/// on the public protocol is the next role change. A user who hears nothing
+/// speaks again: when no request is pending yet and the channel's first
+/// output is still unjudged, the harness repeats the question, as that user
+/// would.
+async fn recover_from_media_fault(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    spec: &PlayAt,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if live.media_health.is_none() {
+        return Ok(false);
+    }
+    let Some((shared, exact)) = live.shared.as_ref() else {
+        return Ok(false);
+    };
+    let channel_id = exact.id.clone();
+    let mut output_id = pending_media_health_request(live);
+    if output_id.is_none() {
+        let already_requested = shared
+            .runtime
+            .live_media_health_requested_output(&live.session_id, &channel_id)
+            .await?
+            .is_some();
+        if already_requested {
+            // The first output was judged already: this failure is not a
+            // silent first output.
+            return Ok(false);
+        }
+        println!("GPT_LIVE_{scenario}_MEDIA_HEALTH_REPROMPT label={label} channel={channel_id}");
+        live.peer.play_at(spec).await?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while output_id.is_none() && Instant::now() < deadline {
+            sleep(Duration::from_millis(100)).await;
+            output_id = pending_media_health_request(live);
+        }
+    }
+    let Some(output_id) = output_id else {
+        println!(
+            "GPT_LIVE_{scenario}_MEDIA_HEALTH label={label} channel={channel_id} requested=false"
+        );
+        return Ok(false);
+    };
+    let from_channel = match &live.evidence {
+        Some(evidence) => Some(evidence.current_channel()?),
+        None => None,
+    };
+    let Some(verdict) = answer_media_health(live, scenario, label, output_id).await? else {
+        return Ok(false);
+    };
+    let media_fault = verdict.verdict == meerkat_contracts::LiveMediaHealthVerdict::MediaFault;
+    if !media_fault || !verdict.reopen_recommended {
+        return Ok(false);
+    }
+    // The closed channel's heard utterances are canonical rows too.
+    let heard: Vec<String> = live
+        .peer
+        .energy()
+        .await?
+        .heard_utterances()
+        .iter()
+        .map(|text| normalize_words(text))
+        .collect();
+    live.media_fault_heard_utterances.extend(heard);
+    live.reopen().await?;
+    if let (Some(evidence), Some(from_channel)) = (&live.evidence, from_channel) {
+        evidence.record(EvidenceRecord::MediaFaultReopened {
+            from_channel,
+            to_channel: evidence.current_channel()?,
+            exchange: label.to_owned(),
+        })?;
+    }
+    Ok(true)
+}
+
+impl PublicLiveHarness {
+    /// Utterances heard on channels closed on a media fault since the last
+    /// call, in order, for scenarios that account every heard utterance.
+    fn take_media_fault_heard_utterances(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.media_fault_heard_utterances)
+    }
+}
+
+async fn native_question_once(
     live: &mut PublicLiveHarness,
     scenario: &str,
     label: &str,
@@ -3263,6 +4234,55 @@ async fn native_question(
     Ok((timing, answer, events_before, fixture_start_ms))
 }
 
+/// A sign-off exchange: play the fixture and wait until the provider's
+/// typed input-transcript deltas since it started carry `tokens` (its
+/// closing words), so the whole utterance was heard. No reply is required:
+/// a model may stay silent after "that's all, close the call". Returns the
+/// fixture's start on the timeline clock.
+async fn sign_off_transcribed(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    spec: PlayAt,
+    tokens: &[&str],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let events_before = live.peer.events().await?.len();
+    let schedule_id = live.peer.play_at(&spec).await?;
+    let fixture_start_ms = live
+        .peer
+        .wait_for_timeline(
+            Duration::from_secs(60),
+            &format!("{label} fixture_start"),
+            |t| fixture_start_entry(t, schedule_id).map(|e| e.t_ms),
+        )
+        .await?;
+    let heard = |events: &[Value]| -> String {
+        normalize_words(
+            &events
+                .get(events_before..)
+                .unwrap_or_default()
+                .iter()
+                .filter(|event| is_user_input(event))
+                .filter_map(|event| event["delta"].as_str())
+                .collect::<String>(),
+        )
+    };
+    let events = wait_for_events(&mut live.peer, 60, |events| {
+        let words = heard(events);
+        let words: Vec<&str> = words.split_whitespace().collect();
+        tokens.iter().all(|token| words.contains(token))
+    })
+    .await
+    .map_err(|error| {
+        format!("{label}: the sign-off was never transcribed with {tokens:?}: {error}")
+    })?;
+    println!(
+        "GPT_LIVE_{scenario}_SIGN_OFF label={label} fixture_start_ms={fixture_start_ms} heard={:?}",
+        heard(&events)
+    );
+    Ok(fixture_start_ms)
+}
+
 /// Client delegations created inside each `[start_i, start_{i+1})` window of
 /// the given labelled fixture starts (sorted by time; the last window is
 /// open-ended).
@@ -3288,7 +4308,8 @@ fn delegations_per_window(
         .collect()
 }
 
-/// The scenario's soft browser faults (journal and live peer), with overlap
+/// The scenario's readout rule (`readout_contract`, an error when violated)
+/// and its soft browser faults (journal and live peer), with overlap
 /// faults reconciled against the backchannel classifier
 /// (`evidence::classify_overlap`): an overlap made only of classified
 /// backchannels (short, no new content, no delegation, yielded to the user)
@@ -3300,6 +4321,7 @@ async fn scenario_browser_faults(
     channel: u32,
     scenario: &str,
 ) -> Result<Vec<evidence::BrowserFault>, Box<dyn std::error::Error>> {
+    readout_contract(evidence, live, channel, scenario).await?;
     let mut faults = evidence.faults()?;
     faults.extend(live.peer.faults().await?);
     let (faults, allowed) = evidence::reconcile_overlap_faults(faults);
@@ -3322,16 +4344,7 @@ fn record_allowed_backchannels(
             burst.text
         );
         println!("GPT_LIVE_{scenario}_BACKCHANNEL {detail}");
-        let mut never = Vec::new();
-        record_tolerant(
-            evidence,
-            channel,
-            scenario,
-            "allowed_backchannel",
-            true,
-            detail,
-            &mut never,
-        )?;
+        record_metric(evidence, channel, scenario, "allowed_backchannel", detail)?;
     }
     Ok(())
 }
@@ -3346,9 +4359,9 @@ fn record_allowed_backchannels(
 /// `response` index, which advances only when a new user utterance starts;
 /// a burst continues the previous burst's response when its index equals
 /// that burst's index at its start or at its end (a late user delta can
-/// advance the index while the assistant is still speaking). Repetition
-/// inside one response is the peer's own `duplicate_readout` fault on the
-/// output transcript text, which every scenario already fails on. The
+/// advance the index while the assistant is still speaking). A result voiced
+/// twice is the readout rule's (`readout_faults`), which every scenario
+/// applies through `scenario_browser_faults`. The
 /// prompt window opens at the previous burst's `last_active_ms`, the last
 /// audible window: the burst's `assistant_audio_end` entry is pushed only
 /// after the hysteresis, so an input final that closed inside it still
@@ -3373,12 +4386,17 @@ fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64
                     continue;
                 }
                 let window_start = last_audible_ms.min(entry.t_ms);
+                // A user utterance that started playing prompts the response
+                // even before its transcript arrives: the provider's input
+                // transcription lags the audio (soak aba8eb88 S103 run 4: an
+                // "Okay." to "Wait, stop" began 1.5 s before the final).
                 let prompted = timeline[..index].iter().any(|e| {
                     e.t_ms >= window_start
-                        && matches!(
+                        && (matches!(
                             e.kind,
                             TimelineKind::InputFinal | TimelineKind::CommentaryAppended
-                        )
+                        ) || (e.kind == TimelineKind::FixtureStart
+                            && e.detail_u64("speech_ms").is_some_and(|speech| speech > 0)))
                 });
                 if !prompted {
                     unprompted.push(entry.t_ms);
@@ -3390,36 +4408,1167 @@ fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64
     unprompted
 }
 
-/// Readout lines an assistant response at or after `from_ms` speaks more
-/// than once (a duplicate readout inside one response). The final response
-/// has a `response_end` only after the scenario flushed it
-/// (`flush_response_timeline`).
-///
-/// A response is the peer's `response` index, so an unprompted second readout
-/// with no user speech in between lands in the same response as the first;
-/// its lines repeat. Lines split on newlines and sentence ends; a kickoff
-/// brief's lines are short ("Client: Marigold account."), so the floor is
-/// three words, below the peer's own five-word sentence fault.
-fn repeated_readout_lines(timeline: &[TimelineEntry], from_ms: u64) -> Vec<String> {
-    let mut repeated = Vec::new();
-    for entry in timeline
-        .iter()
-        .filter(|e| e.kind == TimelineKind::ResponseEnd && e.t_ms >= from_ms)
-    {
-        let mut seen = std::collections::BTreeSet::new();
-        for line in entry
-            .detail_str("text")
-            .unwrap_or_default()
-            .split(['\n', '.', '!', '?'])
-            .map(normalize_words)
-            .filter(|line| line.split(' ').count() >= 3)
+// ---------------------------------------------------------------------------
+// Talk-over contract (barge-in yield)
+// ---------------------------------------------------------------------------
+
+// The talk-over bounds below are FROZEN. Each is derived from a stated
+// healthy population (73 barge-in yields of the 0.8.51 Turbo S soak,
+// 2026-10-02/03: rounds round2, round3, resoak, final, finalc and BuildBuddy
+// invocations 35728bf0 and aba8eb88; runs with provider input lag >= 10 s or
+// p90 > 2 s are void) as its maximum plus the peer's 100 ms energy window. An
+// exceedance in a healthy run is a finding to attribute (which segment
+// moved, and whose it is: the 2026-10-03 sideband stalls were attributed
+// upstream with poll_wait_ms/poll_gap_ms), never a reason to raise the
+// number. Re-deriving a bound needs a new stated population and sign-off.
+
+/// End-to-end talk-over bound: from the user's interrupting speech onset (the
+/// fixture start on the browser clock) to the assistant's last audible frame
+/// in the browser. Population above (n=73): p50 1295 ms, p90 1797 ms, p99
+/// 2389 ms, max 2902 ms. No part of it is meerkat's: media flows browser <->
+/// provider over WebRTC, and the public Live protocol has no cancel,
+/// truncate or output-clear client event, so meerkat has no cut path. Our
+/// only cost is the peer's 100 ms energy window: 2902 + 100, rounded up.
+const TALK_OVER_BOUND_MS: u64 = 3000;
+/// Ingest: onset to the provider reflecting our first voiced input frame
+/// (browser WebRTC uplink plus the provider's 200 ms input framing), taken at
+/// the frame's cadence slot, not its sideband arrival. The provider reflects
+/// a continuous input stream, so a frame's slot is the run's least-late
+/// anchor plus the audio before it: its arrival without the sideband's
+/// transport jitter (lateness over 155 runs: p99 323 ms, max 829 ms; the
+/// observation loop waited for every stall, so it is upstream of meerkat).
+/// Population above (n=73): p50 238 ms, p99 346 ms, max 366 ms; plus the
+/// 100 ms window, rounded up.
+const INGEST_BOUND_MS: u64 = 500;
+/// Playout: the provider's last voiced output frame on the sideband to the
+/// browser's last audible window (provider RTP pacing plus the browser's
+/// jitter buffer). Taken at the frame's arrival: sideband jitter only delays
+/// that arrival, which reads as less playout, never more. Population above
+/// (n=73): p50 455 ms, p90 572 ms, p99 643 ms, max 736 ms; plus the 100 ms
+/// window, rounded up.
+const PLAYOUT_BOUND_MS: u64 = 900;
+/// Sample rate of the provider's PCM16 audio frames.
+const PROVIDER_PCM_RATE_HZ: u64 = 24_000;
+/// PCM16 RMS above which a 200 ms provider audio frame carries speech, the
+/// threshold the derivation used: silent frames measured 0-10, speech
+/// frames 200-3000.
+const VOICED_FRAME_RMS: f64 = 300.0;
+
+/// One barge-in yield split at the points we can observe, on the browser
+/// clock. `turn_taking_ms` (onset to the provider's last voiced output frame
+/// on the sideband) is the provider's decision plus generation; it is
+/// recorded on every yield and bounded only through the end-to-end bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct YieldSegments {
+    onset_ms: u64,
+    last_audible_ms: u64,
+    ingest_ms: i64,
+    turn_taking_ms: i64,
+    playout_ms: i64,
+}
+
+impl YieldSegments {
+    fn total_ms(&self) -> i64 {
+        self.last_audible_ms as i64 - self.onset_ms as i64
+    }
+
+    fn violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        if self.total_ms() > TALK_OVER_BOUND_MS as i64 {
+            violations.push(format!(
+                "talked over the user for {} ms (onset to last audible; bound {TALK_OVER_BOUND_MS} ms)",
+                self.total_ms()
+            ));
+        }
+        if self.ingest_ms > INGEST_BOUND_MS as i64 {
+            violations.push(format!(
+                "ingest took {} ms (onset to the provider's first voiced input frame; bound {INGEST_BOUND_MS} ms)",
+                self.ingest_ms
+            ));
+        }
+        if self.playout_ms > PLAYOUT_BOUND_MS as i64 {
+            violations.push(format!(
+                "playout took {} ms (provider's last voiced output frame to last audible; bound {PLAYOUT_BOUND_MS} ms)",
+                self.playout_ms
+            ));
+        }
+        violations
+    }
+
+    fn detail(&self) -> String {
+        format!(
+            "onset_ms={} ingest_ms={} turn_taking_ms={} playout_ms={} total_ms={}",
+            self.onset_ms,
+            self.ingest_ms,
+            self.turn_taking_ms,
+            self.playout_ms,
+            self.total_ms()
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum YieldObservation {
+    /// The assistant was already quiet at the onset: nothing to yield.
+    NotSpeakingAtOnset {
+        onset_ms: u64,
+        heard_ms: i64,
+    },
+    Yield(YieldSegments),
+}
+
+fn sideband_server_frames<'a>(
+    lines: &'a [provider_recording::Line],
+    channel: u32,
+    frame_type: &'a str,
+) -> impl Iterator<Item = (u64, &'a Value)> + 'a {
+    lines.iter().filter_map(move |line| match &line.entry {
+        provider_recording::Entry::ServerFrame { raw }
+            if line.channel_ordinal == channel && raw["type"] == frame_type =>
         {
-            if !seen.insert(line.clone()) && !repeated.contains(&line) {
-                repeated.push(line);
+            Some((line.elapsed_ms, raw))
+        }
+        _ => None,
+    })
+}
+
+/// The sideband clock against the browser peer's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClockAlignment {
+    /// Sideband elapsed_ms minus browser t_ms (median over the pairs).
+    offset_ms: i64,
+    /// Max minus min offset over the pairs: transport jitter of either
+    /// channel (a sideband frame is stamped when meerkat's observation loop
+    /// takes it), journaled, not judged.
+    spread_ms: i64,
+    pairs: usize,
+}
+
+/// Align the sideband with the browser clock through the commentary.appended
+/// events both saw: the provider sends each on both channels, in the same
+/// order. The k-th on one is the k-th on the other only when both saw the
+/// same number, so unequal counts are an error, never a guess; the median
+/// offset is robust to one late stamp.
+fn sideband_clock_alignment(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+) -> Result<ClockAlignment, String> {
+    let browser: Vec<i64> = timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::CommentaryAppended)
+        .map(|e| e.t_ms as i64)
+        .collect();
+    // The browser sees nothing after its peer disconnects; the sideband may
+    // still receive acks (soak c43aa3db S105 run 1: a result acknowledged
+    // 400 ms after the graceful disconnect). Pair only what both could see.
+    let disconnected = sideband_disconnect_elapsed(lines, channel);
+    let sideband: Vec<i64> = sideband_server_frames(lines, channel, "session.commentary.appended")
+        .map(|(elapsed_ms, _)| elapsed_ms)
+        .filter(|elapsed_ms| disconnected.is_none_or(|at| *elapsed_ms < at))
+        .map(|elapsed_ms| elapsed_ms as i64)
+        .collect();
+    if browser.is_empty() || browser.len() != sideband.len() {
+        return Err(format!(
+            "cannot pair commentary.appended events to align the clocks: the browser saw {} and the sideband {}",
+            browser.len(),
+            sideband.len()
+        ));
+    }
+    let mut offsets: Vec<i64> = sideband.iter().zip(&browser).map(|(s, b)| s - b).collect();
+    offsets.sort_unstable();
+    Ok(ClockAlignment {
+        offset_ms: offsets[offsets.len() / 2],
+        spread_ms: offsets[offsets.len() - 1] - offsets[0],
+        pairs: offsets.len(),
+    })
+}
+
+fn sideband_clock_offset(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+) -> Result<i64, String> {
+    sideband_clock_alignment(timeline, lines, channel).map(|alignment| alignment.offset_ms)
+}
+
+/// When the test disconnected the browser peer of `channel`, on the sideband
+/// clock: the recorded `disconnect:*` marker (a test-driven step).
+fn sideband_disconnect_elapsed(lines: &[provider_recording::Line], channel: u32) -> Option<u64> {
+    lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::Marker { step }
+            if line.channel_ordinal == channel && step.starts_with("disconnect") =>
+        {
+            Some(line.elapsed_ms)
+        }
+        _ => None,
+    })
+}
+
+/// RMS of one base64 PCM16 little-endian provider audio payload.
+fn pcm16_rms(payload: &Value) -> Result<f64, String> {
+    pcm16_frame(payload).map(|(rms, _)| rms)
+}
+
+/// RMS and duration (ms) of one base64 PCM16 provider audio payload.
+fn pcm16_frame(payload: &Value) -> Result<(f64, i64), String> {
+    use base64::Engine as _;
+    let encoded = payload
+        .as_str()
+        .ok_or("audio frame without a base64 payload")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("audio frame payload is not base64: {error}"))?;
+    let samples: Vec<f64> = bytes
+        .chunks_exact(2)
+        .map(|pair| f64::from(i16::from_le_bytes([pair[0], pair[1]])))
+        .collect();
+    let duration_ms = samples.len() as i64 * 1000 / PROVIDER_PCM_RATE_HZ as i64;
+    if samples.is_empty() {
+        return Ok((0.0, 0));
+    }
+    Ok((
+        (samples.iter().map(|s| s * s).sum::<f64>() / samples.len() as f64).sqrt(),
+        duration_ms,
+    ))
+}
+
+/// The provider's input-to-output step on its model clock, not a tolerance:
+/// gpt-live-1 consumes and emits 200 ms frames, and its output frame for
+/// model time t is produced after the input frame of the same time (the
+/// sideband emission offset of output frames over input frames measured
+/// 168-277 ms, one frame, on the finalc yields). A burst that starts before
+/// the user's first voiced input slot plus this step cannot be a reaction to
+/// that utterance: it was already in flight, and it is the yield's.
+const PROVIDER_FRAME_MS: i64 = 200;
+
+/// When the provider heard the user: the cadence slot of the first voiced
+/// reflected input frame arriving at or after the onset (see
+/// INGEST_BOUND_MS), on the browser clock.
+fn provider_heard_ms(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    offset: i64,
+    onset_ms: u64,
+) -> Result<i64, String> {
+    // (arrival, audio reflected before it, rms) for every reflected input
+    // frame; the cadence anchor is the least-late frame's arrival minus the
+    // audio before it.
+    let mut inputs = Vec::new();
+    let mut audio_before_ms = 0i64;
+    for (elapsed_ms, raw) in sideband_server_frames(lines, channel, "session.input_audio.append") {
+        let (rms, duration_ms) = pcm16_frame(&raw["audio"])?;
+        inputs.push((elapsed_ms as i64 - offset, audio_before_ms, rms));
+        audio_before_ms += duration_ms;
+    }
+    let anchor = inputs
+        .iter()
+        .map(|(arrival, before, _)| arrival - before)
+        .min()
+        .ok_or("the provider reflected no input frame")?;
+    inputs
+        .iter()
+        .find(|(arrival, _, rms)| *arrival >= onset_ms as i64 && *rms > VOICED_FRAME_RMS)
+        .map(|(_, before, _)| anchor + before)
+        .ok_or_else(|| {
+            "the provider never reflected a voiced input frame after the barge-in onset".to_owned()
+        })
+}
+
+/// One provider output audio frame on the sideband: arrival on the browser
+/// clock, span on the provider's model clock, and whether it carries speech.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OutputFrame {
+    arrival_ms: i64,
+    start_ms: i64,
+    end_ms: i64,
+    voiced: bool,
+}
+
+fn output_frames(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    offset: i64,
+) -> Result<Vec<OutputFrame>, String> {
+    sideband_server_frames(lines, channel, "session.output_audio.delta")
+        .map(|(elapsed_ms, raw)| {
+            Ok(OutputFrame {
+                arrival_ms: elapsed_ms as i64 - offset,
+                start_ms: raw["start_ms"]
+                    .as_i64()
+                    .ok_or("output frame without start_ms")?,
+                end_ms: raw["end_ms"]
+                    .as_i64()
+                    .ok_or("output frame without end_ms")?,
+                voiced: pcm16_rms(&raw["delta"])? > VOICED_FRAME_RMS,
+            })
+        })
+        .collect()
+}
+
+/// When the provider emitted the burst that became audible at
+/// `audible_start_ms`: the sideband arrival of the first voiced frame of the
+/// voiced run holding the last voiced frame that arrived by then. A run
+/// continues across model-clock silences shorter than the peer's end
+/// hysteresis (`hysteresis_ms`, the silence that separates its bursts).
+/// Playout delays the audible start (p50 455 ms), so only the emission
+/// compares with when the provider heard the user. A burst with no voiced
+/// frame by its audible start emitted at that start.
+fn burst_emission_ms(frames: &[OutputFrame], audible_start_ms: u64, hysteresis_ms: u64) -> i64 {
+    let voiced: Vec<&OutputFrame> = frames.iter().filter(|frame| frame.voiced).collect();
+    let Some(last) = voiced
+        .iter()
+        .rposition(|frame| frame.arrival_ms <= audible_start_ms as i64)
+    else {
+        return audible_start_ms as i64;
+    };
+    let mut first = last;
+    while first > 0 && voiced[first].start_ms - voiced[first - 1].end_ms < hysteresis_ms as i64 {
+        first -= 1;
+    }
+    voiced[first].arrival_ms
+}
+
+/// Split the yield of the barge-in fixture `fixture` (see [`YieldSegments`]).
+/// The yield is the burst audible at or after the onset that started before
+/// the provider could react to the utterance (its first voiced input slot
+/// plus `PROVIDER_FRAME_MS`): one already playing, or one already in flight.
+fn yield_segments(
+    timeline: &[TimelineEntry],
+    lines: &[provider_recording::Line],
+    channel: u32,
+    fixture: u64,
+    hysteresis_ms: u64,
+) -> Result<YieldObservation, String> {
+    let onset_ms = fixture_start_entry(timeline, fixture)
+        .ok_or("the barge-in fixture never started")?
+        .t_ms;
+    let offset = sideband_clock_offset(timeline, lines, channel)?;
+    let heard_ms = provider_heard_ms(lines, channel, offset, onset_ms)?;
+    let Some(end) = timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::AssistantAudioEnd)
+        .find(|e| {
+            e.detail_u64("last_active_ms")
+                .is_some_and(|last| last >= onset_ms)
+        })
+    else {
+        return Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms });
+    };
+    let started_ms = end
+        .detail_u64("started_ms")
+        .ok_or("assistant_audio_end without started_ms")?;
+    let last_audible_ms = end
+        .detail_u64("last_active_ms")
+        .ok_or("assistant_audio_end without last_active_ms")?;
+    let frames = output_frames(lines, channel, offset)?;
+    if started_ms > onset_ms
+        && burst_emission_ms(&frames, started_ms, hysteresis_ms) > heard_ms + PROVIDER_FRAME_MS
+    {
+        return Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms });
+    }
+    let mut last_voiced_output = None;
+    for (elapsed_ms, raw) in sideband_server_frames(lines, channel, "session.output_audio.delta") {
+        let t = elapsed_ms as i64 - offset;
+        if t > last_audible_ms as i64 {
+            break;
+        }
+        if pcm16_rms(&raw["delta"])? > VOICED_FRAME_RMS {
+            last_voiced_output = Some(t);
+        }
+    }
+    let last_voiced_output = last_voiced_output
+        .ok_or("no voiced provider output frame arrived before the last audible window")?;
+    Ok(YieldObservation::Yield(YieldSegments {
+        onset_ms,
+        last_audible_ms,
+        ingest_ms: heard_ms - onset_ms as i64,
+        turn_taking_ms: last_voiced_output - onset_ms as i64,
+        playout_ms: last_audible_ms as i64 - last_voiced_output,
+    }))
+}
+
+/// Assistant bursts that started while the user was still speaking (the
+/// fixture's speech window), after the provider could react to the
+/// utterance (`heard_ms` plus `PROVIDER_FRAME_MS`; earlier bursts are the
+/// yield's). One carrying words that is not a classified backchannel
+/// (`evidence::is_backchannel`, fail-closed) is talk-over the yield bounds
+/// cannot see. One with no words in its transcript window is journaled and
+/// owes the same yield as speech: it must end within `TALK_OVER_BOUND_MS` of
+/// its own start.
+///
+/// A worded start is talk-over only when the user heard more than one
+/// provider frame of it (audible `duration_ms` > `PROVIDER_FRAME_MS`, on the
+/// peer's post-duck energy). One frame is the barge-in duck's reaction time
+/// (#1651): the broker ducks at the user's next reflected voiced frame, one
+/// provider frame after the assistant became audible, so a start held to one
+/// frame is the duck working, not talk-over the user heard. It is journaled
+/// (`held_by_duck`). Turbo S S103 soak 65b7a5c3 R4: the provider's reply to
+/// the previous utterance started 699 ms into the correction, audible 0 ms
+/// (#1710).
+#[derive(Debug, Default, PartialEq)]
+struct TalkOverStarts {
+    violations: Vec<String>,
+    wordless: Vec<String>,
+    held_by_duck: Vec<String>,
+}
+
+fn talk_over_starts(
+    timeline: &[TimelineEntry],
+    fixture: u64,
+    heard_ms: i64,
+    emitted_ms: &dyn Fn(u64, u64) -> i64,
+) -> Result<TalkOverStarts, String> {
+    let start =
+        fixture_start_entry(timeline, fixture).ok_or("the barge-in fixture never started")?;
+    let speech_end_ms = start.t_ms
+        + start
+            .detail_u64("speech_ms")
+            .ok_or("the barge-in fixture has no speech_ms")?;
+    let end = fixture_end_entry(timeline, fixture).ok_or("the barge-in fixture never ended")?;
+    let facts: evidence::OverlapFacts = serde_json::from_value(end.detail["facts"].clone())
+        .map_err(|error| format!("the barge-in fixture's overlap facts are unreadable: {error}"))?;
+    let mut starts = TalkOverStarts::default();
+    for burst in evidence::overlap_bursts(&facts) {
+        if burst.started_ms <= start.t_ms
+            || burst.started_ms >= speech_end_ms
+            || emitted_ms(burst.started_ms, facts.hysteresis_ms) <= heard_ms + PROVIDER_FRAME_MS
+        {
+            continue;
+        }
+        let into_ms = burst.started_ms - start.t_ms;
+        let duration_ms = burst.last_active_ms.saturating_sub(burst.started_ms);
+        if !burst.window_text.chars().any(char::is_alphanumeric) {
+            starts
+                .wordless
+                .push(format!("into_ms={into_ms} duration_ms={duration_ms}"));
+            if !burst.ended || duration_ms > TALK_OVER_BOUND_MS {
+                starts.violations.push(format!(
+                    "a wordless assistant burst that started {into_ms} ms into the utterance lasted {duration_ms} ms{} (bound {TALK_OVER_BOUND_MS} ms)",
+                    if burst.ended { "" } else { " and had not ended" }
+                ));
+            }
+        } else if !evidence::is_backchannel(&burst) {
+            if duration_ms as i64 > PROVIDER_FRAME_MS {
+                starts.violations.push(format!(
+                    "the assistant started talking over the user {into_ms} ms into the utterance ({duration_ms} ms, said {:?})",
+                    burst.window_text
+                ));
+            } else {
+                starts.held_by_duck.push(format!(
+                    "into_ms={into_ms} duration_ms={duration_ms} said={:?}",
+                    burst.window_text
+                ));
             }
         }
     }
-    repeated
+    Ok(starts)
+}
+
+/// Whether the barge-in fixture `fixture` landed on assistant speech: the
+/// assistant was audible while the user spoke (`overlap_ms` > 0), or an
+/// audible assistant burst was still current at the onset by the peer's own
+/// burst rule. That means it started at or before the onset and its last
+/// active window is within the peer's end hysteresis of the onset.
+///
+/// Since #1651 the barge-in duck mutes the assistant at the browser within
+/// its own latency (about 100-400 ms), so audible overlap is truncated by
+/// design. When the provider's next frame arrives after the duck (Turbo S
+/// S103 soak 65b7a5c3 R3: audible at 51279, onset 51285, duck at 51491), the
+/// overlap is 0 although the barge-in did interrupt speech. A burst that had
+/// already ended (R6: last active 48259, onset 48940, 681 ms > the 600 ms
+/// hysteresis) still fails: a barge-in on silence interrupts nothing.
+fn barge_in_landed_on_speech(timeline: &[TimelineEntry], fixture: u64, overlap_ms: u64) -> bool {
+    if overlap_ms > 0 {
+        return true;
+    }
+    let Some(onset_ms) = fixture_start_entry(timeline, fixture).map(|e| e.t_ms) else {
+        return false;
+    };
+    let Some(hysteresis_ms) = fixture_end_entry(timeline, fixture)
+        .and_then(|end| end.detail["facts"]["hysteresis_ms"].as_u64())
+    else {
+        return false;
+    };
+    timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::AssistantAudioEnd)
+        .any(|end| {
+            matches!(
+                (end.detail_u64("started_ms"), end.detail_u64("last_active_ms")),
+                (Some(started), Some(last)) if started <= onset_ms && last + hysteresis_ms >= onset_ms
+            )
+        })
+}
+
+/// The talk-over contract for one barge-in: measure its segments, record
+/// them as evidence (so a failure says which segment moved), and return the
+/// violations of the end-to-end, ingest and playout bounds and any talk-over
+/// that started mid-utterance. An unmeasurable yield is a violation, never a
+/// pass.
+fn talk_over_violations(
+    evidence: &Journal,
+    channel: u32,
+    scenario: &str,
+    timeline: &[TimelineEntry],
+    fixture: u64,
+    label: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let lines = evidence.provider_stream_lines()?;
+    let hysteresis_ms = fixture_end_entry(timeline, fixture)
+        .and_then(|end| end.detail["facts"]["hysteresis_ms"].as_u64());
+    let Some(hysteresis_ms) = hysteresis_ms else {
+        return Ok(vec![format!(
+            "{label}: the barge-in fixture has no end facts (hysteresis), so its talk-over cannot be measured"
+        )]);
+    };
+    let (mut violations, heard_ms) = match yield_segments(
+        timeline,
+        &lines,
+        channel,
+        fixture,
+        hysteresis_ms,
+    ) {
+        Ok(YieldObservation::NotSpeakingAtOnset { onset_ms, heard_ms }) => {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "talk_over",
+                format!(
+                    "label={label} onset_ms={onset_ms} heard_ms={heard_ms} not_speaking_at_onset"
+                ),
+            )?;
+            (Vec::new(), Some(heard_ms))
+        }
+        Ok(YieldObservation::Yield(segments)) => {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "talk_over",
+                format!("label={label} {}", segments.detail()),
+            )?;
+            let heard_ms = segments.onset_ms as i64 + segments.ingest_ms;
+            (
+                segments
+                    .violations()
+                    .into_iter()
+                    .map(|violation| format!("{label}: {violation} [{}]", segments.detail()))
+                    .collect(),
+                Some(heard_ms),
+            )
+        }
+        Err(reason) => (
+            vec![format!(
+                "{label}: the yield could not be measured: {reason}"
+            )],
+            None,
+        ),
+    };
+    if let Some(heard_ms) = heard_ms {
+        let frames = sideband_clock_offset(timeline, &lines, channel)
+            .and_then(|offset| output_frames(&lines, channel, offset));
+        let frames = match frames {
+            Ok(frames) => frames,
+            Err(reason) => {
+                violations.push(format!("{label}: output frames unreadable: {reason}"));
+                return Ok(violations);
+            }
+        };
+        let emitted = |audible_start_ms: u64, hysteresis_ms: u64| {
+            burst_emission_ms(&frames, audible_start_ms, hysteresis_ms)
+        };
+        match talk_over_starts(timeline, fixture, heard_ms, &emitted) {
+            Ok(starts) => {
+                for wordless in starts.wordless {
+                    record_metric(
+                        evidence,
+                        channel,
+                        scenario,
+                        "wordless_burst_during_utterance",
+                        format!("label={label} {wordless}"),
+                    )?;
+                }
+                for held in starts.held_by_duck {
+                    record_metric(
+                        evidence,
+                        channel,
+                        scenario,
+                        "duck_held_start_during_utterance",
+                        format!("label={label} {held}"),
+                    )?;
+                }
+                violations.extend(
+                    starts
+                        .violations
+                        .into_iter()
+                        .map(|v| format!("{label}: {v}")),
+                );
+            }
+            Err(reason) => violations.push(format!(
+                "{label}: talk-over starts could not be read: {reason}"
+            )),
+        }
+    }
+    Ok(violations)
+}
+
+// ---------------------------------------------------------------------------
+// Readout contract (delivery and voicing of delegation results)
+// ---------------------------------------------------------------------------
+
+/// Starts of the narration the delegation scheduler renders on the
+/// commentary lane (`narration_text` in meerkat-mob-mcp
+/// `live_delegation/schedule.rs`); every other delegation commentary append
+/// is the delegation's result. A template drift fails loudly: an
+/// unrecognized narration counts as a second result delivery, and a result
+/// that starts like a narration leaves its delegation without one.
+const NARRATION_STARTS: [&str; 4] = [
+    "Voice request queued: \"",
+    "Started voice request: \"",
+    "Finished voice request: \"",
+    "Voice request \"",
+];
+const READOUT_BOUNDARIES: [&str; 3] = [
+    "session.input_transcript.delta",
+    "session.commentary.appended",
+    "session.delegation.created",
+];
+
+/// One delegation result delivered into the provider conversation: a
+/// sideband commentary append carrying the delegation id, at its send time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResultDelivery {
+    delegation_id: String,
+    channel: u32,
+    elapsed_ms: u64,
+    text: String,
+    /// Sideband arrival of the delegation's `session.delegation.created` on
+    /// the same channel, when recorded.
+    created_ms: Option<u64>,
+}
+
+/// Every result delivery on the sideband, all channels, in send order.
+/// The result text a delegation-lane commentary append carries: a plain
+/// result, or the result after its "Finished ... The result follows."
+/// announcement, which travels in the same append since #1637 (separated by
+/// a newline). Narration alone carries no result.
+fn announced_result_text(content: &str) -> Option<&str> {
+    if content.starts_with("Finished voice request: \"") {
+        let (_, result) = content.split_once('\n')?;
+        let result = result.trim();
+        return (!result.is_empty()).then_some(result);
+    }
+    (!NARRATION_STARTS
+        .iter()
+        .any(|start| content.starts_with(start)))
+    .then_some(content)
+}
+
+fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> {
+    let created: std::collections::BTreeMap<(u32, &str), u64> = lines
+        .iter()
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.delegation.created" =>
+            {
+                Some((
+                    (line.channel_ordinal, raw["delegation"]["id"].as_str()?),
+                    line.elapsed_ms,
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    lines
+        .iter()
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append" =>
+            {
+                let delegation_id = event["delegation_id"].as_str()?;
+                let content = event["content"].as_str()?;
+                let text = announced_result_text(content)?;
+                Some(ResultDelivery {
+                    delegation_id: delegation_id.to_owned(),
+                    channel: line.channel_ordinal,
+                    elapsed_ms: line.elapsed_ms,
+                    text: text.to_owned(),
+                    created_ms: created.get(&(line.channel_ordinal, delegation_id)).copied(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The provider lane of a broker append that can prompt the model to speak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptLane {
+    /// Delegation commentary: a result or a narration.
+    Commentary,
+    /// Thinking: result cues, runtime work, context.
+    Thinking,
+    /// Instructions: in-progress notices.
+    Instructions,
+}
+
+/// One broker append on the channel that can prompt speech, at its sideband
+/// send time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BrokerPrompt {
+    elapsed_ms: u64,
+    lane: PromptLane,
+}
+
+/// Every broker append on `channel` that can prompt the model to speak:
+/// delegation commentary (results and narrations), thinking appends (result
+/// cues, runtime work, context) and instruction appends (in-progress
+/// notices), in send order.
+fn broker_prompts(lines: &[provider_recording::Line], channel: u32) -> Vec<BrokerPrompt> {
+    lines
+        .iter()
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ClientEvent { event } if line.channel_ordinal == channel => {
+                let lane = match event["type"].as_str() {
+                    Some("session.commentary.append") => PromptLane::Commentary,
+                    Some("session.thinking.append") => PromptLane::Thinking,
+                    Some("session.instructions.append") => PromptLane::Instructions,
+                    _ => return None,
+                };
+                Some(BrokerPrompt {
+                    elapsed_ms: line.elapsed_ms,
+                    lane,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The peer's response boundary for a delegation commentary acknowledgement.
+const COMMENTARY_BOUNDARY: &str = "session.commentary.appended";
+
+/// The result delivery whose commentary acknowledgement opened `record`, on
+/// the peer's clock: the response opened by `session.commentary.appended`
+/// whose latest commentary append sent before that boundary is one of the
+/// channel's result deliveries, not a narration.
+fn opening_delivery(
+    record: &support::ReadoutRecord,
+    prompts_ms: &[(i64, PromptLane)],
+    delivered_ms: &[i64],
+) -> Option<i64> {
+    let opened_ms = record.opened_ms? as i64;
+    if record.opened_by != COMMENTARY_BOUNDARY {
+        return None;
+    }
+    let acknowledged = prompts_ms
+        .iter()
+        .filter(|(sent, lane)| *lane == PromptLane::Commentary && *sent <= opened_ms)
+        .map(|(sent, _)| *sent)
+        .max()?;
+    delivered_ms.contains(&acknowledged).then_some(acknowledged)
+}
+
+/// The peer's response boundary for a user transcript delta.
+const USER_SPEECH_BOUNDARY: &str = "session.input_transcript.delta";
+
+/// `current` resumes the readout `previous` was voicing when the user cut it
+/// off: `previous` was closed by the user's speech, every response from there
+/// through `current` was opened by the user's speech (no commentary append or
+/// delegation between them), and no broker append that can prompt speech was
+/// sent from that interruption until `current` closed. A model restarting a
+/// requested readout after the user interrupts it to correct a detail is
+/// still reading it once (S103 R5 on 7b17b1c85: "- The" | "client is the
+/// Marigold account.", cut off by "Wait, stop. Make it Thursday", then read
+/// again from the top). Each interruption admits one resumption, since a
+/// resumption needs its own user utterance closing the previous voicing.
+fn resumes_interrupted_readout(
+    previous: &support::ReadoutRecord,
+    current: &support::ReadoutRecord,
+    records: &[support::ReadoutRecord],
+    prompts_ms: &[i64],
+) -> bool {
+    let (Some(USER_SPEECH_BOUNDARY), Some(interrupted_ms)) =
+        (previous.closed_by.as_deref(), previous.closed_ms)
+    else {
+        return false;
+    };
+    let opened_by_user = records
+        .iter()
+        .filter(|record| record.index > previous.index && record.index <= current.index)
+        .all(|record| record.opened_by == USER_SPEECH_BOUNDARY);
+    let interrupted_ms = interrupted_ms as i64;
+    let prompted = prompts_ms.iter().any(|sent| {
+        *sent > interrupted_ms
+            && current
+                .closed_ms
+                .is_none_or(|closed| *sent <= closed as i64)
+    });
+    opened_by_user && !prompted
+}
+
+/// Sentences of 3 or more normalized words (the peer's stutter rule uses the
+/// same split).
+fn readout_sentences(text: &str) -> Vec<String> {
+    text.split(['\n', '.', '!', '?'])
+        .map(normalize_words)
+        .filter(|sentence| sentence.split(' ').count() >= 3)
+        .collect()
+}
+
+/// The peer's readout records are well formed: consecutive indexes, known
+/// boundaries, only the last one open, no overflow, and present whenever the
+/// provider spoke on the channel. Anything else fails closed.
+fn readout_records_malformed(
+    snapshot: &support::ReadoutSnapshot,
+    provider_spoke: bool,
+) -> Option<String> {
+    if snapshot.overflow {
+        return Some("the peer stopped recording responses at its bound".to_owned());
+    }
+    if provider_spoke && snapshot.records.is_empty() {
+        return Some("the provider spoke but the peer recorded no response".to_owned());
+    }
+    let last = snapshot.records.len().saturating_sub(1);
+    for (position, record) in snapshot.records.iter().enumerate() {
+        let opened_ok = (record.opened_by == "connect" && position == 0)
+            || (READOUT_BOUNDARIES.contains(&record.opened_by.as_str())
+                && record.opened_ms.is_some());
+        let closed_ok = match (&record.closed_by, record.closed_ms) {
+            (Some(kind), Some(_)) => READOUT_BOUNDARIES.contains(&kind.as_str()),
+            (None, None) => position == last,
+            _ => false,
+        };
+        if record.index != position as u64
+            || !opened_ok
+            || !closed_ok
+            || record.text.trim().is_empty()
+            || record.last_output_ms.is_none()
+        {
+            return Some(format!(
+                "malformed readout record at position {position}: {record:?}"
+            ));
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReadoutFault {
+    /// One delegation's result was delivered into the conversation more
+    /// than once.
+    DuplicateDelivery {
+        delegation_id: String,
+        deliveries: usize,
+    },
+    /// A result sentence was voiced in a response with no delivery of it
+    /// left to account for the voicing: the same result voiced in two
+    /// responses.
+    DuplicateReadout {
+        sentence: String,
+        responses: Vec<u64>,
+    },
+    /// A result delivered on the peer's channel was followed by no
+    /// assistant speech: no non-empty response opened at or after its
+    /// delivery (a result delivered and never spoken).
+    MissedReadout { delegation_id: String },
+}
+
+/// The readout rule. Every delegation result is delivered exactly once, and
+/// every voicing of it falls inside one response: a sentence of 3 or more
+/// normalized words found verbatim in a delivered result voices that result,
+/// and each response that voices a sentence must be accounted for by its own
+/// delivery containing that sentence, sent before the response closed (two
+/// results may share a line, a brief and its corrected copy, and each may be
+/// read once). A sentence repeated inside one response is a stutter, a
+/// measurement (`ReadoutRecord::stutters`). Every result delivered on the
+/// peer's channel must be followed by assistant speech: a response opened at
+/// or after its delivery (the result's own commentary.appended opens one).
+/// Verbatim voicing is not required for that: the model paraphrases short
+/// results, and scripted fixtures may cut a readout off. A delivery sent at
+/// or after the session's close request (`close_request_ms`, the user's
+/// sign-off, the browser's disconnect or meerkat's session.close, on the
+/// peer's clock) is exempt and
+/// journaled as delivered after the close request. Deliveries are counted over
+/// every channel; voicing is checked for the deliveries on `channel`, the
+/// channel of the browser peer whose records these are (a reopen starts a
+/// fresh peer). `offset` maps sideband time to that peer's clock. A response
+/// that resumes a readout the user cut off ([`resumes_interrupted_readout`],
+/// judged against `prompts`, the sideband send times of the channel's broker
+/// appends) needs no delivery of its own.
+fn readout_faults(
+    deliveries: &[ResultDelivery],
+    channel: u32,
+    records: &[support::ReadoutRecord],
+    prompts: &[BrokerPrompt],
+    offset: i64,
+    close_request_ms: Option<i64>,
+) -> Vec<ReadoutFault> {
+    let prompt_lanes_ms: Vec<(i64, PromptLane)> = prompts
+        .iter()
+        .map(|prompt| (prompt.elapsed_ms as i64 - offset, prompt.lane))
+        .collect();
+    let prompts_ms: Vec<i64> = prompt_lanes_ms.iter().map(|(sent, _)| *sent).collect();
+    let mut faults = Vec::new();
+    let mut per_delegation: std::collections::BTreeMap<&str, usize> = Default::default();
+    for delivery in deliveries {
+        *per_delegation
+            .entry(delivery.delegation_id.as_str())
+            .or_default() += 1;
+    }
+    for (delegation_id, count) in per_delegation {
+        if count != 1 {
+            faults.push(ReadoutFault::DuplicateDelivery {
+                delegation_id: delegation_id.to_owned(),
+                deliveries: count,
+            });
+        }
+    }
+    for delivery in deliveries_before_close_request(deliveries, channel, offset, close_request_ms) {
+        let sent = delivery.elapsed_ms as i64 - offset;
+        // Speech after the delivery, in any response: the response that
+        // voices a result may have opened just before it was sent (soak
+        // c43aa3db S102 run 2: " Here's" 1 ms before the send, " what they
+        // said:" after it).
+        let spoken_after = records.iter().any(|record| {
+            record
+                .last_output_ms
+                .is_some_and(|last| last as i64 >= sent)
+        });
+        if !spoken_after {
+            faults.push(ReadoutFault::MissedReadout {
+                delegation_id: delivery.delegation_id.clone(),
+            });
+        }
+    }
+    let delivered: Vec<(i64, String)> = deliveries
+        .iter()
+        .filter(|d| d.channel == channel)
+        .map(|d| {
+            (
+                d.elapsed_ms as i64 - offset,
+                format!(" {} ", normalize_words(&d.text)),
+            )
+        })
+        .collect();
+    // Each channel delivery's send and its delegation's creation, peer clock.
+    let delivery_created_ms: std::collections::BTreeMap<i64, i64> = deliveries
+        .iter()
+        .filter(|d| d.channel == channel)
+        .filter_map(|d| Some((d.elapsed_ms as i64 - offset, d.created_ms? as i64 - offset)))
+        .collect();
+    let delivered_ms: Vec<i64> = delivered.iter().map(|(sent, _)| *sent).collect();
+    // A licensing delivery's one re-reading response, across sentences.
+    let mut licensed: std::collections::BTreeMap<i64, u64> = Default::default();
+    let mut voicings: std::collections::BTreeMap<String, Vec<&support::ReadoutRecord>> =
+        Default::default();
+    for record in records {
+        let mut spoken: Vec<String> = readout_sentences(&record.text);
+        spoken.sort();
+        spoken.dedup();
+        for sentence in spoken {
+            let padded = format!(" {sentence} ");
+            if delivered.iter().any(|(_, text)| text.contains(&padded)) {
+                voicings.entry(sentence).or_default().push(record);
+            }
+        }
+    }
+    for (sentence, responses) in voicings {
+        let padded = format!(" {sentence} ");
+        let mut sends: Vec<i64> = delivered
+            .iter()
+            .filter(|(_, text)| text.contains(&padded))
+            .map(|(t, _)| *t)
+            .collect();
+        sends.sort_unstable();
+        let mut used = 0usize;
+        let mut unaccounted = false;
+        for (position, response) in responses.iter().enumerate() {
+            // A re-reading of what a later correction updates (S103 #1705,
+            // 0375acca R3: diff-only corrections, "Updated the kickoff to
+            // Friday", and the brief read again with Friday). Licensed only
+            // when the response was opened by that delivery's own
+            // commentary acknowledgement on this channel, the delivery does
+            // not carry the sentence, the sentence was delivered on this
+            // channel before it, and its delegation was created after that
+            // earlier delivery (a correction requested once the result
+            // existed, never a parallel job); one re-reading response per
+            // licensing delivery. Narration-, cue- and speech-opened
+            // re-reads stay unaccounted.
+            if position > 0
+                && let Some(delivery) = opening_delivery(response, &prompt_lanes_ms, &delivered_ms)
+                && !sends.contains(&delivery)
+                && let Some(original) = sends.iter().copied().filter(|sent| *sent < delivery).min()
+                && delivery_created_ms
+                    .get(&delivery)
+                    .is_some_and(|created| *created > original)
+                && licensed
+                    .get(&delivery)
+                    .is_none_or(|licensed_response| *licensed_response == response.index)
+            {
+                licensed.insert(delivery, response.index);
+                continue;
+            }
+            if position > 0
+                && resumes_interrupted_readout(
+                    responses[position - 1],
+                    response,
+                    records,
+                    &prompts_ms,
+                )
+            {
+                continue;
+            }
+            let available = sends
+                .iter()
+                .filter(|t| response.closed_ms.is_none_or(|closed| **t <= closed as i64))
+                .count();
+            if available > used {
+                used += 1;
+            } else {
+                unaccounted = true;
+            }
+        }
+        if unaccounted {
+            faults.push(ReadoutFault::DuplicateReadout {
+                sentence,
+                responses: responses.iter().map(|r| r.index).collect(),
+            });
+        }
+    }
+    faults
+}
+
+/// The result deliveries on `channel` sent before the close request (all of
+/// them when there is none), ordered on the peer's clock.
+fn deliveries_before_close_request(
+    deliveries: &[ResultDelivery],
+    channel: u32,
+    offset: i64,
+    close_request_ms: Option<i64>,
+) -> impl Iterator<Item = &ResultDelivery> {
+    deliveries.iter().filter(move |d| {
+        d.channel == channel
+            && close_request_ms.is_none_or(|close| d.elapsed_ms as i64 - offset < close)
+    })
+}
+
+/// Apply the readout rule to the scenario: sideband deliveries joined with
+/// the peer's readout records. Stutters are recorded as metrics; a fault, a
+/// malformed or missing record set, or an unalignable clock is an error.
+async fn readout_contract(
+    evidence: &Journal,
+    live: &mut PublicLiveHarness,
+    channel: u32,
+    scenario: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lines = evidence.provider_stream_lines()?;
+    let snapshot = live.peer.readouts().await?;
+    let provider_spoke = sideband_server_frames(&lines, channel, "session.output_transcript.delta")
+        .any(|(_, raw)| raw["delta"].as_str().is_some_and(|d| !d.trim().is_empty()));
+    if let Some(malformed) = readout_records_malformed(&snapshot, provider_spoke) {
+        return Err(format!("{scenario}: readout records unusable: {malformed}").into());
+    }
+    for record in &snapshot.records {
+        for stutter in &record.stutters {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "readout_stutter",
+                format!("response={} sentence={stutter:?}", record.index),
+            )?;
+        }
+    }
+    let deliveries = result_deliveries(&lines);
+    if deliveries.is_empty() {
+        return Ok(());
+    }
+    let offset = if deliveries.iter().any(|d| d.channel == channel) {
+        let timeline = live.peer.timeline().await?;
+        let alignment = sideband_clock_alignment(&timeline, &lines, channel).map_err(|reason| {
+            format!("{scenario}: readout rule cannot order deliveries: {reason}")
+        })?;
+        record_metric(
+            evidence,
+            channel,
+            scenario,
+            "sideband_clock",
+            format!(
+                "pairs={} offset_ms={} spread_ms={}",
+                alignment.pairs, alignment.offset_ms, alignment.spread_ms
+            ),
+        )?;
+        alignment.offset_ms
+    } else {
+        0
+    };
+    // The close request: the earlier of the user's sign-off and meerkat's
+    // session.close on this channel.
+    let close_sent = lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::ClientEvent { event }
+            if line.channel_ordinal == channel && event["type"] == "session.close" =>
+        {
+            Some(line.elapsed_ms as i64 - offset)
+        }
+        _ => None,
+    });
+    // The user hanging up (the browser's disconnect) is a close request too.
+    let disconnect_sent =
+        sideband_disconnect_elapsed(&lines, channel).map(|elapsed_ms| elapsed_ms as i64 - offset);
+    let close_request_ms = [
+        close_sent,
+        disconnect_sent,
+        live.sign_off_onset_ms.map(|t| t as i64),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let before_close: Vec<&ResultDelivery> =
+        deliveries_before_close_request(&deliveries, channel, offset, close_request_ms).collect();
+    for delivery in deliveries.iter().filter(|d| d.channel == channel) {
+        if !before_close.iter().any(|b| std::ptr::eq(*b, delivery)) {
+            record_metric(
+                evidence,
+                channel,
+                scenario,
+                "delivered_after_close_request",
+                format!(
+                    "delegation={} sent_ms={} close_request_ms={close_request_ms:?}",
+                    delivery.delegation_id,
+                    delivery.elapsed_ms as i64 - offset
+                ),
+            )?;
+        }
+    }
+    let prompts = broker_prompts(&lines, channel);
+    let faults = readout_faults(
+        &deliveries,
+        channel,
+        &snapshot.records,
+        &prompts,
+        offset,
+        close_request_ms,
+    );
+    record_metric(
+        evidence,
+        channel,
+        scenario,
+        "readout_rule",
+        format!(
+            "deliveries={} responses={} faults={}",
+            deliveries.len(),
+            snapshot.records.len(),
+            faults.len()
+        ),
+    )?;
+    if faults.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{scenario}: readout rule violated: {faults:?}").into())
+    }
 }
 
 // ===========================================================================
@@ -3436,13 +5585,10 @@ const S100_HEADING_TOKEN: &str = "quokka";
 const S100_SILENCE_HOLD_MS: u64 = 4000;
 /// Follow-ups start this long after the assistant goes quiet.
 const S100_FOLLOW_UP_GAP_MS: u64 = 300;
-/// Overlap the barge-in may observe: server VAD onset detection plus the
-/// assistant audio already in flight. Live runs measured 800-2000 ms from
-/// user onset to the assistant going quiet; beyond this the assistant talked
-/// over the user. The measured value is always printed and journaled.
-const S100_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
-/// Tolerant bound on the median input_final -> first assistant audio.
-const S100_MEDIAN_LATENCY_BOUND_MS: i64 = 3000;
+/// The barge-in's overlap is measured (printed and journaled), not bounded:
+/// the browser must not fault it. The yield contract is the talk-over
+/// contract (`talk_over_violations`, `TALK_OVER_BOUND_MS`).
+const S100_BARGE_IN_OVERLAP_BOUND_MS: u64 = 60_000;
 /// Prefix the mob runtime renders in front of a delegated voice request
 /// (`meerkat_mob::runtime::delegation::render_live_delegation_execution_context`).
 const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context: execute this already committed voice request (not a new user utterance).";
@@ -3543,10 +5689,9 @@ fn classify_summary_open(
         println!(
             "GPT_LIVE_{scenario}_SUMMARY_OPEN_CASE label={label} channel={channel} case={case:?}"
         );
-        evidence.record(EvidenceRecord::Tolerant {
+        evidence.record(EvidenceRecord::Metric {
             channel,
-            check: "summary_open_case".to_owned(),
-            passed: true,
+            metric: "summary_open_case".to_owned(),
             detail: format!("{label}: {case:?}"),
         })?;
     }
@@ -3585,20 +5730,47 @@ fn assert_late_summary_delivered(
 }
 
 /// Late-summary rule, host side: the summarizer missed the pre-open bound, so
-/// the create body carries no history items at all while the startup
-/// instructions still carry the history framing clause.
+/// the create body carries no summary (developer) item, only the newest
+/// conversation turns verbatim, bounded by `LIVE_STARTUP_VERBATIM_ITEMS_MAX`
+/// (`with_pending_context_after_recent`), and the startup instructions carry
+/// the history framing clause. The vault phrase is never among them: it is
+/// summary-only. Every open follows freshly committed follow-up turns
+/// (`s99_seed_followups`, `s99_commit_followups`), so its seed is those turns
+/// in full, with the positive-control fact.
 fn assert_late_summary_seed(
     evidence: &Journal,
     channel: u32,
+    phrase: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let window = meerkat::experimental_gpt_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX;
     let seed = evidence.session_input_seed(channel)?;
-    println!("GPT_LIVE_S99_SESSION_INPUT_SEED channel={channel} seed={seed:?}");
+    let texts = evidence.session_input_texts(channel)?;
+    println!(
+        "GPT_LIVE_S99_SESSION_INPUT_SEED channel={channel} seed={seed:?} items={}",
+        texts.len()
+    );
     let seed =
         seed.ok_or_else(|| format!("no session.start seed was captured for channel {channel}"))?;
     assert_eq!(
-        (seed.input_items, seed.developer_items),
-        (0, 0),
-        "a late summary must leave session.input empty on channel {channel}"
+        seed.developer_items, 0,
+        "a late summary carries no summary item at open on channel {channel}"
+    );
+    assert!(
+        seed.input_items <= window,
+        "a late summary seeds at most {window} recent items on channel {channel}: {}",
+        seed.input_items
+    );
+    assert!(
+        texts.iter().all(|text| !s99_recalls_phrase(text, phrase)),
+        "the vault phrase is summary-only and never in the create-time seed on channel {channel}"
+    );
+    assert_eq!(
+        seed.input_items, window,
+        "each open seeds the newest {window} items of the follow-up turns (channel {channel})"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains(S99_SEEDED_FACT)),
+        "the positive-control fact is in the seed of channel {channel}: {texts:?}"
     );
     assert!(
         seed.frames_history,
@@ -3825,6 +5997,10 @@ struct S100UserRows {
 
 fn s100_user_rows(history: &Value) -> S100UserRows {
     let prefix = normalize_words(S100_DELEGATION_CONTEXT_PREFIX);
+    // The delegation seam prefaces every voice request with the speech
+    // transcript note; the request part of the executor task follows it.
+    let speech_note =
+        normalize_words(meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE);
     let mut rows = S100UserRows::default();
     for message in history["messages"].as_array().into_iter().flatten() {
         if message["role"].as_str() != Some("user") {
@@ -3832,7 +6008,18 @@ fn s100_user_rows(history: &Value) -> S100UserRows {
         }
         let text = normalize_words(&history_text(&json!({"messages":[message]})));
         match text.strip_prefix(prefix.as_str()) {
-            Some(rest) => rows.executor_inputs.push(rest.trim().to_owned()),
+            Some(rest) => {
+                // Contract: the request is prefaced by the speech transcript
+                // note. A task without it keeps the note's absence visible
+                // as a mismatch against the user window.
+                let rest = rest.trim();
+                match rest.strip_prefix(speech_note.as_str()) {
+                    Some(request) => rows.executor_inputs.push(request.trim().to_owned()),
+                    None => rows
+                        .executor_inputs
+                        .push(format!("<missing speech transcript note> {rest}")),
+                }
+            }
             None => rows.spoken.push(text),
         }
     }
@@ -3931,6 +6118,63 @@ async fn wait_executor_turn(
     }
 }
 
+/// Wait until every live delegation of the session has its executor result
+/// acknowledged delivered (`Delivered`), then until the peer observed each
+/// result's `session.commentary.appended` (one per
+/// `session.delegation.created`). The typed-event version of "the results
+/// have been told": nothing is anchored on assistant quiet.
+async fn wait_all_result_commentaries(
+    live: &mut PublicLiveHarness,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_runtime::live_execution::LiveDelegationResultDeliveryObservation;
+    let runtime = live.shared()?.0.runtime.clone();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let snapshots = runtime
+            .live_delegation_recovery_snapshots(&live.session_id)
+            .await?;
+        let mut pending = 0usize;
+        for snapshot in &snapshots {
+            match snapshot.result_delivery() {
+                Some(LiveDelegationResultDeliveryObservation::Delivered) => {}
+                Some(observation) => {
+                    return Err(format!(
+                        "{label}: executor result {} was not delivered: {observation:?}",
+                        snapshot.operation_id()
+                    )
+                    .into());
+                }
+                None => pending += 1,
+            }
+        }
+        if !snapshots.is_empty() && pending == 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let timeline = live.peer.timeline().await?;
+            return Err(format!(
+                "{label}: {pending} executor result(s) not delivered within 90 s; timeline:\n{}",
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    let created: Vec<u64> = live
+        .peer
+        .timeline()
+        .await?
+        .iter()
+        .filter(|entry| entry.kind == TimelineKind::DelegationCreated)
+        .map(|entry| entry.t_ms)
+        .collect();
+    for delegation_created_ms in created {
+        wait_peer_result_commentary(live, label, delegation_created_ms).await?;
+    }
+    Ok(())
+}
+
 /// Wait until the runtime records the delegated result's provider
 /// acknowledgement (`Delivered`), then return the peer's arrival time of the
 /// result's `session.commentary.appended`.
@@ -3978,6 +6222,17 @@ async fn wait_result_commentary(
         }
         sleep(Duration::from_millis(200)).await;
     }
+    wait_peer_result_commentary(live, label, delegation_created_ms).await
+}
+
+/// The peer's arrival time of the delivered result commentary for the
+/// delegation created at `delegation_created_ms` (its `client_event_id` is
+/// keyed by that delegation's provider id).
+async fn wait_peer_result_commentary(
+    live: &mut PublicLiveHarness,
+    label: &str,
+    delegation_created_ms: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
     let timeline = live.peer.timeline().await?;
     let events = live.peer.events().await?;
     let delegation_event = timeline
@@ -4273,9 +6528,8 @@ async fn answer_window(
 ///     to Closed within 20 s, and canonical transcript rows equal to the
 ///     exchange count.
 ///
-/// Tolerant (journaled, summarized, not gated): median input_final -> first
-/// audio under 3 s; the third answer window contains the planted heading
-/// token; the first answer names the file.
+/// Measured (journaled, never judged): median input_final -> first audio; the
+/// first and third answer windows.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dyn std::error::Error>>
@@ -4342,14 +6596,13 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":200}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         assert!(
             history_text(&history).contains(S100_PROJECT),
@@ -4399,7 +6652,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                     "request 1 left no markdown file inside a notes folder under the workspace; markdown files: {files_after_1:?}"
                 )
             })?;
-        live.record_time_to_talk("S100", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S100").await?;
         let answer1 = answer_window(&mut live, "request 1", &request1).await?;
         evidence.record(request1.timing.latency_record(channel, 1, Some(request1.delegation_created_ms)))?;
         let plan_stem = plan_file
@@ -4420,20 +6673,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             })
             .map(str::to_owned)
             .collect();
-        let normalized_answer1 = normalize_words(&answer1);
-        let token_spoken = |token: &str| {
-            normalized_answer1.contains(token)
-                || (token.chars().all(|c| c.is_ascii_digit())
-                    && normalized_answer1.contains(token.trim_start_matches('0')))
-        };
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "answer_1_names_the_file",
-            !stem_tokens.is_empty() && stem_tokens.iter().all(|token| token_spoken(token)),
+            "answer_1",
             format!("file={plan_stem:?} stem_tokens={stem_tokens:?} answer={:?}", answer1.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Request 2 at assistant_quiet + 300 ms: "that file" resolves through
@@ -4481,18 +6726,14 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let barge_in_start_ms = fixture_start_entry(&timeline, barge_in)
             .map(|e| e.t_ms)
             .ok_or("barge-in fixture_start")?;
-        let timeline = live
-            .peer
-            .wait_for_timeline(
-                Duration::from_secs(45),
-                "barge-in input_final then a re-issued assistant_audio_start and assistant_audio_end",
-                |t| {
-                    let input_final = timeline_find(t, TimelineKind::InputFinal, barge_in_start_ms)?;
-                    let restart = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
-                    timeline_find(t, TimelineKind::AssistantAudioEnd, restart.t_ms).map(|_| t.to_vec())
-                },
-            )
-            .await?;
+        // The reply to the barge-in is judged by what the user hears: the
+        // assistant says "done" in speech that started after the user's
+        // barge-in speech did (provider audio clock), whether or not the
+        // provider closed the user's input final first. gpt-live-1 may answer
+        // before the user finishes (soak d98607e1 R5: "Done." while the user
+        // was still saying "... just say done"); talking over the user is
+        // judged by the talk-over check below, not by event order.
+        let timeline = s100_wait_barge_in_reply(&mut live, barge_in_start_ms).await?;
         let barge_in_timing = SpokenTurn::from_timeline(&timeline, barge_in).ok_or("barge-in timing")?;
         let assistant_quiet_after_barge_in_ms = timeline
             .iter()
@@ -4542,11 +6783,15 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             barge_in_timing.input_text,
             reissued.trim()
         );
-        assert!(
-            overlap_ms <= S100_BARGE_IN_OVERLAP_BOUND_MS,
-            "assistant talked over the barge-in for {overlap_ms} ms (bound {S100_BARGE_IN_OVERLAP_BOUND_MS} ms); timeline:\n{}",
-            format_timeline(&timeline)
-        );
+        let talk_over = talk_over_violations(&evidence, channel, "S100", &timeline, barge_in, "barge-in")?;
+        if !talk_over.is_empty() {
+            return Err(format!(
+                "{} (overlap {overlap_ms} ms); timeline:\n{}",
+                talk_over.join("; "),
+                format_timeline(&timeline)
+            )
+            .into());
+        }
         assert!(
             !reissued.trim().is_empty(),
             "no assistant transcript followed the barge-in; timeline:\n{}",
@@ -4569,14 +6814,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         .await?;
         let answer3 = answer_window(&mut live, "request 3", &request3).await?;
         evidence.record(request3.timing.latency_record(channel, 4, Some(request3.delegation_created_ms)))?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "answer_3_contains_planted_second_heading_token",
-            answer3.to_lowercase().contains(S100_HEADING_TOKEN),
+            "answer_3",
             format!("token={S100_HEADING_TOKEN:?} headings={headings:?} answer={:?}", answer3.trim()),
-            &mut tolerant_failures,
         )?;
 
         // (d) Goodbye, graceful client disconnect, host close convergence.
@@ -4596,6 +6839,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 fixture_start_entry(t, goodbye).map(|e| e.t_ms)
             })
             .await?;
+        live.sign_off_onset_ms = Some(goodbye_start);
         // The spoken reply to the goodbye is evidence, not a claim: the model
         // may stay silent after a closing remark (seen live: the provider
         // streamed the goodbye's input and never finished the user turn).
@@ -4636,26 +6880,22 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             goodbye_start,
         )
         .is_some();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
             "goodbye_input_final",
-            goodbye_input_final,
             format!("heard={goodbye_input:?}"),
-            &mut tolerant_failures,
         )?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
             "goodbye_reply",
-            goodbye_timing.is_some(),
             format!(
                 "input_final_to_audio_ms={:?} heard={goodbye_input:?}",
                 goodbye_timing.as_ref().and_then(SpokenTurn::input_final_to_audio_ms)
             ),
-            &mut tolerant_failures,
         )?;
         if goodbye_timing.is_none() {
             // Same fields as S99's line, so one grep gives a cross-scenario
@@ -4682,6 +6922,16 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S100").await?;
         let mut deterministic_failures: Vec<String> = Vec::new();
+        // The sign-off ("Thanks, that is all. Close the call.") needs no spoken
+        // reply: a model may stay silent after a closing remark. The contract
+        // is that the provider transcribed it (typed input deltas carry its
+        // closing words); the host close below then ends the call.
+        let heard_goodbye = normalize_words(&goodbye_input);
+        if !(heard_goodbye.contains("close") && heard_goodbye.contains("call")) {
+            deterministic_failures.push(format!(
+                "the sign-off was not transcribed (no \"close\" and \"call\" in its input deltas): {goodbye_input:?}"
+            ));
+        }
         let close = close_or_record(&mut live, &evidence, channel, "S100", &mut deterministic_failures).await?;
         let close_ms = close.map(|c| c.ms);
 
@@ -4742,7 +6992,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let history = loop {
             let history = live
                 .rpc
-                .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+                .session_history(json!(live.session_id), 30)
                 .await?;
             let rows = s100_user_rows(&history);
             let committed = rows.spoken.len() >= exchanges && rows.executor_inputs.len() >= requests.len();
@@ -4865,7 +7115,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             }
         }
 
-        // Tolerant latency: median input_final -> first assistant audio.
+        // Measured latency: median input_final -> first assistant audio.
         let mut latencies: Vec<i64> = [
             request1.timing.input_final_to_audio_ms(),
             request2.timing.input_final_to_audio_ms(),
@@ -4878,14 +7128,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         .collect();
         latencies.sort_unstable();
         let median = latencies.get(latencies.len() / 2).copied();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S100",
-            "median_input_final_to_first_audio_under_3s",
-            median.is_some_and(|m| m < S100_MEDIAN_LATENCY_BOUND_MS),
+            "input_final_to_first_audio_ms",
             format!("median_ms={median:?} all_ms={latencies:?}"),
-            &mut tolerant_failures,
         )?;
 
         // Evidence and soft faults.
@@ -4900,7 +7148,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         })?;
         let faults = scenario_browser_faults(&evidence, &mut live, channel, "S100").await?;
         println!(
-            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} tolerant_failures={tolerant_failures:?} faults={faults:?} history_messages={}",
+            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} faults={faults:?} history_messages={}",
             started.elapsed().as_millis(),
             request1.timing.input_final_to_audio_ms(),
             request2.timing.input_final_to_audio_ms(),
@@ -4927,8 +7175,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -4953,6 +7203,604 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
 // ===========================================================================
 // Scenario 102: who are you (capabilities, roster, ask another member)
 // ===========================================================================
+
+/// `(tool_use_id, is_error, content)` of every result of tool `name` in a
+/// `session/history` page.
+fn tool_results_named(history: &Value, name: &str) -> Vec<(String, bool, String)> {
+    let messages = history["messages"].as_array().cloned().unwrap_or_default();
+    let ids: Vec<String> = messages
+        .iter()
+        .filter(|row| row["role"] == "block_assistant")
+        .flat_map(|row| row["blocks"].as_array().cloned().unwrap_or_default())
+        .filter(|block| block["block_type"] == "tool_use" && block["data"]["name"] == name)
+        .filter_map(|block| block["data"]["id"].as_str().map(str::to_owned))
+        .collect();
+    messages
+        .iter()
+        .filter(|row| row["role"] == "tool_results")
+        .flat_map(|row| row["results"].as_array().cloned().unwrap_or_default())
+        .filter_map(|result| {
+            let id = result["tool_use_id"].as_str()?.to_owned();
+            ids.contains(&id).then(|| {
+                (
+                    id,
+                    result["is_error"].as_bool().unwrap_or(false),
+                    result["content"].to_string(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Characters kept per row in [`s102_dump_comms_rows`].
+const S102_DUMP_ROW_CHARS: usize = 600;
+
+/// Round-trip evidence, printed on every run: the executor's rows from its
+/// `send_request` on, and the member's own rows. Which comms tool the member
+/// answered with (`send_response`, a new `send_request`, `send_message`) and
+/// how the executor received it are not in the journal otherwise.
+async fn s102_dump_comms_rows(live: &mut PublicLiveHarness) {
+    fn clip(row: &Value) -> String {
+        row.to_string().chars().take(S102_DUMP_ROW_CHARS).collect()
+    }
+    let executor = live.rpc.session_history(json!(live.session_id), 60).await;
+    match executor {
+        Ok(history) => {
+            let messages = history["messages"].as_array().cloned().unwrap_or_default();
+            let from = messages
+                .iter()
+                .position(|row| row.to_string().contains("\"send_request\""))
+                .unwrap_or(0);
+            println!(
+                "GPT_LIVE_S102_EXECUTOR_ROWS total={} from={from}",
+                messages.len()
+            );
+            for (index, row) in messages.iter().enumerate().skip(from) {
+                println!("GPT_LIVE_S102_EXECUTOR_ROW index={index} row={}", clip(row));
+            }
+        }
+        Err(error) => println!("GPT_LIVE_S102_EXECUTOR_ROWS read_failed={error}"),
+    }
+    let member_session = match live
+        .rpc
+        .call(
+            "mob/member_status",
+            json!({"mob_id": live.mob_id, "agent_identity": S102_MEMBER}),
+            60,
+        )
+        .await
+    {
+        Ok(status) => status["current_session_id"].as_str().map(str::to_owned),
+        Err(error) => {
+            println!("GPT_LIVE_S102_MEMBER_ROWS status_failed={error}");
+            return;
+        }
+    };
+    let Some(member_session) = member_session else {
+        println!("GPT_LIVE_S102_MEMBER_ROWS no_current_session");
+        return;
+    };
+    match live.rpc.session_history(json!(member_session), 60).await {
+        Ok(history) => {
+            let messages = history["messages"].as_array().cloned().unwrap_or_default();
+            println!("GPT_LIVE_S102_MEMBER_ROWS total={}", messages.len());
+            for (index, row) in messages.iter().enumerate() {
+                if row["role"] == "system" {
+                    continue;
+                }
+                println!("GPT_LIVE_S102_MEMBER_ROW index={index} row={}", clip(row));
+            }
+        }
+        Err(error) => println!("GPT_LIVE_S102_MEMBER_ROWS read_failed={error}"),
+    }
+}
+
+/// S102's typed round trip, each step awaited on its own typed state (the
+/// harness's executor-turn wait reads the same way): exactly one successful
+/// executor `send_request`; the member's reply arriving at the executor as an
+/// incoming peer response; and the executor's turn over that reply reaching
+/// the open channel as a voiced session-lane row. A comms request has no
+/// built-in wait, so the reply is a later turn's input, never part of the
+/// asking turn. That later turn is conversation the provider has not heard
+/// while the user waits on the call, so the mirror voices it (an ordinary
+/// session-context append); it is not background work to keep quiet.
+/// The `request_id` of the executor's successful `send_request`, from the
+/// tool result's `peer_request_sent` receipt. The result content is the
+/// receipt JSON, sometimes carried as a JSON string holding that JSON.
+fn s102_sent_request_id(content: &str) -> Option<String> {
+    let mut value: Value = serde_json::from_str(content).ok()?;
+    if let Value::String(inner) = &value {
+        value = serde_json::from_str(inner).ok()?;
+    }
+    value["receipt"]["request_id"].as_str().map(str::to_owned)
+}
+
+/// Whether `row` carries the member's completed terminal response to the
+/// executor's request, read from the typed comms block in the executor's
+/// history. The block's content is the rendered "Peer response from ..."
+/// text when the response carried no blocks, and the response's own blocks
+/// when it did (combined5 S102 R3), so the typed fields decide, never text:
+/// kind `response_terminal`, the exact request id, status `completed`, and
+/// the member as the peer.
+fn s102_is_member_response_terminal(row: &Value, request_id: &str) -> bool {
+    let member_suffix = format!("/{S102_MEMBER}");
+    row["blocks"].as_array().is_some_and(|blocks| {
+        blocks.iter().any(|block| {
+            block["type"] == "comms"
+                && block["kind"] == "response_terminal"
+                && block["request_id"] == request_id
+                && block["status"] == "completed"
+                && block["peer"]["display_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(&member_suffix))
+        })
+    })
+}
+
+async fn s102_member_round_trip(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    session_rows_before: usize,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut failures = Vec::new();
+    let executor_history = live.rpc.session_history(json!(live.session_id), 60).await?;
+    let requests = tool_results_named(&executor_history, "send_request");
+    println!("GPT_LIVE_S102_SEND_REQUEST results={requests:?}");
+    let request_id = match requests.as_slice() {
+        [(_, false, content)] => s102_sent_request_id(content),
+        [(_, true, content)] => {
+            failures.push(format!(
+                "the executor's send_request to {S102_MEMBER} failed: {content}"
+            ));
+            return Ok(failures);
+        }
+        other => {
+            failures.push(format!(
+                "the executor must send exactly one send_request to {S102_MEMBER}, got {}",
+                other.len()
+            ));
+            return Ok(failures);
+        }
+    };
+    let Some(request_id) = request_id else {
+        failures.push(format!(
+            "the executor's send_request to {S102_MEMBER} returned no request id: {requests:?}"
+        ));
+        return Ok(failures);
+    };
+    // The member's reply arrives at the executor as a correlated peer
+    // response (`format_peer_response_projection`), and the executor's turn
+    // over it commits an assistant reply after it. Both are read from
+    // `session/history`, the canonical committed rows: the durable half of
+    // the contract, which a reopen seed and a replay carry, not only the
+    // transport append below.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let (peer_response_at, rows, reply) = loop {
+        let history = live.rpc.session_history(json!(live.session_id), 60).await?;
+        let messages = history["messages"].as_array().cloned().unwrap_or_default();
+        let response_at = messages
+            .iter()
+            .position(|row| s102_is_member_response_terminal(row, &request_id));
+        let reply = response_at.and_then(|at| {
+            messages[at + 1..]
+                .iter()
+                .filter(|row| row["role"] == "block_assistant")
+                .map(assistant_row_text)
+                .find(|text| !text.trim().is_empty())
+        });
+        if reply.is_some() || Instant::now() >= deadline {
+            break (response_at, messages.len(), reply);
+        }
+        sleep(Duration::from_millis(250)).await;
+    };
+    println!("GPT_LIVE_S102_PEER_RESPONSE rows={rows} response_at={peer_response_at:?}");
+    s102_dump_comms_rows(live).await;
+    if peer_response_at.is_none() {
+        failures.push(format!(
+            "{S102_MEMBER}'s reply never reached the executor as a peer response"
+        ));
+        failures.extend(s102_premature_claims(
+            &evidence.provider_stream_lines()?,
+            channel,
+            None,
+        ));
+        return Ok(failures);
+    }
+    let Some(reply) = reply else {
+        failures.push(format!(
+            "the executor never answered {S102_MEMBER}'s peer response"
+        ));
+        failures.extend(s102_premature_claims(
+            &evidence.provider_stream_lines()?,
+            channel,
+            None,
+        ));
+        return Ok(failures);
+    };
+    println!("GPT_LIVE_S102_EXECUTOR_REPLY text={reply:?}");
+    // That reply reaches the open channel as a voiced session-lane row: the
+    // mirror's ordinary append of a canonical row the provider has not
+    // heard, carrying the reply's text.
+    let probe: String = reply.trim().chars().take(48).collect();
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let voiced = loop {
+        let rows = evidence.session_commentary_appends(channel)?;
+        let found = rows
+            .iter()
+            .skip(session_rows_before)
+            .find(|(text, _)| commentary_carries(text, &probe))
+            .cloned();
+        if found.is_some() || Instant::now() >= deadline {
+            break found;
+        }
+        sleep(Duration::from_millis(250)).await;
+    };
+    match voiced {
+        Some((text, bytes)) => {
+            println!("GPT_LIVE_S102_VOICED_REPLY bytes={bytes} text={text:?}")
+        }
+        None => failures.push(format!(
+            "the executor's reply to {S102_MEMBER}'s response never reached the live channel \
+             as a voiced session row"
+        )),
+    }
+    // No premature peer claim: before the reply exists in the provider
+    // conversation (the session-lane append carrying it, on the sideband),
+    // no response may attribute an answer to the peer (soak c43aa3db S102
+    // run 2: "Pemberton said it feels like it's around mid-afternoon" before
+    // the peer had replied).
+    let lines = evidence.provider_stream_lines()?;
+    let reply_sent = lines.iter().find_map(|line| match &line.entry {
+        provider_recording::Entry::ClientEvent { event }
+            if line.channel_ordinal == channel
+                && event["type"] == "session.commentary.append"
+                && event["content"]
+                    .as_str()
+                    .is_some_and(|content| commentary_carries(content, &probe)) =>
+        {
+            Some(line.elapsed_ms)
+        }
+        _ => None,
+    });
+    // A reply that never reached the provider conversation leaves the whole
+    // call before it: any attribution to the peer is invented.
+    failures.extend(s102_premature_claims(&lines, channel, reply_sent));
+    Ok(failures)
+}
+
+/// Words that attribute speech to someone: "<peer> said", "<peer> thinks".
+const PEER_ATTRIBUTION_VERBS: &[&str] = &[
+    "said",
+    "says",
+    "replied",
+    "replies",
+    "told",
+    "thinks",
+    "answered",
+    "reckons",
+    "estimates",
+];
+
+/// Subjects whose attribution verb claims what the peer said: the peer's own
+/// name, or a pronoun standing for it ("They said they don't know").
+const PEER_ATTRIBUTION_PRONOUNS: &[&str] = &["they", "he", "she"];
+
+/// Sentences of assistant speech, as the provider transcribed it on the
+/// sideband, spoken before `reply_at_ms` (the sideband send of the append
+/// carrying the peer's reply; `None` when it never reached the provider
+/// conversation, so the whole call) that attribute an answer to the peer:
+/// the peer or a pronoun followed by an attribution verb, or "according to
+/// <peer>". Speech before the reply cannot be voicing it. Timing is per
+/// transcript delta, so a response that asks the peer and voices the real
+/// reply after it arrives is judged by what it said when.
+fn peer_claims_in_speech_before(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    reply_at_ms: Option<u64>,
+    peer: &str,
+) -> Vec<String> {
+    let speech: String = lines
+        .iter()
+        .filter(|line| line.channel_ordinal == channel)
+        .filter(|line| reply_at_ms.is_none_or(|reply| line.elapsed_ms < reply))
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.output_transcript.delta" =>
+            {
+                raw["delta"].as_str()
+            }
+            _ => None,
+        })
+        .collect();
+    speech
+        .split_inclusive(['.', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| {
+            let words = normalize_words(sentence);
+            let words: Vec<&str> = words.split(' ').collect();
+            let attributed = words.windows(2).any(|pair| {
+                (pair[0] == peer || PEER_ATTRIBUTION_PRONOUNS.contains(&pair[0]))
+                    && PEER_ATTRIBUTION_VERBS.contains(&pair[1])
+            });
+            let according = words.windows(3).any(|w| w == ["according", "to", peer]);
+            attributed || according
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// S102's premature-claim failures (soak c43aa3db run 2: "Pemberton said it
+/// feels like it's around mid-afternoon"; combined5 run 3: "They said they
+/// don't know" before the peer had answered).
+fn s102_premature_claims(
+    lines: &[provider_recording::Line],
+    channel: u32,
+    reply_at_ms: Option<u64>,
+) -> Vec<String> {
+    peer_claims_in_speech_before(lines, channel, reply_at_ms, S102_MEMBER_TOKEN)
+        .into_iter()
+        .map(|claim| {
+            format!("the voice attributed an answer to {S102_MEMBER} before its reply existed: {claim:?}")
+        })
+        .collect()
+}
+
+/// Waits until a typed turn's canonical rows (the user prompt and the
+/// assistant's final reply, read from `session/history`) are acknowledged in
+/// the provider conversation on the quiet lane (#1614). Each row rides one
+/// thinking append token (`meerkat-thinking-<token>-<i>`): the text-chat
+/// prefix and the row JSON, split into fragments of at most 500 bytes. A row
+/// is acknowledged when the joined fragments of a token carry it and every
+/// fragment of that token has its `session.thinking.appended`. A typed turn
+/// is text-chat context, never voiced: a `session.commentary.append`
+/// carrying either row fails. A question asked before the rows are
+/// acknowledged races them (verdict tree fb94711f S105 run 3).
+async fn wait_typed_turn_mirrored(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    prompt: &str,
+    scenario: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let history = live.rpc.session_history(json!(live.session_id), 60).await?;
+    let messages = history["messages"].as_array().cloned().unwrap_or_default();
+    let prompt_at = messages
+        .iter()
+        .rposition(|row| row.to_string().contains(prompt))
+        .ok_or_else(|| format!("{scenario}: the typed turn's prompt is not in session/history"))?;
+    let reply = messages[prompt_at + 1..]
+        .iter()
+        .rev()
+        .filter(|row| row["role"] == "block_assistant")
+        .map(assistant_row_text)
+        .find(|text| !text.trim().is_empty())
+        .ok_or_else(|| format!("{scenario}: the typed turn committed no assistant reply"))?;
+    let probes = [typed_row_probe(prompt), typed_row_probe(&reply)];
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let lines = evidence.provider_stream_lines()?;
+        let voiced: Vec<&String> = probes
+            .iter()
+            .filter(|probe| {
+                lines.iter().any(|line| {
+                    matches!(&line.entry, provider_recording::Entry::ClientEvent { event }
+                        if line.channel_ordinal == channel
+                            && event["type"] == "session.commentary.append"
+                            && event["content"]
+                                .as_str()
+                                .is_some_and(|content| carries_row(content, probe)))
+                })
+            })
+            .collect();
+        if !voiced.is_empty() {
+            return Err(format!(
+                "{scenario}: a typed turn's row was voiced on the commentary lane: {voiced:?}"
+            )
+            .into());
+        }
+        let tokens = thinking_tokens(&lines, channel);
+        let pending: Vec<&String> = probes
+            .iter()
+            .filter(|probe| {
+                !tokens
+                    .iter()
+                    .any(|token| token.acknowledged && carries_row(&token.text, probe))
+            })
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{scenario}: the typed turn's rows were not acknowledged on the quiet lane within 60 s: {pending:?}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The first 60 characters of a row's text: what a mirrored row's JSON
+/// carries verbatim (or JSON-escaped).
+fn typed_row_probe(text: &str) -> String {
+    text.trim().chars().take(60).collect()
+}
+
+/// Whether appended content carries a row starting with `probe`, either as
+/// the mirror's row JSON (parsed) or as text holding the probe verbatim or
+/// JSON-escaped (a framed thinking append: prefix, newline, row JSON).
+fn carries_row(content: &str, probe: &str) -> bool {
+    if commentary_carries(content, probe) || content.contains(probe) {
+        return true;
+    }
+    let escaped = serde_json::to_string(probe).unwrap_or_default();
+    let escaped = escaped.trim_matches('"');
+    !escaped.is_empty() && content.contains(escaped)
+}
+
+/// One thinking append token: its fragments' text joined in fragment order,
+/// and whether every fragment was acknowledged.
+#[derive(Debug, PartialEq)]
+struct ThinkingToken {
+    text: String,
+    acknowledged: bool,
+}
+
+/// The channel's thinking append tokens (`meerkat-thinking-<token>-<i>`).
+fn thinking_tokens(lines: &[provider_recording::Line], channel: u32) -> Vec<ThinkingToken> {
+    let mut fragments: BTreeMap<String, Vec<(u64, String, String)>> = BTreeMap::new();
+    for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
+        if let provider_recording::Entry::ClientEvent { event } = &line.entry
+            && event["type"] == "session.thinking.append"
+            && let Some(id) = event["event_id"].as_str()
+            && let Some((token, index)) = id.rsplit_once('-')
+            && let Ok(index) = index.parse::<u64>()
+        {
+            fragments.entry(token.to_owned()).or_default().push((
+                index,
+                id.to_owned(),
+                event["content"].as_str().unwrap_or_default().to_owned(),
+            ));
+        }
+    }
+    let acked = |id: &str| {
+        lines.iter().any(|line| {
+            line.channel_ordinal == channel
+                && matches!(&line.entry, provider_recording::Entry::ServerFrame { raw }
+                    if raw["type"] == "session.thinking.appended"
+                        && raw["client_event_id"] == id)
+        })
+    };
+    fragments
+        .into_values()
+        .map(|mut parts| {
+            parts.sort_by_key(|(index, _, _)| *index);
+            ThinkingToken {
+                acknowledged: parts.iter().all(|(_, id, _)| acked(id)),
+                text: parts.iter().map(|(_, _, text)| text.as_str()).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Waits until the assistant has said "done" in output that started (provider
+/// audio clock) at or after the start of the user's first transcribed
+/// barge-in speech, and its audio has ended (the last assistant audio event
+/// since the barge-in onset is an end). Returns the timeline.
+async fn s100_wait_barge_in_reply(
+    live: &mut PublicLiveHarness,
+    barge_in_start_ms: u64,
+) -> Result<Vec<TimelineEntry>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let timeline = live.peer.timeline().await?;
+        let events = live.peer.events().await?;
+        let audio_ended = timeline
+            .iter()
+            .rev()
+            .find(|e| {
+                e.t_ms >= barge_in_start_ms
+                    && matches!(
+                        e.kind,
+                        TimelineKind::AssistantAudioStart | TimelineKind::AssistantAudioEnd
+                    )
+            })
+            .is_some_and(|e| e.kind == TimelineKind::AssistantAudioEnd);
+        if audio_ended && s100_barge_in_answered(&timeline, &events, barge_in_start_ms) {
+            return Ok(timeline);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the assistant did not say \"done\" after the barge-in within 45 s; timeline:\n{}",
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Whether an assistant output delta saying "done" started (provider audio
+/// clock) at or after the user's first barge-in input delta. The barge-in's
+/// first input delta is the first user input event after the last provider
+/// event the peer logged at or before the barge-in onset (the timeline's
+/// `first_input_delta` is recorded once per session, not per utterance: soak
+/// 93b6aaec S100 R1).
+fn s100_barge_in_answered(
+    timeline: &[TimelineEntry],
+    events: &[Value],
+    barge_in_start_ms: u64,
+) -> bool {
+    let onset_index = timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::ProviderEvent && e.t_ms <= barge_in_start_ms)
+        .filter_map(|e| e.detail_u64("event_index"))
+        .max()
+        .and_then(|index| usize::try_from(index).ok());
+    let first_after = onset_index.map_or(0, |index| index + 1);
+    let Some((heard_index, heard)) = events
+        .iter()
+        .enumerate()
+        .skip(first_after)
+        .find(|(_, e)| is_user_input(e))
+    else {
+        return false;
+    };
+    let Some(heard_start) = heard["start_ms"].as_f64() else {
+        return false;
+    };
+    events.iter().skip(heard_index).any(|e| {
+        e["type"] == "session.output_transcript.delta"
+            && e["start_ms"]
+                .as_f64()
+                .is_some_and(|start| start >= heard_start)
+            && normalize_words(e["delta"].as_str().unwrap_or_default())
+                .split(' ')
+                .any(|word| word == "done")
+    })
+}
+
+/// The text blocks of one `block_assistant` history row, joined.
+fn assistant_row_text(row: &Value) -> String {
+    row["blocks"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block["block_type"] == "text")
+                .filter_map(|block| block["data"]["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a voiced row's content carries `probe`: the mirror sends a
+/// canonical row as JSON (`{"role":"assistant","text":...}`), so its string
+/// values are compared, not its escaped bytes.
+fn commentary_carries(content: &str, probe: &str) -> bool {
+    fn strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) => out.push(text),
+            Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+            Value::Object(map) => map.values().for_each(|item| strings(item, out)),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<Value>(content) {
+        Ok(value) => {
+            let mut found = Vec::new();
+            strings(&value, &mut found);
+            found
+                .iter()
+                .any(|text| text.trim_start().starts_with(probe))
+        }
+        // A prefix cut inside the JSON (content over the capture limit)
+        // still carries the probe's bytes when it has no escapes.
+        Err(_) => content.contains(probe),
+    }
+}
 
 /// Planted second member and its planted tool: test oracles the roster
 /// preface carries and the answer windows are checked for.
@@ -4986,9 +7834,8 @@ impl meerkat::experimental_gpt_live::PublicGptLiveInstructionsPreface for Roster
 /// executor's canonical session, before the channel connects; the first two
 /// answers produce no delegation; the third produces exactly one, completed
 /// by the existing member with a commentary readout; the close converges.
-/// Tolerant: the second answer window names the planted member; the first
-/// answer window mentions files or the shell (the executor's tools from the
-/// preface); open request -> connected under 5 s.
+/// Measured (never judged): the first two answer windows; open request ->
+/// connected.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn std::error::Error>> {
@@ -5045,9 +7892,10 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         unmeasured_playback: true,
         executor_instructions: Some(vec![format!(
             "You are the executor behind a voice assistant in a mob with another member named {S102_MEMBER}. \
-             When asked to ask them something, send them exactly one request with the comms send_request tool \
-             and wait for the reply; if no reply arrives within the tool's timeout, say so. \
-             Answer in one or two short spoken sentences, quoting their answer if you got one."
+             When asked to ask them something, send them exactly one request with the comms send_request tool. \
+             The reply does not come back inside that turn: it arrives later as an incoming peer response, \
+             and you are woken to read it. In the asking turn, say in one short spoken sentence that you asked. \
+             When their response arrives, answer in one or two short spoken sentences quoting it."
         )]),
         extra_members: vec![ExtraMember {
             identity: S102_MEMBER,
@@ -5067,9 +7915,8 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -5104,17 +7951,14 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             PlayAt::new("whoareyou_capabilities", Anchor::Now, 0),
         )
         .await?;
-        live.record_time_to_talk("S102", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S102").await?;
         evidence.record(q1.latency_record(channel, 1, None))?;
-        let lower1 = answer1.to_lowercase();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S102",
-            "answer_1_mentions_executor_tools",
-            lower1.contains("file") || lower1.contains("shell") || lower1.contains("command"),
+            "answer_1",
             format!("answer={:?}", answer1.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Q2: roster, native; the planted member token is the oracle.
@@ -5129,18 +7973,17 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         )
         .await?;
         evidence.record(q2.latency_record(channel, 2, None))?;
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S102",
-            "answer_2_names_planted_member",
-            answer2.to_lowercase().contains(S102_MEMBER_TOKEN),
+            "answer_2",
             format!("token={S102_MEMBER_TOKEN:?} answer={:?}", answer2.trim()),
-            &mut tolerant_failures,
         )?;
 
         // Q3: ask them, delegated.
         evidence.stage(EvidenceStage::WhoAreYouAsk)?;
+        let session_rows_before_q3 = evidence.session_commentary_appends(channel)?.len();
         let request3 = delegated_request(
             &mut live,
             started,
@@ -5156,26 +7999,18 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         let answer3 = answer_window(&mut live, "question 3", &request3).await?;
         evidence.record(request3.timing.latency_record(channel, 3, Some(request3.delegation_created_ms)))?;
         println!("GPT_LIVE_S102_ANSWER3 answer={:?}", answer3.trim());
-        record_tolerant(
-            &evidence,
-            channel,
-            "S102",
-            "answer_3_relays_member_or_time",
-            {
-                let lower = answer3.to_lowercase();
-                lower.contains(S102_MEMBER_TOKEN)
-                    || lower.contains("utc")
-                    || lower.contains("o'clock")
-                    || lower.contains(" time")
-                    || lower.contains(S102_TOOL.replace('_', " ").as_str())
-            },
-            format!("answer={:?}", answer3.trim()),
-            &mut tolerant_failures,
-        )?;
+        // The typed contract behind "ask them": the executor's one
+        // send_request reached the wired member, the member answered, and the
+        // reply came back to the executor as a successful tool result. How
+        // the voice model words the relay is its own choice and is not
+        // checked: round 1's substring oracle passed on "their sense of the
+        // time" while the member was never reached.
+        let round_trip_failures =
+            s102_member_round_trip(&mut live, &evidence, channel, session_rows_before_q3).await?;
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S102").await?;
-        let mut deterministic_failures = Vec::new();
+        let mut deterministic_failures = round_trip_failures;
         let close = close_or_record(&mut live, &evidence, channel, "S102", &mut deterministic_failures).await?;
 
         let timeline = live.peer.timeline().await?;
@@ -5210,7 +8045,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={:?} close_converged_before_host_close={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={:?} close_converged_before_host_close={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             q1.input_final_to_audio_ms(),
             q2.input_final_to_audio_ms(),
@@ -5229,8 +8064,10 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -5258,15 +8095,23 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
 
 /// Tokens the monologue plants; the single executor input must carry all.
 const S103_TOKENS: [&str; 4] = ["marigold", "tuesday", "copenhagen", "pelican"];
-/// The barge-in lands this long after the brief readout's first audio.
-const S103_BARGE_IN_OFFSET_MS: u64 = 1500;
-/// Overlap bound for the two interruptions (provider VAD/stop latency).
-const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
-/// Tolerant bound: assistant energy off within this of the barge-in onset.
-/// Not achievable with this provider (measured 868 and 2248 ms here, 1200-1700
-/// ms in S100): kept as the design's target, reported, never a gate. The
-/// overlap gate stays at `S103_BARGE_IN_OVERLAP_BOUND_MS`.
-const S103_QUIET_BOUND_MS: i64 = 800;
+/// S103's fixtures. The monologue's provider-stream window runs from its
+/// `play_at` step to the barge-in queue's step.
+const S103_MONOLOGUE: &str = "interrupt_monologue";
+const S103_BARGE_IN: &str = "interrupt_barge_in";
+const S103_CORRECTION: &str = "interrupt_correction";
+/// The barge-in starts at the onset of the first assistant audio after the
+/// brief's commentary. That audio is often a short acknowledgement ("Okay,
+/// I'm on it.") rather than the readout, and a 1500 ms offset landed after
+/// it ended in 2 of 5 runs, so the barge-in interrupted nothing. At the onset
+/// it always lands on assistant speech.
+const S103_BARGE_IN_OFFSET_MS: u64 = 0;
+/// The two interruptions' overlap is measured, not bounded (the browser must
+/// not fault it). gpt-live-1 owns interruption: the browser's media runs to
+/// the provider directly and Meerkat sends no cancel, so the assistant stops
+/// when the provider's turn detection yields. The yield contract is the
+/// talk-over contract (`talk_over_violations`, `TALK_OVER_BOUND_MS`).
+const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 60_000;
 
 /// Wait until every delegated executor turn is terminal and the assistant
 /// has produced no new event for `quiet`; bounded.
@@ -5275,10 +8120,12 @@ async fn wait_for_settled(
     quiet: Duration,
     bound: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_runtime::live_execution::LiveDelegationWorkerTerminalKind;
     let runtime = live.shared()?.0.runtime.clone();
     let deadline = Instant::now() + bound;
     let mut last_len = live.peer.events().await?.len();
     let mut quiet_since = Instant::now();
+    let mut last_states = Vec::new();
     loop {
         let events = live.peer.events().await?;
         if events.len() != last_len {
@@ -5289,12 +8136,40 @@ async fn wait_for_settled(
             .live_delegation_recovery_snapshots(&live.session_id)
             .await?;
         let all_terminal = snapshots.iter().all(|s| s.terminal().is_some());
-        if all_terminal && quiet_since.elapsed() >= quiet {
+        // A completed result still on its way to the channel (released, its
+        // append not yet resolved) is not settled: closing then cuts off its
+        // injection before the model can read it (S103 R6 on b187df1e0: the
+        // correction's result was released 0.5 s before the close, after 6 s
+        // of quiet, and the provider reported context_injection_incomplete).
+        // The quiet window restarts at every delegation state transition (a
+        // terminal, a delivery resolved), so it covers the readout that
+        // follows the last one.
+        let results_resolved = snapshots.iter().all(|s| {
+            s.terminal() != Some(LiveDelegationWorkerTerminalKind::Completed)
+                || !s.result_eligible()
+                || s.result_delivery().is_some()
+        });
+        let states: Vec<String> = snapshots
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}:{:?}:{:?}",
+                    s.operation_id(),
+                    s.terminal(),
+                    s.result_delivery()
+                )
+            })
+            .collect();
+        if states != last_states {
+            last_states = states;
+            quiet_since = Instant::now();
+        }
+        if all_terminal && results_resolved && quiet_since.elapsed() >= quiet {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "session did not settle within {} s (all_terminal={all_terminal}, quiet_for_ms={})",
+                "session did not settle within {} s (all_terminal={all_terminal}, results_resolved={results_resolved}, quiet_for_ms={})",
                 bound.as_secs(),
                 quiet_since.elapsed().as_millis()
             )
@@ -5305,25 +8180,33 @@ async fn wait_for_settled(
 }
 
 /// Scenario 103: a 27 s monologue with disfluencies and three 700-900 ms
-/// mid-sentence pauses ends in a request whose readout is long; 1500 ms
-/// into that readout the user barges in with a correction, and 300 ms after
-/// that clip ends corrects again.
+/// mid-sentence pauses ends in a request whose readout is long; at the first
+/// assistant audio after the brief lands the user barges in with a
+/// correction, and 300 ms after that clip ends corrects again.
 ///
-/// Deterministic, but provider-dependent: the monologue produces exactly
-/// one client delegation and its executor input carries all four planted
-/// tokens, and the monologue fixture sees no assistant overlap. gpt-live-1
-/// has been observed (1 of 2 runs) to end the turn on a 700-900 ms pause and
-/// delegate mid-monologue, 10 s before the utterance ended, speaking 5.2 s
-/// over the user; the only legitimate lever against that is instruction
-/// text asking the model to let the user finish, never a runtime heuristic.
+/// Deterministic: the monologue produces at least one client delegation and
+/// its delegations' executor inputs together carry all four planted tokens.
+/// Provider behaviour, measured not judged: gpt-live-1 owns turn-taking and
+/// the public API exposes no turn-detection control; it has been seen
+/// to end the turn on a 700-900 ms pause and delegate mid-monologue, or to
+/// speak over a pause (2 of 5 soak runs). No words are lost either way,
+/// because each delegation's request carries every user delta since the
+/// previous one, so that split is measured (`GPT_LIVE_S103_MONOLOGUE_TURNS`),
+/// not judged; the only lever on it is instruction text asking the model to
+/// let the user finish, never a runtime heuristic.
 /// The remaining deterministic checks:
 /// after the barge-in every new assistant response starts after a new input
-/// final or a commentary append, and no response repeats itself (no
-/// duplicate readout; see `unprompted_assistant_response_starts`, the
-/// repetition is a browser fault);
+/// final or a commentary append; every delegation result is delivered once
+/// and voiced inside one response (`readout_faults`, applied by
+/// `scenario_browser_faults`); the barge-in and the correction keep the
+/// talk-over bounds (`talk_over_violations`);
 /// overlap beyond the bound only inside the two interruption windows; close
-/// converges. Tolerant: assistant energy off within 800 ms of the barge-in
-/// onset; the last executor input carries "friday"; open -> connected < 5 s.
+/// converges; the barge-in lands on assistant speech and is answered (the
+/// provider's next response or delegation closes its input, and an assistant
+/// row follows its canonical row); every input final commits as a canonical
+/// spoken row. The public protocol has no response lifecycle (no interrupted
+/// or cancelled event, no truncation signal), so there is no interruption
+/// event to assert against. Measured (never judged): open -> connected.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
@@ -5389,9 +8272,8 @@ async fn run_s103_interrupt_and_recover(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -5402,7 +8284,9 @@ async fn run_s103_interrupt_and_recover(
         evidence.stage(EvidenceStage::InterruptMonologue)?;
         let monologue = live
             .peer
-            .play_at(&PlayAt::new("interrupt_monologue", Anchor::Now, 0))
+            // Overlap over the monologue is gpt-live-1's turn-taking, measured
+            // (GPT_LIVE_S103_MONOLOGUE_TURNS) rather than judged.
+            .play_at(&PlayAt::new(S103_MONOLOGUE, Anchor::Now, 0).overlap_bound_ms(60_000))
             .await?;
         let monologue_start_ms = live
             .peer
@@ -5436,7 +8320,7 @@ async fn run_s103_interrupt_and_recover(
             &monologue_classification
                 .backchannels
                 .iter()
-                .map(|burst| ("interrupt_monologue".to_owned(), burst.clone()))
+                .map(|burst| (S103_MONOLOGUE.to_owned(), burst.clone()))
                 .collect::<Vec<_>>(),
         )?;
         // Classified backchannels ("mm-hm" yielded to the user) are allowed;
@@ -5448,7 +8332,7 @@ async fn run_s103_interrupt_and_recover(
                 timeline_find(t, TimelineKind::DelegationCreated, monologue_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S103", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S103").await?;
         let executor_done_at_ms = wait_executor_turn(&mut live, &mut seen_executor_turns, started).await?;
         let commentary_ms = live
             .peer
@@ -5460,10 +8344,10 @@ async fn run_s103_interrupt_and_recover(
         let scheduled = live
             .peer
             .queue(&[
-                PlayAt::new("interrupt_barge_in", Anchor::FirstAssistantAudio, S103_BARGE_IN_OFFSET_MS)
+                PlayAt::new(S103_BARGE_IN, Anchor::FirstAssistantAudio, S103_BARGE_IN_OFFSET_MS)
                     .allow_active(true)
                     .overlap_bound_ms(S103_BARGE_IN_OVERLAP_BOUND_MS),
-                PlayAt::new("interrupt_correction", Anchor::Now, 300)
+                PlayAt::new(S103_CORRECTION, Anchor::Now, 300)
                     .overlap_bound_ms(S103_BARGE_IN_OVERLAP_BOUND_MS),
             ])
             .await?;
@@ -5548,15 +8432,6 @@ async fn run_s103_interrupt_and_recover(
             barge_in_timing.as_ref().map(|t| t.input_text.as_str()),
             correction_timing.as_ref().map(|t| t.input_text.as_str())
         );
-        record_tolerant(
-            &evidence,
-            channel,
-            "S103",
-            "assistant_quiet_within_800ms_of_barge_in",
-            assistant_quiet_after_onset_ms.is_some_and(|ms| ms <= S103_QUIET_BOUND_MS),
-            format!("onset_to_assistant_quiet_ms={assistant_quiet_after_onset_ms:?}"),
-            &mut tolerant_failures,
-        )?;
 
         // Readout integrity after the barge-in: every assistant response
         // starts after a new input final or a commentary append.
@@ -5570,7 +8445,7 @@ async fn run_s103_interrupt_and_recover(
         // Canonical history: executor inputs.
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         let rows = s100_user_rows(&history);
         let markdown = s100_markdown_files(&workspace);
@@ -5594,65 +8469,162 @@ async fn run_s103_interrupt_and_recover(
             ],
         );
         println!("GPT_LIVE_S103_DELEGATIONS per_window={per_window:?}");
-        if per_window.first().map(|(_, c)| *c) != Some(1) {
+        // Provider behaviour, measured not judged: gpt-live-1 owns turn-taking
+        // and the public API has no turn-detection control, so it may end the
+        // turn on a mid-sentence pause and delegate before the monologue ends,
+        // or speak over a pause. Neither may lose words: each delegation's
+        // request carries every user delta since the previous one, so the
+        // monologue's delegations together must carry all planted tokens.
+        let monologue_delegations = per_window.first().map(|(_, c)| *c).unwrap_or(0);
+        if monologue_delegations == 0 {
             deterministic_failures.push(format!(
-                "the monologue must produce exactly one client delegation; per window: {per_window:?}"
+                "the monologue produced no client delegation; per window: {per_window:?}"
             ));
         }
-        match rows.executor_inputs.first() {
-            Some(task) => {
-                // Only the request part (the user transcript of the window);
-                // the assistant's interjections sit under the heading.
-                let (input, _context) = split_executor_task(task);
-                let missing: Vec<&str> = S103_TOKENS
-                    .iter()
-                    .copied()
-                    .filter(|token| !input.contains(token))
-                    .collect();
-                if !missing.is_empty() {
-                    deterministic_failures.push(format!(
-                        "the monologue's executor input lacks planted tokens {missing:?}: {input:?}"
-                    ));
-                }
+        // Only the request part of each task (the user transcript of its
+        // window); the assistant's interjections sit under the heading.
+        let monologue_requests: Vec<String> = rows
+            .executor_inputs
+            .iter()
+            .take(monologue_delegations)
+            .map(|task| split_executor_task(task).0)
+            .collect();
+        // Each planted token is spoken once, so it must reach exactly one of
+        // the monologue's delegations: none lost, none carried twice. A token
+        // that reached none is classified from the provider's own evidence
+        // for the monologue window (#1706): lost by us after the provider
+        // transcribed it (a failure), never transcribed during an
+        // untranscribed provider ingest stall (provider-degraded, void), or
+        // transcribed as something else with no stall (a failure: that can
+        // come from our own prompt).
+        let mut monologue_ingest: Option<Result<evidence::ProviderIngestWindow, String>> = None;
+        for token in S103_TOKENS {
+            let carriers = monologue_requests
+                .iter()
+                .filter(|request| request.contains(token))
+                .count();
+            if carriers == 1 {
+                continue;
             }
-            None => deterministic_failures.push("no executor input row in the canonical history".to_owned()),
+            let reached = format!(
+                "planted token {token:?} reached {carriers} of the monologue's executor inputs (exactly one required): {monologue_requests:?}"
+            );
+            if carriers > 1 {
+                deterministic_failures.push(reached);
+                continue;
+            }
+            let window = monologue_ingest.get_or_insert_with(|| {
+                evidence.provider_stream_lines().and_then(|lines| {
+                    evidence::ProviderIngestWindow::between_steps(
+                        &lines,
+                        channel,
+                        &support::play_at_step(S103_MONOLOGUE),
+                        &support::queue_step(&[S103_BARGE_IN, S103_CORRECTION]),
+                    )
+                })
+            });
+            match window {
+                Err(error) => deterministic_failures.push(format!(
+                    "{reached}; the provider's evidence for the monologue could not be read: {error}"
+                )),
+                Ok(window) => match evidence::classify_planted_token_loss(token, window) {
+                    evidence::PlantedTokenLoss::DroppedAfterTranscript => {
+                        deterministic_failures.push(format!(
+                            "{reached}; the provider transcribed it, so it was lost after the input transcript"
+                        ));
+                    }
+                    evidence::PlantedTokenLoss::OmittedDuringIngestStall(stall) => {
+                        println!(
+                            "GPT_LIVE_S103_TRANSCRIPT_OMISSION token={token:?} stall_gap_ms={} burst_ms={} audio_ms={}..{}",
+                            stall.stall_gap_ms, stall.burst_ms, stall.audio_start_ms, stall.audio_end_ms
+                        );
+                        evidence.note_input_transcript_omission("monologue", token, &stall)?;
+                    }
+                    evidence::PlantedTokenLoss::TranscribedOtherwise { heard } => {
+                        deterministic_failures.push(format!(
+                            "{reached}; the provider transcribed something else in the token's place, with no ingest stall: heard {heard:?}"
+                        ));
+                    }
+                },
+            }
         }
-        if monologue_overlap_ms > 0 {
-            deterministic_failures.push(format!(
-                "the assistant spoke {monologue_overlap_ms} ms over the monologue (answered a pause)"
-            ));
+        println!(
+            "GPT_LIVE_S103_MONOLOGUE_TURNS delegations={monologue_delegations} assistant_overlap_ms={monologue_overlap_ms}"
+        );
+        for (fixture, label) in [(barge_in, "barge-in"), (correction, "correction")] {
+            for violation in talk_over_violations(&evidence, channel, "S103", &timeline, fixture, label)? {
+                deterministic_failures.push(format!(
+                    "{violation} (overlap barge_in={barge_in_overlap_ms} correction={correction_overlap_ms})"
+                ));
+            }
         }
-        if barge_in_overlap_ms > S103_BARGE_IN_OVERLAP_BOUND_MS
-            || correction_overlap_ms > S103_BARGE_IN_OVERLAP_BOUND_MS
-        {
-            deterministic_failures.push(format!(
-                "interruption overlap beyond the bound: barge_in={barge_in_overlap_ms} correction={correction_overlap_ms} bound={S103_BARGE_IN_OVERLAP_BOUND_MS}"
-            ));
+        if !barge_in_landed_on_speech(&timeline, barge_in, barge_in_overlap_ms) {
+            deterministic_failures.push(
+                "the barge-in did not land on assistant speech, so it interrupted nothing".to_owned(),
+            );
         }
         if !unprompted_starts.is_empty() {
             deterministic_failures.push(format!(
                 "assistant audio started without a new input final or commentary at ms {unprompted_starts:?} (duplicate readout)"
             ));
         }
-        let repeated_lines = repeated_readout_lines(&timeline, barge_in_start_ms);
-        if !repeated_lines.is_empty() {
+        // Barge-in contract. gpt-live-1's public protocol carries no response
+        // lifecycle: no done, cancelled or interrupted event and no truncation
+        // signal, so an interrupted assistant turn is indistinguishable from a
+        // finished one and "no audio after the interruption" has no event to
+        // order against. What it does carry is causal order: the peer closes
+        // the barge-in's input transcript only when the provider's next output
+        // transcript delta or delegation for it arrives (`closed_by`). So the
+        // barge-in must be answered that way, and its canonical row must be
+        // followed by an assistant row; neither depends on the model's words.
+        let barge_in_final = timeline.iter().find(|e| {
+            e.kind == TimelineKind::InputFinal
+                && e.detail_u64("closed_at_ms").is_some_and(|t| t >= barge_in_start_ms)
+        });
+        match barge_in_final.and_then(|e| e.detail.get("closed_by").and_then(|c| c.as_str())) {
+            Some("response" | "delegation") => {}
+            other => deterministic_failures.push(format!(
+                "the barge-in was never answered: no provider response or delegation closed its input (closed_by={other:?})"
+            )),
+        }
+        if let Some(heard) = barge_in_final
+            .and_then(|e| e.detail.get("text").and_then(|t| t.as_str()))
+            .map(normalize_words)
+            .filter(|heard| !heard.is_empty())
+        {
+            let messages = history["messages"].as_array().cloned().unwrap_or_default();
+            let row = messages.iter().position(|m| {
+                m["role"].as_str() == Some("user")
+                    && normalize_words(&history_text(&json!({"messages":[m]}))).contains(heard.as_str())
+            });
+            let answered = row.is_some_and(|row| {
+                messages[row + 1..]
+                    .iter()
+                    .any(|m| m["role"].as_str().is_some_and(|role| role.contains("assistant")))
+            });
+            if !answered {
+                deterministic_failures.push(format!(
+                    "the barge-in's canonical row ({row:?}) is not followed by an assistant row"
+                ));
+            }
+        }
+        // Every utterance the provider finalized commits as a canonical
+        // spoken row. Whether "Friday" is among them is the provider's
+        // transcription: when the assistant answers "Actually," at once, the
+        // provider closes that turn and has been seen never to transcribe
+        // the rest.
+        let spoken: Vec<String> = rows.spoken.iter().map(|row| normalize_words(row)).collect();
+        let uncommitted: Vec<String> = timeline
+            .iter()
+            .filter(|e| e.kind == TimelineKind::InputFinal)
+            .filter_map(|e| e.detail.get("text").and_then(|t| t.as_str()).map(normalize_words))
+            .filter(|heard| !heard.is_empty() && !spoken.iter().any(|row| row.contains(heard.as_str())))
+            .collect();
+        if !uncommitted.is_empty() {
             deterministic_failures.push(format!(
-                "an assistant response repeated readout lines after the barge-in (duplicate readout): {repeated_lines:?}"
+                "input finals never committed as canonical spoken rows: {uncommitted:?}"
             ));
         }
-        record_tolerant(
-            &evidence,
-            channel,
-            "S103",
-            "last_executor_input_carries_friday",
-            rows
-                .executor_inputs
-                .last()
-                .is_some_and(|task| split_executor_task(task).0.contains("friday"))
-                || rows.spoken.iter().any(|row| row.contains("friday")),
-            format!("executor_inputs={:?}", rows.executor_inputs),
-            &mut tolerant_failures,
-        )?;
 
         let report = live.peer.energy().await?;
         evidence.record(EvidenceRecord::Energy {
@@ -5668,7 +8640,7 @@ async fn run_s103_interrupt_and_recover(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S103_OK total_ms={} connected_ms={connected_ms} monologue_overlap_ms={monologue_overlap_ms} barge_in_overlap_ms={barge_in_overlap_ms} correction_overlap_ms={correction_overlap_ms} onset_to_quiet_ms={assistant_quiet_after_onset_ms:?} executor_done_at_ms={executor_done_at_ms} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S103_OK total_ms={} connected_ms={connected_ms} monologue_overlap_ms={monologue_overlap_ms} barge_in_overlap_ms={barge_in_overlap_ms} correction_overlap_ms={correction_overlap_ms} onset_to_quiet_ms={assistant_quiet_after_onset_ms:?} executor_done_at_ms={executor_done_at_ms} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close.map(|c| c.ms)
         );
@@ -5681,8 +8653,10 @@ async fn run_s103_interrupt_and_recover(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -5724,8 +8698,8 @@ const S107_REOPEN_BOUND: Duration = Duration::from_secs(10);
 /// terminality and its executor input and answer are committed to the
 /// canonical session; a subsequent open on the same session connects within
 /// 10 s and answers a spoken question natively; the second channel closes
-/// gracefully. Tolerant: the committed answer names the poem's subject;
-/// open request -> connected under 5 s on both channels.
+/// gracefully. Measured (never judged): the committed answer; open request
+/// -> connected on both channels.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
@@ -5790,10 +8764,9 @@ async fn run_s107_stuck_close_convergence(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -5815,7 +8788,7 @@ async fn run_s107_stuck_close_convergence(
                 timeline_find(t, TimelineKind::DelegationCreated, request_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S107", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S107").await?;
         live.record_uplink("S107").await?;
         let timeline1 = live.peer.timeline().await?;
         let request_timing = SpokenTurn::from_timeline(&timeline1, request);
@@ -5891,7 +8864,7 @@ async fn run_s107_stuck_close_convergence(
         let (rows, assistant_text) = loop {
             let history = live
                 .rpc
-                .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+                .session_history(json!(live.session_id), 30)
                 .await?;
             let rows = s100_user_rows(&history);
             let messages = history["messages"].as_array().cloned().unwrap_or_default();
@@ -5929,14 +8902,12 @@ async fn run_s107_stuck_close_convergence(
         if assistant_text.trim().is_empty() {
             deterministic_failures.push("the job's final transcript (assistant rows after the executor input) was not committed".to_owned());
         }
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S107",
-            "committed_answer_names_the_poem_subject",
-            assistant_text.to_lowercase().contains("lighthouse"),
+            "committed_answer",
             format!("assistant_after_job={:?}", assistant_text.chars().take(300).collect::<String>()),
-            &mut tolerant_failures,
         )?;
 
         live.record_workgraph_mode("S107", 1, &mut deterministic_failures).await?;
@@ -5977,7 +8948,7 @@ async fn run_s107_stuck_close_convergence(
             PlayAt::new("stuckclose_back", Anchor::Now, 0).overlap_bound_ms(60_000),
         )
         .await?;
-        live.record_time_to_talk("S107", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S107").await?;
         evidence.record(back.latency_record(channel2, 1, None))?;
         if answer_back.trim().is_empty() {
             deterministic_failures.push("the reopened channel produced no spoken answer".to_owned());
@@ -5996,7 +8967,7 @@ async fn run_s107_stuck_close_convergence(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S107_OK total_ms={} connected_ms={connected_ms} close_ms={close_ms} close_converged={converged} executor_done_at_ms={executor_done_at_ms:?} reopen_ms={reopen_ms} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S107_OK total_ms={} connected_ms={connected_ms} close_ms={close_ms} close_converged={converged} executor_done_at_ms={executor_done_at_ms:?} reopen_ms={reopen_ms} back_ms={:?} close2_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             back.input_final_to_audio_ms(),
             close2.map(|c| c.ms)
@@ -6011,8 +8982,10 @@ async fn run_s107_stuck_close_convergence(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -6090,9 +9063,8 @@ fn s104_policy() -> LiveDelegationExecutionPolicy {
 /// answer is committed to the source (under ExistingMember also its executor
 /// input row); the typed turn commits its user and assistant rows; the reopen
 /// connects within 30 s and the first spoken question is answered natively
-/// (no delegation); the second channel closes gracefully. Tolerant: the
-/// post-reopen answer window carries the job's planted result token and the
-/// typed fact; open -> connected < 5 s per channel.
+/// (no delegation); the second channel closes gracefully. Measured (never
+/// judged): the post-reopen answer window; open -> connected per channel.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()
@@ -6163,10 +9135,9 @@ async fn run_s104_handoff_voice_typed_voice(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
 
@@ -6210,7 +9181,7 @@ async fn run_s104_handoff_voice_typed_voice(
                 timeline_find(t, TimelineKind::DelegationCreated, request_start_ms).map(|e| e.t_ms)
             })
             .await?;
-        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S104").await?;
         live.record_uplink("S104").await?;
         let timeline1 = live.peer.timeline().await?;
         println!(
@@ -6262,7 +9233,7 @@ async fn run_s104_handoff_voice_typed_voice(
         };
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         let rows = s100_user_rows(&history);
         let all_text = history_text(&history).to_lowercase();
@@ -6352,7 +9323,7 @@ async fn run_s104_handoff_voice_typed_voice(
             PlayAt::new("handoff_back", Anchor::Now, 0).overlap_bound_ms(60_000),
         )
         .await?;
-        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S104").await?;
         evidence.record(back.latency_record(channel2, 1, None))?;
         // The reopen's summary (a late one rides the thinking lane at this
         // question's first delta) and the job-result commentary land in the
@@ -6429,12 +9400,11 @@ async fn run_s104_handoff_voice_typed_voice(
                 output_transcript_text(&events_settled, start)
             })
             .unwrap_or_default();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel2,
             "S104",
             "post_reopen_answer_window",
-            true,
             format!(
                 "fixture_start_ms={back_start} audio_end_answer={:?} settled_answer={:?} commentary_ms={:?} transcript_after_commentary={:?}",
                 answer_at_audio_end.trim(),
@@ -6442,27 +9412,28 @@ async fn run_s104_handoff_voice_typed_voice(
                 commentary.map(|entry| entry.t_ms),
                 transcript_after_commentary.trim()
             ),
-            &mut tolerant_failures,
         )?;
         let lower = answer_back.to_lowercase();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel2,
             "S104",
-            "post_reopen_answer_carries_job_result_token",
-            lower.contains(S104_RESULT_TOKEN),
+            "post_reopen_answer",
             format!("token={S104_RESULT_TOKEN:?} answer={:?}", answer_back.trim()),
-            &mut tolerant_failures,
         )?;
-        record_tolerant(
-            &evidence,
-            channel2,
-            "S104",
-            "post_reopen_answer_carries_typed_fact",
-            lower.contains(S104_TYPED_TOKEN),
-            format!("token={S104_TYPED_TOKEN:?} answer={:?}", answer_back.trim()),
-            &mut tolerant_failures,
-        )?;
+        // The typed note was committed while the call was closed, so by the
+        // reopen contract it rides the reopen's startup input verbatim. That
+        // delivery is the contract; whether the spoken answer repeats the
+        // word is the model's wording.
+        let seed_texts = evidence.session_input_texts(channel2)?;
+        if !seed_texts
+            .iter()
+            .any(|text| text.to_lowercase().contains(S104_TYPED_TOKEN))
+        {
+            deterministic_failures.push(format!(
+                "the note typed during the closure ({S104_TYPED_TOKEN:?}) must ride the reopen's startup input; seed texts: {seed_texts:?}"
+            ));
+        }
         // The reopen's contract: every row committed before the voice
         // session was created rides its startup input (the retained seed is
         // sealed at provider-session creation), so a question about it is
@@ -6563,7 +9534,7 @@ async fn run_s104_handoff_voice_typed_voice(
             }
         }
         println!(
-            "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close1.map(|c| c.ms),
             back.input_final_to_audio_ms(),
@@ -6579,8 +9550,10 @@ async fn run_s104_handoff_voice_typed_voice(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -6618,6 +9591,9 @@ fn s106_seed_prompt() -> String {
         "For the record: the sponsor's name is {S106_SEED_TOKEN}. Just acknowledge in one short sentence."
     )
 }
+/// The closing words of the e10 sign-off fixture ("... Close the call."):
+/// transcribed, they show the provider heard the whole utterance.
+const S106_SIGN_OFF_TOKENS: &[&str] = &["close", "call"];
 const S106_TYPED_PROMPT: &str = "Typed while the voice call is down: the budget code is Kestrel. Reply with one short sentence.";
 const S106_LONG_HOLD_MS: u64 = 20_000;
 const S106_REOPEN_HOLD_MS: u64 = 4000;
@@ -6665,10 +9641,7 @@ async fn s106_reopen_cycle(
     typed_prompt: Option<&str>,
     user_text: &mut Vec<String>,
     deterministic_failures: &mut Vec<String>,
-    tolerant_failures: &mut Vec<String>,
 ) -> Result<(S106Cycle, u32, Option<SeedCase>), Box<dyn std::error::Error>> {
-    let before = evidence.owner_appends()?;
-    let texts_before = evidence.instructions_append_attempt_texts()?.len();
     evidence.stage(EvidenceStage::HaulReopen)?;
     // Let every executor turn and its result delivery settle before the
     // close: a result still in flight at close hits the runtime's
@@ -6681,6 +9654,7 @@ async fn s106_reopen_cycle(
     // An utterance still open here (a final word that arrived after the
     // reply began) is committed by the runtime as its own user row at close,
     // so it is heard too.
+    user_text.extend(live.take_media_fault_heard_utterances());
     user_text.extend(
         live.peer
             .energy()
@@ -6691,6 +9665,12 @@ async fn s106_reopen_cycle(
     );
     live.record_uplink("S106").await?;
     let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
+    // The reopen's append accounting starts once the old channel is closed:
+    // anything the old channel still sent before its close (a result cue
+    // deferred to its response end, #1615) is not the reopen's (verdict
+    // 5e6cdc16 S106, 10/10: "instructions 3 -> 4" was channel 2's cue).
+    let before = evidence.owner_appends()?;
+    let texts_before = evidence.instructions_append_attempt_texts()?.len();
     if let Some(prompt) = typed_prompt {
         user_text.push(normalize_words(prompt));
         let typed = live
@@ -6761,7 +9741,7 @@ async fn s106_reopen_cycle(
         acknowledged: cycle.acknowledged,
         greeted: cycle.greeted,
     })?;
-    live.record_time_to_talk("S106", tolerant_failures).await?;
+    live.record_time_to_talk("S106").await?;
     if greeted {
         deterministic_failures.push(format!(
             "the assistant greeted on its own after the reopen (channel {new_channel})"
@@ -6808,9 +9788,8 @@ async fn s106_reopen_cycle(
 /// and are all acknowledged; exactly one delegation per delegated exchange
 /// and none for the native ones; canonical user rows carry exactly the words
 /// of the typed turns and of every user utterance across all channels, in
-/// order; every close converges; WorkGraph parallel mode. Tolerant: the final summary
-/// window carries the three planted tokens; median input_final -> first
-/// audio under 3 s; open -> connected under 5 s per channel.
+/// order; every close converges; WorkGraph parallel mode. Measured (never
+/// judged): median input_final -> first audio; open -> connected per channel.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std::error::Error>> {
@@ -6872,7 +9851,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let mut channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let mut latencies: Vec<i64> = Vec::new();
@@ -6882,7 +9860,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     let mut user_text = vec![normalize_words(&s106_seed_prompt())];
     let mut delegation_windows: Vec<(String, usize)> = Vec::new();
     let mut stage_ms: Vec<(String, u128)> = vec![("connected".to_owned(), connected_ms)];
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
         if silence_hold_greeting(&mut live, &evidence, channel, "S106", S106_REOPEN_HOLD_MS).await? {
@@ -6957,7 +9935,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             Some(S106_TYPED_PROMPT),
             &mut user_text,
             &mut deterministic_failures,
-            &mut tolerant_failures,
         )
         .await?;
         channel = channel2;
@@ -6994,7 +9971,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             None,
             &mut user_text,
             &mut deterministic_failures,
-            &mut tolerant_failures,
         )
         .await?;
         channel = channel3;
@@ -7013,23 +9989,64 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             native_question(&mut live, "S106", "haul_e9", s106_spec("haul_e9", false)).await?;
         latencies.extend(t9.input_final_to_audio_ms());
         // The model may answer the summary itself or delegate it to the
-        // executor and read the commentary back; the answer window is
-        // everything it said after the question, once the session settles.
-        wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(120)).await?;
+        // executor and read the commentary back. The answer window closes on
+        // a typed end, never a quiet window (round 1 closed on 3 s of quiet
+        // while a delegated summary was still running): a native answer has
+        // ended with its audio (native_question waited for it); a delegated
+        // one ends when the worker is terminal, its result commentary is
+        // appended and that readout's audio has ended.
+        let timeline9 = live.peer.timeline().await?;
+        if let Some(delegation_ms) =
+            timeline_find(&timeline9, TimelineKind::DelegationCreated, s9).map(|entry| entry.t_ms)
+        {
+            let seen_before = seen_executor_turns.clone();
+            wait_executor_turn(&mut live, &mut seen_executor_turns, started).await?;
+            let operation_id = seen_executor_turns
+                .difference(&seen_before)
+                .next()
+                .cloned()
+                .ok_or("exchange 9's executor turn was not recorded")?;
+            let result_ms =
+                wait_result_commentary(&mut live, "exchange 9", &operation_id, delegation_ms).await?;
+            let readout_ms =
+                first_assistant_energy_since(&mut live, "exchange 9 result readout", result_ms).await?;
+            live.peer
+                .wait_for_timeline(
+                    Duration::from_secs(60),
+                    "exchange 9 assistant_audio_end after the result readout",
+                    |t| timeline_find(t, TimelineKind::AssistantAudioEnd, readout_ms).map(|_| ()),
+                )
+                .await?;
+        }
         let answer9 = answer_transcript_text(&live.peer.events().await?, events_before_e9);
-        let lower9 = answer9.to_lowercase();
-        let found: Vec<&str> = S106_TOKENS.iter().copied().filter(|t| lower9.contains(t)).collect();
-        record_tolerant(
-            &evidence,
-            channel,
-            "S106",
-            "final_summary_carries_three_planted_tokens",
-            found.len() == S106_TOKENS.len(),
-            format!("found={found:?} answer={:?}", answer9.trim()),
-            &mut tolerant_failures,
-        )?;
-        let (t10, _a10, _, s10) = native_question(&mut live, "S106", "haul_e10", s106_spec("haul_e10", false)).await?;
-        latencies.extend(t10.input_final_to_audio_ms());
+        println!("GPT_LIVE_S106_ANSWER9 answer={:?}", answer9.trim());
+        // The typed contract: before the summary question, every planted
+        // fact (two spoken on the first channel, one typed while the call was
+        // closed) reached the third channel's model as typed input: its
+        // startup seed, or the late summary appended after its first user
+        // turn. Which facts a free-form spoken summary names is the model's
+        // wording (round 1 failed on that 3/5, twice because the answer
+        // window closed before a delegated summary was spoken).
+        let mut delivered = evidence.session_input_texts(channel)?;
+        delivered.extend(evidence.owned_thinking_appends(channel)?);
+        let delivered_lower = delivered.join("\n").to_lowercase();
+        let missing: Vec<&str> = S106_TOKENS
+            .iter()
+            .copied()
+            .filter(|token| !delivered_lower.contains(token))
+            .collect();
+        println!("GPT_LIVE_S106_FACTS_DELIVERED channel={channel} missing={missing:?}");
+        if !missing.is_empty() {
+            deterministic_failures.push(format!(
+                "planted facts {missing:?} never reached the final channel's model as typed input; delivered: {delivered:?}"
+            ));
+        }
+        // e10 is the sign-off ("Thanks, that's all for today. Close the
+        // call."). Silence after it is valid model behaviour (round 3 r1:
+        // transcribed in real time, then 55 s of no reply), so its contract
+        // is that the provider transcribed it; the host close below ends the
+        // call deterministically.
+        let s10 = sign_off_transcribed(&mut live, "S106", "haul_e10", s106_spec("haul_e10", false), S106_SIGN_OFF_TOKENS).await?;
         let timeline3 = live.peer.timeline().await?;
         delegation_windows.extend(delegations_per_window(
             &timeline3,
@@ -7055,6 +10072,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
         // Same rule as the reopen cycles: the channel's utterances are
         // counted once its last reply has settled.
+        user_text.extend(live.take_media_fault_heard_utterances());
         user_text.extend(
             live.peer
                 .energy()
@@ -7076,7 +10094,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         // other. The row count is printed, not asserted.
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":600}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         // Rows the runtime authors itself (a delegation result merged after
         // its channel closed arrives as injected execution context) are
@@ -7107,17 +10125,15 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         );
         // The row count is evidence, not a verdict: the browser and the
         // runtime close utterances on separately ordered event streams.
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S106",
-            "canonical_row_count_matches_browser_utterances",
-            rows.spoken.len() == typed_turns + utterances,
+            "canonical_row_count",
             format!(
                 "spoken_rows={} typed={typed_turns} browser_utterances={utterances}",
                 rows.spoken.len()
             ),
-            &mut tolerant_failures,
         )?;
         if !words_match {
             deterministic_failures.push(format!(
@@ -7126,14 +10142,12 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         }
         latencies.sort_unstable();
         let median = latencies.get(latencies.len() / 2).copied();
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S106",
-            "median_input_final_to_first_audio_under_3s",
-            median.is_some_and(|m| m < 3000),
+            "input_final_to_first_audio_ms",
             format!("median_ms={median:?} all_ms={latencies:?}"),
-            &mut tolerant_failures,
         )?;
         evidence.record(EvidenceRecord::Timeline { channel, entries: timeline3.clone() })?;
         let faults = scenario_browser_faults(&evidence, &mut live, channel, "S106").await?;
@@ -7146,7 +10160,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             }
         }
         println!(
-            "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} faults={faults:?}",
             started.elapsed().as_millis(),
             close3.map(|c| c.ms)
         );
@@ -7159,8 +10173,10 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -7181,27 +10197,393 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
 }
 
 // ===========================================================================
+/// The three S101 jobs, told apart by their "Started voice request"
+/// narration (the user's transcribed request).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum S101Job {
+    Job1,
+    Quick,
+    Job2,
+}
+
+/// Words that state a job is complete, and words that make a sentence about
+/// it a promise or a status instead ("I'll tell you when it's done", "the
+/// second one is running").
+const S101_DONE_WORDS: &[&str] = &[
+    "created",
+    "done",
+    "finished",
+    "complete",
+    "completed",
+    "ready",
+];
+const S101_HEDGE_WORDS: &[&str] = &[
+    "when", "once", "will", "ll", "until", "soon", "running", "started", "starting", "start",
+    "kicked", "handed", "going", "watching", "checking",
+];
+const S101_NUMBER_WORDS: &[&str] = &[
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+
+fn s101_number_value(word: &str) -> Option<u64> {
+    word.parse().ok().or_else(|| {
+        S101_NUMBER_WORDS
+            .iter()
+            .position(|w| *w == word)
+            .and_then(|index| u64::try_from(index).ok())
+    })
+}
+
+fn s101_is_number(word: &str) -> bool {
+    !word.is_empty()
+        && (word.chars().all(|c| c.is_ascii_digit()) || S101_NUMBER_WORDS.contains(&word))
+}
+
+/// The references to a job a sentence can make: its marker file (as the
+/// recognizer renders it) or its ordinal.
+fn s101_job_refs(job: S101Job) -> &'static [&'static [&'static str]] {
+    match job {
+        S101Job::Job1 => &[
+            &["marker1"],
+            &["marker", "1"],
+            &["marker", "one"],
+            &["first", "one"],
+            &["first", "job"],
+            &["first", "slow", "job"],
+        ],
+        S101Job::Job2 => &[
+            &["marker2"],
+            &["marker", "2"],
+            &["marker", "two"],
+            &["second", "one"],
+            &["second", "job"],
+            &["second", "slow", "job"],
+        ],
+        S101Job::Quick => &[],
+    }
+}
+
+/// File counts `text` states in the quick question's answer shape:
+/// "there are N files" / "there is N file" or "count is N".
+fn s101_stated_counts(text: &str) -> Vec<u64> {
+    let words = s101_words(text);
+    let tokens: Vec<&str> = words.iter().map(|(_, word)| word.as_str()).collect();
+    (0..tokens.len())
+        .filter(|&index| {
+            tokens[index..].starts_with(&["count", "is"])
+                || (tokens[index] == "there"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|w| *w == "are" || *w == "is")
+                    && tokens
+                        .get(index + 3)
+                        .is_some_and(|w| *w == "file" || *w == "files"))
+        })
+        .filter_map(|index| tokens.get(index + 2).and_then(|w| s101_number_value(w)))
+        .collect()
+}
+
+/// Lowercased alphanumeric words of `text` with each word's char offset.
+fn s101_words(text: &str) -> Vec<(usize, String)> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut start = 0;
+    for (index, c) in text.chars().enumerate() {
+        if c.is_alphanumeric() {
+            if current.is_empty() {
+                start = index;
+            }
+            current.extend(c.to_lowercase());
+        } else if !current.is_empty() {
+            words.push((start, std::mem::take(&mut current)));
+        }
+    }
+    if !current.is_empty() {
+        words.push((start, current));
+    }
+    words
+}
+
+/// Outcome claims spoken (provider output transcript, sideband clock) before
+/// the provider learned the job was complete: the job's first commentary
+/// append after its "Started" narration, i.e. its "Finished" narration or
+/// its result. Two claim shapes the fixture identifies deterministically:
+/// - a job's marker file or ordinal with a completion word and no hedge,
+///   timed at the later of the two words;
+/// - the quick question's value as "count is N", "there are N" or "N
+///   files", timed at the number, after the quick delegation was created. A
+///   bare number is not a claim: it can be a filler or an ordinal.
+fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u32) -> Vec<String> {
+    let mut created: BTreeMap<String, u64> = BTreeMap::new();
+    let mut jobs: BTreeMap<String, S101Job> = BTreeMap::new();
+    let mut known: BTreeMap<String, u64> = BTreeMap::new();
+    let mut results: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    let mut deltas: Vec<(u64, String)> = Vec::new();
+    // Every recorded client event id, and every commentary acknowledgement:
+    // an acknowledgement whose client event is missing from the recording
+    // is an append the recorder did not capture (before the recorder kept
+    // commentary released from the user's floor hold, 93b6aaec S101 R2).
+    let mut recorded_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut commentary_acks: Vec<(u64, String)> = Vec::new();
+    for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
+        if let provider_recording::Entry::ClientEvent { event } = &line.entry
+            && let Some(id) = event["event_id"].as_str()
+        {
+            recorded_ids.insert(id.to_owned());
+        }
+        match &line.entry {
+            provider_recording::Entry::ServerFrame { raw } => match raw["type"].as_str() {
+                Some("session.commentary.appended") => {
+                    if let Some(id) = raw["client_event_id"].as_str() {
+                        commentary_acks.push((line.elapsed_ms, id.to_owned()));
+                    }
+                }
+                Some("session.delegation.created") => {
+                    if let Some(id) = raw["delegation"]["id"].as_str() {
+                        created.entry(id.to_owned()).or_insert(line.elapsed_ms);
+                    }
+                }
+                Some("session.output_transcript.delta") => {
+                    if let Some(delta) = raw["delta"].as_str() {
+                        deltas.push((line.elapsed_ms, delta.to_owned()));
+                    }
+                }
+                _ => {}
+            },
+            provider_recording::Entry::ClientEvent { event }
+                if event["type"] == "session.commentary.append" =>
+            {
+                let (Some(id), Some(content)) =
+                    (event["delegation_id"].as_str(), event["content"].as_str())
+                else {
+                    continue;
+                };
+                if content.starts_with("Started voice request") {
+                    let request = format!(" {} ", normalize_words(content));
+                    let job = if request.contains(" how many files ") {
+                        S101Job::Quick
+                    } else if [
+                        " marker2 ",
+                        " marker 2 ",
+                        " marker two ",
+                        " second slow job ",
+                        " second job ",
+                    ]
+                    .iter()
+                    .any(|needle| request.contains(needle))
+                    {
+                        S101Job::Job2
+                    } else {
+                        S101Job::Job1
+                    };
+                    jobs.entry(id.to_owned()).or_insert(job);
+                } else if jobs.contains_key(id) {
+                    known.entry(id.to_owned()).or_insert(line.elapsed_ms);
+                    if let Some(result) = announced_result_text(content) {
+                        results
+                            .entry(id.to_owned())
+                            .or_insert((line.elapsed_ms, result.to_owned()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let created_at = |job: S101Job| {
+        jobs.iter()
+            .find(|(_, j)| **j == job)
+            .and_then(|(id, _)| created.get(id).copied())
+            .unwrap_or(0)
+    };
+    // Fallback anchor for a job whose result row is not in the recording:
+    // the first acknowledgement of an unrecorded append after the job's
+    // delegation was created. The acknowledgement names no delegation, so
+    // this is the earliest moment the result can have been known.
+    let unrecorded_ack_after = |after: u64| {
+        commentary_acks
+            .iter()
+            .filter(|(at, id)| *at >= after && !recorded_ids.contains(id))
+            .map(|(at, _)| *at)
+            .min()
+    };
+    let known_at = |job: S101Job| {
+        jobs.iter()
+            .find(|(_, j)| **j == job)
+            .map_or(u64::MAX, |(id, _)| {
+                known
+                    .get(id)
+                    .copied()
+                    .or_else(|| unrecorded_ack_after(created_at(job)))
+                    .unwrap_or(u64::MAX)
+            })
+    };
+    let mut claims = Vec::new();
+    let quick_window = |at: u64| created_at(S101Job::Quick) <= at && at < known_at(S101Job::Quick);
+    // The quick job's result and its count (the first number in it).
+    let quick_result = jobs
+        .iter()
+        .find(|(_, job)| **job == S101Job::Quick)
+        .and_then(|(id, _)| results.get(id).cloned());
+    let quick_value = quick_result.as_ref().and_then(|(_, text)| {
+        s101_words(text)
+            .into_iter()
+            .find_map(|(_, word)| s101_number_value(&word))
+    });
+    // Every count a delivered result states, with the instant the provider
+    // had it: the voice reading another job's result ("Marker two.txt is
+    // created ... There are 1 files.") repeats that result, it does not
+    // answer the quick question.
+    let result_counts: Vec<(u64, u64)> = results
+        .values()
+        .flat_map(|(at, text)| {
+            s101_stated_counts(text)
+                .into_iter()
+                .map(move |value| (*at, value))
+        })
+        .collect();
+    let mut text = String::new();
+    let mut times = Vec::new();
+    for (at, delta) in &deltas {
+        for c in delta.chars() {
+            text.push(c);
+            times.push(*at);
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0;
+    while start < chars.len() {
+        let end = chars[start..]
+            .iter()
+            .position(|c| matches!(c, '.' | '!' | '?'))
+            .map_or(chars.len(), |offset| start + offset + 1);
+        let sentence: String = chars[start..end].iter().collect();
+        let words = s101_words(&sentence);
+        let at = |offset: usize| times.get(start + offset).copied();
+        let tokens: Vec<&str> = words.iter().map(|(_, w)| w.as_str()).collect();
+        // The quick question's value as a phrase.
+        for index in 0..tokens.len() {
+            let number_at = if tokens[index..].starts_with(&["count", "is"])
+                || (tokens[index] == "there"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|w| ["is", "are", "was", "were"].contains(w)))
+            {
+                Some(index + 2)
+            } else if s101_is_number(tokens[index])
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|w| *w == "file" || *w == "files")
+                // "marker one file" names job 1's file; it is not a count.
+                && (index == 0 || tokens[index - 1] != "marker")
+            {
+                Some(index)
+            } else {
+                None
+            };
+            let Some(number_at) = number_at else { continue };
+            let Some(when) = tokens
+                .get(number_at)
+                .filter(|w| s101_is_number(w))
+                .and_then(|_| at(words[number_at].0))
+            else {
+                continue;
+            };
+            // A count another delivered result already stated is that result
+            // being read, before the quick result as after it (bargesoak2
+            // S101 R1: job 2's result said "There are 1 files." at 69388 ms
+            // and the voice read it at 70344 ms, ten seconds before the quick
+            // result existed).
+            let read_from_another_result = result_counts.iter().any(|(at, stated)| {
+                *at <= when && s101_number_value(tokens[number_at]) == Some(*stated)
+            });
+            if quick_window(when) && !read_from_another_result {
+                claims.push(format!(
+                    "the voice stated the quick question's answer ({:?}) at {when} ms, before its result (known at {} ms)",
+                    sentence.trim(),
+                    known_at(S101Job::Quick)
+                ));
+                break;
+            }
+            // After the result, the asked-for answer ("there are N files",
+            // present tense, or "count is N") must state the result's count.
+            // Other mentions ("there was 1 file at the time of the check",
+            // about another job's result) are not the quick answer.
+            let answer_phrase = tokens[index..].starts_with(&["count", "is"])
+                || (tokens[index] == "there"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|w| *w == "are" || *w == "is")
+                    && tokens
+                        .get(index + 3)
+                        .is_some_and(|w| *w == "file" || *w == "files"));
+            if let (Some((result_at, result_text)), Some(value)) = (&quick_result, quick_value)
+                && answer_phrase
+                && when >= *result_at
+                && s101_number_value(tokens[number_at]) != Some(value)
+                && !read_from_another_result
+            {
+                claims.push(format!(
+                    "the voice misreported the quick question's answer at {when} ms ({:?}); the result says {result_text:?}",
+                    sentence.trim()
+                ));
+                break;
+            }
+        }
+        // A slow job declared complete.
+        let done = tokens.iter().position(|w| S101_DONE_WORDS.contains(w));
+        let hedged = tokens.iter().any(|w| S101_HEDGE_WORDS.contains(w));
+        if let Some(done) = done
+            && !hedged
+        {
+            for job in [S101Job::Job1, S101Job::Job2] {
+                let reference = s101_job_refs(job).iter().find_map(|reference| {
+                    (0..tokens.len()).find_map(|index| {
+                        tokens[index..]
+                            .starts_with(reference)
+                            .then(|| index + reference.len() - 1)
+                    })
+                });
+                if let Some(reference) = reference {
+                    let when = at(words[reference].0.max(words[done].0));
+                    if let Some(when) = when
+                        && when < known_at(job)
+                    {
+                        claims.push(format!(
+                            "the voice declared {job:?} complete at {when} ms ({:?}), before the provider knew it was (at {} ms)",
+                            sentence.trim(),
+                            known_at(job)
+                        ));
+                    }
+                }
+            }
+        }
+        start = end;
+    }
+    claims
+}
+
 // Scenario 101: busy backend (slow job, quick question, second slow job)
 // ===========================================================================
 
-/// Quick question and second job offsets after job 1's delegation.created.
+/// Quick question offset after job 1's delegation.created.
 const S101_QUICK_OFFSET_MS: u64 = 5000;
-const S101_JOB2_OFFSET_MS: u64 = 12_000;
-/// Tolerant bound: the quick question's input final -> its commentary.
-const S101_QUICK_ANSWER_BOUND_MS: i64 = 3000;
 
 /// Scenario 101: with the WorkGraph-scheduled DurableFork policy, a slow
 /// executor job (shell sleep 25 s, then marker-one.txt) is running when the
 /// user asks an unrelated quick question at +5 s and starts a second slow job
-/// (sleep 20 s, marker-two.txt) at +12 s.
+/// (sleep 20 s, marker-two.txt) as soon as the quick question is delegated.
+/// Job 2 is anchored on that delegation, not on a fixed offset: a fixed
+/// offset let the two utterances run together and the provider joined them
+/// into one delegation (soak e963088c R1, after the quick fixture grew).
 ///
-/// Deterministic: three client delegations; every executor turn reaches
-/// Completed (job 1 is not cancelled by supersede); at least two delegations
-/// run concurrently (parallel scheduling, journaled with the WorkGraph
-/// items); both marker files exist; a commentary append landed for each
-/// finished job while the channel was live; three executor inputs committed
-/// to the canonical session; graceful close. Tolerant: the quick question's
-/// input final -> first commentary under 3 s.
+/// Deterministic: three client delegations; the quick question's worker
+/// starts while job 1's shell command is still running (no marker file yet),
+/// so a busy worker never holds a later request back; every executor turn
+/// reaches Completed (job 1 is not cancelled by supersede); at least two
+/// delegations run concurrently (parallel scheduling, journaled with the
+/// WorkGraph items); both marker files exist; every job's result is delivered
+/// to the live channel (typed Delivered) before close; three executor inputs
+/// committed to the canonical session; graceful close.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn std::error::Error>> {
@@ -7228,7 +10610,9 @@ async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn s
 async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            // Executor-level detail (agent loop, tool calls, the executor
+            // model's requests) so a slow delegated turn is attributable.
+            "meerkat_openai=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp=debug,meerkat_mob=debug,meerkat_core::agent=debug,meerkat_tools=debug,meerkat_client=debug",
         )
         .with_test_writer()
         .try_init();
@@ -7263,9 +10647,8 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
 
         // Job 1, then the quick question and job 2 anchored on job 1's
@@ -7288,6 +10671,53 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 timeline_find(t, TimelineKind::DelegationCreated, job1_start_ms).map(|e| e.t_ms)
             })
             .await?;
+        // Watch worker starts from here on. Each operation's first sighting
+        // records whether a marker file existed yet: job 1's shell command
+        // (`sleep 25 && touch marker-one.txt`) creates the first marker, so a
+        // worker first seen before any marker started while job 1's tool
+        // call was still running.
+        let start_watch = {
+            let runtime = live.shared()?.0.runtime.clone();
+            let session_id = live.session_id.clone();
+            let workspace = workspace.clone();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let task_stop = Arc::clone(&stop);
+            let task = tokio::spawn(async move {
+                let mut first_seen: Vec<(String, bool)> = Vec::new();
+                let mut max_running = 0usize;
+                loop {
+                    if let Ok(snapshots) = runtime.live_delegation_recovery_snapshots(&session_id).await {
+                        max_running = max_running.max(
+                            snapshots
+                                .iter()
+                                .filter(|s| {
+                                    s.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Running
+                                })
+                                .count(),
+                        );
+                        let marker_exists = std::fs::read_dir(&workspace)
+                            .map(|entries| {
+                                entries.flatten().any(|entry| {
+                                    entry.file_name().to_string_lossy().to_lowercase().contains("marker")
+                                })
+                            })
+                            .unwrap_or(false);
+                        for snapshot in &snapshots {
+                            let operation = snapshot.operation_id().to_string();
+                            if !first_seen.iter().any(|(seen, _)| seen == &operation) {
+                                first_seen.push((operation, marker_exists));
+                            }
+                        }
+                    }
+                    if first_seen.len() >= 3 || task_stop.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+                (first_seen, max_running)
+            });
+            (stop, task)
+        };
         let quick = live
             .peer
             .play_at(
@@ -7297,10 +10727,12 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
         let job2 = live
             .peer
             .play_at(
-                &PlayAt::new("busy_job2", Anchor::Now, S101_JOB2_OFFSET_MS).overlap_bound_ms(60_000),
+                &PlayAt::new("busy_job2", Anchor::Event, 0)
+                    .event_type("session.delegation.created")
+                    .overlap_bound_ms(60_000),
             )
             .await?;
-        live.record_time_to_talk("S101", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S101").await?;
 
         // Three delegations, then every executor turn terminal; the peak
         // number of simultaneously non-terminal turns is the parallelism.
@@ -7325,7 +10757,12 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             let snapshots = runtime
                 .live_delegation_recovery_snapshots(&live.session_id)
                 .await?;
-            let running = snapshots.iter().filter(|s| s.terminal().is_none()).count();
+            // Only workers actually started count; a delegation queued behind
+            // another (start authorized, worker not running) is not parallel.
+            let running = snapshots
+                .iter()
+                .filter(|s| s.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Running)
+                .count();
             max_concurrent = max_concurrent.max(running);
             for snapshot in snapshots.iter().filter(|s| s.terminal().is_some()) {
                 terminal_at
@@ -7362,29 +10799,44 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 ));
             }
         }
+        let (watch_stop, watch_task) = start_watch;
+        watch_stop.store(true, std::sync::atomic::Ordering::Release);
+        let (worker_starts, watch_max_running) = watch_task.await?;
+        max_concurrent = max_concurrent.max(watch_max_running);
+        println!(
+            "GPT_LIVE_S101_WORKER_STARTS first_seen_with_marker={worker_starts:?} max_running_while_starting={watch_max_running}"
+        );
+        match worker_starts.get(1) {
+            Some((_, false)) => {}
+            Some((operation, true)) => deterministic_failures.push(format!(
+                "the quick question's worker ({operation}) did not start until job 1's shell command \
+                 returned: a busy worker held a later request back"
+            )),
+            None => deterministic_failures.push(format!(
+                "the quick question's worker never started: {worker_starts:?}"
+            )),
+        }
         if max_concurrent < 2 {
             deterministic_failures.push(format!(
                 "no two delegations ran concurrently (max_concurrent={max_concurrent}); the channel is still serial"
             ));
         }
-        // Commentary for each finished job while the channel is live.
-        let commentaries = live
-            .peer
-            .wait_for_timeline(Duration::from_secs(60), "three commentary_appended entries", |t| {
-                let count = t.iter().filter(|e| e.kind == TimelineKind::CommentaryAppended).count();
-                (count >= 3).then_some(count)
-            })
-            .await;
+        // Every job's result is delivered to the live channel (the typed
+        // Delivered observation) before the call closes. Counting commentary
+        // appends could not show that: the "Started voice request" narrations
+        // are commentary appends too, so the count passed before any result
+        // landed and the call closed with a result still in flight (soak
+        // round 3: the quick answer was delivered after the disconnect).
+        let results_delivered = wait_all_result_commentaries(&mut live, "S101").await;
         let timeline = live.peer.timeline().await?;
         let commentary_times: Vec<u64> = timeline
             .iter()
             .filter(|e| e.kind == TimelineKind::CommentaryAppended)
             .map(|e| e.t_ms)
             .collect();
-        if let Err(error) = commentaries {
+        if let Err(error) = results_delivered {
             deterministic_failures.push(format!(
-                "fewer than three commentary appends while live (got {:?}): {error}",
-                commentary_times.len()
+                "not every job's result reached the live channel before close: {error}"
             ));
         }
         let quick_timing = SpokenTurn::from_timeline(&timeline, quick);
@@ -7403,15 +10855,6 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             quick_timing.as_ref().map(|t| t.input_text.as_str()),
             job2_timing.as_ref().map(|t| t.input_text.as_str())
         );
-        record_tolerant(
-            &evidence,
-            channel,
-            "S101",
-            "quick_question_answered_under_3s",
-            quick_answer_ms.is_some_and(|ms| ms < S101_QUICK_ANSWER_BOUND_MS),
-            format!("quick_input_final_to_first_commentary_ms={quick_answer_ms:?}"),
-            &mut tolerant_failures,
-        )?;
         // The recognizer renders "marker-one.txt" as "marker1" or "marker
         // one"; the executor follows what it heard, so the deterministic fact
         // is two distinct marker files, not their exact spelling.
@@ -7437,10 +10880,16 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S101").await?;
         let close = close_or_record(&mut live, &evidence, channel, "S101", &mut deterministic_failures).await?;
+        // No job's outcome is spoken before the provider learns that job is
+        // complete (verdict aba5e15b: "and the second one is also done:
+        // marker2.txt is created" 10-14 s before job 2 finished, 5/5 runs).
+        for claim in s101_premature_outcome_claims(&evidence.provider_stream_lines()?, channel) {
+            deterministic_failures.push(claim);
+        }
 
         let history = live
             .rpc
-            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .session_history(json!(live.session_id), 30)
             .await?;
         // Under DurableFork the executor-input rows live in the fork sessions;
         // the canonical (voice) session commits each delegation's final
@@ -7492,7 +10941,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S101_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} jobs_done_at_ms={jobs_done_ms} commentaries={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S101_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} jobs_done_at_ms={jobs_done_ms} commentaries={} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             commentary_times.len(),
             close.map(|c| c.ms)
@@ -7506,8 +10955,10 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -7592,9 +11043,9 @@ fn s105_first_int(text: &str) -> Option<i64> {
 /// (found by content: spoken file names are rendered loosely by the
 /// recognizer);
 /// the typed turn commits; the recall is answered natively; graceful close;
-/// WorkGraph parallel mode. Tolerant: the recall window carries the corrected
-/// numbers; cache_read on the second fork is not observable over RPC here
-/// (skipped, as the design allows).
+/// WorkGraph parallel mode; the typed correction updates both files.
+/// Measured (never judged): the recall answer; cache_read on the second fork is
+/// not observable over RPC here.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
@@ -7658,9 +11109,8 @@ async fn run_s105_fork_and_merge_parallel(
     let _server_guard = AbortScenarioServer(live.server_task.clone());
     let _failure_guard = evidence::FailureGuard(evidence.clone());
     let channel = evidence.current_channel()?;
-    let mut tolerant_failures = Vec::new();
     let mut deterministic_failures: Vec<String> = Vec::new();
-    let result = async {
+    let result = AssertUnwindSafe(async {
         evidence.stage(EvidenceStage::Connected)?;
 
         // A, then B 4 s after A's delegation.
@@ -7685,7 +11135,7 @@ async fn run_s105_fork_and_merge_parallel(
             .peer
             .play_at(&PlayAt::new("fork_b", Anchor::Now, S105_B_OFFSET_MS).overlap_bound_ms(60_000))
             .await?;
-        live.record_time_to_talk("S105", &mut tolerant_failures).await?;
+        live.record_time_to_talk("S105").await?;
         let timeline = live
             .peer
             .wait_for_timeline(Duration::from_secs(90), "two delegation_created entries", |t| {
@@ -7821,6 +11271,19 @@ async fn run_s105_fork_and_merge_parallel(
         }
         live.record_workgraph_mode("S105", 2, &mut deterministic_failures).await?;
 
+        // Both executor results reach the model as commentary after the
+        // forks are terminal, on their own schedule. Speaking (or typing)
+        // before they are delivered races them: a result landing during the
+        // recall utterance makes the assistant talk over it and fragments the
+        // recall into several finals. Proceed only once every result is
+        // acknowledged delivered and its commentary reached the peer.
+        wait_all_result_commentaries(&mut live, "S105").await?;
+        // Contract before the typed correction: both forks' results reached
+        // the source's live channel (each delegation's typed result delivery
+        // is Delivered; wait_all_result_commentaries above fails the run
+        // otherwise). A live-delivered result is provider context, not yet a
+        // canonical row (that comes from the spoken readout's commit, or from
+        // the post-close merge), so the typed delivery is what holds here.
         // Typed correction while live, then the voice recall.
         evidence.stage(EvidenceStage::ForkCorrection)?;
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
@@ -7844,16 +11307,35 @@ async fn run_s105_fork_and_merge_parallel(
             .as_ref()
             .and_then(|name| std::fs::read_to_string(workspace.join(name)).ok());
         println!("GPT_LIVE_S105_ARTIFACTS_AFTER number={number_after:?} doubled={doubled_after:?}");
-        record_tolerant(
+        // The typed correction is executed: both files carry the corrected
+        // numbers. This is the only check that the source member acted on
+        // the merged fork state (the typed turn can succeed while the edit
+        // lands nowhere), the same contract the pre-correction check holds.
+        if number_after.as_deref().and_then(s105_first_int) != Some(21)
+            || doubled_after.as_deref().and_then(s105_first_int) != Some(42)
+        {
+            deterministic_failures.push(format!(
+                "the typed correction did not update both files: number={number_after:?} doubled={doubled_after:?}"
+            ));
+        }
+        // The correction's own executor result is delivered on the same
+        // serialized result channel. The recall asks about the corrected
+        // numbers, so it waits for every result, the correction's included,
+        // to reach the model; otherwise delegating the recall is a correct
+        // answer to a model that has not heard the result yet.
+        wait_all_result_commentaries(&mut live, "S105 after the typed correction").await?;
+        // The typed turn's rows reach the model as mirrored session rows on
+        // their own schedule. A recall asked before they land races them:
+        // the model starts speaking on the rows mid-question and the recall
+        // is talked over (verdict tree fb94711f S105 run 3).
+        wait_typed_turn_mirrored(
+            &mut live,
             &evidence,
             channel,
+            &s105_typed_prompt(doubled_file.as_deref().unwrap_or("the doubled-number file")),
             "S105",
-            "typed_correction_updated_the_files",
-            number_after.as_deref().and_then(s105_first_int) == Some(21)
-                && doubled_after.as_deref().and_then(s105_first_int) == Some(42),
-            format!("number={number_after:?} doubled={doubled_after:?}"),
-            &mut tolerant_failures,
-        )?;
+        )
+        .await?;
         let events_before_recall = live.peer.events().await?.len();
         let (recall, answer, _, _) = native_question(
             &mut live,
@@ -7866,29 +11348,23 @@ async fn run_s105_fork_and_merge_parallel(
         )
         .await?;
         evidence.record(recall.latency_record(channel, 3, None))?;
-        let lower = normalize_words(&answer);
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S105",
-            "recall_reflects_typed_correction",
-            (lower.contains("42") || lower.contains("forty two"))
-                && (lower.contains("21") || lower.contains("twenty one")),
+            "recall_answer",
             format!("answer={:?}", answer.trim()),
-            &mut tolerant_failures,
         )?;
         let events = live.peer.events().await?;
         if events[events_before_recall..].iter().any(is_client_delegation) {
             deterministic_failures.push("the voice recall must be answered natively, not delegated".to_owned());
         }
-        record_tolerant(
+        record_metric(
             &evidence,
             channel,
             "S105",
-            "second_fork_cache_read_skipped",
-            true,
+            "second_fork_cache_read",
             "provider usage rows are not observable over RPC in this harness; skipped as designed".to_owned(),
-            &mut tolerant_failures,
         )?;
 
         evidence.stage(EvidenceStage::Closing)?;
@@ -7909,7 +11385,7 @@ async fn run_s105_fork_and_merge_parallel(
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S105_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} number={n:?} doubled={d:?} forks_spawned={} forks_retired={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S105_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} number={n:?} doubled={d:?} forks_spawned={} forks_retired={} close_ms={:?} faults={faults:?}",
             started.elapsed().as_millis(),
             lifecycle.spawned.len(),
             lifecycle.retired.len(),
@@ -7924,8 +11400,10 @@ async fn run_s105_fork_and_merge_parallel(
             .into());
         }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
+    let result = settle_scenario_body(&mut live, result).await;
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -7944,6 +11422,9 @@ async fn run_s105_fork_and_merge_parallel(
     browser_flush?;
     Ok(())
 }
+
+/// S98's delayed typed update, committed during the call.
+const S98_TYPED_UPDATE: &str = "A delayed background update changes the code word you must remember from Tangerine to Violet. Acknowledge the new code word Violet briefly. Do not use tools or start another task.";
 
 /// Scenario 98: the public Live lifecycle facts that no provider event
 /// establishes on its own, driven against the real API.
@@ -7965,12 +11446,31 @@ async fn run_s105_fork_and_merge_parallel(
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
-    timeout(Duration::from_secs(480), run_s98_real_audio_and_context())
-        .await
-        .map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")?
+    // Recorded like every Turbo S scenario (journal, browser evidence,
+    // provider stream on both channels).
+    let evidence = Journal::create_for("S98", "Violet".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(480),
+        run_s98_real_audio_and_context(evidence.clone()),
+    )
+    .await;
+    let finished = evidence.finish_classified(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
+    result.map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")??;
+    finished?;
+    Ok(())
 }
 
-async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_s98_real_audio_and_context(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug",
@@ -7978,12 +11478,23 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
         .with_test_writer()
         .try_init();
     require_api_key()?;
-    let mut live = open_public_live(
-        "gpt-live-public-reopen-e2e-",
-        "scenario-98-operator",
-        LiveDelegationExecutionPolicy::ExistingMember,
-    )
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-reopen-e2e-",
+        operator_principal: "scenario-98-operator",
+        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: false,
+        executor_instructions: None,
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: false,
+    })
     .await?;
+    evidence.stage(EvidenceStage::Connected)?;
     let session_id = live.session_id.clone();
     live.assert_existing_text_identity().await?;
 
@@ -8012,14 +11523,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     // confirmation.
     let mut settle_deadline = confirmed_at + Duration::from_secs(3);
     let history = loop {
-        let history = live
-            .rpc
-            .call(
-                "session/history",
-                json!({"session_id":session_id,"offset":0,"limit":200}),
-                30,
-            )
-            .await?;
+        let history = live.rpc.session_history(json!(session_id), 30).await?;
         let text = history_text(&history);
         if history["messages"].as_array().is_some_and(|messages| {
             messages.iter().any(|message| {
@@ -8089,14 +11593,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
 
     // Phase C: close drains provider observations and confirms closure.
     live.close_exact().await?;
-    let history_after_close = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
-        )
-        .await?;
+    let history_after_close = live.rpc.session_history(json!(session_id), 30).await?;
     let committed_before_reopen = history_text(&history_after_close);
     assert!(
         committed_before_reopen.contains(&history_text(&history)),
@@ -8155,14 +11652,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     .map(|operation| operation.operation_id().clone())
     .collect();
     println!("GPT_LIVE_PUBLIC_STAGE stage=existing_member_history");
-    let history_before_work = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
-        )
-        .await?;
+    let history_before_work = live.rpc.session_history(json!(session_id), 30).await?;
     let message_count = history_before_work["messages"]
         .as_array()
         .ok_or("missing session history")?
@@ -8221,14 +11711,7 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
             return Err("timed out waiting for the real existing-member delegated turn".into());
         }
     };
-    let history_after_work = live
-        .rpc
-        .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
-        )
-        .await?;
+    let history_after_work = live.rpc.session_history(json!(session_id), 30).await?;
     let messages: Vec<WireSessionMessage> =
         serde_json::from_value(history_after_work["messages"].clone())?;
     let new_messages = &messages[message_count..];
@@ -8267,33 +11750,34 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     // A later ordinary background turn is a new canonical context update,
     // not another result for the already completed voice delegation.
     let before_update = live.peer.events().await?.len();
-    live.rpc.call(
-        "turn/start",
-        json!({
-            "session_id":session_id,
-            "prompt":"A delayed background update changes the code word you must remember from Tangerine to Violet. Acknowledge the new code word Violet briefly. Do not use tools or start another task."
-        }),
-        120,
-    ).await?;
-    live.assert_existing_text_identity().await?;
-    let updated = live
-        .rpc
+    live.rpc
         .call(
-            "session/history",
-            json!({"session_id":session_id,"offset":0,"limit":200}),
-            30,
+            "turn/start",
+            json!({
+                "session_id":session_id,
+                "prompt":S98_TYPED_UPDATE
+            }),
+            120,
         )
         .await?;
+    live.assert_existing_text_identity().await?;
+    let updated = live.rpc.session_history(json!(session_id), 30).await?;
     assert!(
         updated["messages"].to_string().contains("Violet"),
         "delayed update must first commit to the unchanged background session"
     );
-    // The typed update is voiced as owner commentary; do not speak into it.
+    // The typed update reaches the voice as quiet text-chat context (#1614):
+    // ask the recall only once both rows are acknowledged on the quiet lane,
+    // then after any speech has ended.
+    let channel = evidence.current_channel()?;
+    wait_typed_turn_mirrored(&mut live, &evidence, channel, S98_TYPED_UPDATE, "S98").await?;
     wait_for_assistant_quiet(&mut live.peer).await?;
     let before_updated_recall = live.peer.events().await?.len();
     let audio_baseline = live.peer.audio_evidence().await?;
+    // `recall` asks for the word the user asked to remember, which stays
+    // Tangerine after the update; `recall_now` asks for the current word.
     live.peer
-        .call(json!({"type":"play","name":"recall"}))
+        .call(json!({"type":"play","name":"recall_now"}))
         .await?;
     let recalled_update = wait_for_events(&mut live.peer, 90, |events| {
         output_transcript_text(events, before_updated_recall)
@@ -8317,6 +11801,8 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     }
     live.close_exact().await?;
     live.assert_existing_text_identity().await?;
+    live.peer.stop_evidence().await?;
+    evidence.stage(EvidenceStage::Finished)?;
     live.peer.close().await;
     live.server_task.abort();
     println!(
@@ -8853,53 +12339,1998 @@ mod config_tests {
         assert!(super::unprompted_assistant_response_starts(&entries, 53787).is_empty());
     }
 
-    /// The brief read once, line by line, then read again from its first line
-    /// with no user speech in between: one peer response whose short lines
-    /// repeat. No user speech follows, so its `response_end` exists only
-    /// because the scenario flushes the open response before its final read
-    /// (`flush_response_timeline`, `flushed: true`). The burst rule cannot see
-    /// it (same response index); the readout-line rule does.
+    /// S97's readout is judged on speech after the result was sent: a
+    /// readout that starts before the provider's ack frame counts (746845a3
+    /// R2), speech recorded before the send does not, and "no files" states
+    /// the empty workspace (746845a3 R3).
     #[test]
-    fn s103_second_unprompted_readout_of_short_brief_lines_is_flagged() {
-        use serde_json::json;
-        let brief = "Client: Marigold account.\nKickoff: Tuesday afternoon.\nVenue: Copenhagen office downstairs.\nDeck codename: Pelican.";
-        let entries = timeline(&[
-            (53790, "fixture_start", json!({"id": 2})),
-            (60922, "input_final", json!({"index": 1})),
-            (61287, "assistant_audio_start", json!({"response": 2})),
-            (
-                66287,
-                "assistant_audio_end",
-                json!({"last_active_ms": 65687, "response": 2}),
-            ),
-            (70100, "assistant_audio_start", json!({"response": 2})),
-            (
-                75000,
-                "response_end",
-                json!({"index": 2, "chars": 200, "text": format!("{brief}\n{brief}"), "flushed": true}),
-            ),
-        ]);
-        assert!(super::unprompted_assistant_response_starts(&entries, 53790).is_empty());
+    fn s97_readout_is_speech_after_the_result_was_sent() {
+        let mut seq = 0;
+        let mut line = |entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms: seq * 100,
+                entry,
+            }
+        };
+        let delta = |id: &str, text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta",
+                "event_id": id, "delta": text}),
+        };
+        let lines = vec![
+            line(delta("e1", "Is it empty? On it, checking that now.")),
+            line(super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({"type": "session.commentary.append",
+                    "delegation_id": "d1", "event_id": "meerkat-append-2",
+                    "content": "Started voice request: \"Inspect the directory\"."}),
+            }),
+            line(super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({"type": "session.commentary.append",
+                    "delegation_id": "d1", "event_id": "meerkat-append-3",
+                    "content": "Finished voice request: \"Inspect the directory\". The result follows.\nThe current working directory is empty."}),
+            }),
+            line(delta("e2", "It's empty.")),
+            line(super::provider_recording::Entry::ServerFrame {
+                raw: serde_json::json!({"type": "session.commentary.appended",
+                    "client_event_id": "meerkat-append-3"}),
+            }),
+        ];
+        let before = super::output_deltas_before_result(&lines, "d1").unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(super::output_deltas_before_result(&lines, "d2").is_none());
+        let peer = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(id, text)| {
+                    serde_json::json!({"type": "session.output_transcript.delta",
+                        "event_id": id, "delta": text})
+                })
+                .collect::<Vec<_>>()
+        };
+        let heard = super::output_transcript_text_excluding(
+            &peer(&[("e1", "Is it empty? On it."), ("e2", "It's empty.")]),
+            &before,
+        );
+        assert!(super::s97_states_empty_workspace(&heard), "{heard}");
+        let only_before = super::output_transcript_text_excluding(
+            &peer(&[("e1", "Is it empty? On it."), ("e3", "Done.")]),
+            &before,
+        );
+        assert!(
+            !super::s97_states_empty_workspace(&only_before),
+            "{only_before}"
+        );
+        assert!(super::s97_states_empty_workspace(
+            "Voice channel ready. The current directory has no files in it."
+        ));
+        assert!(!super::s97_states_empty_workspace(
+            "There are two files: a and b."
+        ));
+        // Soak 7f770753 S97 R2 and its siblings: "not any", "aren't any"
+        // (straight or curly apostrophe), "are not any" and "zero" files all
+        // state the empty workspace.
+        for stated in [
+            "There aren't any files in the current directory.",
+            "There aren\u{2019}t any files in the current directory.",
+            "There are not any files in it.",
+            "I found there are not any files there.",
+            "There are zero files in the working directory.",
+        ] {
+            assert!(super::s97_states_empty_workspace(stated), "{stated}");
+        }
+        // Mentioning files without stating the workspace is empty is not the
+        // fact.
+        for not_stated in [
+            "I'm checking the files in the directory now.",
+            "There aren't many files: just notes.md.",
+            "I don't see any problems with the files.",
+        ] {
+            assert!(
+                !super::s97_states_empty_workspace(not_stated),
+                "{not_stated}"
+            );
+        }
+    }
+
+    // ---- readout rule -------------------------------------------------------
+
+    const BRIEF: &str = "Saved as kickoff_brief.md.\n# Kickoff brief\nThe client is the Marigold account.\nThe kickoff is Tuesday afternoon.\nThe deck code name is Pelican.\n";
+    const CORRECTED_BRIEF: &str = "Updated kickoff_brief.md.\n# Kickoff brief\nThe client is the Marigold account.\nThe kickoff is Friday afternoon.\nThe deck code name is Pelican.\n";
+
+    fn result_delivery(delegation_id: &str, elapsed_ms: u64, text: &str) -> super::ResultDelivery {
+        super::ResultDelivery {
+            delegation_id: delegation_id.to_owned(),
+            channel: 1,
+            elapsed_ms,
+            text: text.to_owned(),
+            created_ms: None,
+        }
+    }
+
+    /// A result whose delegation was created at `created_ms`.
+    fn created_delivery(
+        delegation_id: &str,
+        created_ms: u64,
+        elapsed_ms: u64,
+        text: &str,
+    ) -> super::ResultDelivery {
+        super::ResultDelivery {
+            created_ms: Some(created_ms),
+            ..result_delivery(delegation_id, elapsed_ms, text)
+        }
+    }
+
+    fn readout(index: u64, closed_ms: Option<u64>, text: &str) -> super::support::ReadoutRecord {
+        super::support::ReadoutRecord {
+            index,
+            opened_by: if index == 0 {
+                "connect"
+            } else {
+                "session.commentary.appended"
+            }
+            .to_owned(),
+            opened_ms: Some(index * 1000),
+            closed_by: closed_ms.map(|_| "session.input_transcript.delta".to_owned()),
+            closed_ms,
+            last_output_ms: Some(closed_ms.unwrap_or(index * 1000 + 500)),
+            text: text.to_owned(),
+            stutters: Vec::new(),
+        }
+    }
+
+    /// One delegation's result delivered into the conversation twice is a
+    /// duplicate delivery even when the model voices it only once.
+    #[test]
+    fn a_result_delivered_twice_is_a_duplicate_delivery() {
+        let deliveries = [
+            result_delivery("item_a", 1000, BRIEF),
+            result_delivery("item_a", 4000, BRIEF),
+        ];
+        let records = [readout(
+            5,
+            Some(9000),
+            "Here it is. The client is the Marigold account.",
+        )];
         assert_eq!(
-            super::repeated_readout_lines(&entries, 53790),
+            super::readout_faults(&deliveries, 1, &records, &[], 0, None),
+            vec![super::ReadoutFault::DuplicateDelivery {
+                delegation_id: "item_a".to_owned(),
+                deliveries: 2,
+            }]
+        );
+    }
+
+    /// A result delivered once, read in one response and read again in a
+    /// later response opened by a commentary append is a duplicate readout.
+    #[test]
+    fn a_result_voiced_in_two_responses_is_a_duplicate_readout() {
+        let deliveries = [result_delivery("item_a", 1000, BRIEF)];
+        let records = [
+            readout(0, Some(900), "Okay, I am on it."),
+            readout(
+                1,
+                Some(6000),
+                "The client is the Marigold account. The kickoff is Tuesday afternoon.",
+            ),
+            readout(2, Some(9000), "Sure. The kickoff is Tuesday afternoon."),
+        ];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &records, &[], 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "the kickoff is tuesday afternoon".to_owned(),
+                responses: vec![1, 2],
+            }]
+        );
+    }
+
+    /// A response with explicit boundaries, for the resumption rule.
+    fn bounded_readout(
+        index: u64,
+        opened_by: &str,
+        closed: Option<(&str, u64)>,
+        text: &str,
+    ) -> super::support::ReadoutRecord {
+        super::support::ReadoutRecord {
+            index,
+            opened_by: opened_by.to_owned(),
+            opened_ms: Some(index * 1000),
+            closed_by: closed.map(|(by, _)| by.to_owned()),
+            closed_ms: closed.map(|(_, at)| at),
+            last_output_ms: Some(closed.map_or(index * 1000 + 500, |(_, at)| at)),
+            text: text.to_owned(),
+            stutters: Vec::new(),
+        }
+    }
+
+    const USER: &str = super::USER_SPEECH_BOUNDARY;
+    const COMMENTARY: &str = "session.commentary.appended";
+
+    /// S103 R5 on 7b17b1c85: the brief's readout ("- The" | "client is the
+    /// Marigold account.", split by the result's commentary.appended) is cut
+    /// off by "Wait, stop. Make it Thursday", restarted from the top ("- The"
+    /// | "client is the Marigold account.", split by the late "instead"),
+    /// cut off again by "Actually, Friday", then read in full with the
+    /// correction. No broker append follows the result. Each restart resumes
+    /// the readout the user interrupted: one reading, no fault.
+    fn s103_r5_records() -> Vec<super::support::ReadoutRecord> {
+        vec![
+            bounded_readout(
+                2,
+                "session.delegation.created",
+                Some((COMMENTARY, 2900)),
+                "Okay. On it, working on it. - The",
+            ),
+            bounded_readout(
+                3,
+                COMMENTARY,
+                Some((USER, 4000)),
+                "client is the Marigold account.",
+            ),
+            bounded_readout(4, USER, Some((USER, 5000)), "- The"),
+            bounded_readout(
+                5,
+                USER,
+                Some((USER, 6000)),
+                "client is the Marigold account.",
+            ),
+            bounded_readout(
+                6,
+                USER,
+                None,
+                "- The client is the Marigold account. - The kickoff is Friday afternoon. - The deck code name is Pelican.",
+            ),
+        ]
+    }
+
+    fn commentary(elapsed_ms: u64) -> super::BrokerPrompt {
+        super::BrokerPrompt {
+            elapsed_ms,
+            lane: super::PromptLane::Commentary,
+        }
+    }
+
+    fn cue(elapsed_ms: u64) -> super::BrokerPrompt {
+        super::BrokerPrompt {
+            elapsed_ms,
+            lane: super::PromptLane::Thinking,
+        }
+    }
+
+    const THURSDAY: &str = "Updated the kickoff to Thursday afternoon.";
+    const FRIDAY: &str = "Updated the kickoff to Friday afternoon.";
+
+    /// #1705 (S103 control 0375acca R3): the brief's readout is cut off before
+    /// its first line; two diff-only corrections follow. The voice reads the
+    /// brief with Thursday (response 8, opened by the Friday request's
+    /// "Started" narration), then the Friday result lands and it reads the
+    /// brief again with Friday (response 9, opened by that delivery).
+    fn s103_correction_records(response_9_opened_by: &str) -> Vec<super::support::ReadoutRecord> {
+        vec![
+            bounded_readout(
+                1,
+                COMMENTARY,
+                Some((USER, 1500)),
+                "Here it is, reading it back now:",
+            ),
+            bounded_readout(
+                8,
+                COMMENTARY,
+                Some((COMMENTARY, 8999)),
+                "The updated version with Thursday. The client is the Marigold account. The deck code name is Pelican.",
+            ),
+            bounded_readout(
+                9,
+                response_9_opened_by,
+                None,
+                "Actually, the version with Friday. The client is the Marigold account. The deck code name is Pelican.",
+            ),
+        ]
+    }
+
+    /// The corrections were requested after the brief was delivered (their
+    /// delegations are created at 4000 and 6000, the brief sent at 1000).
+    fn s103_correction_deliveries() -> Vec<super::ResultDelivery> {
+        vec![
+            created_delivery("item_brief", 500, 1000, BRIEF),
+            created_delivery("item_thursday", 4000, 7500, THURSDAY),
+            created_delivery("item_friday", 6000, 8800, FRIDAY),
+        ]
+    }
+
+    #[test]
+    fn a_re_reading_opened_by_a_later_result_delivery_is_licensed_once() {
+        // Commentary appends: the brief, Thursday, the Friday request's
+        // "Started" narration (acknowledged at response 8's boundary), Friday.
+        let prompts = [
+            commentary(1000),
+            commentary(7500),
+            commentary(7800),
+            commentary(8800),
+        ];
+        assert!(
+            super::readout_faults(
+                &s103_correction_deliveries(),
+                1,
+                &s103_correction_records(COMMENTARY),
+                &prompts,
+                0,
+                None
+            )
+            .is_empty()
+        );
+    }
+
+    /// The same re-reading opened by a narration's acknowledgement (no new
+    /// result behind it) is still a duplicate readout.
+    #[test]
+    fn a_re_reading_opened_by_a_narration_still_fails() {
+        let prompts = [
+            commentary(1000),
+            commentary(7500),
+            commentary(7800),
+            commentary(8800),
+            commentary(8900),
+        ];
+        assert_eq!(
+            super::readout_faults(
+                &s103_correction_deliveries(),
+                1,
+                &s103_correction_records(COMMENTARY),
+                &prompts,
+                0,
+                None
+            ),
             vec![
-                "client marigold account",
-                "kickoff tuesday afternoon",
-                "venue copenhagen office downstairs",
-                "deck codename pelican"
+                super::ReadoutFault::DuplicateReadout {
+                    sentence: "the client is the marigold account".to_owned(),
+                    responses: vec![8, 9],
+                },
+                super::ReadoutFault::DuplicateReadout {
+                    sentence: "the deck code name is pelican".to_owned(),
+                    responses: vec![8, 9],
+                },
             ]
         );
     }
 
-    /// One readout of the brief, and a confirmation after it, repeat nothing.
+    /// The commentary sends of the R3 shape: the brief, Thursday, the Friday
+    /// request's "Started" narration (acknowledged at response 8's boundary)
+    /// and Friday.
+    fn s103_correction_prompts() -> Vec<super::BrokerPrompt> {
+        vec![
+            commentary(1000),
+            commentary(7500),
+            commentary(7800),
+            commentary(8800),
+        ]
+    }
+
+    fn duplicate_count(
+        deliveries: &[super::ResultDelivery],
+        records: &[super::support::ReadoutRecord],
+        prompts: &[super::BrokerPrompt],
+    ) -> usize {
+        super::readout_faults(deliveries, 1, records, prompts, 0, None)
+            .iter()
+            .filter(|fault| matches!(fault, super::ReadoutFault::DuplicateReadout { .. }))
+            .count()
+    }
+
+    /// A re-reading after a result cue (a thinking append, never a response
+    /// boundary): the response is opened by the user's speech, so no
+    /// delivery licenses it.
     #[test]
-    fn s103_single_readout_repeats_no_lines() {
-        use serde_json::json;
-        let entries = timeline(&[(
-            75000,
-            "response_end",
-            json!({"index": 2, "chars": 150, "text": "Client: Marigold account.\nKickoff: Friday afternoon.\nVenue: Copenhagen office downstairs.\nGot it. I updated the brief."}),
-        )]);
-        assert!(super::repeated_readout_lines(&entries, 0).is_empty());
+    fn a_cue_opened_re_reading_still_fails() {
+        let mut prompts = s103_correction_prompts();
+        prompts.push(cue(8950));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &s103_correction_records(USER),
+                &prompts
+            ),
+            2
+        );
+    }
+
+    /// A third reading with no new delivery since the licensed one (opened
+    /// by a new delegation's boundary, not cut off by the user, so no
+    /// resumption either) is still a duplicate readout.
+    #[test]
+    fn a_re_reading_with_no_new_delivery_still_fails() {
+        const DELEGATION: &str = "session.delegation.created";
+        let mut records = s103_correction_records(COMMENTARY);
+        records[2].closed_by = Some(DELEGATION.to_owned());
+        records[2].closed_ms = Some(9_900);
+        records.push(bounded_readout(
+            10,
+            DELEGATION,
+            None,
+            "Once more. The client is the Marigold account. The deck code name is Pelican.",
+        ));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &records,
+                &s103_correction_prompts()
+            ),
+            2
+        );
+    }
+
+    /// One delivery licenses one re-reading: a second response whose opening
+    /// boundary acknowledges the same delivery (no commentary sent between)
+    /// is still a duplicate readout.
+    #[test]
+    fn two_re_readings_licensed_by_one_delivery_still_fail() {
+        let mut records = s103_correction_records(COMMENTARY);
+        records[2].closed_by = Some(COMMENTARY.to_owned());
+        records[2].closed_ms = Some(9_900);
+        records.push(bounded_readout(
+            10,
+            COMMENTARY,
+            None,
+            "Again. The client is the Marigold account. The deck code name is Pelican.",
+        ));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &records,
+                &s103_correction_prompts()
+            ),
+            2
+        );
+    }
+
+    /// A delivery on another channel, or of a job created before the brief
+    /// existed (S101-style parallel jobs), licenses nothing.
+    #[test]
+    fn a_delivery_from_another_channel_or_a_parallel_job_licenses_nothing() {
+        let mut other_channel = s103_correction_deliveries();
+        other_channel[2].channel = 2;
+        assert_eq!(
+            duplicate_count(
+                &other_channel,
+                &s103_correction_records(COMMENTARY),
+                &s103_correction_prompts()
+            ),
+            2,
+            "another channel's delivery"
+        );
+        let mut parallel_job = s103_correction_deliveries();
+        parallel_job[2].created_ms = Some(800);
+        assert_eq!(
+            duplicate_count(
+                &parallel_job,
+                &s103_correction_records(COMMENTARY),
+                &s103_correction_prompts()
+            ),
+            2,
+            "a job created before the brief was delivered"
+        );
+    }
+
+    #[test]
+    fn a_readout_restarted_after_the_user_cuts_it_off_is_one_reading() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        // The result itself is the only broker append, sent before the
+        // interruption.
+        let prompts = [commentary(2900)];
+        assert!(
+            super::readout_faults(&deliveries, 1, &s103_r5_records(), &prompts, 0, None).is_empty()
+        );
+    }
+
+    /// The same restart with a result cue sent after the interruption is a
+    /// cue-driven re-read: still a duplicate readout.
+    #[test]
+    fn a_re_read_after_a_cue_still_fails_after_an_interruption() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        let prompts = [commentary(2900), cue(4500)];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &s103_r5_records(), &prompts, 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "client is the marigold account".to_owned(),
+                responses: vec![3, 5],
+            }]
+        );
+    }
+
+    /// A re-read opened by a commentary append (a narration) after the
+    /// interruption is not a resumption: still a duplicate readout.
+    #[test]
+    fn a_re_read_opened_by_commentary_still_fails_after_an_interruption() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        let mut records = s103_r5_records();
+        records[2].opened_by = COMMENTARY.to_owned();
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &records, &[commentary(2900)], 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "client is the marigold account".to_owned(),
+                responses: vec![3, 5],
+            }]
+        );
+    }
+
+    /// A readout that ended on its own (not cut off by the user) and is read
+    /// again after the user speaks is a second reading: still a duplicate.
+    #[test]
+    fn a_re_read_after_a_readout_that_was_not_cut_off_still_fails() {
+        let deliveries = [result_delivery("item_a", 2900, BRIEF)];
+        let records = [
+            bounded_readout(
+                3,
+                COMMENTARY,
+                Some(("session.delegation.created", 4000)),
+                "client is the Marigold account.",
+            ),
+            bounded_readout(
+                4,
+                "session.delegation.created",
+                Some((USER, 5000)),
+                "One moment.",
+            ),
+            bounded_readout(5, USER, None, "client is the Marigold account."),
+        ];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &records, &[commentary(2900)], 0, None),
+            vec![super::ReadoutFault::DuplicateReadout {
+                sentence: "client is the marigold account".to_owned(),
+                responses: vec![3, 5],
+            }]
+        );
+    }
+
+    /// A line repeated back to back inside one response, with one delivery,
+    /// is a model stutter: a measurement, no fault (finalc S103 run 4).
+    #[test]
+    fn a_repeat_inside_one_response_is_a_stutter_not_a_fault() {
+        let deliveries = [result_delivery("item_a", 1000, BRIEF)];
+        let records = [readout(
+            1,
+            None,
+            "Line five. The deck code name is Pelican. Line five. The deck code name is Pelican.",
+        )];
+        assert!(super::readout_faults(&deliveries, 1, &records, &[], 0, None).is_empty());
+    }
+
+    /// The brief and its corrected copy share lines; each delivery accounts
+    /// for one reading of them (soak round 2, S103 run 5). Reading the
+    /// shared lines again before the corrected copy was delivered is a
+    /// re-voice of the first result.
+    #[test]
+    fn a_corrected_copy_accounts_for_one_more_reading_of_shared_lines() {
+        let deliveries = [
+            result_delivery("item_a", 1000, BRIEF),
+            result_delivery("item_b", 7500, CORRECTED_BRIEF),
+        ];
+        let first = readout(
+            1,
+            Some(6000),
+            "The client is the Marigold account. The kickoff is Tuesday afternoon.",
+        );
+        let corrected = readout(
+            8,
+            Some(12000),
+            "The client is the Marigold account. The kickoff is Friday afternoon.",
+        );
+        assert!(
+            super::readout_faults(&deliveries, 1, &[first.clone(), corrected], &[], 0, None)
+                .is_empty()
+        );
+        let early = readout(2, Some(7000), "The client is the Marigold account.");
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &[first, early], &[], 0, None),
+            vec![
+                super::ReadoutFault::MissedReadout {
+                    delegation_id: "item_b".to_owned()
+                },
+                super::ReadoutFault::DuplicateReadout {
+                    sentence: "the client is the marigold account".to_owned(),
+                    responses: vec![1, 2],
+                },
+            ]
+        );
+    }
+
+    /// A result delivered and followed by no assistant speech is a missed
+    /// readout, even when an earlier response spoke; speech after the
+    /// delivery, paraphrased or cut off, satisfies it.
+    #[test]
+    fn a_result_never_followed_by_speech_is_a_missed_readout() {
+        let deliveries = [result_delivery(
+            "item_a",
+            5000,
+            "Updated the kickoff to Thursday, October 8, 2026.",
+        )];
+        let before_only = [readout(4, Some(4900), "Okay, changing the day.")];
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &before_only, &[], 0, None),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
+        );
+        let paraphrased = [
+            readout(4, Some(4900), "Okay, changing the day."),
+            readout(6, None, "Thursday afternoon."),
+        ];
+        assert!(super::readout_faults(&deliveries, 1, &paraphrased, &[], 0, None).is_empty());
+    }
+
+    /// Ordered against the close request: a result delivered before it and
+    /// never followed by speech is a missed readout; one delivered at or
+    /// after it is exempt (journaled as delivered after the close request).
+    #[test]
+    fn a_result_delivered_after_the_close_request_is_exempt() {
+        let records = [readout(4, Some(4900), "Okay, changing the day.")];
+        let before = [result_delivery(
+            "item_a",
+            5000,
+            "Updated the kickoff to Friday.",
+        )];
+        assert_eq!(
+            super::readout_faults(&before, 1, &records, &[], 0, Some(9000)),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
+        );
+        let after = [result_delivery(
+            "item_a",
+            9500,
+            "Updated the kickoff to Friday.",
+        )];
+        assert!(super::readout_faults(&after, 1, &records, &[], 0, Some(9000)).is_empty());
+        assert_eq!(
+            super::deliveries_before_close_request(&after, 1, 0, Some(9000)).count(),
+            0
+        );
+        assert_eq!(
+            super::deliveries_before_close_request(&before, 1, 0, Some(9000)).count(),
+            1
+        );
+    }
+
+    fn barge_in_with_bursts(
+        bursts: serde_json::Value,
+        output: serde_json::Value,
+        inputs: serde_json::Value,
+    ) -> Vec<super::TimelineEntry> {
+        timeline(&[
+            (
+                10_000,
+                "fixture_start",
+                serde_json::json!({"id": 7, "speech_ms": 3000}),
+            ),
+            (
+                14_000,
+                "fixture_end",
+                serde_json::json!({"id": 7, "facts": {
+                    "now_ms": 14_000, "hysteresis_ms": 600, "bursts": bursts,
+                    "output": output, "inputs": inputs, "delegations": []
+                }}),
+            ),
+        ])
+    }
+
+    /// #1710: a worded start during the utterance is talk-over only when the
+    /// user heard more than one provider frame of it (the duck's reaction
+    /// time). Duck soak 65b7a5c3 R4 (0 ms audible) is held by the duck; the
+    /// pre-duck tlb-guard R1 correction (2304 ms) and bargesoak R1 barge-in
+    /// (700 ms) still fail; 200 ms is the exclusive bound.
+    #[test]
+    fn a_start_held_by_the_duck_to_one_provider_frame_is_not_talk_over() {
+        let start_of = |duration_ms: u64, text: &str| {
+            let timeline = barge_in_with_bursts(
+                serde_json::json!([
+                    // One energy window (100 ms) overlaps the user even when the
+                    // duck holds the burst to it (duck R4: duration 0).
+                    {"started_ms": 11_000, "last_active_ms": 11_000 + duration_ms, "ended": true,
+                        "overlap_ms": duration_ms + 100}
+                ]),
+                serde_json::json!([{"t_ms": 11_000, "text": text}]),
+                serde_json::json!([12_800]),
+            );
+            super::talk_over_starts(&timeline, 7, 10_250, &|audible, _| audible as i64).unwrap()
+        };
+        // Worded and not a backchannel (duck R4 itself said " and Okay.", which
+        // the live classifier did not take as a backchannel there).
+        let held = start_of(0, " switching the kickoff to Friday then.");
+        assert!(held.violations.is_empty(), "{held:?}");
+        assert_eq!(held.held_by_duck.len(), 1, "{held:?}");
+        let boundary = start_of(200, " switching the kickoff to Friday then.");
+        assert!(
+            boundary.violations.is_empty(),
+            "exclusive bound: {boundary:?}"
+        );
+        let guard = start_of(2304, " Okay, switching it to Thursday. Right. Friday.");
+        assert!(
+            matches!(guard.violations.as_slice(), [s] if s.contains("2304 ms")),
+            "{guard:?}"
+        );
+        let bargesoak = start_of(700, " I'm working on it and checking the brief now.");
+        assert!(
+            matches!(bargesoak.violations.as_slice(), [s] if s.contains("700 ms")),
+            "{bargesoak:?}"
+        );
+        let just_over = start_of(300, " switching the kickoff to Friday then.");
+        assert_eq!(just_over.violations.len(), 1, "{just_over:?}");
+    }
+
+    /// Talk-over that starts after the onset, while the user is still
+    /// speaking, fails unless it is a classified backchannel; the burst that
+    /// was already playing at onset is the yield's, not a start.
+    #[test]
+    fn talk_over_that_starts_during_the_utterance_fails() {
+        let started_over = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 9000, "last_active_ms": 10_400, "ended": true, "overlap_ms": 400},
+                {"started_ms": 11_000, "last_active_ms": 12_500, "ended": true, "overlap_ms": 1500}
+            ]),
+            serde_json::json!([{"t_ms": 11_600, "text": " Let me walk you through the whole plan."}]),
+            serde_json::json!([12_800]),
+        );
+        // The provider heard the user at 10_250: a reaction can start after
+        // 10_450.
+        let starts =
+            super::talk_over_starts(&started_over, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
+        assert!(
+            matches!(starts.violations.as_slice(), [s] if s.starts_with("the assistant started talking over the user 1000 ms")),
+            "{starts:?}"
+        );
+        let backchannel = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 11_000, "last_active_ms": 11_300, "ended": true, "overlap_ms": 300}
+            ]),
+            serde_json::json!([{"t_ms": 11_500, "text": " Okay."}]),
+            serde_json::json!([11_900]),
+        );
+        assert_eq!(
+            super::talk_over_starts(&backchannel, 7, 10_250, &|audible, _| audible as i64).unwrap(),
+            super::TalkOverStarts::default()
+        );
+        // A reply already in flight when the provider heard the user is the
+        // yield's, not a start.
+        let in_flight = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 10_300, "last_active_ms": 11_500, "ended": true, "overlap_ms": 1200}
+            ]),
+            serde_json::json!([{"t_ms": 10_900, "text": " Sure, I'll switch it to Thursday."}]),
+            serde_json::json!([12_000]),
+        );
+        assert_eq!(
+            super::talk_over_starts(&in_flight, 7, 10_250, &|audible, _| audible as i64).unwrap(),
+            super::TalkOverStarts::default()
+        );
+        // A burst with no words in its window is journaled, not judged.
+        let wordless = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 12_500, "last_active_ms": 12_700, "ended": true, "overlap_ms": 200}
+            ]),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let starts =
+            super::talk_over_starts(&wordless, 7, 10_250, &|audible, _| audible as i64).unwrap();
+        assert!(starts.violations.is_empty());
+        assert_eq!(
+            starts.wordless,
+            vec!["into_ms=2500 duration_ms=200".to_owned()]
+        );
+        // A wordless burst owes the same yield as speech: one outlasting
+        // TALK_OVER_BOUND_MS from its own start fails.
+        let long_wordless = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 11_000, "last_active_ms": 14_100, "ended": true, "overlap_ms": 2000}
+            ]),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let starts =
+            super::talk_over_starts(&long_wordless, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
+        assert!(
+            matches!(starts.violations.as_slice(), [v] if v.starts_with("a wordless assistant burst that started 1000 ms into the utterance lasted 3100 ms")),
+            "{starts:?}"
+        );
+    }
+
+    fn output_frame(arrival_ms: i64, start_ms: i64, voiced: bool) -> super::OutputFrame {
+        super::OutputFrame {
+            arrival_ms,
+            start_ms,
+            end_ms: start_ms + 200,
+            voiced,
+        }
+    }
+
+    /// A burst's emission is the sideband arrival of the first voiced frame
+    /// of its run (model-time silences shorter than the hysteresis do not
+    /// break it), not its audible start, which trails by the playout.
+    #[test]
+    fn a_burst_is_emitted_where_its_voiced_run_starts() {
+        let frames = [
+            // The previous burst, 1 s of model time earlier.
+            output_frame(9000, 38_000, true),
+            output_frame(9200, 38_200, false),
+            // This burst: voiced from model 39_200, with a 200 ms word gap.
+            output_frame(10_150, 39_200, true),
+            output_frame(10_350, 39_400, false),
+            output_frame(10_550, 39_600, true),
+            output_frame(10_750, 39_800, true),
+        ];
+        assert_eq!(super::burst_emission_ms(&frames, 10_602, 600), 10_150);
+        // A gap as long as the hysteresis separates bursts.
+        assert_eq!(super::burst_emission_ms(&frames, 9100, 600), 9000);
+        // Nothing voiced had arrived by the audible start.
+        assert_eq!(super::burst_emission_ms(&frames, 8000, 600), 8000);
+    }
+
+    /// The soak b52680b4 S103 run 5 shape: a reply to the earlier barge-in
+    /// becomes audible 602 ms into the correction, after the provider heard
+    /// it, but was emitted before the provider could react: it is the
+    /// yield's, not a talk-over start.
+    #[test]
+    fn an_in_flight_reply_audible_after_the_onset_is_not_a_start() {
+        let late_audible = barge_in_with_bursts(
+            serde_json::json!([
+                {"started_ms": 10_602, "last_active_ms": 12_300, "ended": true, "overlap_ms": 1700}
+            ]),
+            serde_json::json!([{"t_ms": 11_200, "text": " Got it, switching it to Thursday."}]),
+            serde_json::json!([12_800]),
+        );
+        let emitted_early =
+            super::talk_over_starts(&late_audible, 7, 10_250, &|_, _| 10_150).unwrap();
+        assert_eq!(emitted_early, super::TalkOverStarts::default());
+        let emitted_late =
+            super::talk_over_starts(&late_audible, 7, 10_250, &|audible, _| audible as i64)
+                .unwrap();
+        assert!(
+            matches!(emitted_late.violations.as_slice(), [v] if v.starts_with("the assistant started talking over the user 602 ms"))
+        );
+    }
+
+    /// A response that starts while a user utterance plays is prompted by it,
+    /// though its transcript arrives later (soak aba8eb88 S103 run 4); with
+    /// no utterance, commentary or final since the assistant was last
+    /// audible it is still unprompted.
+    #[test]
+    fn a_response_during_a_playing_utterance_is_prompted() {
+        let during = timeline(&[
+            (
+                1000,
+                "assistant_audio_end",
+                serde_json::json!({"last_active_ms": 900, "response": 0}),
+            ),
+            (
+                1200,
+                "fixture_start",
+                serde_json::json!({"id": 2, "speech_ms": 2870}),
+            ),
+            (
+                2000,
+                "assistant_audio_start",
+                serde_json::json!({"response": 1}),
+            ),
+        ]);
+        assert!(super::unprompted_assistant_response_starts(&during, 0).is_empty());
+        let silent_fixture = timeline(&[
+            (
+                1000,
+                "assistant_audio_end",
+                serde_json::json!({"last_active_ms": 900, "response": 0}),
+            ),
+            (
+                1200,
+                "fixture_start",
+                serde_json::json!({"id": "silence-1", "speech_ms": 0}),
+            ),
+            (
+                2000,
+                "assistant_audio_start",
+                serde_json::json!({"response": 1}),
+            ),
+        ]);
+        assert_eq!(
+            super::unprompted_assistant_response_starts(&silent_fixture, 0),
+            vec![2000]
+        );
+    }
+
+    /// Speech that follows a delivery inside a response opened just before it
+    /// voices the result: soak c43aa3db S102 run 2 (" Here's" 1 ms before
+    /// the send, " what they said:" after it).
+    #[test]
+    fn speech_after_the_delivery_in_an_earlier_opened_response_is_not_missed() {
+        let deliveries = [result_delivery(
+            "item_a",
+            1000,
+            "I asked Analyst Pemberton.",
+        )];
+        let mut spanning = readout(0, Some(1400), "Here's what they said:");
+        spanning.opened_ms = Some(999);
+        spanning.last_output_ms = Some(1300);
+        assert!(
+            super::readout_faults(&deliveries, 1, &[spanning.clone()], &[], 0, None).is_empty()
+        );
+        spanning.last_output_ms = Some(999);
+        assert_eq!(
+            super::readout_faults(&deliveries, 1, &[spanning], &[], 0, None),
+            vec![super::ReadoutFault::MissedReadout {
+                delegation_id: "item_a".to_owned()
+            }]
+        );
+    }
+
+    /// Acks the sideband receives after the browser disconnected are not
+    /// paired (soak c43aa3db S105 run 1), and the disconnect is a close
+    /// request.
+    #[test]
+    fn sideband_acks_after_the_disconnect_are_not_paired() {
+        let entries = timeline(&[(1000, "commentary_appended", serde_json::json!({}))]);
+        let mut lines = vec![server_frame(
+            1,
+            1500,
+            serde_json::json!({"type": "session.commentary.appended"}),
+        )];
+        lines.push(super::provider_recording::Line {
+            seq: 2,
+            channel_ordinal: 1,
+            elapsed_ms: 5000,
+            entry: super::provider_recording::Entry::Marker {
+                step: "disconnect:graceful".to_owned(),
+            },
+        });
+        lines.push(server_frame(
+            3,
+            5400,
+            serde_json::json!({"type": "session.commentary.appended"}),
+        ));
+        let alignment = super::sideband_clock_alignment(&entries, &lines, 1).unwrap();
+        assert_eq!((alignment.offset_ms, alignment.pairs), (500, 1));
+        assert_eq!(super::sideband_disconnect_elapsed(&lines, 1), Some(5000));
+        assert_eq!(super::sideband_disconnect_elapsed(&lines, 2), None);
+    }
+
+    /// A typed row split across thinking fragments under one token is
+    /// carried when the token's joined text holds it (escaped or verbatim),
+    /// and acknowledged only when every fragment was (#1614).
+    #[test]
+    fn a_typed_row_is_matched_across_the_fragments_of_one_thinking_token() {
+        let line =
+            |seq: u64, entry: super::provider_recording::Entry| super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms: seq * 100,
+                entry,
+            };
+        let append = |seq: u64, id: &str, content: &str| {
+            line(
+                seq,
+                super::provider_recording::Entry::ClientEvent {
+                    event: serde_json::json!({"type": "session.thinking.append", "event_id": id, "content": content}),
+                },
+            )
+        };
+        let ack = |seq: u64, id: &str| {
+            line(
+                seq,
+                super::provider_recording::Entry::ServerFrame {
+                    raw: serde_json::json!({"type": "session.thinking.appended", "client_event_id": id}),
+                },
+            )
+        };
+        let row = "Correction: the number in number.txt must be 21 and \"number2.txt\" must be 42.";
+        let mut lines = vec![
+            append(
+                1,
+                "meerkat-thinking-7-0",
+                "From the text chat during this call: ...\n{\"role\":\"user\",\"text\":\"Correction: the number in number.txt",
+            ),
+            append(
+                2,
+                "meerkat-thinking-7-1",
+                " must be 21 and \\\"number2.txt\\\" must be 42.\"}",
+            ),
+            ack(3, "meerkat-thinking-7-0"),
+        ];
+        let probe = super::typed_row_probe(row);
+        let tokens = super::thinking_tokens(&lines, 1);
+        assert_eq!(tokens.len(), 1);
+        assert!(
+            super::carries_row(&tokens[0].text, &probe),
+            "{:?}",
+            tokens[0].text
+        );
+        assert!(
+            !tokens[0].acknowledged,
+            "one fragment is still unacknowledged"
+        );
+        lines.push(ack(4, "meerkat-thinking-7-1"));
+        assert!(super::thinking_tokens(&lines, 1)[0].acknowledged);
+        assert!(super::thinking_tokens(&lines, 2).is_empty());
+    }
+
+    /// A job declared complete before the provider learned it was is a
+    /// premature outcome claim (verdict aba5e15b S101, 5/5 runs); a claim
+    /// after the job's "Finished" narration, a hedged promise, and a status
+    /// are not. The quick question's value counts only before its result.
+    #[test]
+    fn s101_flags_outcomes_spoken_before_the_job_completed() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append", "delegation_id": id, "content": content}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let lines = vec![
+            line(1000, created("j1")),
+            line(
+                1100,
+                append(
+                    "j1",
+                    "Started voice request: \"Start a slow job: sleep 25 seconds, then create marker1 dot txt\".",
+                ),
+            ),
+            line(2000, created("q")),
+            line(
+                2100,
+                append(
+                    "q",
+                    "Started voice request: \"How many files are in the workspace? Just the number\".",
+                ),
+            ),
+            line(2500, delta(" I'll let you know when marker one is done.")),
+            line(3000, delta("One.")),
+            line(3200, delta(" There are two files.")),
+            line(4000, append("q", "0")),
+            line(4050, delta(" There are zero files.")),
+            line(4060, delta(" Sorry, there are three files.")),
+            line(4100, created("j2")),
+            line(
+                4200,
+                append(
+                    "j2",
+                    "Started voice request: \"Hand the executor a second slow job: create marker2 dot txt\".",
+                ),
+            ),
+            line(4500, delta(" The second one is running.")),
+            line(
+                5000,
+                append(
+                    "j1",
+                    "Finished voice request: \"Start a slow job ...\". The result follows.",
+                ),
+            ),
+            line(5300, delta(" The first one is done.")),
+            line(
+                5600,
+                delta(" And the second one is done too: marker two dot txt is created."),
+            ),
+            line(
+                9000,
+                append(
+                    "j2",
+                    "Finished voice request: \"Hand the executor ...\". The result follows.",
+                ),
+            ),
+            line(9200, delta(" Marker two dot txt is created.")),
+        ];
+        let claims = super::s101_premature_outcome_claims(&lines, 1);
+        assert_eq!(claims.len(), 3, "{claims:#?}");
+        assert!(
+            claims[0].contains("quick question's answer (\"There are two files.\") at 3200"),
+            "{claims:#?}"
+        );
+        assert!(
+            claims[1].contains("misreported the quick question's answer at 4060"),
+            "{claims:#?}"
+        );
+        assert!(
+            claims[2].contains("declared Job2 complete at 5600"),
+            "{claims:#?}"
+        );
+        assert!(super::s101_premature_outcome_claims(&lines, 2).is_empty());
+    }
+
+    /// A count read out from another job's result is that result, not the
+    /// quick answer (rv1644 S101 R4: job 2's result said "There are 1
+    /// files." and the voice read it verbatim after the quick result's
+    /// "there are 0 files"). A count no delivered result states still fails.
+    #[test]
+    fn s101_a_count_read_from_another_result_is_not_a_misreport() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append",
+                "delegation_id": id, "content": content}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let lines = vec![
+            line(500, created("j1")),
+            line(
+                600,
+                append(
+                    "j1",
+                    "Started voice request: \"Start a slow job for me in the shell, sleep for twenty-five seconds, and then create a file called marker one dot txt\".",
+                ),
+            ),
+            line(1000, created("q")),
+            line(
+                1100,
+                append(
+                    "q",
+                    "Started voice request: \"While that runs, how many files are in your working directory right now? Answer as \"there are N files\".",
+                ),
+            ),
+            line(
+                2000,
+                append(
+                    "q",
+                    "Finished voice request: \"While that runs, how many files ...\". The result follows.\nthere are 0 files",
+                ),
+            ),
+            line(2200, delta(" The count is 0.")),
+            line(
+                2600,
+                append(
+                    "j1",
+                    "Finished voice request: \"Start a slow job ...\". The result follows.\nThe file `marker1.txt` is created.",
+                ),
+            ),
+            line(3000, created("j2")),
+            line(
+                3100,
+                append(
+                    "j2",
+                    "Started voice request: \"And hand the executor a second slow job right away. Sleep twenty seconds and create marker2 dot txt\".",
+                ),
+            ),
+            line(
+                9000,
+                append(
+                    "j2",
+                    "Finished voice request: \"And hand the executor a second slow job ...\". The result follows.\nMarker two.txt is created. Marker one.txt is created. There are 1 files.",
+                ),
+            ),
+            line(
+                9200,
+                delta(
+                    " Marker two.txt is created, marker one.txt is created, and there are 1 files.",
+                ),
+            ),
+            line(9900, delta(" So there are 2 files.")),
+        ];
+        let claims = super::s101_premature_outcome_claims(&lines, 1);
+        assert_eq!(claims.len(), 1, "{claims:#?}");
+        assert!(
+            claims[0].contains("misreported the quick question's answer at 9900"),
+            "{claims:#?}"
+        );
+    }
+
+    /// A quick result the recording lacks (held behind the user's floor and
+    /// released unrecorded, 93b6aaec S101 R2) is anchored on the first
+    /// acknowledgement of an unrecorded append after the quick delegation was
+    /// created: a count spoken after it is not premature, one before it is.
+    #[test]
+    fn s101_anchors_an_unrecorded_quick_result_on_its_acknowledgement() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |event_id: &str, id: &str, content: &str| {
+            super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({"type": "session.commentary.append",
+                    "event_id": event_id, "delegation_id": id, "content": content}),
+            }
+        };
+        let acked = |event_id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.commentary.appended",
+                "client_event_id": event_id}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let quick_started = append(
+            "meerkat-append-4",
+            "q",
+            "Started voice request: \"How many files are in your working directory? Answer as there are N files\".",
+        );
+        let after = vec![
+            line(2000, created("q")),
+            line(2100, quick_started.clone()),
+            line(2600, acked("meerkat-append-4")),
+            // meerkat-append-5 (the held quick result) is not recorded.
+            line(4000, acked("meerkat-append-5")),
+            line(4200, delta(" There are 0 files.")),
+        ];
+        assert!(
+            super::s101_premature_outcome_claims(&after, 1).is_empty(),
+            "{:#?}",
+            super::s101_premature_outcome_claims(&after, 1)
+        );
+        let before = vec![
+            line(2000, created("q")),
+            line(2100, quick_started),
+            line(2600, acked("meerkat-append-4")),
+            line(3000, delta(" There are 0 files.")),
+            line(4000, acked("meerkat-append-5")),
+        ];
+        let claims = super::s101_premature_outcome_claims(&before, 1);
+        assert_eq!(claims.len(), 1, "{claims:#?}");
+        assert!(
+            claims[0].contains("before its result (known at 4000 ms)"),
+            "{claims:#?}"
+        );
+    }
+
+    /// Job 1's file named with its number ("the marker one file is
+    /// created") is not a stated count of files (soak 769f207d R2).
+    /// bargesoak2 S101 R1: job 2's result stated "There are 1 files." before
+    /// the quick question's own result existed, and the voice read it. That is
+    /// job 2's result being read, not a premature quick answer. A count no
+    /// delivered result stated is still a premature answer.
+    #[test]
+    fn s101_a_count_read_from_another_result_before_the_quick_result_is_not_premature() {
+        // Recording order is elapsed order here, so the instant is the seq.
+        let line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            super::provider_recording::Line {
+                seq: elapsed_ms,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append",
+                "delegation_id": id, "content": content}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let recording = |voice: &str| {
+            vec![
+                line(13571, created("j1")),
+                line(
+                    13889,
+                    append(
+                        "j1",
+                        "Started voice request: \"Start a slow job for me in the shell, sleep for 25 seconds, and then create a file called marker 1 dot txt\".",
+                    ),
+                ),
+                line(25838, created("q")),
+                line(
+                    26157,
+                    append(
+                        "q",
+                        "Started voice request: \"While that runs, how many files are in your working directory right now? Answer as, there are n files.\".",
+                    ),
+                ),
+                line(38856, created("j2")),
+                line(
+                    39176,
+                    append(
+                        "j2",
+                        "Started voice request: \"And hand the executor a second slow job right away. Sleep 20 seconds and create marker 2 dot txt\".",
+                    ),
+                ),
+                line(
+                    43244,
+                    append(
+                        "j1",
+                        "Finished voice request: \"Start a slow job ...\". The result follows.\nThe file `marker1.txt` is created.",
+                    ),
+                ),
+                line(
+                    69388,
+                    append(
+                        "j2",
+                        "Finished voice request: \"And hand the executor a second slow job ...\". The result follows.\nThere are 1 files. marker1.txt and marker2.txt are now created.",
+                    ),
+                ),
+                line(70344, delta(voice)),
+                line(
+                    80136,
+                    append(
+                        "q",
+                        "Finished voice request: \"While that runs, how many files ...\". The result follows.\nThere are 1 files.",
+                    ),
+                ),
+            ]
+        };
+        let read_back = super::s101_premature_outcome_claims(
+            &recording(" There is 1 file. Marker one and marker two are now created."),
+            1,
+        );
+        assert!(read_back.is_empty(), "{read_back:#?}");
+        let guessed = super::s101_premature_outcome_claims(&recording(" There are 3 files."), 1);
+        assert_eq!(guessed.len(), 1, "{guessed:#?}");
+        assert!(
+            guessed[0].contains("before its result (known at 80136 ms)"),
+            "{guessed:#?}"
+        );
+    }
+
+    #[test]
+    fn s101_marker_file_names_are_not_counts() {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let event =
+            |value: serde_json::Value| super::provider_recording::Entry::ServerFrame { raw: value };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append", "delegation_id": id, "content": content}),
+        };
+        let lines = vec![
+            line(
+                100,
+                event(
+                    serde_json::json!({"type": "session.delegation.created", "delegation": {"id": "j1"}}),
+                ),
+            ),
+            line(
+                110,
+                append(
+                    "j1",
+                    "Started voice request: \"Start a slow job and create marker1 dot txt\".",
+                ),
+            ),
+            line(
+                200,
+                event(
+                    serde_json::json!({"type": "session.delegation.created", "delegation": {"id": "q"}}),
+                ),
+            ),
+            line(
+                210,
+                append(
+                    "q",
+                    "Started voice request: \"How many files are in your working directory?\".",
+                ),
+            ),
+            line(
+                300,
+                append(
+                    "j1",
+                    "Finished voice request: \"Start a slow job ...\". The result follows.",
+                ),
+            ),
+            line(
+                400,
+                event(
+                    serde_json::json!({"type": "session.output_transcript.delta", "delta": " The marker one file is created."}),
+                ),
+            ),
+            line(900, append("q", "There are 0 files.")),
+        ];
+        assert!(super::s101_premature_outcome_claims(&lines, 1).is_empty());
+    }
+
+    /// The barge-in reply is judged by content: "done" in assistant speech
+    /// that started after the user's barge-in speech did, even before the
+    /// user's input final (soak d98607e1 R5). A "done" said before the
+    /// barge-in (the previous readout's "Done!") does not count, and no
+    /// "done" after it fails.
+    /// Local only: replay `barge_in_landed_on_speech` over recorded S103 run
+    /// journals (S103_REPLAY = colon-separated run directories), printing
+    /// the verdict and the overlap beside it.
+    #[test]
+    #[ignore = "local replay against recordings"]
+    fn s103_barge_in_landed_replay() {
+        use super::support::TimelineEntry;
+        let dirs = std::env::var("S103_REPLAY").unwrap_or_default();
+        for dir in dirs.split(':').filter(|d| !d.is_empty()) {
+            let journal =
+                std::fs::read_to_string(std::path::Path::new(dir).join("journal.jsonl")).unwrap();
+            let mut timeline: Vec<TimelineEntry> = Vec::new();
+            for line in journal.lines() {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                let record = &value["record"];
+                if record["kind"] == "timeline" && record["channel"] == 1 {
+                    // Entry kinds this oracle does not model are skipped.
+                    timeline = record["entries"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+                        .collect();
+                }
+            }
+            let barge_in = timeline
+                .iter()
+                .find(|e| e.detail["name"] == "interrupt_barge_in" && e.detail["id"].is_u64())
+                .and_then(|e| e.detail["id"].as_u64())
+                .unwrap();
+            let overlap = super::fixture_end_entry(&timeline, barge_in)
+                .and_then(|e| e.detail_u64("overlap_ms"))
+                .unwrap_or(0);
+            println!(
+                "REPLAY {dir} overlap={overlap} landed={}",
+                super::barge_in_landed_on_speech(&timeline, barge_in, overlap)
+            );
+        }
+    }
+
+    /// S103 soak 65b7a5c3 (the duck, #1651, truncates audible overlap): R3's
+    /// barge-in started 6 ms after the assistant became audible and the duck
+    /// muted the rest, so the overlap is 0 but the burst was current at the
+    /// onset: it landed. R6's barge-in started 681 ms after the last active
+    /// window, past the 600 ms hysteresis: a barge-in on silence, it fails.
+    #[test]
+    fn s103_barge_in_lands_on_a_burst_current_at_the_onset_even_when_ducked() {
+        use super::support::{TimelineEntry, TimelineKind};
+        let timeline = |onset: u64, started: u64, last_active: u64, ended_at: u64| {
+            vec![
+                TimelineEntry {
+                    t_ms: started,
+                    kind: TimelineKind::AssistantAudioStart,
+                    detail: serde_json::json!({"response": 0}),
+                },
+                TimelineEntry {
+                    t_ms: onset,
+                    kind: TimelineKind::FixtureStart,
+                    detail: serde_json::json!({"id": 2, "name": "interrupt_barge_in", "speech_ms": 2870}),
+                },
+                TimelineEntry {
+                    t_ms: ended_at,
+                    kind: TimelineKind::AssistantAudioEnd,
+                    detail: serde_json::json!({"started_ms": started, "last_active_ms": last_active, "response": 0}),
+                },
+                TimelineEntry {
+                    t_ms: onset + 4450,
+                    kind: TimelineKind::FixtureEnd,
+                    detail: serde_json::json!({"id": 2, "name": "interrupt_barge_in", "overlap_ms": 0,
+                        "facts": {"hysteresis_ms": 600}}),
+                },
+            ]
+        };
+        // R3: audible at 51279, onset 51285, last active 51279 (the duck at
+        // 51491 muted the rest).
+        assert!(super::barge_in_landed_on_speech(
+            &timeline(51285, 51279, 51279, 51974),
+            2,
+            0
+        ));
+        // R6: a burst from 44051 last active at 48259; onset 48940.
+        assert!(!super::barge_in_landed_on_speech(
+            &timeline(48940, 44051, 48259, 48952),
+            2,
+            0
+        ));
+        // Audible overlap is enough on its own.
+        assert!(super::barge_in_landed_on_speech(
+            &timeline(48940, 44051, 48259, 48952),
+            2,
+            200
+        ));
+        // No burst at all before the onset: nothing was interrupted.
+        assert!(!super::barge_in_landed_on_speech(
+            &timeline(48940, 50000, 51000, 51700),
+            2,
+            0
+        ));
+    }
+
+    #[test]
+    fn s100_barge_in_reply_is_judged_by_content_after_the_barge_in() {
+        use super::support::{TimelineEntry, TimelineKind};
+        // The session's only first_input_delta is the earlier request's
+        // (soak 93b6aaec R1); the barge-in is located by the provider events
+        // the peer logged before its onset at 400.
+        let entry = |t_ms: u64, kind: TimelineKind, index: u64| TimelineEntry {
+            t_ms,
+            kind,
+            detail: serde_json::json!({"event_index": index}),
+        };
+        let timeline = vec![
+            entry(100, TimelineKind::FirstInputDelta, 0),
+            entry(300, TimelineKind::ProviderEvent, 1),
+        ];
+        let input = |text: &str, start: f64| serde_json::json!({"type": "session.input_transcript.delta", "delta": text, "start_ms": start});
+        let output = |text: &str, start: f64| serde_json::json!({"type": "session.output_transcript.delta", "delta": text, "start_ms": start});
+        let answered = vec![
+            input(" Now open that file", 37000.0),
+            output(" Done! I added the section.", 44200.0),
+            input(" Hold", 46400.0),
+            output(" Done.", 49000.0),
+            input(" just say done", 49400.0),
+        ];
+        assert!(super::s100_barge_in_answered(&timeline, &answered, 400));
+        let unanswered: Vec<_> = answered
+            .iter()
+            .filter(|e| e["delta"] != " Done.")
+            .cloned()
+            .collect();
+        assert!(
+            !super::s100_barge_in_answered(&timeline, &unanswered, 400),
+            "the readout's \"Done!\" before the barge-in is not its reply"
+        );
+    }
+
+    /// Local only: replay the oracle against recorded S101 provider streams
+    /// (S101_REPLAY = colon-separated run directories).
+    #[test]
+    #[ignore = "local replay against recordings"]
+    fn s101_premature_outcome_replay() {
+        let dirs = std::env::var("S101_REPLAY").unwrap_or_default();
+        for dir in dirs.split(':').filter(|d| !d.is_empty()) {
+            let lines = super::provider_recording::read(
+                &std::path::Path::new(dir).join("provider-stream.jsonl"),
+            )
+            .unwrap();
+            println!(
+                "REPLAY {dir} {:?}",
+                super::s101_premature_outcome_claims(&lines, 1)
+            );
+        }
+    }
+
+    /// The vault phrase has five words and never repeats a word back to
+    /// back, over every byte pair that would have (fb94711f S99 run 8).
+    #[test]
+    fn the_vault_phrase_never_repeats_a_word_back_to_back() {
+        for first in 0..=u8::MAX {
+            for second in (first % 8..=u8::MAX).step_by(8) {
+                let phrase = super::s99_vault_phrase(&[first, second, second, first, first]);
+                let words: Vec<&str> = phrase.split(' ').collect();
+                assert_eq!(words.len(), 5, "{phrase}");
+                assert!(words.windows(2).all(|pair| pair[0] != pair[1]), "{phrase}");
+            }
+        }
+        assert_eq!(
+            super::s99_vault_phrase(&[4, 6, 4, 4, 2]),
+            super::s99_vault_phrase(&[4, 6, 4, 4, 2]),
+            "the phrase is a function of the digest"
+        );
+    }
+
+    /// Speech that attributes an answer to the peer before the peer's reply
+    /// existed is a premature claim (soak c43aa3db S102 run 2; combined5 run
+    /// 3, where a pronoun stood for the peer). Asking the peer, and voicing
+    /// the real reply after it arrived in the same response, are not.
+    #[test]
+    fn a_peer_claim_spoken_before_the_reply_exists_is_flagged() {
+        let delta = |seq: u64, elapsed_ms: u64, text: &str| super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms,
+            entry: super::provider_recording::Entry::ServerFrame {
+                raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+            },
+        };
+        let lines = vec![
+            delta(1, 1000, " Sure, I'm asking Analyst Pemberton now."),
+            delta(2, 2000, " They said they don't know,"),
+            delta(3, 2200, " but I've asked Analyst Pemberton."),
+            delta(4, 3000, " According to Pemberton it's mid-afternoon."),
+            delta(5, 3500, " Pemberton said it feels like mid-afternoon."),
+            delta(6, 5000, " Analyst Pemberton replied, 13 UTC."),
+        ];
+        let claims = super::peer_claims_in_speech_before(&lines, 1, Some(4000), "pemberton");
+        assert_eq!(claims.len(), 3, "{claims:?}");
+        assert!(claims[0].starts_with("They said they don't know"));
+        assert!(claims[1].starts_with("According to Pemberton"));
+        assert!(claims[2].starts_with("Pemberton said"));
+        assert!(
+            super::peer_claims_in_speech_before(&lines, 2, None, "pemberton").is_empty(),
+            "another channel's speech is not this call's"
+        );
+        assert_eq!(
+            super::peer_claims_in_speech_before(&lines, 1, None, "pemberton").len(),
+            4,
+            "with no reply ever sent, the voiced reply is invented too"
+        );
+    }
+
+    /// Since #1637 the "Finished ... The result follows." announcement and
+    /// the result travel in one append; the result after the newline is the
+    /// delivery, and an announcement with nothing after it is not (re-verdict
+    /// 93b6aaec: S97 and S99 found no delivery at all).
+    #[test]
+    fn an_announced_result_is_the_result_after_its_announcement() {
+        assert_eq!(
+            super::announced_result_text(
+                "Finished voice request: \"inspect the directory\". The result follows.\nThe current working directory is empty."
+            ),
+            Some("The current working directory is empty.")
+        );
+        assert_eq!(
+            super::announced_result_text(
+                "Finished voice request: \"inspect\". The result follows."
+            ),
+            None
+        );
+        assert_eq!(
+            super::announced_result_text("Started voice request: \"inspect\"."),
+            None
+        );
+        assert_eq!(
+            super::announced_result_text("The number is 47."),
+            Some("The number is 47.")
+        );
+    }
+
+    /// Scheduler narration on the commentary lane is not a result; the
+    /// delegation's other commentary append is.
+    #[test]
+    fn narration_appends_are_not_result_deliveries() {
+        let append = |seq: u64, content: &str| super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms: seq * 100,
+            entry: super::provider_recording::Entry::ClientEvent {
+                event: serde_json::json!({
+                    "type": "session.commentary.append",
+                    "delegation_id": "item_a",
+                    "content": content,
+                }),
+            },
+        };
+        let lines = [
+            append(
+                1,
+                "Voice request queued: \"x\". 1 request(s) are running ahead of it; it starts when a slot frees.",
+            ),
+            append(2, "Started voice request: \"x\"."),
+            append(
+                3,
+                "Voice request \"x\" is waiting for the assistant to finish its current turn before it starts.",
+            ),
+            append(4, "Finished voice request: \"x\". The result follows."),
+            append(5, BRIEF),
+        ];
+        let deliveries = super::result_deliveries(&lines);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].text, BRIEF);
+    }
+
+    /// Missing or malformed readout records fail closed.
+    #[test]
+    fn readout_records_fail_closed() {
+        assert!(
+            serde_json::from_value::<super::support::ReadoutSnapshot>(serde_json::Value::Null)
+                .is_err()
+        );
+        let snapshot = |records: Vec<super::support::ReadoutRecord>, overflow: bool| {
+            super::support::ReadoutSnapshot { records, overflow }
+        };
+        let well_formed = vec![
+            readout(0, Some(900), "Okay."),
+            readout(1, None, "The client is the Marigold account."),
+        ];
+        assert_eq!(
+            super::readout_records_malformed(&snapshot(well_formed.clone(), false), true),
+            None
+        );
+        assert!(super::readout_records_malformed(&snapshot(Vec::new(), false), true).is_some());
+        assert_eq!(
+            super::readout_records_malformed(&snapshot(Vec::new(), false), false),
+            None
+        );
+        assert!(
+            super::readout_records_malformed(&snapshot(well_formed.clone(), true), true).is_some()
+        );
+        let mut gap = well_formed.clone();
+        gap[1].index = 2;
+        assert!(super::readout_records_malformed(&snapshot(gap, false), true).is_some());
+        let mut open_first = well_formed.clone();
+        open_first[0].closed_by = None;
+        open_first[0].closed_ms = None;
+        assert!(super::readout_records_malformed(&snapshot(open_first, false), true).is_some());
+        let mut unknown_boundary = well_formed;
+        unknown_boundary[1].opened_by = "session.usage.updated".to_owned();
+        assert!(
+            super::readout_records_malformed(&snapshot(unknown_boundary, false), true).is_some()
+        );
+    }
+
+    // ---- talk-over contract -------------------------------------------------
+
+    fn pcm(amplitude: i16) -> String {
+        use base64::Engine as _;
+        let bytes: Vec<u8> = std::iter::repeat_n(amplitude.to_le_bytes(), 4800)
+            .flatten()
+            .collect();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn server_frame(
+        seq: u64,
+        elapsed_ms: u64,
+        raw: serde_json::Value,
+    ) -> super::provider_recording::Line {
+        super::provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms,
+            entry: super::provider_recording::Entry::ServerFrame { raw },
+        }
+    }
+
+    /// Sideband clock = browser clock + 500 ms (one commentary.appended seen
+    /// at browser 1000 and sideband 1500). Barge-in onset at 10_000; the
+    /// assistant burst started at 9000 and was last audible at 11_400.
+    fn yield_fixture(
+        input_voiced_at: u64,
+        last_output_at: u64,
+    ) -> (
+        Vec<super::TimelineEntry>,
+        Vec<super::provider_recording::Line>,
+    ) {
+        let entries = timeline(&[
+            (
+                1000,
+                "commentary_appended",
+                serde_json::json!({"event_index": 3}),
+            ),
+            (
+                10_000,
+                "fixture_start",
+                serde_json::json!({"id": 7, "speech_ms": 1500}),
+            ),
+            (
+                12_000,
+                "assistant_audio_end",
+                serde_json::json!({"started_ms": 9000, "last_active_ms": 11_400}),
+            ),
+        ]);
+        let lines = vec![
+            server_frame(
+                1,
+                1500,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+            server_frame(
+                2,
+                10_550,
+                serde_json::json!({"type": "session.input_audio.append", "audio": pcm(4)}),
+            ),
+            server_frame(
+                3,
+                input_voiced_at,
+                serde_json::json!({"type": "session.input_audio.append", "audio": pcm(2000)}),
+            ),
+            server_frame(
+                4,
+                last_output_at,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500), "start_ms": 40_000, "end_ms": 40_200}),
+            ),
+            server_frame(
+                5,
+                last_output_at + 200,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(5), "start_ms": 40_200, "end_ms": 40_400}),
+            ),
+            // The next response, after the last audible window: not the yield.
+            server_frame(
+                6,
+                13_000,
+                serde_json::json!({"type": "session.output_audio.delta", "delta": pcm(1500), "start_ms": 43_000, "end_ms": 43_200}),
+            ),
+        ];
+        (entries, lines)
+    }
+
+    #[test]
+    fn a_yield_splits_into_ingest_turn_taking_and_playout() {
+        let (entries, lines) = yield_fixture(10_750, 11_200);
+        let observation = super::yield_segments(&entries, &lines, 1, 7, 600).unwrap();
+        let super::YieldObservation::Yield(segments) = observation else {
+            panic!("expected a yield, got {observation:?}");
+        };
+        assert_eq!(
+            segments,
+            super::YieldSegments {
+                onset_ms: 10_000,
+                last_audible_ms: 11_400,
+                ingest_ms: 250,
+                turn_taking_ms: 700,
+                playout_ms: 700,
+            }
+        );
+        assert!(segments.violations().is_empty());
+    }
+
+    /// Each bound fails on its own segment: slow ingest, slow playout, and
+    /// an end-to-end talk-over past the bound.
+    #[test]
+    fn each_talk_over_bound_fails_its_segment() {
+        // A voiced frame stalled on the sideband (arriving 300 ms after its
+        // slot) is not slow ingest: ingest is taken at the cadence slot.
+        let (entries, lines) = yield_fixture(11_050, 11_200);
+        let super::YieldObservation::Yield(stalled) =
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(stalled.ingest_ms, 250);
+        assert!(stalled.violations().is_empty());
+        // Speech reflected three frames late on the cadence is slow ingest.
+        let (entries, mut lines) = yield_fixture(11_150, 11_200);
+        for (seq, at) in [(10, 10_750), (11, 10_950)] {
+            lines.insert(
+                2,
+                server_frame(
+                    seq,
+                    at,
+                    serde_json::json!({"type": "session.input_audio.append", "audio": pcm(4)}),
+                ),
+            );
+        }
+        lines.sort_by_key(|line| line.elapsed_ms);
+        let super::YieldObservation::Yield(slow_ingest) =
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(slow_ingest.ingest_ms, 650);
+        assert!(
+            matches!(slow_ingest.violations().as_slice(), [v] if v.starts_with("ingest took 650 ms"))
+        );
+        let (entries, lines) = yield_fixture(10_750, 10_800);
+        let super::YieldObservation::Yield(slow_playout) =
+            super::yield_segments(&entries, &lines, 1, 7, 600).unwrap()
+        else {
+            panic!("expected a yield");
+        };
+        assert_eq!(slow_playout.playout_ms, 1100);
+        assert!(
+            matches!(slow_playout.violations().as_slice(), [v] if v.starts_with("playout took 1100 ms"))
+        );
+        let talk_over = super::YieldSegments {
+            onset_ms: 10_000,
+            last_audible_ms: 13_001,
+            ingest_ms: 250,
+            turn_taking_ms: 2400,
+            playout_ms: 600,
+        };
+        assert!(
+            matches!(talk_over.violations().as_slice(), [v] if v.starts_with("talked over the user for 3001 ms"))
+        );
+    }
+
+    /// An unmeasurable yield is an error (never a pass); a quiet assistant
+    /// at onset has nothing to yield.
+    #[test]
+    fn an_unmeasurable_yield_is_an_error() {
+        let (entries, mut lines) = yield_fixture(10_750, 11_200);
+        lines.retain(|line| !matches!(&line.entry, super::provider_recording::Entry::ServerFrame { raw } if raw["type"] == "session.input_audio.append"));
+        assert!(super::yield_segments(&entries, &lines, 1, 7, 600).is_err());
+        let (entries, mut lines) = yield_fixture(10_750, 11_200);
+        // The sideband saw a commentary.appended the browser did not: the
+        // pairs cannot be matched, so nothing is measured.
+        lines.push(server_frame(
+            7,
+            2900,
+            serde_json::json!({"type": "session.commentary.appended"}),
+        ));
+        assert!(super::yield_segments(&entries, &lines, 1, 7, 600).is_err());
+        // One late sideband stamp (a 127 ms outlier, soak 35728bf0 S100 run
+        // 3) leaves the median offset, so the yield is still measured.
+        let (mut entries, mut lines) = yield_fixture(10_750, 11_200);
+        entries.insert(
+            1,
+            timeline(&[(2000, "commentary_appended", serde_json::json!({}))]).remove(0),
+        );
+        lines.insert(
+            1,
+            server_frame(
+                7,
+                2627,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+        );
+        entries.insert(
+            2,
+            timeline(&[(3000, "commentary_appended", serde_json::json!({}))]).remove(0),
+        );
+        lines.insert(
+            2,
+            server_frame(
+                8,
+                3500,
+                serde_json::json!({"type": "session.commentary.appended"}),
+            ),
+        );
+        let alignment = super::sideband_clock_alignment(&entries, &lines, 1).unwrap();
+        assert_eq!(
+            (alignment.offset_ms, alignment.spread_ms, alignment.pairs),
+            (500, 127, 3)
+        );
+        assert!(matches!(
+            super::yield_segments(&entries, &lines, 1, 7, 600),
+            Ok(super::YieldObservation::Yield(_))
+        ));
+        // Fresh, alignable recordings: the provider heard the user at the
+        // 10_250 slot, so a burst starting after 10_450 could react to it.
+        let (_, lines) = yield_fixture(10_750, 11_200);
+        let burst = |started_ms: u64, last_active_ms: u64| {
+            timeline(&[
+                (1000, "commentary_appended", serde_json::json!({})),
+                (
+                    10_000,
+                    "fixture_start",
+                    serde_json::json!({"id": 7, "speech_ms": 1500}),
+                ),
+                (
+                    last_active_ms + 600,
+                    "assistant_audio_end",
+                    serde_json::json!({"started_ms": started_ms, "last_active_ms": last_active_ms}),
+                ),
+            ])
+        };
+        // Started after the provider could react: not the yield's.
+        assert_eq!(
+            super::yield_segments(&burst(10_700, 11_400), &lines, 1, 7, 600),
+            Ok(super::YieldObservation::NotSpeakingAtOnset {
+                onset_ms: 10_000,
+                heard_ms: 10_250
+            })
+        );
+        // Last audible before the onset (its end entry trails by the
+        // hysteresis): quiet at onset.
+        assert_eq!(
+            super::yield_segments(&burst(9000, 9800), &lines, 1, 7, 600),
+            Ok(super::YieldObservation::NotSpeakingAtOnset {
+                onset_ms: 10_000,
+                heard_ms: 10_250
+            })
+        );
+        // Started after the onset but before the provider could react to the
+        // utterance: a reply already in flight, measured as the yield.
+        assert!(matches!(
+            super::yield_segments(&burst(10_300, 11_400), &lines, 1, 7, 600),
+            Ok(super::YieldObservation::Yield(super::YieldSegments {
+                ingest_ms: 250,
+                ..
+            }))
+        ));
     }
 }

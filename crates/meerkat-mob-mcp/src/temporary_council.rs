@@ -1478,8 +1478,12 @@ impl TemporaryCouncilCoordinator {
                     supervise_panicked_council(&state, &council_id, &claim, &detail).await
                 }
             });
-            let _ = tx.send(Some(published));
+            // Release the reservation BEFORE publishing. The outcome is
+            // durably sealed by now, so a caller that arrives after a joined
+            // caller has its answer must replay the record rather than join
+            // this finished execution and be told it ran it.
             drop(guard);
+            let _ = tx.send(Some(published));
         });
 
         Ok(Admission::Join(rx))
@@ -1982,6 +1986,45 @@ fn provenance(
 // Owned execution
 // ===========================================================================
 
+/// The council's absolute deadline passed before the awaited step finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CouncilDeadlineElapsed;
+
+/// Await `fut` until `deadline` on the coordinator clock
+/// ([`MobMcpState::temporary_council_now`]).
+///
+/// Without a coordinator clock change this is one timer for the time left,
+/// exactly as `tokio::time::timeout` was. When the clock offset moves (only the
+/// test-only `set_temporary_council_clock_offset` moves it), its setter's
+/// notification re-arms the wait against the new time left, so a test observes
+/// an exact expiry. Nothing wakes on its own to re-read the clock.
+async fn within_council_deadline<F: std::future::Future>(
+    state: &MobMcpState,
+    deadline: DateTime<Utc>,
+    fut: F,
+) -> Result<F::Output, CouncilDeadlineElapsed> {
+    let mut clock = state.temporary_council_clock_changes();
+    tokio::pin!(fut);
+    let mut clock_open = true;
+    loop {
+        let remaining = (deadline - state.temporary_council_now())
+            .to_std()
+            .map_err(|_| CouncilDeadlineElapsed)?;
+        let expiry = tokio::time::sleep(remaining);
+        tokio::pin!(expiry);
+        tokio::select! {
+            biased;
+            output = &mut fut => return Ok(output),
+            () = &mut expiry => return Err(CouncilDeadlineElapsed),
+            changed = clock.changed(), if clock_open => {
+                // A closed watch can never move the clock again: keep the
+                // armed timer only.
+                clock_open = changed.is_ok();
+            }
+        }
+    }
+}
+
 struct CouncilRun {
     state: Arc<MobMcpState>,
     validated: ValidatedRequest,
@@ -2144,6 +2187,15 @@ impl CouncilRun {
             .ok()
     }
 
+    /// Await `fut` until the council's absolute deadline, on the coordinator
+    /// clock. See [`within_council_deadline`].
+    async fn within_deadline<F: std::future::Future>(
+        &self,
+        fut: F,
+    ) -> Result<F::Output, CouncilDeadlineElapsed> {
+        within_council_deadline(&self.state, self.record.deadline, fut).await
+    }
+
     async fn temporary_handle(&self) -> Result<MobHandle, MobError> {
         self.state.handle_for(&self.record.temporary_mob_id).await
     }
@@ -2188,10 +2240,10 @@ impl CouncilRun {
                 }
             };
             for binding in self.host_bootstrap.host_bindings.clone() {
-                let Some(remaining) = self.remaining() else {
+                if self.remaining().is_none() {
                     return Err(TemporaryCouncilExitReason::DeadlineExceeded);
-                };
-                match tokio::time::timeout(remaining, temporary.bind_host(binding)).await {
+                }
+                match self.within_deadline(temporary.bind_host(binding)).await {
                     Ok(Ok(report)) => {
                         bound_hosts.insert(report.host_id);
                     }
@@ -2286,26 +2338,26 @@ impl CouncilRun {
 
             // The absolute deadline wraps this await too: capability creation
             // executes at the source owner and can block on a remote host.
-            let created = tokio::time::timeout(
-                remaining,
-                source.create_forked_participant_with_profile_witness(
-                    self.state.console_principal_snapshot(),
-                    custody.source_identity.clone(),
-                    source_profile,
-                    custody.capability_request_id.clone(),
-                    self.validated
-                        .request
-                        .participants
-                        .iter()
-                        .find(|spec| spec.order == custody.order)
-                        .and_then(|spec| spec.prefix_message_count),
-                    custody.scope,
-                    // v1 reuse policy: one attachment, one council.
-                    ForkedParticipantReusePolicy::OneShot,
-                    ttl,
-                ),
-            )
-            .await;
+            let created = self
+                .within_deadline(
+                    source.create_forked_participant_with_profile_witness(
+                        self.state.console_principal_snapshot(),
+                        custody.source_identity.clone(),
+                        source_profile,
+                        custody.capability_request_id.clone(),
+                        self.validated
+                            .request
+                            .participants
+                            .iter()
+                            .find(|spec| spec.order == custody.order)
+                            .and_then(|spec| spec.prefix_message_count),
+                        custody.scope,
+                        // v1 reuse policy: one attachment, one council.
+                        ForkedParticipantReusePolicy::OneShot,
+                        ttl,
+                    ),
+                )
+                .await;
             let capability = match created {
                 Ok(Ok(capability)) => capability,
                 Ok(Err(error)) => {
@@ -2348,9 +2400,9 @@ impl CouncilRun {
             if let ForkedParticipantOwnerRoute::Host { host_id, .. } = capability.owner_route()
                 && !bound_hosts.contains(host_id.as_str())
             {
-                let Some(remaining) = self.remaining() else {
+                if self.remaining().is_none() {
                     return Err(TemporaryCouncilExitReason::DeadlineExceeded);
-                };
+                }
                 let temporary = match self.temporary_handle().await {
                     Ok(handle) => handle,
                     Err(error) => {
@@ -2371,15 +2423,13 @@ impl CouncilRun {
                         });
                     }
                 };
-                let descriptor = match tokio::time::timeout(
-                    remaining,
-                    source.issue_host_binding_descriptor(
+                let descriptor = match self
+                    .within_deadline(source.issue_host_binding_descriptor(
                         host_id.as_str(),
                         &self.record.temporary_mob_id,
                         target_supervisor,
-                    ),
-                )
-                .await
+                    ))
+                    .await
                 {
                     Ok(Ok(descriptor)) => descriptor,
                     Ok(Err(error)) => {
@@ -2409,10 +2459,10 @@ impl CouncilRun {
                         });
                     }
                 };
-                let Some(remaining) = self.remaining() else {
+                if self.remaining().is_none() {
                     return Err(TemporaryCouncilExitReason::DeadlineExceeded);
-                };
-                match tokio::time::timeout(remaining, temporary.bind_host(binding)).await {
+                }
+                match self.within_deadline(temporary.bind_host(binding)).await {
                     Ok(Ok(report)) => {
                         bound_hosts.insert(report.host_id);
                     }
@@ -2455,17 +2505,15 @@ impl CouncilRun {
                 capability.owner_route(),
                 ForkedParticipantOwnerRoute::Local { .. }
             ) {
-                let Some(remaining) = self.remaining() else {
+                if self.remaining().is_none() {
                     return Err(TemporaryCouncilExitReason::DeadlineExceeded);
-                };
-                let inheritance = match tokio::time::timeout(
-                    remaining,
-                    source.fork_build_inheritance(
+                }
+                let inheritance = match self
+                    .within_deadline(source.fork_build_inheritance(
                         capability.source_identity(),
                         &capability.provenance().source_session_id,
-                    ),
-                )
-                .await
+                    ))
+                    .await
                 {
                     Ok(Ok(inheritance)) => inheritance,
                     Ok(Err(error)) => {
@@ -2481,19 +2529,17 @@ impl CouncilRun {
                 };
                 spec = spec.with_fork_build_inheritance(inheritance);
             }
-            let Some(remaining) = self.remaining() else {
+            if self.remaining().is_none() {
                 return Err(TemporaryCouncilExitReason::DeadlineExceeded);
-            };
-            let spawned = tokio::time::timeout(
-                remaining,
-                temporary.spawn_attached_forked_participant(
+            }
+            let spawned = self
+                .within_deadline(temporary.spawn_attached_forked_participant(
                     self.state.console_principal_snapshot(),
                     &capability,
                     custody.attachment_id.clone(),
                     spec,
-                ),
-            )
-            .await;
+                ))
+                .await;
             let seated = match spawned {
                 Ok(Ok(seated)) => seated,
                 Ok(Err(error)) => {
@@ -2554,10 +2600,11 @@ impl CouncilRun {
                 detail: format!("temporary mob is unavailable: {error}"),
             }
         })?;
-        let Some(remaining) = self.remaining() else {
+        if self.remaining().is_none() {
             return Err(TemporaryCouncilExitReason::DeadlineExceeded);
-        };
-        let report = tokio::time::timeout(remaining, handle.wire_members_batch(edges))
+        }
+        let report = self
+            .within_deadline(handle.wire_members_batch(edges))
             .await
             .map_err(|_| TemporaryCouncilExitReason::DeadlineExceeded)?
             .map_err(|error| TemporaryCouncilExitReason::WiringIncomplete {
@@ -2666,10 +2713,10 @@ impl CouncilRun {
                     exit = TemporaryCouncilExitReason::MaxExchangesReached;
                     break 'rounds;
                 }
-                let Some(remaining) = self.remaining() else {
+                if self.remaining().is_none() {
                     exit = TemporaryCouncilExitReason::DeadlineExceeded;
                     break 'rounds;
-                };
+                }
 
                 let receipt_index = self.record.exchanges.len();
                 let idempotency_key =
@@ -2700,7 +2747,6 @@ impl CouncilRun {
                         &correlation_id,
                         format!("council-r{round}-p{}", custody.order),
                         bounds.max_result_bytes,
-                        remaining,
                     )
                     .await
                 {
@@ -2819,7 +2865,6 @@ impl CouncilRun {
         correlation_id: &str,
         label: String,
         max_bytes: usize,
-        remaining: Duration,
     ) -> Result<BoundedExchange, DeliveryFailure> {
         let handle =
             self.temporary_handle()
@@ -2840,26 +2885,27 @@ impl CouncilRun {
         })?;
         let work = WorkSpec::new(content, WorkOrigin::Internal).with_injected_context(injected);
 
-        let turn = tokio::time::timeout(
-            remaining,
-            handle.start_work_for_identity_with_delivery_identity_bounded(
-                identity.clone(),
-                work,
-                HandlingMode::Queue,
-                delivery,
-                result_spec.clone(),
-            ),
-        )
-        .await
-        .map_err(|_| DeliveryFailure::DeadlineExceeded { phase: "admitted" })?
-        .map_err(|error| DeliveryFailure::Admission {
-            detail: error.to_string(),
-        })?;
+        let turn = self
+            .within_deadline(
+                handle.start_work_for_identity_with_delivery_identity_bounded(
+                    identity.clone(),
+                    work,
+                    HandlingMode::Queue,
+                    delivery,
+                    result_spec.clone(),
+                ),
+            )
+            .await
+            .map_err(|_| DeliveryFailure::DeadlineExceeded { phase: "admitted" })?
+            .map_err(|error| DeliveryFailure::Admission {
+                detail: error.to_string(),
+            })?;
 
-        let Some(remaining) = self.remaining() else {
+        if self.remaining().is_none() {
             return Err(DeliveryFailure::DeadlineExceeded { phase: "completed" });
-        };
-        let bounded = tokio::time::timeout(remaining, turn.wait_bounded(result_spec))
+        }
+        let bounded = self
+            .within_deadline(turn.wait_bounded(result_spec))
             .await
             .map_err(|_| DeliveryFailure::DeadlineExceeded { phase: "completed" })?
             .map_err(|error| DeliveryFailure::Turn {
@@ -3231,7 +3277,9 @@ impl CouncilRun {
                 source,
             })?;
 
-        let remaining = self.remaining().ok_or(MergeTurnError::DeadlineExceeded)?;
+        if self.remaining().is_none() {
+            return Err(MergeTurnError::DeadlineExceeded);
+        }
         let injected = self.injected_context();
         let result = self
             .deliver_bounded_turn(
@@ -3242,7 +3290,6 @@ impl CouncilRun {
                 &correlation_id,
                 format!("council-merge-{purpose}-p{order}"),
                 max_bytes,
-                remaining,
             )
             .await
             .map_err(MergeTurnError::from);

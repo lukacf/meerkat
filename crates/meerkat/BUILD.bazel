@@ -1854,6 +1854,7 @@ rust_library(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -1938,6 +1939,7 @@ rust_library(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2039,6 +2041,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2076,6 +2079,7 @@ rust_test(
         "//crates/meerkat-runtime:package_runfiles",
         "//crates/meerkat:cargo_manifest",
         "//tests/fixtures/machine-dsl-tests:package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//tests/fixtures/mcp-test-server:package_runfiles",
         "//tests/fixtures/surface-build-fixtures:package_runfiles",
         ":package_runfiles",
@@ -2083,6 +2087,7 @@ rust_test(
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2117,6 +2122,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2155,6 +2161,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2215,6 +2222,7 @@ rust_test(
         "//tests/fixtures/surface-build-fixtures:cargo_manifest",
         "//tests/fixtures/surface-build-fixtures:package_runfiles",
         "//tools/buildbuddy:lane_scripts",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//:workspace_runfiles",
         "@rules_rust//rust/toolchain:current_cargo_files",
         "@rules_rust//rust/toolchain:current_rust_stdlib_files",
@@ -2224,6 +2232,7 @@ rust_test(
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2258,6 +2267,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2296,6 +2306,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2323,10 +2334,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2361,6 +2375,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2399,6 +2414,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2427,10 +2443,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2465,6 +2484,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2503,6 +2523,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2530,10 +2551,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2568,6 +2592,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2606,6 +2631,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2633,10 +2659,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2671,6 +2700,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2709,6 +2739,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2738,10 +2769,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2776,6 +2809,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2814,6 +2848,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2841,10 +2876,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -2879,6 +2917,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -2917,6 +2956,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -2964,10 +3004,12 @@ rust_test(
         "//crates/meerkat-web-runtime:cargo_manifest",
         "//crates/meerkat-web-runtime:package_runfiles",
         "//crates/meerkat:cargo_manifest",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3002,6 +3044,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3040,6 +3083,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3067,10 +3111,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3105,6 +3152,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3143,6 +3191,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3172,10 +3221,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3210,6 +3261,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3248,6 +3300,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3277,10 +3330,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3315,6 +3370,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3353,6 +3409,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3384,10 +3441,12 @@ rust_test(
     data = [
         ":package_runfiles",
         "//crates/meerkat-tools:package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3422,6 +3481,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3460,6 +3520,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3487,10 +3548,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3525,6 +3589,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3563,6 +3628,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3592,10 +3658,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3630,6 +3698,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3668,6 +3737,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3695,13 +3765,12 @@ rust_test(
         "integration",
     ],
     data = [
-        ":package_runfiles",
-        "//:workspace_cargo_manifests",
-        "//:workspace_metadata",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3736,6 +3805,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3774,6 +3844,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3801,10 +3872,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3839,6 +3913,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3877,6 +3952,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -3904,10 +3980,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -3942,6 +4021,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -3980,6 +4060,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4007,10 +4088,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4045,6 +4129,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4083,6 +4168,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4114,10 +4200,12 @@ rust_test(
     ],
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4152,6 +4240,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4190,6 +4279,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4219,13 +4309,12 @@ rust_test(
         "required-feature",
     ],
     data = [
-        ":package_runfiles",
-        "//:workspace_cargo_manifests",
-        "//:workspace_metadata",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4260,6 +4349,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4298,6 +4388,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4325,10 +4416,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4363,6 +4457,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4401,6 +4496,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4427,10 +4523,13 @@ rust_test(
     tags = [
         "live",
     ],
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4465,6 +4564,115 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "mcp_oauth_host_canary_test",
+    aliases = aliases(
+        package_name = "crates/meerkat",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mcp_oauth_host_canary",
+    crate_root = "tests/mcp_oauth_host_canary.rs",
+    crate_features = [
+        "anthropic",
+        "atif",
+        "comms",
+        "copilot",
+        "gemini",
+        "integration-real-tests",
+        "jsonl-store",
+        "live",
+        "live-webrtc",
+        "mcp",
+        "memory-store",
+        "memory-store-session",
+        "openai",
+        "openai-live",
+        "openai-realtime",
+        "schedule",
+        "session-compaction",
+        "session-store",
+        "skills",
+        "test-mcp-oauth-fixtures",
+        "test-realtime-fixtures",
+        "workgraph",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "embedded_skills/meerkat-cli-reference/SKILL.md",
+        "embedded_skills/meerkat-platform/SKILL.md",
+        "embedded_skills/meerkat-platform/references/api_reference.md",
+        "embedded_skills/meerkat-platform/references/migration_0_5.md",
+        "embedded_skills/meerkat-platform/references/mobs.md",
+        "src/surface/request_execution.rs",
+    ],
+    srcs = [
+        "tests/mcp_oauth_host_canary.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "mcp_oauth_host_canary",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat:meerkat_anthropic_agent_factory_build",
+        "//crates/meerkat:meerkat_atif_agent_factory_build",
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_comms_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_copilot_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_gemini_agent_factory_build",
+        "//crates/meerkat:meerkat_hooks_agent_factory_build",
+        "//crates/meerkat:meerkat_jobs_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_mcp_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_memory_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_openai_agent_factory_build",
+        "//crates/meerkat:meerkat_providers_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_skills_agent_factory_build",
+        "//crates/meerkat:meerkat_sqlite_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4503,6 +4711,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4530,10 +4739,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4568,6 +4780,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4606,6 +4819,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4633,10 +4847,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4671,6 +4888,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4709,6 +4927,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4738,10 +4957,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4776,6 +4997,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4814,6 +5036,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4845,10 +5068,12 @@ rust_test(
     data = [
         ":package_runfiles",
         "//crates/meerkat-core:package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4883,6 +5108,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -4921,6 +5147,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -4948,10 +5175,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -4986,6 +5216,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5024,6 +5255,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5052,10 +5284,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5090,6 +5325,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5128,6 +5364,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5155,10 +5392,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5193,6 +5433,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5231,6 +5472,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5258,10 +5500,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5296,6 +5541,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5334,6 +5580,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5363,10 +5610,12 @@ rust_test(
     size = "medium",
     data = [
         "//crates/meerkat-rpc:package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5401,6 +5650,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5439,6 +5689,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5466,10 +5717,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5504,6 +5758,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5542,6 +5797,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5569,10 +5825,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5607,6 +5866,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5645,6 +5905,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5672,10 +5933,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5710,6 +5974,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5748,6 +6013,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5775,10 +6041,13 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5813,6 +6082,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5851,6 +6121,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5882,10 +6153,12 @@ rust_test(
         ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -5920,6 +6193,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -5958,6 +6232,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -5987,10 +6262,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -6025,6 +6302,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -6063,6 +6341,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -6092,10 +6371,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -6130,6 +6411,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -6168,6 +6450,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "test-mcp-oauth-fixtures",
         "test-realtime-fixtures",
         "workgraph",
     ],
@@ -6197,10 +6480,12 @@ rust_test(
     size = "medium",
     data = [
         ":package_runfiles",
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "crates/meerkat",
@@ -6235,6 +6520,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
     ] + all_crate_deps(
         package_name = "crates/meerkat",
         normal = True,
@@ -6262,6 +6548,7 @@ test_suite(
         ":job_delivery_projector_test",
         ":job_surface_test",
         ":live_pipeline_unit_test",
+        ":mcp_oauth_host_canary_test",
         ":meerkat_unit_test",
         ":persistence_contract_test",
         ":predicate_schedule_test",

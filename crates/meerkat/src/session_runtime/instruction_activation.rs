@@ -11,27 +11,36 @@ use meerkat_core::{
     InstructionActivationMutation, InstructionActivationReceipt, InstructionActivationRequest,
     SessionError, SessionId, SessionServiceHistoryExt as _,
 };
-use meerkat_runtime::{
-    RuntimeDriverError, RuntimeState, RuntimeStoreWriteFence, SessionServiceRuntimeExt as _,
-};
+use meerkat_runtime::{RuntimeDriverError, RuntimeStoreWriteFence};
 
 use super::MeerkatSessionRuntime;
 
 fn instruction_activation_session_error_to_host(
     error: SessionError,
 ) -> InstructionActivationHostError {
-    match error {
-        SessionError::ExternalWriteFenceConflict { reason } => {
+    match meerkat_runtime::instruction_activation_admission_for_session_error(&error) {
+        Some((InstructionActivationAdmissionErrorCode::ExternalWriteFenceConflict, reason)) => {
             InstructionActivationHostError::ExternalWriteFenceConflict(reason)
         }
-        SessionError::ExternalWriteFenceBackoff { reason } => {
+        Some((InstructionActivationAdmissionErrorCode::ExternalWriteFenceBackoff, reason)) => {
             InstructionActivationHostError::ExternalWriteFenceBackoff(reason)
         }
-        SessionError::Unsupported(message) => InstructionActivationHostError::Admission {
-            code: InstructionActivationAdmissionErrorCode::DurabilityUnavailable,
-            message,
-        },
-        other => InstructionActivationHostError::Session(other),
+        Some((code, message)) => InstructionActivationHostError::Admission { code, message },
+        None => InstructionActivationHostError::Session(error),
+    }
+}
+
+impl From<meerkat_runtime::InstructionActivationRuntimeRefusal> for InstructionActivationHostError {
+    fn from(refusal: meerkat_runtime::InstructionActivationRuntimeRefusal) -> Self {
+        match refusal {
+            meerkat_runtime::InstructionActivationRuntimeRefusal::Admission { code, message } => {
+                Self::Admission { code, message }
+            }
+            meerkat_runtime::InstructionActivationRuntimeRefusal::Runtime(error) => {
+                Self::Runtime(error)
+            }
+            other => Self::Runtime(RuntimeDriverError::Internal(other.to_string())),
+        }
     }
 }
 
@@ -140,61 +149,13 @@ impl MeerkatSessionRuntime {
                 message: format!("session {session_id} is not currently materialized"),
             });
         }
-        #[cfg(feature = "live")]
-        if self
-            .runtime_adapter
-            .live_active_channel_for_session(session_id)
-            .await
-            .is_some()
-        {
-            return Err(InstructionActivationHostError::Admission {
-                code: InstructionActivationAdmissionErrorCode::LiveChannelOpen,
-                message: format!("session {session_id} has an open live channel"),
-            });
-        }
-
-        let runtime_running = self
-            .runtime_adapter
-            .runtime_state(session_id)
-            .await
-            .is_ok_and(|state| matches!(state, RuntimeState::Running));
-        let has_active_inputs = self
-            .runtime_adapter
-            .list_active_inputs(session_id)
-            .await
-            .is_ok_and(|inputs| !inputs.is_empty());
-        if !matches!(
-            self.runtime_adapter
-                .resolve_transcript_edit_admission(session_id, runtime_running, has_active_inputs)
-                .await,
-            Ok(meerkat_runtime::meerkat_machine::dsl::TranscriptEditAdmissionKind::Admissible)
-        ) {
-            return Err(InstructionActivationHostError::Admission {
-                code: InstructionActivationAdmissionErrorCode::SessionBusy,
-                message: format!("session {session_id} has active runtime work"),
-            });
-        }
-
         let identity = self.service.live_session_llm_identity(session_id).await?;
-        let resolved_capabilities = self
-            .runtime_adapter
-            .resolved_session_llm_capabilities(session_id)
-            .await
-            .map_err(InstructionActivationHostError::Runtime)?
-            .ok_or_else(|| {
-                InstructionActivationHostError::Runtime(RuntimeDriverError::Internal(format!(
-                    "materialized session {session_id} has no machine-owned resolved llm capability surface"
-                )))
-            })?;
-        if !resolved_capabilities.supports_mid_conversation_system_messages {
-            return Err(InstructionActivationHostError::Admission {
-                code: InstructionActivationAdmissionErrorCode::UnsupportedCurrentLowering,
-                message: format!(
-                    "model {} for session {session_id} cannot exactly represent an ordered mid-conversation System activation",
-                    identity.model
-                ),
-            });
-        }
+        meerkat_runtime::instruction_activation_runtime_admission(
+            &self.runtime_adapter,
+            session_id,
+            Some(identity.model.as_str()),
+        )
+        .await?;
 
         let service = Arc::clone(&self.service);
         let owned_session_id = session_id.clone();

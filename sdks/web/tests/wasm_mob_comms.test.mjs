@@ -211,14 +211,23 @@ test("WASM mob comms: real idle drains, volatile topology and actionable message
             wasm.mob_member_subscribe(mob, member)));
         }
         // Auto-wiring before autonomous kickoff also delivers the two
-        // machine-emitted kickoff Requests. They are not PeerAdded notices.
+        // machine-emitted kickoff notices. They are visible one-way lifecycle
+        // notices (#1608): each wakes the peer once, names its kind, and is
+        // never a request (no request id, no reply owed). They are not
+        // PeerAdded notices, which stay silent.
         const startupRequests = autoWire && mode !== "turn_driven" ? 4 : 2;
         if (startupRequests === 4) {
           await idleAfter(mob, "a", 4);
           const prompts = provider.requests.map(request => JSON.stringify(request.messages.at(-1)));
           for (const phase of ["starting", "started"]) {
-            assert.equal(prompts.filter(prompt => prompt.includes(`Intent: mob.kickoff_${phase}`)).length, 1);
+            const notices = prompts.filter(prompt => prompt.includes(`Kind: mob.kickoff_${phase}`));
+            assert.equal(notices.length, 1, `one visible mob.kickoff_${phase} notice`);
+            assert.match(notices[0], /Peer lifecycle notice from/);
+            assert.match(notices[0], /not a request/);
+            assert.doesNotMatch(notices[0], /Request ID/);
           }
+          assert.equal(prompts.filter(prompt => prompt.includes("Intent: mob.kickoff_")).length, 0,
+            "kickoff notices must not arrive as peer requests");
         }
         assert.equal(provider.requests.length, startupRequests,
           JSON.stringify(provider.requests.map(request => request.messages.at(-1))));

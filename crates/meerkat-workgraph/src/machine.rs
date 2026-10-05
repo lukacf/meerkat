@@ -4,15 +4,18 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 
 use crate::WorkGraphError;
-use crate::machines::{work_attention_lifecycle as attention_dsl, workgraph_lifecycle as wg_dsl};
+use crate::machines::{
+    work_attention_lifecycle as attention_dsl, work_item_admission as admission_dsl,
+    workgraph_lifecycle as wg_dsl,
+};
 use crate::types::{
     AddEvidenceRequest, AttentionDelegatedAuthority, CancelledChildJoinPolicy,
     ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, FailedChildJoinPolicy,
     ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
-    ProjectedAttentionAuthority, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    ProjectedAttentionAuthority, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAdmissionKey,
     WorkAttentionBinding, WorkAttentionMode, WorkAttentionStatus, WorkClaim, WorkCompletionPolicy,
     WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState, WorkItem,
-    WorkItemId, WorkNamespace, WorkStatus,
+    WorkItemAdmissionState, WorkItemId, WorkNamespace, WorkStatus,
 };
 
 /// Machine-owned public error classification surfaced to REST/RPC callers.
@@ -438,6 +441,61 @@ impl WorkGraphMachine {
         })
     }
 
+    /// Classify a keyed create that found an existing item already admitted
+    /// under the same realm/namespace admission key.
+    ///
+    /// The store returns the existing item's recorded admission identity
+    /// without judging it; `WorkItemAdmissionMachine` compares the requested
+    /// key and the owner-computed request digest against that recovered
+    /// identity. The shell mirrors the verdict and fails closed on anything
+    /// other than exactly one.
+    pub fn classify_admission_replay(
+        existing_item_id: &WorkItemId,
+        existing_admission: &WorkItemAdmissionState,
+        admission_key: &WorkAdmissionKey,
+        request_digest: &str,
+    ) -> Result<admission_dsl::WorkAdmissionReplayKind, WorkGraphError> {
+        let mut dsl_auth = admission_dsl::WorkItemAdmissionMachineAuthority::recover_from_state(
+            existing_admission.clone(),
+        )
+        .map_err(|error| {
+            WorkGraphError::Store(format!(
+                "work item {existing_item_id} has an invalid recorded admission identity: {error:?}"
+            ))
+        })?;
+        let transition = admission_dsl::WorkItemAdmissionMachineMutator::apply(
+            &mut dsl_auth,
+            admission_dsl::WorkItemAdmissionInput::ClassifyAdmissionReplay {
+                requested_admission_key: wg_dsl::WorkAdmissionKeyRef::from(admission_key.as_str()),
+                requested_request_digest: wg_dsl::WorkAdmissionDigestRef::from(request_digest),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::Store(format!(
+                "WorkItemAdmission refused admission replay classification for work item {existing_item_id}: {error:?}"
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let admission_dsl::WorkItemAdmissionEffect::AdmissionReplayClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "WorkItemAdmission emitted multiple admission replay verdicts for work item {existing_item_id}"
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "WorkItemAdmission emitted no admission replay verdict for work item {existing_item_id}"
+            ))
+        })
+    }
+
     /// Resolve whether a requested completion policy is admissible at CREATE for
     /// a non-goal work item.
     ///
@@ -717,6 +775,31 @@ impl WorkGraphMachine {
         namespace: WorkNamespace,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        Self::create_item_with_admission(request, realm_id, namespace, now, None)
+            .map(|(item, event, _)| (item, event))
+    }
+
+    /// Create a work item and bind its admission identity.
+    ///
+    /// `admission` is the caller's key plus the owner-computed digest of the
+    /// exact request; `None` creates an ordinary unkeyed item. The lifecycle
+    /// machine carries the identity on its `Created` effect, and this shell
+    /// realizes the composition route `work_item_create_binds_admission` by
+    /// driving `WorkItemAdmissionMachine::Bind` with exactly those fields. The
+    /// returned admission state is `Admitted` for a keyed create and
+    /// `Unkeyed` otherwise; the caller persists it in the same store
+    /// transaction as the item.
+    pub fn create_item_with_admission(
+        request: CreateWorkItemRequest,
+        realm_id: String,
+        namespace: WorkNamespace,
+        now: DateTime<Utc>,
+        admission: Option<(&WorkAdmissionKey, &str)>,
+    ) -> Result<(WorkItem, WorkGraphEvent, WorkItemAdmissionState), WorkGraphError> {
+        let admission_key =
+            admission.map(|(key, _)| wg_dsl::WorkAdmissionKeyRef::from(key.as_str()));
+        let admission_request_digest =
+            admission.map(|(_, digest)| wg_dsl::WorkAdmissionDigestRef::from(digest));
         let title = validate_title(request.title)?;
         let status = request.status.unwrap_or_default();
         // The creation policy "a new work item may only start open or blocked"
@@ -745,6 +828,8 @@ impl WorkGraphMachine {
                     cancelled_child_join_policy: cancelled_child_join_policy_to_dsl(
                         request.cancelled_child_join_policy,
                     ),
+                    admission_key,
+                    admission_request_digest,
                 }
             }
             wg_dsl::WorkCreateStatusAdmissionKind::AdmittedBlocked => {
@@ -766,6 +851,8 @@ impl WorkGraphMachine {
                     cancelled_child_join_policy: cancelled_child_join_policy_to_dsl(
                         request.cancelled_child_join_policy,
                     ),
+                    admission_key,
+                    admission_request_digest,
                 }
             }
             wg_dsl::WorkCreateStatusAdmissionKind::Denied => {
@@ -774,7 +861,8 @@ impl WorkGraphMachine {
                 ));
             }
         };
-        let dsl_state = apply_new_item_dsl(input)?;
+        let (dsl_state, created) = apply_new_item_dsl_created(input)?;
+        let admission_state = bind_item_admission(created)?;
         let mut item = WorkItem {
             id: WorkItemId::generated(),
             realm_id,
@@ -802,7 +890,7 @@ impl WorkGraphMachine {
         };
         sync_item_from_machine_state(&mut item)?;
         let event = item_event(&item, WorkGraphEventKind::Created, now)?;
-        Ok((item, event))
+        Ok((item, event, admission_state))
     }
 
     pub fn update_item(
@@ -1388,6 +1476,10 @@ fn work_graph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
         WorkGraphError::AttentionTargetRealmMismatch { .. } => {
             wg_dsl::WorkGraphErrorKind::AttentionTargetRealmMismatch
         }
+        WorkGraphError::UnpairedAdmissionIdentity { .. } => {
+            wg_dsl::WorkGraphErrorKind::UnpairedAdmissionIdentity
+        }
+        WorkGraphError::SchemaMismatch { .. } => wg_dsl::WorkGraphErrorKind::SchemaMismatch,
     }
 }
 
@@ -1425,12 +1517,99 @@ fn normalize_labels(labels: BTreeSet<String>) -> Result<BTreeSet<String>, WorkGr
     Ok(normalized)
 }
 
-fn apply_new_item_dsl(
+/// Apply a create input and return the new lifecycle state together with the
+/// admission identity its `Created` effect carries (exactly one such effect is
+/// required).
+pub(crate) fn apply_new_item_dsl_created(
     input: wg_dsl::WorkGraphLifecycleInput,
-) -> Result<wg_dsl::WorkGraphLifecycleMachineState, WorkGraphError> {
+) -> Result<
+    (
+        wg_dsl::WorkGraphLifecycleMachineState,
+        (
+            Option<wg_dsl::WorkAdmissionKeyRef>,
+            Option<wg_dsl::WorkAdmissionDigestRef>,
+        ),
+    ),
+    WorkGraphError,
+> {
+    // Pure typed extraction for the refusal's payload; the machine decides
+    // whether the identity is refused.
+    let (admission_key_present, request_digest_present) = match &input {
+        wg_dsl::WorkGraphLifecycleInput::CreateOpen {
+            admission_key,
+            admission_request_digest,
+            ..
+        }
+        | wg_dsl::WorkGraphLifecycleInput::CreateBlocked {
+            admission_key,
+            admission_request_digest,
+            ..
+        } => (admission_key.is_some(), admission_request_digest.is_some()),
+        _ => (false, false),
+    };
     let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
-    wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
+    let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+    if transition.effects().iter().any(|effect| {
+        matches!(
+            effect,
+            wg_dsl::WorkGraphLifecycleEffect::UnpairedAdmissionIdentityRejected
+        )
+    }) {
+        return Err(WorkGraphError::UnpairedAdmissionIdentity {
+            admission_key_present,
+            request_digest_present,
+        });
+    }
+    let mut created = None;
+    for effect in transition.effects() {
+        if let wg_dsl::WorkGraphLifecycleEffect::Created {
+            admission_key,
+            admission_request_digest,
+        } = effect
+            && created
+                .replace((admission_key.clone(), admission_request_digest.clone()))
+                .is_some()
+        {
+            return Err(WorkGraphError::Store(
+                "WorkGraphLifecycle create emitted multiple Created effects".to_string(),
+            ));
+        }
+    }
+    let created = created.ok_or_else(|| {
+        WorkGraphError::Store("WorkGraphLifecycle create emitted no Created effect".to_string())
+    })?;
+    Ok((dsl_auth.state().clone(), created))
+}
+
+/// Realize the `work_item_create_binds_admission` route: drive a fresh
+/// `WorkItemAdmissionMachine` with the identity the lifecycle `Created` effect
+/// carried. Exactly one `Bound` effect is required.
+fn bind_item_admission(
+    (admission_key, request_digest): (
+        Option<wg_dsl::WorkAdmissionKeyRef>,
+        Option<wg_dsl::WorkAdmissionDigestRef>,
+    ),
+) -> Result<WorkItemAdmissionState, WorkGraphError> {
+    let mut dsl_auth = admission_dsl::WorkItemAdmissionMachineAuthority::new();
+    let transition = admission_dsl::WorkItemAdmissionMachineMutator::apply(
+        &mut dsl_auth,
+        admission_dsl::WorkItemAdmissionInput::Bind {
+            admission_key,
+            request_digest,
+        },
+    )
+    .map_err(|error| WorkGraphError::InvalidInput(format!("{error:?}")))?;
+    let bound = transition
+        .effects()
+        .iter()
+        .filter(|effect| matches!(effect, admission_dsl::WorkItemAdmissionEffect::Bound { .. }))
+        .count();
+    if bound != 1 {
+        return Err(WorkGraphError::Store(format!(
+            "WorkItemAdmission bind emitted {bound} Bound effects"
+        )));
+    }
     Ok(dsl_auth.state().clone())
 }
 
@@ -2638,6 +2817,22 @@ mod tests {
             (
                 WorkGraphError::InvalidTransition("bad".to_string()),
                 WorkGraphPublicErrorClass::InvalidTransition,
+            ),
+            (
+                WorkGraphError::UnpairedAdmissionIdentity {
+                    admission_key_present: true,
+                    request_digest_present: false,
+                },
+                WorkGraphPublicErrorClass::InvalidArguments,
+            ),
+            (
+                WorkGraphError::SchemaMismatch {
+                    version: 4,
+                    missing_objects: vec!["table:workgraph_item_admissions".to_string()],
+                    unexpected_objects: Vec::new(),
+                    changed_objects: Vec::new(),
+                },
+                WorkGraphPublicErrorClass::StoreError,
             ),
             (
                 WorkGraphError::InvalidInput("bad".to_string()),

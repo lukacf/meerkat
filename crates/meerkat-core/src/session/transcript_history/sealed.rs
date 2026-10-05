@@ -92,19 +92,18 @@ impl ValidatedTranscriptHistory {
                 self.state.commit_count()
             )));
         }
-        let bound = if start_index == 0 {
-            TranscriptRewritePrefixAccumulator::empty()
-        } else {
-            self.state
-                .edge(start_index - 1)
-                .map(TranscriptRevisionEdge::rewrite_prefix)
-                .cloned()
-                .ok_or_else(|| {
-                    TranscriptEditError::HistoryStateMalformed(
-                        "rewrite prefix cannot address compact graph".to_string(),
-                    )
-                })?
-        };
+        // A store whose physical head lies before the retirement point
+        // would need retired edges this graph no longer holds.
+        self.state.refuse_if_retired_count(start_index)?;
+        let bound = self
+            .state
+            .rewrite_prefix_at(start_index)
+            .map(std::borrow::Cow::into_owned)
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "rewrite prefix cannot address compact graph".to_string(),
+                )
+            })?;
         if &bound != start_prefix {
             return Err(TranscriptEditError::HistoryStateMalformed(format!(
                 "rewrite prefix does not bind the first {start_index} graph occurrences"
@@ -130,18 +129,16 @@ impl ValidatedTranscriptHistory {
         first: &TranscriptRewriteCommit,
     ) -> Result<ValidatedTranscriptRewriteSuffix<'_>, TranscriptEditError> {
         let start_index = self.exact_rewrite_commit_index(first)?;
-        let start_prefix = if start_index == 0 {
-            TranscriptRewritePrefixAccumulator::empty()
-        } else {
-            self.state
-                .edge(start_index - 1)
-                .map(|edge| edge.rewrite_prefix().clone())
-                .ok_or_else(|| {
-                    TranscriptEditError::HistoryStateMalformed(
-                        "rewrite suffix lost its preceding occurrence prefix".to_string(),
-                    )
-                })?
-        };
+        self.state.refuse_if_retired_count(start_index)?;
+        let start_prefix = self
+            .state
+            .rewrite_prefix_at(start_index)
+            .map(std::borrow::Cow::into_owned)
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "rewrite suffix lost its preceding occurrence prefix".to_string(),
+                )
+            })?;
         Ok(ValidatedTranscriptRewriteSuffix {
             history: self,
             start_prefix,
@@ -153,20 +150,51 @@ impl ValidatedTranscriptHistory {
         })
     }
 
+    /// Receipt-only proof of the exact commit suffix that starts at `first`
+    /// and runs through the head: the rewrite prefix before it, those
+    /// commits, and the final prefix.
+    ///
+    /// Unlike [`Self::prove_commit_suffix_starting_with`] it needs no edge
+    /// bodies, so an audit receipt can still be repaired for occurrences the
+    /// graph has retired.
+    pub fn audit_receipt_starting_with(
+        &self,
+        first: &TranscriptRewriteCommit,
+    ) -> Result<super::TranscriptRewriteAuditReceiptBatch, TranscriptEditError> {
+        let start_index = self.exact_rewrite_commit_index(first)?;
+        let start_prefix = self
+            .state
+            .rewrite_prefix_at(start_index)
+            .map(std::borrow::Cow::into_owned)
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "rewrite receipt lost its preceding occurrence prefix".to_string(),
+                )
+            })?;
+        super::TranscriptRewriteAuditReceiptBatch::new(
+            start_prefix,
+            self.state.commits().skip(start_index).cloned().collect(),
+            self.state.rewrite_prefix().clone(),
+        )
+    }
+
     /// Explicit user-restore projection to the latest occurrence of a child
     /// revision. Parent-advance fractional states are intentionally excluded.
     pub fn project_at_revision(&self, revision: &str) -> Result<Self, TranscriptEditError> {
-        let index = self
+        let Some(index) = self
             .state
             .edges()
             .iter()
             .rposition(|edge| edge.revision() == revision)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "revision {revision} is not an audited child endpoint"
-                ))
-            })?;
-        self.project_at_edge_count(index + 1)
+        else {
+            if self.state.is_retired_revision(revision) {
+                return Err(self.state.retired_revision_refusal(revision));
+            }
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "revision {revision} is not an audited child endpoint"
+            )));
+        };
+        self.project_at_edge_count(self.state.retired_count() + index + 1)
     }
 
     /// Explicit projection immediately after this exact rewrite occurrence.

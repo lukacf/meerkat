@@ -69,6 +69,7 @@ impl TestPeerCommsAuthority {
                 meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
                     session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id),
                     runtime_epoch_id: None,
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
             )
             .expect("RegisterSession input");

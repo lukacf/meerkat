@@ -1037,6 +1037,14 @@ fn json_result(result: ImageGenerationToolResult) -> Result<ToolOutput, BuiltinT
         .map_err(|err| BuiltinToolError::execution_failed(err.to_string()))
 }
 
+/// The names of the image generation family's tools.
+pub const TOOL_NAMES: &[&str] = &["generate_image"];
+
+/// The names of the image generation family's tools.
+pub fn tool_names() -> &'static [&'static str] {
+    TOOL_NAMES
+}
+
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
@@ -1399,6 +1407,23 @@ mod tests {
                 .pointer("/properties/source_images/items/$ref")
                 .is_some(),
             "source_images keeps the full image reference definition: {request:#?}"
+        );
+    }
+
+    #[test]
+    fn tool_names_match_the_tool_definition() {
+        let runtime = ImageGenerationToolRuntime {
+            session_id: SessionId::new(),
+            machine: Arc::new(FakeMachine::default()),
+            planner: fake_planner(),
+            blob_store: Arc::new(FakeBlobStore {
+                writes: Mutex::new(Vec::new()),
+            }),
+            executor: Arc::new(FakeExecutor),
+        };
+        assert_eq!(
+            [GenerateImageTool::new(runtime).def().name.to_string()],
+            tool_names()
         );
     }
 

@@ -605,6 +605,14 @@ impl Fixture {
         self.control.events.lock().await.clone()
     }
 
+    async fn announced_releases(&self) -> Vec<(String, String)> {
+        self.control.announced_releases.lock().await.clone()
+    }
+
+    async fn separate_narration_kinds(&self) -> Vec<LiveDelegationNarrationKind> {
+        self.control.separate_narration_kinds.lock().await.clone()
+    }
+
     /// Close a voice item the way a fork's `workgraph_close` tool call does.
     async fn close_item_as(&self, title: &str, status: meerkat::WorkStatus) {
         let item = self.voice_item_titled(title).await;
@@ -795,6 +803,26 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
         "{narrations:?}"
     );
 
+    // The Completed sentence is never its own provider event: it rides in
+    // the release of the result it introduces, so the provider never holds
+    // "Finished ..." without that result (Turbo S S101: sent separately it
+    // was answered with an invented value before the result landed).
+    assert!(
+        !fx.separate_narration_kinds()
+            .await
+            .contains(&LiveDelegationNarrationKind::Completed),
+        "{:?}",
+        fx.separate_narration_kinds().await
+    );
+    let announced = fx.announced_releases().await;
+    assert_eq!(announced.len(), 2, "{announced:?}");
+    assert!(announced.iter().any(|(key, text)| key == "first-delegation"
+        && text.contains("find the fastest train to Oslo")
+        && text.starts_with("Finished voice request")));
+    assert!(announced.iter().any(
+        |(key, text)| key == "second-delegation" && text.starts_with("Finished voice request")
+    ));
+
     // The Completed sentence and the result it introduces are released under
     // one hold of the channel's delegation append lane: nothing from the
     // other worker lands between them.
@@ -831,6 +859,62 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
             .any(|evidence| evidence.kind == "live_delegation_result")
     }));
     fx.close().await;
+}
+
+/// combined5 S102 R3: the worker's turn asked another member, and the voice
+/// answered the "Finished voice request ... The result follows."
+/// announcement with an invented reply before the member had answered. A
+/// result released while the worker's peer request still awaits its answer
+/// carries those members, so the broker sends its pending-answer notice
+/// ahead of the result, and no Completed sentence goes out before them. An
+/// ordinary result keeps its Completed sentence and carries no members.
+#[tokio::test]
+async fn a_result_awaiting_a_peer_answer_is_released_without_the_completed_sentence() {
+    for awaiting in [true, false] {
+        let mut fx = fixture(true).await;
+        *fx.coordinator
+            .awaiting_peer_replies_for_test
+            .lock()
+            .expect("override") = Some(if awaiting {
+            vec!["analyst-pemberton".to_string()]
+        } else {
+            Vec::new()
+        });
+        let operation = fx
+            .delegate("ask", "ask analyst-pemberton what time it is")
+            .await;
+        let call = fx.next_call().await;
+        fx.client.release(call.index);
+        fx.wait_for_completed(std::slice::from_ref(&operation))
+            .await;
+        wait_until(WAIT, || async {
+            !fx.control.releases.lock().await.is_empty()
+        })
+        .await;
+        let narrations = fx.narrations().await;
+        let expected = if awaiting {
+            vec![LiveDelegationNarrationKind::Claimed]
+        } else {
+            vec![
+                LiveDelegationNarrationKind::Claimed,
+                LiveDelegationNarrationKind::Completed,
+            ]
+        };
+        assert_eq!(
+            kinds(&narrations),
+            expected,
+            "awaiting={awaiting}: {narrations:?}"
+        );
+        let awaiting_releases = fx.control.awaiting_peer_replies.lock().await.clone();
+        let expected_members: Vec<Vec<String>> = if awaiting {
+            vec![vec!["analyst-pemberton".to_string()]]
+        } else {
+            vec![Vec::new()]
+        };
+        assert_eq!(awaiting_releases, expected_members, "awaiting={awaiting}");
+        fx.assert_nothing_cancelled();
+        fx.close().await;
+    }
 }
 
 #[tokio::test]
@@ -1165,26 +1249,43 @@ async fn a_continuation_that_misses_the_workers_last_model_call_is_not_delivered
 
     fx.commit_continuation("continuation-1", "something else entirely")
         .await;
-    let coordinator = Arc::clone(&fx.coordinator);
-    let provider_binding = fx.provider_binding.clone();
-    let steer = tokio::spawn(async move {
-        coordinator
-            .steer_continuation(PendingContinuation {
-                provider_binding,
-                delegation: LiveSidebandDelegationRef::__from_provider_observation(
-                    "split-delegation".to_string(),
-                    "split-provider-delegation".to_string(),
-                )
-                .expect("delegation"),
-                continuation_id: "continuation-1".to_string(),
-                transcript: " into a file called notes dot md".to_string(),
-            })
-            .await;
-    });
-    wait_until(WAIT, || async { fx.steered("continuation-1").await }).await;
-    // The model returns final text: the run ends with no further boundary.
+    // The steer returns once authorized while the worker is still parked on
+    // its model call: the channel's observation loop never waits for a
+    // worker's next boundary (a running tool call can hold one for as long
+    // as the tool runs), so later delegation requests are never held back.
+    // The clock is paused around the steer: a steer that waited for the
+    // boundary would leave the runtime idle, the paused clock would advance
+    // straight to the deadline, and the test fails at once (a deadlock
+    // detector, not a wall-clock margin).
+    tokio::time::pause();
+    let steered = tokio::time::timeout(
+        WAIT,
+        fx.coordinator.steer_continuation(PendingContinuation {
+            provider_binding: fx.provider_binding.clone(),
+            delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                "split-delegation".to_string(),
+                "split-provider-delegation".to_string(),
+            )
+            .expect("delegation"),
+            continuation_id: "continuation-1".to_string(),
+            transcript: " into a file called notes dot md".to_string(),
+        }),
+    )
+    .await;
+    tokio::time::resume();
+    steered.expect("the steer returns without waiting for the worker's model boundary");
+    assert!(fx.steered("continuation-1").await);
+    // The model returns final text: the run ends with no further boundary,
+    // so the delivery resolves as a missed run and the machine records it.
     fx.client.release(0);
-    steer.await.expect("steer task");
+    wait_until(WAIT, || async {
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-1")
+            .await
+            .expect("machine state")
+            .is_some()
+    })
+    .await;
     assert_eq!(
         fx.runtime
             .live_delegation_steer_delivered(&fx.session_id, "continuation-1")

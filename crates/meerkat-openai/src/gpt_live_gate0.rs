@@ -27,7 +27,7 @@ pub const GATE0_CANDIDATE_CONTRACT: &str = "unqualified-direct-gate0-v1";
 pub const GATE0_RESPONSES_BRIDGE_TOOL: &str = "invoke_meerkat";
 
 const GATE0_RESPONSES_BRIDGE_DESCRIPTION: &str =
-    "Delegate this request to the channel-bound Meerkat agent.";
+    "Delegate this request to the channel-bound executor agent.";
 
 fn strict_bridge_parameters() -> serde_json::Value {
     serde_json::json!({
@@ -786,6 +786,19 @@ impl From<TransportError> for Gate0CandidateError {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The model-facing bridge description names no product: words the
+    /// voice model is given bias its input transcription (Turbo S S103).
+    #[test]
+    fn bridge_description_names_no_product() {
+        assert!(
+            !GATE0_RESPONSES_BRIDGE_DESCRIPTION
+                .to_ascii_lowercase()
+                .contains("meerkat"),
+            "{}",
+            GATE0_RESPONSES_BRIDGE_DESCRIPTION
+        );
+    }
     use meerkat_llm_core::provider_runtime::AdmittedExperimentalRealtimeTarget;
     use oai_rt_rs::experimental::gpt_live::{
         CodecError, MAX_BRIDGE_ARGUMENT_BYTES, decode_bridge_arguments,

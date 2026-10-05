@@ -575,6 +575,19 @@ impl McpRouterAdapter {
         }
     }
 
+    /// Host-channel status: MCP targets waiting for human OAuth authorization
+    /// through the host. See [`McpRouter::servers_awaiting_authorization`].
+    /// Not an agent event; it carries no authorize URL, state or code.
+    pub async fn servers_awaiting_authorization(
+        &self,
+    ) -> Vec<meerkat_auth_core::McpServerIdentity> {
+        let router = self.router.read().await;
+        match router.as_ref() {
+            Some(r) => r.servers_awaiting_authorization(),
+            None => Vec::new(),
+        }
+    }
+
     /// Stage an MCP server reload operation.
     pub async fn stage_reload<T: Into<McpReloadTarget>>(&self, target: T) -> Result<(), String> {
         let mut router = self.router.write().await;
@@ -615,6 +628,129 @@ impl McpRouterAdapter {
         }
         self.sync_router_projection(router);
         Ok(actions)
+    }
+
+    /// Drive draining (Removing) servers to finalization in a background
+    /// task, forwarding their lifecycle actions to `lifecycle_tx`.
+    ///
+    /// `running` guards one drain per adapter: a call while a drain runs is a
+    /// no-op. The drain is woken by typed progress, never a timer poll: a
+    /// finished tool call (a draining server's in-flight count drops) or the
+    /// earliest removal timeout of a draining server. It ends when no server
+    /// is draining, and reclaims the drain for a removal staged between that
+    /// check and releasing `running`.
+    pub fn spawn_removal_drain(
+        self: &Arc<Self>,
+        running: Arc<AtomicBool>,
+        lifecycle_tx: tokio::sync::mpsc::UnboundedSender<crate::McpLifecycleAction>,
+    ) {
+        if running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let adapter = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let next = match adapter.progress_removals_and_next_wait(&lifecycle_tx).await {
+                    Ok(next) => next,
+                    Err(error) => {
+                        tracing::warn!("background MCP drain apply failed: {error}");
+                        running.store(false, Ordering::Release);
+                        return;
+                    }
+                };
+                if let Some(wait) = next {
+                    wait.wait(None).await;
+                    continue;
+                }
+                running.store(false, Ordering::Release);
+                // A removal staged after the check above saw `running` set and
+                // spawned no drain of its own.
+                match adapter.has_removing_servers().await {
+                    Ok(true)
+                        if running
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok() => {}
+                    _ => return,
+                }
+            }
+        });
+    }
+
+    /// [`Self::progress_removals`], forwarding its lifecycle actions, plus
+    /// what the drain waits on next. All under one router lock: whoever then
+    /// observes a removal finalized also finds its action queued, and no
+    /// progress between the pass and the wait is missed.
+    async fn progress_removals_and_next_wait(
+        &self,
+        lifecycle_tx: &tokio::sync::mpsc::UnboundedSender<crate::McpLifecycleAction>,
+    ) -> Result<Option<crate::router::McpProgressWait>, String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        let delta = router
+            .progress_removals()
+            .await
+            .map_err(|e| e.to_string())?;
+        self.sync_router_projection(router);
+        for action in delta.lifecycle_actions {
+            let _ = lifecycle_tx.send(action);
+        }
+        Ok(router.removal_progress_wait())
+    }
+
+    /// Wait until every spawned connect attempt has delivered its result to
+    /// the router, without consuming the results: the next boundary still
+    /// processes them and emits their lifecycle actions. Returns `false` if
+    /// `limit` elapses first (a hang guard for tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_connect_results_delivered(&self, limit: Duration) -> bool {
+        let limit = tokio::time::Instant::now() + limit;
+        loop {
+            let wait = {
+                let router = self.router.read().await;
+                let Some(router) = router.as_ref() else {
+                    return true;
+                };
+                let wait = router.progress_wait();
+                if !router.connect_results_outstanding() {
+                    return true;
+                }
+                wait
+            };
+            if tokio::time::Instant::now() >= limit {
+                return false;
+            }
+            wait.wait(Some(limit)).await;
+        }
+    }
+
+    /// Wait until no server is draining (every removal finalized by the
+    /// drain). Returns `false` if `limit` elapses first (a hang guard for
+    /// tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_removals_finalized(&self, limit: Duration) -> bool {
+        let limit = tokio::time::Instant::now() + limit;
+        loop {
+            let wait = {
+                let router = self.router.read().await;
+                let Some(router) = router.as_ref() else {
+                    return true;
+                };
+                let wait = router.progress_wait();
+                if !router.has_removing_servers() {
+                    return true;
+                }
+                wait
+            };
+            if tokio::time::Instant::now() >= limit {
+                return false;
+            }
+            wait.wait(Some(limit)).await;
+        }
     }
 
     /// Progress only Removing server finalization (drain/timeout) without applying staged ops.
@@ -661,6 +797,14 @@ impl McpRouterAdapter {
         let started = tokio::time::Instant::now();
         let deadline = started + timeout;
         loop {
+            // Taken before the poll: a connect result delivered after the
+            // poll read the pending set wakes the wait.
+            let next = self
+                .router
+                .read()
+                .await
+                .as_ref()
+                .map(McpRouter::progress_wait);
             let update = self.poll_external_updates().await;
             all_notices.extend(update.notices);
             if update.pending.is_empty() {
@@ -673,7 +817,10 @@ impl McpRouterAdapter {
                     waited: started.elapsed(),
                 });
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            match next {
+                Some(wait) => wait.wait(Some(deadline)).await,
+                None => tokio::time::sleep_until(deadline).await,
+            }
         }
     }
 
@@ -712,7 +859,9 @@ impl McpRouterAdapter {
         let router = router
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
-        router.set_inflight_calls_for_testing(server_name, count);
+        router
+            .set_inflight_calls_for_testing(server_name, count)
+            .map_err(|error| error.to_string())?;
         self.sync_router_projection(router);
         Ok(())
     }
@@ -1170,44 +1319,11 @@ mod tests {
     use meerkat_core::ExternalToolSurfacePendingOp;
     use meerkat_runtime::RuntimeExternalToolSurfaceHandle;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::time::Duration;
 
     fn async_connect_test_timeout() -> Duration {
         Duration::from_secs((McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS as u64) + 5)
-    }
-
-    fn test_server_path() -> PathBuf {
-        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-            let target_dir = PathBuf::from(target_dir);
-            for profile in ["debug", "release"] {
-                let candidate = target_dir.join(profile).join("mcp-test-server");
-                if candidate.exists() {
-                    return candidate;
-                }
-            }
-            return target_dir.join("debug/mcp-test-server");
-        }
-
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root");
-        workspace_root.join("target/debug/mcp-test-server")
-    }
-
-    fn skip_if_no_test_server() -> Option<PathBuf> {
-        let path = test_server_path();
-        if path.exists() {
-            Some(path)
-        } else {
-            eprintln!(
-                "Skipping: mcp-test-server not built. \
-                 Run `cargo build -p mcp-test-server` first."
-            );
-            None
-        }
     }
 
     fn test_server_config(name: &str, path: &Path) -> meerkat_core::McpServerConfig {
@@ -1526,9 +1642,7 @@ mod tests {
     /// authority and calls must keep working after the bind.
     #[tokio::test]
     async fn adapter_late_bind_rederives_pre_bind_facts_instead_of_poisoning() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         // Embedder flow: ephemeral construction-time authority, servers
         // staged + applied + connected BEFORE the session bind exists.
         let mut router = generated_surface_router();
@@ -1629,9 +1743,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_bind_external_surface_handle_allows_post_bind_pending_state() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         let router = McpRouter::new();
         let adapter = McpRouterAdapter::new(router);
         let handle = generated_surface_handle();
@@ -1762,9 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_bind_seeds_pre_bind_pending_servers_into_dsl() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         let mut router = generated_surface_router();
         router
             .stage_add(test_server_config("srv-beta", &server_path))
@@ -1885,9 +1995,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_until_ready_returns_notices_when_server_connects() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router
@@ -1957,23 +2065,17 @@ mod tests {
     }
 
     /// Shutdown owns in-flight connects: shutting down the adapter while a
-    /// stdio server is still connecting must kill that server's child, which
-    /// then exits shortly after (asserted below within a bounded backstop;
-    /// a zombie awaiting reaping counts as exited). (Fails-old: shutdown never
-    /// joined the spawned connect task, which kept the child alive until the
-    /// connect timeout; a stopping test runtime then skipped the deferred kill
-    /// entirely and left the child holding the test's stderr.)
+    /// stdio server is still connecting kills that server, which has exited
+    /// when shutdown returns. (Fails-old: shutdown never joined the spawned
+    /// connect task, which kept the child alive until the connect timeout; a
+    /// stopping test runtime then skipped the deferred kill entirely and left
+    /// the child holding the test's stderr. After the join, the kill was still
+    /// fire-and-forget, so the child outlived shutdown.)
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn shutdown_kills_a_stdio_server_still_connecting() {
-        let pid_file = std::env::temp_dir().join(format!(
-            "meerkat-mcp-connect-join-{}-{}.pid",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        ));
+        use crate::stdio_test_fixture::{PidReport, process_exited};
+        let mut report = PidReport::new("connect-join");
         let mut router = generated_surface_router();
         router
             .stage_add(meerkat_core::McpServerConfig::stdio(
@@ -1981,58 +2083,106 @@ mod tests {
                 "/bin/sh",
                 vec![
                     "-c".to_string(),
-                    format!("echo $$ > '{}'; exec sleep 60", pid_file.display()),
+                    format!("echo $$ > '{}'; exec sleep 60", report.path().display()),
                 ],
                 HashMap::new(),
             ))
             .expect("stage add");
         router.apply_staged().await.expect("apply staged");
         let adapter = McpRouterAdapter::new(router);
-
-        // Bounded failure backstop only: the child writes its pid at startup.
-        let pid: u32 = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Ok(text) = std::fs::read_to_string(&pid_file)
-                    && let Ok(pid) = text.trim().parse()
-                {
-                    return pid;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("stdio child must start and record its pid");
+        let pid = report.pids().await[0];
 
         adapter.shutdown().await;
-        let _ = std::fs::remove_file(&pid_file);
 
-        // Exited means reaped (no /proc entry) or a zombie awaiting reaping;
-        // either way it no longer holds the test's pipes. Bounded backstop.
-        let exited = |pid: u32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Err(_) => true,
-            Ok(stat) => stat
-                .rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next())
-                .is_some_and(|state| state == "Z"),
-        };
-        let dead = tokio::time::timeout(Duration::from_secs(5), async {
-            while !exited(pid) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .is_ok();
         assert!(
-            dead,
+            process_exited(pid),
             "stdio child {pid} of a still-connecting server outlived adapter shutdown"
+        );
+    }
+
+    /// Stdio servers often launch through a wrapper (`sh -c`, `npx`, `uvx`),
+    /// so the real server is a grandchild. Shutdown terminates the server's
+    /// whole process group, so the grandchild cannot be orphaned.
+    /// (Fails-old: only the direct child was killed.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shutdown_kills_a_wrapped_stdio_servers_whole_process_group() {
+        use crate::stdio_test_fixture::{PidReport, process_exited};
+        let mut report = PidReport::new("wrapped-group");
+        let mut router = generated_surface_router();
+        router
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "wrapped-srv",
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    format!(
+                        "sleep 60 & echo $$ $! > '{}'; wait",
+                        report.path().display()
+                    ),
+                ],
+                HashMap::new(),
+            ))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+        let pids = report.pids().await;
+        let (wrapper, server) = (pids[0], pids[1]);
+
+        adapter.shutdown().await;
+
+        assert!(
+            process_exited(wrapper),
+            "wrapper {wrapper} outlived adapter shutdown"
+        );
+        assert!(
+            process_exited(server),
+            "wrapped server {server} (a grandchild) outlived adapter shutdown"
+        );
+    }
+
+    /// An established wrapped server that keeps running past stdin EOF is
+    /// terminated with its whole process group, without a grace window, and
+    /// has exited when shutdown returns. (Fails-old: rmcp gave the wrapper up
+    /// to 3 s after EOF from a detached task, then killed only the wrapper.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shutdown_kills_an_established_wrapped_stdio_servers_process_group() {
+        use crate::stdio_test_fixture::{PidReport, process_exited, sh_mcp_server_args};
+        let mut report = PidReport::new("established-group");
+        let mut router = generated_surface_router();
+        router
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "established-srv",
+                "/bin/sh",
+                sh_mcp_server_args(Some(report.path())),
+                HashMap::new(),
+            ))
+            .expect("stage add");
+        router.apply_staged().await.expect("apply staged");
+        let adapter = McpRouterAdapter::new(router);
+        let pids = report.pids().await;
+        let (wrapper, server) = (pids[0], pids[1]);
+        adapter
+            .wait_until_ready(async_connect_test_timeout())
+            .await
+            .expect("fixture server completes the handshake");
+
+        adapter.shutdown().await;
+
+        assert!(
+            process_exited(wrapper),
+            "established server {wrapper} outlived adapter shutdown"
+        );
+        assert!(
+            process_exited(server),
+            "established server's grandchild {server} outlived adapter shutdown"
         );
     }
 
     #[tokio::test]
     async fn stage_reload_all_returns_typed_report_and_fails_closed_on_shutdown() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
         let mut router = generated_surface_router();
         router
             .stage_add(test_server_config("reload-srv", &server_path))
@@ -2216,9 +2366,7 @@ mod tests {
 
     #[tokio::test]
     async fn connected_adapter_reports_exact_catalog_support_with_deferred_entries() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router
@@ -2262,9 +2410,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_reload_rebuild_requires_fresh_live_resolution() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router
@@ -2360,9 +2506,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_action_reload_invalidates_plan_resolved_while_connection_was_pending() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let mut router = generated_surface_router();
         router

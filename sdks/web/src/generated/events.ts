@@ -357,6 +357,8 @@ export type InterruptedToolRunDisposition = {
   kind: "unknown";
 };
 
+export type LiveChannelCloseReason = "client_requested" | "client_disconnected" | "provider_closed" | "error" | "media_fault" | "replaced" | "open_abandoned";
+
 export type LiveChannelId = string;
 
 export interface LiveContextObservationId {
@@ -404,7 +406,7 @@ export interface LoweredRequestProvenance {
 
 export type MeerkatSchema = unknown;
 
-export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable";
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported";
 
 export type ModelFallbackSkippedTarget = {
   context?: ContextBudgetFact | null;
@@ -941,7 +943,7 @@ export type TranscriptRewriteSelection = {
   type: "compaction_message_range";
 };
 
-export type TranscriptTurnInput = "runtime_authored";
+export type TranscriptTurnInput = "runtime_authored" | "typed_text";
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 
@@ -1301,6 +1303,14 @@ export interface BoundaryAppendsDiscardedEvent {
   type: "boundary_appends_discarded";
 }
 
+export interface LiveChannelClosedEvent {
+  channel_id: string;
+  reason: LiveChannelCloseReason;
+  reopen_recommended: boolean;
+  session_id: SessionId;
+  type: "live_channel_closed";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1348,7 +1358,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "peer_content_ingested",
   "provider_cache_breakpoints_discarded",
   "boundary_append_applied",
-  "boundary_appends_discarded"
+  "boundary_appends_discarded",
+  "live_channel_closed"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1400,4 +1411,5 @@ export type AgentEvent =
   ModelFallbackCommittedEvent |
   ModelFallbackTargetFailedEvent |
   BoundaryAppendAppliedEvent |
-  BoundaryAppendsDiscardedEvent;
+  BoundaryAppendsDiscardedEvent |
+  LiveChannelClosedEvent;

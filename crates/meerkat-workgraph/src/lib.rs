@@ -37,6 +37,9 @@ pub use execution_machine::{
 pub use machine::{
     ChildJoinDisposition, WorkAttentionMachine, WorkGraphMachine, WorkGraphPublicErrorClass,
 };
+#[cfg(test)]
+mod admission_tests;
+
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,
     WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_request_response_schema,
@@ -45,7 +48,7 @@ pub use rest_contract::{
 pub use service::{AttentionTargetRealmResolver, WorkExecutionBridge, WorkGraphService};
 pub use store::{
     DisabledWorkGraphStore, MemoryWorkGraphStore, WorkGraphEventFilter, WorkGraphNamespaceRead,
-    WorkGraphStore, WorkGraphStoreKind,
+    WorkGraphStore, WorkGraphStoreKind, WorkItemAdmissionInsert,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{SqliteWorkGraphStore, WORKGRAPH_DOMAIN, prepare_pre_0_8_10_workgraph_attention};
@@ -59,7 +62,7 @@ pub use tool_surface::{
 pub use tools::{
     WorkGraphToolCapability, WorkGraphToolContract, WorkGraphToolError, WorkGraphToolErrorCode,
     WorkGraphToolSource, handle_unscoped_workgraph_tools_call, unscoped_workgraph_tools_list,
-    workgraph_platform_capability_manifest, workgraph_tools_list,
+    workgraph_platform_capability_manifest, workgraph_tool_names, workgraph_tools_list,
 };
 pub use types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
@@ -76,15 +79,16 @@ pub use types::{
     ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
     ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
     PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode,
-    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
-    WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding,
-    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionEvidenceKind,
-    WorkExecutionEvidenceProjection, WorkExecutionMachineState, WorkExecutionTarget,
-    WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams,
-    WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey,
-    WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
+    WORK_ADMISSION_KEY_MAX_BYTES, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus,
+    WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind,
+    WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding, WorkExecutionBindingFilter,
+    WorkExecutionBindingId, WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection,
+    WorkExecutionMachineState, WorkExecutionTarget, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams, WorkGraphItemsResponse,
+    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
+    WorkItemAdmissionState, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner,
+    WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =
@@ -149,6 +153,12 @@ pub mod machine_schema_exports {
     pub fn workgraph_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
         meerkat_machine_schema::catalog::dsl::workgraph_lifecycle_schema_metadata().attach_to(
             crate::machines::workgraph_lifecycle::WorkGraphLifecycleMachineState::schema(),
+        )
+    }
+
+    pub fn work_item_admission_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::work_item_admission_schema_metadata().attach_to(
+            crate::machines::work_item_admission::WorkItemAdmissionMachineState::schema(),
         )
     }
 

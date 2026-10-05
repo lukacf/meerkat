@@ -134,6 +134,15 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let api_key = self.api_key.clone();
         Box::pin(try_stream! {
+            // The realtime text session is opened without a tool-choice
+            // control; a non-Auto choice is refused, never dropped.
+            if !request.tool_choice.is_auto() {
+                Err(LlmError::ToolChoiceUnsupported {
+                    provider: "openai_realtime".to_owned(),
+                    choice: request.tool_choice.clone(),
+                    reason: meerkat_llm_core::ToolChoiceRefusal::ProviderHasNoToolChoice,
+                })?;
+            }
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
             let request = &projected_request;

@@ -41,6 +41,16 @@ pub enum RuntimeDriverError {
     #[error("Runtime destroyed")]
     Destroyed,
 
+    /// A live channel's bootstrap delivery barrier was revoked (the channel
+    /// closed or its execution was revoked) while a delegation result waited
+    /// behind it. The result was not released on that channel; its close-time
+    /// disposition belongs to the caller.
+    #[error("live context delivery barrier revoked on channel {channel_id}")]
+    LiveContextBarrierRevoked {
+        session_id: String,
+        channel_id: String,
+    },
+
     /// Durable recovery state could not be replayed through canonical runtime authority.
     #[error("Recovery corruption: {reason}")]
     RecoveryCorruption { reason: String },

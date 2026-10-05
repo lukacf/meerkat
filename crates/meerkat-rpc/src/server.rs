@@ -85,14 +85,76 @@ impl meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher
         if observation.output().channel_id != *binding.channel_id() {
             return Err(ExperimentalLivePublicObservationDeliveryError::Rejected);
         }
+        let kind = observation.kind();
         let output = observation.into_output();
-        let params = meerkat_contracts::LiveAssistantOutputAvailableParams {
-            channel_id: output.channel_id.to_string(),
-            output_id: output.output_id,
-            content_index: output.content_index,
+        let notification = match kind {
+            meerkat::experimental_gpt_live::ExperimentalLivePublicObservationKind::MediaHealthRequested => {
+                RpcNotification::try_new(
+                    "live/media_health_requested",
+                    &meerkat_contracts::LiveMediaHealthRequestedParams {
+                        channel_id: output.channel_id.to_string(),
+                        output_id: output.output_id,
+                    },
+                )
+            }
+            _ => RpcNotification::try_new(
+                "live/assistant_output_available",
+                &meerkat_contracts::LiveAssistantOutputAvailableParams {
+                    channel_id: output.channel_id.to_string(),
+                    output_id: output.output_id,
+                    content_index: output.content_index,
+                },
+            ),
+        }
+        .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.deliver(binding, notification).await
+    }
+
+    /// `live/assistant_playback_hint {channel_id, hint}` (#1638), written
+    /// under the same binding-fenced custody as every live notification.
+    async fn publish_playback_hint(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        hint: meerkat::experimental_gpt_live::ExperimentalLivePlaybackHint,
+    ) -> Result<(), meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError>
+    {
+        use meerkat::experimental_gpt_live::{
+            ExperimentalLivePlaybackHint, ExperimentalLivePublicObservationDeliveryError,
         };
-        let notification = RpcNotification::try_new("live/assistant_output_available", &params)
-            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+
+        let hint = match hint {
+            ExperimentalLivePlaybackHint::Duck => {
+                meerkat_contracts::LiveAssistantPlaybackHint::Duck
+            }
+            ExperimentalLivePlaybackHint::Restore => {
+                meerkat_contracts::LiveAssistantPlaybackHint::Restore
+            }
+            _ => return Err(ExperimentalLivePublicObservationDeliveryError::Rejected),
+        };
+        let notification = RpcNotification::try_new(
+            "live/assistant_playback_hint",
+            &meerkat_contracts::LiveAssistantPlaybackHintParams {
+                channel_id: binding.channel_id().to_string(),
+                hint,
+            },
+        )
+        .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        self.deliver(binding, notification).await
+    }
+}
+
+#[cfg(feature = "openai-live")]
+impl ExperimentalLiveRpcObservationPublisher {
+    /// Queue one live notification for the connection writer and wait until
+    /// it is written (or refused for a stale binding).
+    async fn deliver(
+        &self,
+        binding: meerkat_live::ProviderWebrtcBinding,
+        notification: RpcNotification,
+    ) -> Result<(), meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError>
+    {
+        use meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError;
+
         let (delivery_tx, delivery_rx) = oneshot::channel();
         self.tx
             .send(ExperimentalLiveRpcNotification::new(
@@ -938,15 +1000,19 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (callback_request_tx, callback_request_rx) =
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
-        let callback_id_counter = Arc::new(AtomicU64::new(0));
         let (long_running_tx, long_running_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
 
-        // Wire callback tool state into the runtime so session/create handlers
-        // can build CallbackToolDispatchers that route through this server.
-        runtime.set_callback_channel(callback_request_tx.clone(), callback_id_counter.clone());
+        // This connection owns its callback route: its channel, its id space
+        // and its registered callback tools. The route lives on this
+        // connection's router and is never written into the shared runtime,
+        // so another connection on the same runtime cannot replace it.
+        let callback_route =
+            crate::callback_dispatcher::CallbackRoute::new(callback_request_tx.clone());
+        let callback_id_counter = callback_route.id_counter();
 
         let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)
-            .with_skill_runtime(skill_runtime);
+            .with_skill_runtime(skill_runtime)
+            .with_callback_route(callback_route);
         #[cfg(feature = "openai-live")]
         let router = router.with_experimental_live_public_observation_publisher(Arc::new(
             ExperimentalLiveRpcObservationPublisher {
@@ -1130,7 +1196,11 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
     /// Get the shared registered tools list.
     pub fn registered_tools(&self) -> Vec<meerkat_core::ToolDef> {
-        self.router.runtime().callback_tool_registry().snapshot()
+        self.router
+            .callback_route()
+            .map(|route| route.registry())
+            .unwrap_or_else(|| self.router.runtime().callback_tool_registry())
+            .snapshot()
     }
 
     /// Run the server until EOF or a fatal transport error.
@@ -1420,6 +1490,12 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // connection that failed to deliver its answer.
         self.reject_queued_responses().await;
         self.reject_queued_experimental_live_notifications();
+        // The connection that owns this callback route is gone. Close the
+        // route and fail every callback it still owes BEFORE the graceful
+        // request shutdown: dispatchers observe a closed route or a dropped
+        // response as typed `tool_unavailable` immediately, instead of
+        // waiting on a client that can never answer.
+        self.close_callback_route();
         connection_result?;
 
         // Graceful shutdown: close all sessions (unless this is a shared TCP
@@ -1551,6 +1627,17 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         admitted.settle(write_result.is_ok());
         drop(publication_custody);
         write_result.map_err(ServerError::from)
+    }
+
+    /// Close this connection's callback route and fail its pending and
+    /// queued callbacks. Dropping each response sender is the typed failure
+    /// its dispatcher maps to `tool_unavailable`.
+    fn close_callback_route(&mut self) {
+        self.callback_request_rx.close();
+        while let Ok(envelope) = self.callback_request_rx.try_recv() {
+            drop(envelope);
+        }
+        self.pending_callbacks.clear();
     }
 
     fn reject_queued_experimental_live_notifications(&mut self) {
@@ -2447,6 +2534,49 @@ mod tests {
             ExperimentalLiveRpcNotification::new(binding, notification, delivery_tx),
             delivery_rx,
         )
+    }
+
+    /// #1638: a barge-in hint becomes `live/assistant_playback_hint` under
+    /// the channel's binding, and is delivered only once the writer settles
+    /// it; a refused write reports `Rejected`, never success.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn playback_hints_publish_as_live_assistant_playback_hint_notifications() {
+        use meerkat::experimental_gpt_live::{
+            ExperimentalLivePlaybackHint, ExperimentalLivePublicObservationDeliveryError,
+            ExperimentalLivePublicObservationPublisher,
+        };
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let publisher = Arc::new(ExperimentalLiveRpcObservationPublisher { tx });
+        for (hint, wire, delivered) in [
+            (ExperimentalLivePlaybackHint::Duck, "duck", true),
+            (ExperimentalLivePlaybackHint::Restore, "restore", false),
+        ] {
+            let binding = test_experimental_live_binding("barge-in", 2, 5);
+            let publish = tokio::spawn({
+                let publisher = Arc::clone(&publisher);
+                let binding = binding.clone();
+                async move { publisher.publish_playback_hint(binding, hint).await }
+            });
+            let mut queued = rx.recv().await.expect("hint queued for the writer");
+            assert_eq!(queued.binding, binding);
+            assert_eq!(queued.notification.method, "live/assistant_playback_hint");
+            assert_eq!(
+                queued.notification.params_value().expect("params"),
+                serde_json::json!({"channel_id": "barge-in", "hint": wire})
+            );
+            queued.settle(delivered);
+            let outcome = publish.await.expect("publish task");
+            if delivered {
+                assert_eq!(outcome, Ok(()));
+            } else {
+                assert_eq!(
+                    outcome,
+                    Err(ExperimentalLivePublicObservationDeliveryError::Rejected)
+                );
+            }
+        }
     }
 
     #[cfg(feature = "live-webrtc")]

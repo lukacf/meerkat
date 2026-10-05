@@ -1754,6 +1754,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -3418,6 +3447,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -3642,18 +3711,27 @@
         "description": "A Meerkat-native JSON schema."
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -6447,11 +6525,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -10605,6 +10688,14 @@
             "default": false,
             "type": "boolean"
           },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -10817,6 +10908,14 @@
       },
       "retire_member": {
         "default": false,
+        "type": "boolean"
+      },
+      "rotation_observe_hold": {
+        "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+        "type": "boolean"
+      },
+      "run_start_hold": {
+        "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
         "type": "boolean"
       },
       "supported_protocol_versions": {
@@ -12996,6 +13095,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -13081,6 +13187,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -13244,6 +13357,71 @@
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -14766,6 +14944,87 @@
       },
       {
         "additionalProperties": false,
+        "description": "Hold the member's run starts for a mob Stop (#1500). A peer without\n[`BridgeCapabilities::run_start_hold`] rejects it at decode.",
+        "properties": {
+          "cancel_current_run": {
+            "default": false,
+            "description": "Cancel, at its next boundary, exactly the run the hold found current.",
+            "type": "boolean"
+          },
+          "command": {
+            "const": "hold_run_starts",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_member": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Release a run-start hold (mob Resume).",
+        "properties": {
+          "command": {
+            "const": "release_run_starts",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_member": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
         "description": "Retire one exact peer-only controller-member runtime incarnation (V5).\n\nSupervisor authentication proves who issued the command. `member_fence`\nseparately proves which exact Mob incarnation and runtime/session epoch the\ncontroller is authorized to retire. Neither authority may be inferred from\nthe other or from the addressed session id.",
         "properties": {
           "command": {
@@ -15767,6 +16026,15 @@
             "const": "observe_supervisor_rotation",
             "type": "string"
           },
+          "hold_until_terminal_ms": {
+            "description": "Hold the reply until the operation is terminal (completed or\nrejected) as visible to this observer, for at most this many\nmilliseconds. When the hold elapses the member replies with the\nobservation it has then (not found or pending). Absent: a single-shot\nobservation. A completed receipt is visible to the next supervisor, so\nsupervisors hold their attempted-authority read.\n\nAn extension independent of the protocol version, like\n`tracked_input_cancel`: members advertise it with\n[`BridgeCapabilities::rotation_observe_hold`]. A member that does not\nimplement it rejects the field (this payload denies unknown fields)\nwith the typed `Unsupported` cause, and the supervisor falls back to\nsingle-shot observation.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "observer": {
             "$ref": "#/$defs/BridgePeerSpec"
           },
@@ -16602,6 +16870,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -16629,6 +16904,71 @@
       "SourceUuid": {
         "description": "Canonical source identifier.",
         "type": "string"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -17893,6 +18233,14 @@
             "default": false,
             "type": "boolean"
           },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -18237,6 +18585,14 @@
             "default": false,
             "type": "boolean"
           },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -18506,6 +18862,14 @@
           },
           "retire_member": {
             "default": false,
+            "type": "boolean"
+          },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
             "type": "boolean"
           },
           "supported_protocol_versions": {
@@ -21065,6 +21429,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -24149,6 +24520,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -25943,6 +26343,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -26201,18 +26641,27 @@
         "type": "string"
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -29006,11 +29455,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -36526,6 +36980,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -37007,6 +37490,14 @@
           },
           "retire_member": {
             "default": false,
+            "type": "boolean"
+          },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
             "type": "boolean"
           },
           "supported_protocol_versions": {
@@ -37527,6 +38018,79 @@
           "invoke_and_observe"
         ],
         "type": "string"
+      },
+      "BridgeHeldRun": {
+        "description": "What a [`BridgeCommand::HoldRunStarts`] did to the member's run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The member had no run.",
+            "properties": {
+              "run": {
+                "const": "no_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run was cancelled at its next boundary.",
+            "properties": {
+              "run": {
+                "const": "cancelled_at_boundary",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run ended on its own between the hold and the cancel.",
+            "properties": {
+              "run": {
+                "const": "run_ended_before_cancel",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run continues; no cancel was requested.",
+            "properties": {
+              "run": {
+                "const": "left_running",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
@@ -40076,6 +40640,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -40632,18 +41236,27 @@
         "type": "string"
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -43495,11 +44108,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -44398,7 +45016,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -44480,6 +45112,16 @@
           "provider_native_resume"
         ],
         "type": "object"
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
       },
       "WireLiveContinuityMode": {
         "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
@@ -45658,6 +46300,24 @@
           "expected_member",
           "operation_id",
           "receipt"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Reply to [`BridgeCommand::HoldRunStarts`].",
+        "properties": {
+          "result": {
+            "const": "run_starts_held",
+            "type": "string"
+          },
+          "run": {
+            "$ref": "#/$defs/BridgeHeldRun"
+          }
+        },
+        "required": [
+          "result",
+          "run"
         ],
         "type": "object"
       },
@@ -47146,6 +47806,15 @@
     "additionalProperties": false,
     "description": "Request to observe a previously submitted supervisor rotation.\n\nThe observer identity and epoch are explicit proof inputs that the member\nvalidates against the authenticated request sender and its current or\npending authority state.",
     "properties": {
+      "hold_until_terminal_ms": {
+        "description": "Hold the reply until the operation is terminal (completed or\nrejected) as visible to this observer, for at most this many\nmilliseconds. When the hold elapses the member replies with the\nobservation it has then (not found or pending). Absent: a single-shot\nobservation. A completed receipt is visible to the next supervisor, so\nsupervisors hold their attempted-authority read.\n\nAn extension independent of the protocol version, like\n`tracked_input_cancel`: members advertise it with\n[`BridgeCapabilities::rotation_observe_hold`]. A member that does not\nimplement it rejects the field (this payload denies unknown fields)\nwith the typed `Unsupported` cause, and the supervisor falls back to\nsingle-shot observation.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
       "observer": {
         "$ref": "#/$defs/BridgePeerSpec"
       },
@@ -47924,9 +48593,81 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -50560,6 +51301,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -51113,6 +51883,14 @@
             "default": false,
             "type": "boolean"
           },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
+            "type": "boolean"
+          },
           "supported_protocol_versions": {
             "default": [
               2,
@@ -51562,6 +52340,87 @@
               "operation_id",
               "expected_run_id",
               "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Hold the member's run starts for a mob Stop (#1500). A peer without\n[`BridgeCapabilities::run_start_hold`] rejects it at decode.",
+            "properties": {
+              "cancel_current_run": {
+                "default": false,
+                "description": "Cancel, at its next boundary, exactly the run the hold found current.",
+                "type": "boolean"
+              },
+              "command": {
+                "const": "hold_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Release a run-start hold (mob Resume).",
+            "properties": {
+              "command": {
+                "const": "release_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
             ],
             "type": "object"
           },
@@ -52568,6 +53427,15 @@
                 "const": "observe_supervisor_rotation",
                 "type": "string"
               },
+              "hold_until_terminal_ms": {
+                "description": "Hold the reply until the operation is terminal (completed or\nrejected) as visible to this observer, for at most this many\nmilliseconds. When the hold elapses the member replies with the\nobservation it has then (not found or pending). Absent: a single-shot\nobservation. A completed receipt is visible to the next supervisor, so\nsupervisors hold their attempted-authority read.\n\nAn extension independent of the protocol version, like\n`tracked_input_cancel`: members advertise it with\n[`BridgeCapabilities::rotation_observe_hold`]. A member that does not\nimplement it rejects the field (this payload denies unknown fields)\nwith the typed `Unsupported` cause, and the supervisor falls back to\nsingle-shot observation.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "observer": {
                 "$ref": "#/$defs/BridgePeerSpec"
               },
@@ -53279,6 +54147,79 @@
           "invoke_and_observe"
         ],
         "type": "string"
+      },
+      "BridgeHeldRun": {
+        "description": "What a [`BridgeCommand::HoldRunStarts`] did to the member's run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The member had no run.",
+            "properties": {
+              "run": {
+                "const": "no_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run was cancelled at its next boundary.",
+            "properties": {
+              "run": {
+                "const": "cancelled_at_boundary",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run ended on its own between the hold and the cancel.",
+            "properties": {
+              "run": {
+                "const": "run_ended_before_cancel",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run continues; no cancel was requested.",
+            "properties": {
+              "run": {
+                "const": "left_running",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
@@ -54413,6 +55354,24 @@
               "expected_member",
               "operation_id",
               "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::HoldRunStarts`].",
+            "properties": {
+              "result": {
+                "const": "run_starts_held",
+                "type": "string"
+              },
+              "run": {
+                "$ref": "#/$defs/BridgeHeldRun"
+              }
+            },
+            "required": [
+              "result",
+              "run"
             ],
             "type": "object"
           },
@@ -57089,6 +58048,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -58133,18 +59132,27 @@
         "type": "object"
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -58385,7 +59393,7 @@
         "type": "string"
       },
       "PeerLifecycleKind": {
-        "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane topology updates, not correlated\npeer work requests. They intentionally do not create request/response\nlifecycles and must never require an LLM-authored reply.",
+        "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane updates (topology changes and\nmember-kickoff status), not correlated peer work requests. They\nintentionally do not create request/response lifecycles and must never\nrequire an LLM-authored reply. Topology kinds are consumed silently by the\nreceiver; kickoff kinds are projected to the receiving agent as visible\nlifecycle notices.",
         "oneOf": [
           {
             "enum": [
@@ -58398,6 +59406,36 @@
           {
             "const": "mob.dismiss",
             "description": "Supervisor-directed dismissal: a typed terminal lifecycle signal that\nretires a live executor. The dismissal authority is the supervisor /\nruntime drain-lifecycle owner, never a peer-authored message body — a\n\"DISMISS\" string in a peer message is ordinary content, not a control\nsignal.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_pending",
+            "description": "A member's kickoff is queued behind its start gate.\n\nThe six kickoff kinds are visible member-status notices, not requests:\nthe receiver records nothing to answer and owes no reply.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_starting",
+            "description": "A member's kickoff turn is being started.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_started",
+            "description": "A member's kickoff turn started.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_callback_pending",
+            "description": "A member's kickoff is waiting on its callback.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_failed",
+            "description": "A member's kickoff failed.",
+            "type": "string"
+          },
+          {
+            "const": "mob.kickoff_cancelled",
+            "description": "A member's kickoff was cancelled.",
             "type": "string"
           }
         ]
@@ -58906,6 +59944,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -59618,6 +60663,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -61029,6 +62081,71 @@
         },
         "type": "object"
       },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",
         "enum": [
@@ -61723,11 +62840,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -62857,7 +63979,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -62939,6 +64075,16 @@
           "provider_native_resume"
         ],
         "type": "object"
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
       },
       "WireLiveContinuityMode": {
         "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
@@ -65709,6 +66855,87 @@
           },
           {
             "additionalProperties": false,
+            "description": "Hold the member's run starts for a mob Stop (#1500). A peer without\n[`BridgeCapabilities::run_start_hold`] rejects it at decode.",
+            "properties": {
+              "cancel_current_run": {
+                "default": false,
+                "description": "Cancel, at its next boundary, exactly the run the hold found current.",
+                "type": "boolean"
+              },
+              "command": {
+                "const": "hold_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Release a run-start hold (mob Resume).",
+            "properties": {
+              "command": {
+                "const": "release_run_starts",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMemberIncarnation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Retire one exact peer-only controller-member runtime incarnation (V5).\n\nSupervisor authentication proves who issued the command. `member_fence`\nseparately proves which exact Mob incarnation and runtime/session epoch the\ncontroller is authorized to retire. Neither authority may be inferred from\nthe other or from the addressed session id.",
             "properties": {
               "command": {
@@ -66709,6 +67936,15 @@
               "command": {
                 "const": "observe_supervisor_rotation",
                 "type": "string"
+              },
+              "hold_until_terminal_ms": {
+                "description": "Hold the reply until the operation is terminal (completed or\nrejected) as visible to this observer, for at most this many\nmilliseconds. When the hold elapses the member replies with the\nobservation it has then (not found or pending). Absent: a single-shot\nobservation. A completed receipt is visible to the next supervisor, so\nsupervisors hold their attempted-authority read.\n\nAn extension independent of the protocol version, like\n`tracked_input_cancel`: members advertise it with\n[`BridgeCapabilities::rotation_observe_hold`]. A member that does not\nimplement it rejects the field (this payload denies unknown fields)\nwith the typed `Unsupported` cause, and the supervisor falls back to\nsingle-shot observation.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "observer": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -68873,6 +70109,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -68958,6 +70201,13 @@
               "array",
               "null"
             ]
+          },
+          "tool_choice_plan": {
+            "description": "Tool choice for this turn's model requests, in order: entry `k`\napplies to the run's `k`-th provider call, and every call after the\nplan is exhausted is `Auto`. Run-local: it lives only as long as the\noverlay and never reaches session defaults, later turns or fallback.",
+            "items": {
+              "$ref": "#/$defs/ToolChoice"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -69121,6 +70371,71 @@
           }
         },
         "type": "object"
+      },
+      "ToolChoice": {
+        "description": "Which tool use the model may or must make on one provider call.\n\n`Auto` is today's behaviour and the default: the model decides, and the\nprovider request carries no choice beyond what each adapter always sent.\nEvery other variant is lowered to the provider's native tool-choice field.\nA provider or model that cannot honour a requested choice refuses the\ncall with a typed unsupported error; a choice is never downgraded to\n`Auto` silently.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model decides whether to call a tool.",
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call at least one of the offered tools.",
+            "properties": {
+              "mode": {
+                "const": "required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must not call any tool.",
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model must call the named tool, which must be offered.",
+            "properties": {
+              "mode": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -71985,6 +73300,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -72466,6 +73810,14 @@
           },
           "retire_member": {
             "default": false,
+            "type": "boolean"
+          },
+          "rotation_observe_hold": {
+            "description": "Held supervisor-rotation observation\n([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like\n`tracked_input_cancel`, independent of the protocol version, because\nearlier members of the same version do not implement it.",
+            "type": "boolean"
+          },
+          "run_start_hold": {
+            "description": "Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and\n[`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the\nprotocol version, like `rotation_observe_hold`.",
             "type": "boolean"
           },
           "supported_protocol_versions": {
@@ -72986,6 +74338,79 @@
           "invoke_and_observe"
         ],
         "type": "string"
+      },
+      "BridgeHeldRun": {
+        "description": "What a [`BridgeCommand::HoldRunStarts`] did to the member's run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The member had no run.",
+            "properties": {
+              "run": {
+                "const": "no_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run was cancelled at its next boundary.",
+            "properties": {
+              "run": {
+                "const": "cancelled_at_boundary",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run ended on its own between the hold and the cancel.",
+            "properties": {
+              "run": {
+                "const": "run_ended_before_cancel",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The current run continues; no cancel was requested.",
+            "properties": {
+              "run": {
+                "const": "left_running",
+                "type": "string"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run",
+              "run_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
@@ -73967,6 +75392,24 @@
               "expected_member",
               "operation_id",
               "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::HoldRunStarts`].",
+            "properties": {
+              "result": {
+                "const": "run_starts_held",
+                "type": "string"
+              },
+              "run": {
+                "$ref": "#/$defs/BridgeHeldRun"
+              }
+            },
+            "required": [
+              "result",
+              "run"
             ],
             "type": "object"
           },
@@ -76330,6 +77773,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -76886,18 +78369,27 @@
         "type": "string"
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -79749,11 +81241,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -80652,7 +82149,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -80734,6 +82245,16 @@
           "provider_native_resume"
         ],
         "type": "object"
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
       },
       "WireLiveContinuityMode": {
         "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
@@ -84930,6 +86451,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -86658,6 +88208,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -86882,18 +88472,27 @@
         "description": "A Meerkat-native JSON schema."
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -89712,11 +91311,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -97220,6 +98824,82 @@
     "title": "ListSessionsResult",
     "type": "object"
   },
+  "LiveAssistantOutputAvailableParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Ephemeral control notification emitted after the server has admitted one\nexact assistant playback target.\n\nThe opaque `output_id` is the only client control handle. Provider turn,\nresponse, item, delta, and interaction identities remain server-internal.\nA surface publishes this payload only after the canonical live host has\napplied the corresponding provider observation.",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "content_index": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "output_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "output_id",
+      "content_index"
+    ],
+    "title": "LiveAssistantOutputAvailableParams",
+    "type": "object"
+  },
+  "LiveAssistantPlaybackHint": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The playback a `live/assistant_playback_hint` asks the client for.",
+    "oneOf": [
+      {
+        "const": "duck",
+        "description": "The user's speech and audible assistant audio overlap (a barge-in,\neither side starting): silence assistant playback now.",
+        "type": "string"
+      },
+      {
+        "const": "restore",
+        "description": "The user's speech or the assistant's output has gone quiet: play\nassistant audio normally again.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveAssistantPlaybackHint"
+  },
+  "LiveAssistantPlaybackHintParams": {
+    "$defs": {
+      "LiveAssistantPlaybackHint": {
+        "description": "The playback a `live/assistant_playback_hint` asks the client for.",
+        "oneOf": [
+          {
+            "const": "duck",
+            "description": "The user's speech and audible assistant audio overlap (a barge-in,\neither side starting): silence assistant playback now.",
+            "type": "string"
+          },
+          {
+            "const": "restore",
+            "description": "The user's speech or the assistant's output has gone quiet: play\nassistant audio normally again.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Runtime notification `live/assistant_playback_hint`: a barge-in playback\nhint for the channel's assistant audio. The user hears the assistant until\nthe provider stops sending audio and the client drains what is already in\nflight; a client that applies `duck` silences it as soon as the user's\nspeech and assistant audio overlap instead, and `restore` ends the duck. The runtime derives both from\nthe provider's reflected input and output audio on the provider's audio\nclock; a client that ignores them plays as before.",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "hint": {
+        "$ref": "#/$defs/LiveAssistantPlaybackHint"
+      }
+    },
+    "required": [
+      "channel_id",
+      "hint"
+    ],
+    "title": "LiveAssistantPlaybackHintParams",
+    "type": "object"
+  },
   "LiveChannelParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `live/status`, `live/close`, and `live/interrupt`.\nThey all take the same `{channel_id}` shape; this struct is the typed\nname for it.\n\n`live/commit_input` no longer uses this shape — it carries an optional\n`response_modality` override (G9) so callers can request a text-only\nresponse on an audio-first channel without flipping the channel\nmodality. See [`LiveCommitInputParams`].",
@@ -97527,6 +99207,97 @@
       }
     ],
     "title": "LiveInterruptStatus"
+  },
+  "LiveMediaHealthParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`live/media_health` request: the client's raw decoded-audio counters from\nthe channel's media start to now, for the output a\n`live/media_health_requested` notification named. The runtime judges them;\nthe client never sends a verdict.",
+    "properties": {
+      "audible_frames": {
+        "description": "Decoded frames whose RMS reached the client's non-silent floor.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "channel_id": {
+        "type": "string"
+      },
+      "decoded_frames": {
+        "description": "Audio frames the client decoded since the channel's media start.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "max_rms": {
+        "description": "Highest decoded RMS, in linear amplitude (0.0 to 1.0).",
+        "format": "double",
+        "type": "number"
+      },
+      "output_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "output_id",
+      "decoded_frames",
+      "audible_frames",
+      "max_rms"
+    ],
+    "title": "LiveMediaHealthParams",
+    "type": "object"
+  },
+  "LiveMediaHealthRequestedParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Runtime request notification `live/media_health_requested`: at the typed\nend of a channel's first assistant output (its first segment settled with\na non-empty transcript), the runtime asks the client for its raw\ndecoded-audio counters from the channel's media start to now (nothing was\naudible before the first output). The `output_id` is only the report key;\nthat output is already settled and is not a playback handle. The client\nanswers with `live/media_health`. A client that never answers leaves the\noutput unjudged.",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "output_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "output_id"
+    ],
+    "title": "LiveMediaHealthRequestedParams",
+    "type": "object"
+  },
+  "LiveMediaHealthResult": {
+    "$defs": {
+      "LiveMediaHealthVerdict": {
+        "description": "The runtime's verdict on one `live/media_health` report.",
+        "oneOf": [
+          {
+            "const": "audible",
+            "description": "The output was audible; the channel stays open.",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The output had a transcript but no audible audio: the runtime closed\nthe channel with reason `media_fault` before answering.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`live/media_health` result.",
+    "properties": {
+      "reopen_recommended": {
+        "description": "For a media fault: whether the session may reopen the channel with its\nretained context (one media-fault reopen per session).",
+        "type": "boolean"
+      },
+      "verdict": {
+        "$ref": "#/$defs/LiveMediaHealthVerdict"
+      }
+    },
+    "required": [
+      "verdict"
+    ],
+    "title": "LiveMediaHealthResult",
+    "type": "object"
   },
   "LiveOpenParams": {
     "$defs": {
@@ -98769,7 +100540,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -98796,6 +100581,16 @@
               "debug"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
           }
         ]
       },
@@ -102957,6 +104752,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -106397,6 +108199,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; each name must\nbelong to the profile's composed tool families.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -109515,6 +111324,9 @@
       },
       "ok": {
         "type": "boolean"
+      },
+      "stop_report": {
+        "description": "For `stop`: what the stop did to each member's run and whether its\nrun starts are held (#1500). A member reported `not_holdable` may\nstill start a turn while the mob is stopped."
       }
     },
     "required": [
@@ -114372,6 +116184,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -115541,6 +117360,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -120705,6 +122531,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -122236,6 +124069,13 @@
           "comms": {
             "default": false,
             "type": "boolean"
+          },
+          "deny": {
+            "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "image_generation": {
             "default": false,
@@ -124012,6 +125852,13 @@
       "comms": {
         "default": false,
         "type": "boolean"
+      },
+      "deny": {
+        "description": "Profile-declared tool deny list, carried so a member materialized on\nanother host enforces the same execution gate.\n\nOmitted when empty for the same two reasons as `read_only`: a spec\nwithout a deny list keeps its pre-existing digest-covered bytes, and a\nrestricted spec sent to a host too old to know the field is rejected\nby `deny_unknown_fields` instead of materializing an ungated member.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "image_generation": {
         "default": false,
@@ -139713,6 +141560,215 @@
     "title": "WireAuthStatusDetail",
     "type": "object"
   },
+  "WireAuthStatusResult": {
+    "$defs": {
+      "AuthStatusPhase": {
+        "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
+        "oneOf": [
+          {
+            "enum": [
+              "valid",
+              "expiring",
+              "expired",
+              "reauth_required",
+              "refresh_failed"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "released",
+            "description": "The lease was explicitly released (credential lifecycle torn down).",
+            "type": "string"
+          },
+          {
+            "const": "absent",
+            "description": "No lease phase is tracked at all for this binding.",
+            "type": "string"
+          },
+          {
+            "const": "missing_credential",
+            "description": "A lease may exist but holds no live credential material.",
+            "type": "string"
+          }
+        ]
+      },
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
+      "WireAuthStatusDetail": {
+        "description": "`GET /auth/bindings/{binding_id}/status` success body. Richer than\n[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /\n`auth_binding` / `has_refresh_token` so the caller can key by\nbinding directly.",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auth_binding": {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_refresh_token": {
+            "type": "boolean"
+          },
+          "last_refresh_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/AuthStatusPhase"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "provider",
+          "auth_method",
+          "state",
+          "has_refresh_token"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthPhase": {
+        "description": "Secret-free authorization phase of an MCP server target.",
+        "oneOf": [
+          {
+            "enum": [
+              "authorized",
+              "reauth_required"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: awaiting human authorization through the host.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireMcpAuthStatus": {
+        "description": "`auth/status/get` result for an MCP server target.",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireMcpAuthPhase"
+          }
+        },
+        "required": [
+          "mcp",
+          "phase"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/status/get` result: a provider binding status or an MCP status.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireAuthStatusDetail"
+      },
+      {
+        "$ref": "#/$defs/WireMcpAuthStatus"
+      }
+    ],
+    "title": "WireAuthStatusResult"
+  },
   "WireBackendProfile": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire projection of [`meerkat_core::BackendProfile`].",
@@ -142207,6 +144263,35 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -143909,6 +145994,46 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -144133,18 +146258,27 @@
         "description": "A Meerkat-native JSON schema."
       },
       "ModelFallbackSkipReason": {
-        "enum": [
-          "provider_boundary",
-          "auth_unavailable",
-          "context_fit",
-          "context_unknown",
-          "output_budget",
-          "tool_parity",
-          "modality_parity",
-          "request_unsupported",
-          "admission_unavailable"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "provider_boundary",
+              "auth_unavailable",
+              "context_fit",
+              "context_unknown",
+              "output_budget",
+              "tool_parity",
+              "modality_parity",
+              "request_unsupported",
+              "admission_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "tool_choice_unsupported",
+            "description": "The target cannot honour the failed request's forced tool choice (the\ntarget adapter's own typed refusal), so it is skipped before any\nprovider call instead of being switched to and refused.",
+            "type": "string"
+          }
+        ]
       },
       "ModelFallbackSkippedTarget": {
         "description": "Evidence attached even when every configured candidate is rejected.",
@@ -146938,11 +149072,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -153935,7 +156074,21 @@
             "type": "object"
           },
           {
+            "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
             "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireLiveCloseReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
               "status": {
                 "const": "closed",
                 "type": "string"
@@ -153962,6 +156115,16 @@
               "debug"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
           }
         ]
       },
@@ -155117,6 +157280,16 @@
   },
   "WireLiveAdapterStatus": {
     "$defs": {
+      "WireLiveCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it: the media path is broken.",
+            "type": "string"
+          }
+        ]
+      },
       "WireLiveDegradationReason": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveDegradationReason`].\n\nInternally-tagged on `kind` (snake_case) — matches the core enum's serde\nshape exactly. SDK consumers route on `kind` to distinguish the\nnon-payload variants from the typed `other { detail }` payload.",
         "oneOf": [
@@ -155259,7 +157432,21 @@
         "type": "object"
       },
       {
+        "description": "The channel is closed. `reason` is present when the runtime closed it\nfor a typed cause (a media fault); `reopen_recommended` says whether\nthe session may reopen it with its retained context. A plain close\nserializes as `{\"status\":\"closed\"}`, as before.",
         "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireLiveCloseReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reopen_recommended": {
+            "type": "boolean"
+          },
           "status": {
             "const": "closed",
             "type": "string"
@@ -155693,6 +157880,49 @@
     ],
     "title": "WireLiveTransportBootstrap"
   },
+  "WireLoginCancelled": {
+    "$defs": {
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/login/cancel` success body.",
+    "properties": {
+      "cancelled": {
+        "type": "boolean"
+      },
+      "mcp": {
+        "$ref": "#/$defs/WireMcpAuthTarget"
+      }
+    },
+    "required": [
+      "mcp",
+      "cancelled"
+    ],
+    "title": "WireLoginCancelled",
+    "type": "object"
+  },
   "WireLoginReady": {
     "$defs": {
       "BindingId": {
@@ -155733,6 +157963,47 @@
         ],
         "type": "object"
       },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginReady": {
+        "description": "MCP arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp"
+        ],
+        "type": "object"
+      },
       "WireOAuthProvider": {
         "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
         "enum": [
@@ -155742,17 +158013,47 @@
           "copilot"
         ],
         "type": "string"
+      },
+      "WireProviderLoginReady": {
+        "description": "Provider arm of [`WireLoginReadyTarget`].",
+        "properties": {
+          "auth_binding": {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/WireOAuthProvider"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "provider"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireProviderLoginReady"
+      },
+      {
+        "$ref": "#/$defs/WireMcpLoginReady"
+      }
+    ],
     "properties": {
-      "auth_binding": {
-        "$ref": "#/$defs/WireAuthBindingRef"
-      },
-      "binding_id": {
-        "type": "string"
-      },
       "expires_at": {
         "type": [
           "string",
@@ -155761,15 +158062,6 @@
       },
       "has_refresh_token": {
         "type": "boolean"
-      },
-      "profile_id": {
-        "type": "string"
-      },
-      "provider": {
-        "$ref": "#/$defs/WireOAuthProvider"
-      },
-      "realm_id": {
-        "type": "string"
       },
       "scopes": {
         "items": {
@@ -155785,11 +158077,6 @@
       }
     },
     "required": [
-      "realm_id",
-      "binding_id",
-      "auth_binding",
-      "profile_id",
-      "provider",
       "has_refresh_token",
       "scopes"
     ],
@@ -155798,6 +158085,54 @@
   },
   "WireLoginStart": {
     "$defs": {
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoginDisposition": {
+        "description": "Whether `auth/login/start` admitted a new MCP attempt or returned the one\nalready pending for the target (no second attempt is ever admitted).",
+        "enum": [
+          "started",
+          "joined"
+        ],
+        "type": "string"
+      },
+      "WireMcpLoginStart": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`WireLoginStartTarget`]. A joined start returns the pending\nattempt's authorize URL and state: wire callers are host-privileged by\ncontract.",
+        "properties": {
+          "disposition": {
+            "$ref": "#/$defs/WireMcpLoginDisposition"
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp",
+          "disposition"
+        ],
+        "type": "object"
+      },
       "WireOAuthProvider": {
         "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
         "enum": [
@@ -155807,16 +158142,34 @@
           "copilot"
         ],
         "type": "string"
+      },
+      "WireProviderLoginStart": {
+        "additionalProperties": false,
+        "description": "Provider arm of [`WireLoginStartTarget`].",
+        "properties": {
+          "provider": {
+            "$ref": "#/$defs/WireOAuthProvider"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`POST /auth/login/start` success body.",
+    "description": "`POST /auth/login/start` success body. Host-channel data: the\nauthorize URL and state must never reach an agent, tool result,\ntranscript or log.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireProviderLoginStart"
+      },
+      {
+        "$ref": "#/$defs/WireMcpLoginStart"
+      }
+    ],
     "properties": {
       "authorize_url": {
         "type": "string"
-      },
-      "provider": {
-        "$ref": "#/$defs/WireOAuthProvider"
       },
       "redirect_uri": {
         "type": "string"
@@ -155828,10 +158181,106 @@
     "required": [
       "authorize_url",
       "state",
-      "redirect_uri",
-      "provider"
+      "redirect_uri"
     ],
     "title": "WireLoginStart",
+    "type": "object"
+  },
+  "WireMcpAuthStatus": {
+    "$defs": {
+      "WireMcpAuthPhase": {
+        "description": "Secret-free authorization phase of an MCP server target.",
+        "oneOf": [
+          {
+            "enum": [
+              "authorized",
+              "reauth_required"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: awaiting human authorization through the host.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/status/get` result for an MCP server target.",
+    "properties": {
+      "account_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mcp": {
+        "$ref": "#/$defs/WireMcpAuthTarget"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireMcpAuthPhase"
+      }
+    },
+    "required": [
+      "mcp",
+      "phase"
+    ],
+    "title": "WireMcpAuthStatus",
+    "type": "object"
+  },
+  "WireMcpAuthTarget": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+    "properties": {
+      "oauth_account": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "server_name": {
+        "type": "string"
+      },
+      "server_url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "server_name",
+      "server_url"
+    ],
+    "title": "WireMcpAuthTarget",
     "type": "object"
   },
   "WireMemberHealthClass": {
@@ -159537,6 +161986,13 @@
             "default": false,
             "type": "boolean"
           },
+          "deny": {
+            "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -160961,6 +163417,13 @@
       "comms": {
         "default": false,
         "type": "boolean"
+      },
+      "deny": {
+        "description": "Tool names members of the profile may not execute although their\nfamilies are enabled. Enforcement like `read_only`; omitted when empty\nfor the same compatibility reason.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "image_generation": {
         "default": false,

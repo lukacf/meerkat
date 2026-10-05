@@ -522,7 +522,17 @@ async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
             },
         }
     );
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The restored host's own sweep has finished a pass over the stopped
+    // mob (and waits for it to run) without delivering. Hang guard only.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        restarted
+            .temporary_council_sweep_passes()
+            .wait_for(|passes| *passes >= 1),
+    )
+    .await
+    .expect("the restored sweep finishes a pass")
+    .expect("sweep pass signal");
     assert!(
         completion_records(&fixture, &owner, job_id)
             .await
@@ -539,6 +549,103 @@ async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
     );
     await_settled(&council_store, &council_id).await;
     assert!(restarted.relink_detached_councils().await.is_empty());
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await.len(),
+        1,
+        "delivered exactly once"
+    );
+    fixture.teardown().await;
+}
+
+/// The restored host's sweep can run its first pass before the host has
+/// registered the convener's mob (MobKit inserts restored handles after
+/// constructing the state). That pass cannot resolve the convener, so the
+/// sweep waits for the managed-mob set to change instead of ending: once the
+/// handle is inserted and the mob runs, the outcome is delivered once.
+/// (Fails-old: the pass reported the delivery failed, the sweep ended with
+/// nothing to wait on, and the outcome was never delivered; 1 in 11 full-lane
+/// runs under load. Under heavier load it also caught the delivery being
+/// admitted while the resume re-attached the convener's executor and then
+/// never run; meerkat-runtime pins that with
+/// `input_admitted_before_a_pending_attachment_regates_wakes_at_commit`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relink_sweep_that_runs_before_the_convener_mob_is_registered_delivers_once_it_is() {
+    let fixture = CouncilFixture::new_runtime_backed(|_| {
+        ScriptedTurn::Text("LATE-HANDLE-POSITION".to_string())
+    });
+    fixture.seed_source_mob(&["convener", "researcher"]).await;
+    let owner = member_session(&fixture, "convener").await;
+    let job_id = "council-job-late-handle";
+    let council_id = fixture.council_id("relink-late-handle");
+    fixture
+        .state
+        .temporary_council()
+        .run_detached(
+            one_participant_request(&fixture, "relink-late-handle"),
+            TemporaryCouncilJobBinding::new(job_id, owner.clone()),
+        )
+        .await
+        .expect("the council runs");
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .expect("source mob handle");
+    handle.stop().await.expect("stop the mob");
+    let runtime = fixture.runtime_adapter.clone().expect("runtime-backed");
+    runtime
+        .unregister_session(&owner)
+        .await
+        .expect("the convener is not live after the restart");
+    let council_store: std::sync::Arc<dyn meerkat_mob::store::TemporaryCouncilStore> =
+        std::sync::Arc::new(
+            meerkat_mob::store::SqliteTemporaryCouncilStore::open(fixture.realm_custody_path())
+                .expect("open the durable council store"),
+        );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        fixture.service.clone(),
+        Some(std::sync::Arc::clone(&runtime)),
+        meerkat_mob::MobControlPrincipal::Owner,
+    )
+    .with_temporary_council_store(council_store.clone())
+    .into_shared();
+    let mut sweep_passes = restarted.temporary_council_sweep_passes();
+
+    // A verb before the host registers its mobs starts the sweep; its first
+    // pass cannot resolve the convener. Hang guard only.
+    assert!(
+        restarted
+            .handle_for(&fixture.source_mob_id())
+            .await
+            .is_err(),
+        "the convener's mob is not registered yet"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        sweep_passes.wait_for(|passes| *passes >= 1),
+    )
+    .await
+    .expect("the sweep finishes its first pass")
+    .expect("sweep pass signal");
+    assert!(
+        completion_records(&fixture, &owner, job_id)
+            .await
+            .is_empty()
+    );
+
+    // The host registers the mob, then activates it: the sweep delivers.
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+    handle.resume().await.expect("activate the mob");
+    let delivered = await_completion_records(&fixture, &owner, job_id).await;
+    assert!(
+        delivered[0].contains("LATE-HANDLE-POSITION"),
+        "the council's real result is delivered: {}",
+        delivered[0]
+    );
+    await_settled(&council_store, &council_id).await;
     assert_eq!(
         completion_records(&fixture, &owner, job_id).await.len(),
         1,

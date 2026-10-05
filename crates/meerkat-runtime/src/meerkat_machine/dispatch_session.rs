@@ -751,6 +751,7 @@ mod compaction_coordinator_tests {
                     dsl::MeerkatMachineInput::RegisterSession {
                         session_id: self.dsl_session_id.clone(),
                         runtime_epoch_id: Some(self.dsl_epoch_id.clone()),
+                        initial_run_start_holds: std::collections::BTreeSet::new(),
                     },
                     "compaction_coordinator_test::register",
                 )
@@ -2055,13 +2056,15 @@ impl MeerkatMachine {
         preparation: SessionBindingPreparation,
         attempt: Option<&mut super::session_management::IdempotentBindingPreparationAttempt>,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
-        self.prepare_session_runtime_bindings_with_claim(
-            session_id,
-            preparation,
-            attempt,
-            MaterializationClaimRequest::ReleaseOnDrop,
-            None,
-        )
+        crate::stack_relief::box_in_own_frame(|| {
+            self.prepare_session_runtime_bindings_with_claim(
+                session_id,
+                preparation,
+                attempt,
+                MaterializationClaimRequest::ReleaseOnDrop,
+                None,
+            )
+        })
         .await
     }
 
@@ -2131,11 +2134,13 @@ impl MeerkatMachine {
             }
             (false, guard)
         } else {
-            Box::pin(self.register_session_inner_for_actor_materialization(
-                session_id.clone(),
-                Arc::clone(&candidate_materialization_claim_state),
-                attempt,
-            ))
+            crate::stack_relief::box_in_own_frame(|| {
+                self.register_session_inner_for_actor_materialization(
+                    session_id.clone(),
+                    Arc::clone(&candidate_materialization_claim_state),
+                    attempt,
+                )
+            })
             .await?
         };
         tracing::debug!(
@@ -2144,6 +2149,10 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings registered session"
         );
+        // #1446: the binding transaction below runs in its own boxed block, so
+        // its temporaries are not reserved in this frame while the registration
+        // call above recurses. Its `return`s are the function's own returns.
+        crate::stack_relief::box_in_own_frame(|| async {
         // Serialize the full generated registration/binding transaction with
         // executor attachment and teardown. A live idempotent binding remains a
         // valid handle bundle, but it cannot reopen actor materialization.
@@ -2352,6 +2361,9 @@ impl MeerkatMachine {
                 // The entry epoch this preparation owns. A warm/idempotent
                 // registration restates it; a cold revival installs it.
                 runtime_epoch_id: Some(current_epoch.clone()),
+                // Staged run-start holds (#1500), applied before the runtime
+                // loop can start a run.
+                initial_run_start_holds: self.registration_run_start_holds(&session_id),
             }
         };
         match self
@@ -2720,6 +2732,8 @@ impl MeerkatMachine {
             }
         };
         Ok(MeerkatMachineCommandResult::Bindings(bindings))
+        })
+        .await
     }
 
     async fn prepare_session_materialization_with_mode(
@@ -3182,6 +3196,7 @@ impl MeerkatMachine {
                                     &entry_epoch_id,
                                 ),
                             ),
+                            initial_run_start_holds: self.registration_run_start_holds(&sid),
                         },
                         "RegisterSession",
                     )

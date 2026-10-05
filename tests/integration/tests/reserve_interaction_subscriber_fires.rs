@@ -299,6 +299,7 @@ fn install_ephemeral_peer_request_response_authority(
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId::from(session.to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )

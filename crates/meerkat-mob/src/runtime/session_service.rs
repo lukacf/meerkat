@@ -13,10 +13,6 @@ use meerkat_core::service::{
     SessionError, SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
 };
 use meerkat_core::{InputId, RunId};
-#[cfg(feature = "runtime-adapter")]
-use std::collections::HashMap;
-#[cfg(feature = "runtime-adapter")]
-use std::sync::{Mutex, OnceLock, Weak};
 
 #[cfg(feature = "openai-live")]
 fn start_live_bridge_on_session_actor(
@@ -947,40 +943,6 @@ fn build_runtime_receipt(
 }
 
 #[cfg(feature = "runtime-adapter")]
-fn ephemeral_runtime_adapter_cache()
--> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
-fn persistent_runtime_adapter_cache()
--> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(feature = "runtime-adapter")]
-fn cached_runtime_adapter(
-    cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>,
-    key: usize,
-    init: impl FnOnce() -> Arc<meerkat_runtime::MeerkatMachine>,
-) -> Arc<meerkat_runtime::MeerkatMachine> {
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.retain(|_, adapter| adapter.strong_count() > 0);
-    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
-        return existing;
-    }
-    let adapter = init();
-    cache.insert(key, Arc::downgrade(&adapter));
-    adapter
-}
-
-#[cfg(feature = "runtime-adapter")]
 pub(crate) async fn retire_runtime_session_for_archive(
     runtime_adapter: &meerkat_runtime::MeerkatMachine,
     session_id: &SessionId,
@@ -1170,6 +1132,27 @@ pub trait MobSessionService:
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(
             "typed system-notice append is not supported by this session service".to_string(),
+        ))
+    }
+
+    /// Append one typed instruction activation to the live session's durable
+    /// transcript while the caller holds the runtime turn-finalization
+    /// boundary (see [`crate::MobHandle::activate_member_instruction`]).
+    /// Keyed by the request's activation identity: re-applying the effective
+    /// activation is `InstructionActivationMutation::Duplicate`, never a
+    /// second System row.
+    ///
+    /// The default is a typed refusal, never a silent success: a decorator
+    /// that does not forward this method must not drop activations quietly.
+    /// Every production wrapper over a durable owner forwards it explicitly.
+    async fn activate_instruction_under_runtime_turn_boundary(
+        &self,
+        _session_id: &SessionId,
+        _request: meerkat_core::InstructionActivationRequest,
+        _write_fence: Option<Arc<dyn meerkat_runtime::RuntimeStoreWriteFence>>,
+    ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
+        Err(SessionError::Unsupported(
+            "instruction activation is not supported by this session service".to_string(),
         ))
     }
 
@@ -2433,14 +2416,10 @@ where
             .await
     }
 
+    /// The machine this service instance owns.
     #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        let key = std::ptr::from_ref(self) as usize;
-        Some(cached_runtime_adapter(
-            ephemeral_runtime_adapter_cache(),
-            key,
-            || Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
-        ))
+        Some(meerkat_session::EphemeralSessionService::<B>::canonical_runtime_adapter(self))
     }
 
     #[cfg(feature = "runtime-adapter")]
@@ -2748,6 +2727,18 @@ where
         )
         .await
         .map(|_| ())
+    }
+
+    async fn activate_instruction_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        request: meerkat_core::InstructionActivationRequest,
+        write_fence: Option<Arc<dyn meerkat_runtime::RuntimeStoreWriteFence>>,
+    ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::activate_instruction_under_runtime_turn_boundary(
+            self, session_id, request, write_fence,
+        )
+        .await
     }
 
     async fn publish_boundary_appends_discarded_for_actor(
@@ -3202,20 +3193,11 @@ where
         {
             None
         }
+        // The machine the surface composition built and bound into this
+        // service (a directly constructed service owns one of its own).
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let key = std::ptr::from_ref(self) as usize;
-            let store = self.runtime_store();
-            Some(cached_runtime_adapter(
-                persistent_runtime_adapter_cache(),
-                key,
-                || {
-                    Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-                        store,
-                        self.blob_store(),
-                    ))
-                },
-            ))
+            Some(meerkat_session::PersistentSessionService::<B>::canonical_runtime_adapter(self))
         }
     }
 

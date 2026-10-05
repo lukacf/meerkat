@@ -115,6 +115,9 @@ fn fix_updates_remove_types(
                 fix_updates_remove_types(then_updates, set_fields);
                 fix_updates_remove_types(else_updates, set_fields);
             }
+            ast::UpdateDef::ForEach { updates, .. } => {
+                fix_updates_remove_types(updates, set_fields);
+            }
             _ => {}
         }
     }

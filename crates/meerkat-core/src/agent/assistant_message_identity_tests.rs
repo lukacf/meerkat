@@ -77,6 +77,9 @@ impl Live {
 enum Outcome {
     Reply(Vec<AssistantBlock>, StopReason),
     Retryable,
+    /// The provider stream ended without its terminal event, classified as
+    /// `meerkat_llm_core` classifies it: a retryable `IncompleteResponse`.
+    Truncated,
     Fatal,
 }
 
@@ -226,6 +229,16 @@ impl AgentLlmRequestAttempt for IdentityAttempt {
                     ),
                 ),
                 "transient provider failure",
+            )),
+            Outcome::Truncated => Err(AgentError::llm(
+                "mock",
+                crate::error::LlmFailureReason::ProviderError(
+                    crate::error::LlmProviderError::retryable(
+                        crate::error::LlmProviderErrorKind::IncompleteResponse,
+                        serde_json::json!({"message": "Stream ended without Done event"}),
+                    ),
+                ),
+                "Incomplete response: Stream ended without Done event",
             )),
             Outcome::Fatal => Err(AgentError::llm(
                 "mock",
@@ -803,6 +816,115 @@ async fn retries_reuse_the_id_and_commit_it_once() {
         })
         .collect::<Vec<_>>();
     assert_eq!(deltas, vec![("partial", Some(id)), ("complete", Some(id))]);
+    assert_eq!(turn_completed_ids(&events), vec![Some(id)]);
+    assert_eq!(run_completed_id(&events), Some(id));
+}
+
+/// A provider stream truncated mid-answer (S103 R1 on 850a38699: "Stream
+/// ended without Done event") is retried under the same id. The truncated
+/// attempt's reasoning, reasoning completion and partial text were live
+/// output only: nothing of it is committed, the turn and run complete with
+/// the retry's answer alone, and a consumer that discards the id's live
+/// buffer on `Retrying` (its documented contract) renders the answer once.
+#[tokio::test]
+async fn a_truncated_attempt_is_retried_and_never_committed() {
+    let (tx, mut rx) = mpsc::channel(1024);
+    let client = IdentityClient::new(
+        tx.clone(),
+        vec![
+            Call::failing(
+                vec![
+                    Live::Reasoning("weighing"),
+                    Live::ReasoningComplete("weighing"),
+                    Live::Text("partial"),
+                ],
+                Outcome::Truncated,
+            ),
+            Call::text("complete"),
+        ],
+    );
+    let mut agent = builder()
+        .build_standalone(
+            client.clone(),
+            Arc::new(LookupTool {
+                append_image: false,
+            }),
+            Arc::new(NoopStore),
+        )
+        .await;
+
+    agent
+        .run_with_events("go".to_string().into(), tx)
+        .await
+        .expect("the truncated attempt is retried and the run completes");
+    let events = drain(&mut rx);
+
+    let rows = committed_rows(agent.session());
+    assert_eq!(rows.len(), 1, "one committed assistant row");
+    assert_eq!(
+        rows[0].1, "complete",
+        "only the retry's answer is committed"
+    );
+    let id = rows[0].0.expect("committed id");
+    let committed_reasoning = agent
+        .session()
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            Message::BlockAssistant(assistant) => Some(assistant),
+            _ => None,
+        })
+        .flat_map(|assistant| assistant.blocks.iter())
+        .any(|block| matches!(block, AssistantBlock::Reasoning { .. }));
+    assert!(
+        !committed_reasoning,
+        "the truncated attempt's reasoning is never committed"
+    );
+    assert_eq!(client.attempt_ids(), vec![id, id]);
+
+    // A consumer folding the live stream by its contract: deltas append to
+    // the id's buffer, `Retrying` discards it.
+    let mut text = String::new();
+    let mut reasoning_completions = Vec::new();
+    let mut retries = 0;
+    for event in &events {
+        match event {
+            AgentEvent::TextDelta {
+                delta,
+                assistant_message_id,
+            } => {
+                assert_eq!(*assistant_message_id, Some(id));
+                text.push_str(delta);
+            }
+            AgentEvent::ReasoningComplete {
+                content,
+                assistant_message_id,
+            } => {
+                assert_eq!(*assistant_message_id, Some(id));
+                reasoning_completions.push(content.clone());
+            }
+            AgentEvent::Retrying {
+                assistant_message_id,
+                ..
+            } => {
+                assert_eq!(*assistant_message_id, Some(id));
+                retries += 1;
+                text.clear();
+                reasoning_completions.clear();
+            }
+            AgentEvent::TextComplete { content, .. } => {
+                assert_eq!(content, "complete", "final text is the retry's alone");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(retries, 1, "one retry");
+    assert_eq!(text, "complete", "the live buffer renders the answer once");
+    assert!(
+        reasoning_completions.is_empty(),
+        "the truncated attempt's reasoning completion was discarded with its buffer"
+    );
+    assert_eq!(turn_started_ids(&events), vec![Some(id)]);
     assert_eq!(turn_completed_ids(&events), vec![Some(id)]);
     assert_eq!(run_completed_id(&events), Some(id));
 }

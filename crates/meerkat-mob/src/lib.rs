@@ -230,6 +230,8 @@ pub use run::{
 pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub use runtime::MemberInstructionActivationError;
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};
 pub use runtime::bridge_protocol::{
@@ -252,6 +254,11 @@ pub use runtime::mob_scoped_workgraph_service;
 pub use runtime::remote_member_operator_tool_defs_for_test;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::run_mobpack_callable;
+pub use runtime::stop_report::{
+    HostRunStartHoldReason, MemberRunStarts, MemberStopOutcome, MemberStopRun, MobStopReport,
+    NotHoldableReason,
+};
+pub use runtime::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
 pub use runtime::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
     AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,
@@ -278,23 +285,25 @@ pub use runtime::{
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
     MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain, MemberLiveStatusDomain,
     MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberRespawnReceipt,
-    MemberRunState, MemberSessionActivity, MemberStatusSessionView, MemberStatusViewSource,
-    MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions, MobBuilder,
-    MobDestroyError, MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle,
-    MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle, MobMachineStateChanges,
-    MobMemberEndpointOwner, MobMemberEndpointStatus, MobMemberPeerEndpoint, MobMemberSnapshot,
-    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService,
-    MobSpawnManyFailure, MobState, MobUnreachablePeer, MobWireMembersBatchReport,
-    OwnedMemberTargetAdmission, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
-    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, SessionResumeAuthority,
+    MemberRunState, MemberSessionActivity, MemberShutdownOutcome, MemberStatusSessionView,
+    MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
+    MemberTurnOptions, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
+    MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
+    MobMachineStateChanges, MobMemberEndpointOwner, MobMemberEndpointStatus, MobMemberPeerEndpoint,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobSessionService, MobShutdownReport, MobSpawnManyFailure, MobState, MobUnreachablePeer,
+    MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt, PeerTarget,
+    PreviousMemberCleanupReport, ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality,
+    RetirementSettlement, RetirementSettlementWatch, RetirementStage, SessionResumeAuthority,
     SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
-    SessionResumeRejection, SessionResumeVerdict, SpawnContinuityIntent, SpawnCustomizationContext,
-    SpawnMemberAdmission, SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec,
-    SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt,
-    WorkTurnHandle, materialize_nonpersistent_session_resume_verdict, mob_error_wire_code,
-    observe_live_durable_source_via_projection_visibility, observe_member_status_view_via_read,
-    profile_to_wire, render_bounded_delegation_task, stored_realm_profile_to_wire,
+    SessionResumeRejection, SessionResumeVerdict, ShutdownOptions, SpawnContinuityIntent,
+    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
+    SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec,
+    SpawnSystemPromptOverride, SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult,
+    WorkDeliveryReceipt, WorkTurnHandle, materialize_nonpersistent_session_resume_verdict,
+    mob_error_wire_code, observe_live_durable_source_via_projection_visibility,
+    observe_member_status_view_via_read, profile_to_wire, render_bounded_delegation_task,
+    stored_realm_profile_to_wire,
 };
 #[cfg(feature = "openai-live")]
 pub use runtime::{

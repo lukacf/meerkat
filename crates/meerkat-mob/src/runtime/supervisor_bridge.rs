@@ -93,6 +93,30 @@ impl BridgeRequestFailure {
     }
 }
 
+/// The mob's member run-start posture (#1500), read from MobMachine's
+/// `member_run_starts_held`. A member that was not bound when the posture
+/// changed gets it on its next bind, and a restored mob publishes it from its
+/// recovered machine state, so a supervisor restart cannot lose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberRunStartPosture {
+    Held,
+    Released,
+}
+
+impl MemberRunStartPosture {
+    /// The posture of a MobMachine state: Held iff its
+    /// `member_run_starts_held` is set. Every arm that emits
+    /// `HoldMemberRunStarts` sets it, only ResumeStopped and ResetToRunning
+    /// clear it, and TLC checks that a Stopped mob always has it set.
+    pub(crate) fn of(state: &crate::machines::mob_machine::MobMachineState) -> Self {
+        if state.member_run_starts_held {
+            Self::Held
+        } else {
+            Self::Released
+        }
+    }
+}
+
 pub(crate) struct MobSupervisorBridge {
     participant_name: String,
     endpoint_config: SupervisorBridgeEndpointConfig,
@@ -148,6 +172,17 @@ pub(crate) struct MobSupervisorBridge {
     #[cfg(not(target_arch = "wasm32"))]
     controlling_reply_endpoint: StdRwLock<Option<PeerAddress>>,
     shutdown_complete: std::sync::atomic::AtomicBool,
+    /// Whether each peer (by peer id) advertised held rotation observation in
+    /// its bind reply. In-memory only: after a restart a peer is unknown until
+    /// it binds again, and an unknown peer is offered the hold with the typed
+    /// `Unsupported` rejection as the fallback.
+    rotation_observe_hold: StdMutex<HashMap<String, bool>>,
+    /// Peers' advertised run-start hold support (#1500), by peer id.
+    run_start_hold: StdMutex<HashMap<String, bool>>,
+    /// Run-start releases a Resume owes peers it could not reach because they
+    /// were not bound (#1500), by peer id; the peer's next successful bind
+    /// sends the release.
+    member_run_start_posture: StdMutex<MemberRunStartPosture>,
 }
 
 /// Linear owner for one bridge request correlation.
@@ -544,7 +579,63 @@ impl MobSupervisorBridge {
             #[cfg(not(target_arch = "wasm32"))]
             controlling_reply_endpoint: StdRwLock::new(controlling_reply_endpoint),
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
+            rotation_observe_hold: StdMutex::new(HashMap::new()),
+            run_start_hold: StdMutex::new(HashMap::new()),
+            member_run_start_posture: StdMutex::new(MemberRunStartPosture::Released),
         })
+    }
+
+    /// Record whether `peer_id` supports held rotation observation, from its
+    /// advertised capabilities or from a typed `Unsupported` rejection.
+    pub(crate) fn record_peer_rotation_observe_hold(&self, peer_id: &str, supported: bool) {
+        self.rotation_observe_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer_id.to_string(), supported);
+    }
+
+    /// Record whether `peer_id` supports the run-start hold (#1500).
+    pub(crate) fn record_peer_run_start_hold(&self, peer_id: &str, supported: bool) {
+        self.run_start_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer_id.to_string(), supported);
+    }
+
+    /// Record the mob's member run-start posture (#1500).
+    pub(crate) fn set_member_run_start_posture(&self, posture: MemberRunStartPosture) {
+        *self
+            .member_run_start_posture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = posture;
+    }
+
+    /// The mob's member run-start posture, which every member bind delivers.
+    pub(crate) fn member_run_start_posture(&self) -> MemberRunStartPosture {
+        *self
+            .member_run_start_posture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `peer_id` supports the run-start hold; `None` when it has not
+    /// advertised capabilities to this process.
+    pub(crate) fn peer_run_start_hold(&self, peer_id: &str) -> Option<bool> {
+        self.run_start_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(peer_id)
+            .copied()
+    }
+
+    /// Whether `peer_id` supports held rotation observation; `None` when it
+    /// has not advertised capabilities to this process.
+    pub(crate) fn peer_rotation_observe_hold(&self, peer_id: &str) -> Option<bool> {
+        self.rotation_observe_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(peer_id)
+            .copied()
     }
 
     async fn build_runtime(
@@ -1053,6 +1144,7 @@ impl MobSupervisorBridge {
                 // peer interaction for a participant name, not a runtime session
                 // entry, so it owns no entry runtime epoch.
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "mob_supervisor_bridge::register",
         )

@@ -15,6 +15,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `close-stops-attention` — terminal WorkGraph item closure routes to WorkAttention Stop so live goal attention bindings cannot survive their target item
 
 ### Routes
+- `work_item_create_binds_admission`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `work_item_close_stops_attention`
   - anchors: (unclaimed)
   - scenarios: `close-stops-attention`
@@ -23,6 +26,12 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `(none)`
 
 ### Invariants
+- `work_item_create_routes_to_admission_bind`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `admission_bind_originates_from_work_item_create`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `closed_work_item_routes_to_attention_stop`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

@@ -51,3 +51,5 @@ inventory::submit! {
 
 #[cfg(test)]
 mod client_service_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod stdio_test_fixture;

@@ -195,6 +195,23 @@ them.
   lanes could run different TLC builds. The PR, nightly and `cargo.yml`
   TLC lanes and `setup-buildbuddy-ci` now all install through the action.
 
+- Turbo S S101's premature-outcome oracle no longer reads a duration as the
+  second job (#1713). "The 25 second one just finished." names job 1, the
+  25-second job, but matched job 2's ordinal reference "second one" and was
+  flagged as a premature job 2 claim. An ordinal "second" right after a count
+  is now a duration's unit, and each job is also named by its own sleep
+  duration (job 1 25 s, job 2 20 s). The only post-#1635 sighting was this
+  false positive, so the genuine rate is 0 in 46.
+
+- Turbo S S99 records two diagnostic metrics. `recall_delegated` is recorded
+  for every client delegation in an S99 exchange, before the native-voice
+  check, so every soak counts the delegated-recall rate (#1719).
+  `provider_truncated_answer` is recorded when an exchange's transcript
+  matches but the browser decoded no speech for it: gpt-live cut its own
+  audio over the user's last word while its transcript kept the whole answer
+  (#1717). The browser peer counts decoded speech before its playback gate,
+  so no duck causes it.
+
 ## [0.8.51] - 2026-10-05
 
 ### Breaking

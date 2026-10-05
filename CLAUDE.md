@@ -360,6 +360,12 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   `verify-machine-poster-coverage` when machine authority or a poster input
   (`scripts/machine-posters-changed`, a separate classifier so poster-only
   changes never start the machine lanes) changed.
+- `tlc-audits`: on a machine-authority change, the two hand-written TLC
+  audit shards of the canonical TLC lane
+  (`machine_verify_all_tlc_test.sh --part audits-a|audits-b`) in parallel,
+  needing only a JDK and the TLC jar (`.github/actions/setup-tlc-ci`, the one
+  TLC install for every lane: an immutable repository mirror of the tlaplus
+  v1.8.0 jar pinned by sha256); the `CI gate` requires them on such a change. The `machine-verify --all` sweep is not in PR CI.
 - `clippy`: one lane per shard of every directly changed package
   (`clippy --no-deps --all-targets --all-features -D warnings`).
 - `unit`: `nextest --lib --bins --profile ci-pr` (`fast` plus a 4-minute hung-test kill) for
@@ -403,9 +409,9 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   pushes. It runs under
   `!cancelled()` so superseded runs surface as cancelled.
 
-Integration-fast, e2e-fast, the dense Mob topology stress, bounded TLC, the
-feature matrices, audit, the SDK suites, and the whole BuildBuddy/Bazel graph
-do not run in PR CI. `cargo.yml` remains a separate reusable/manually
+Integration-fast, e2e-fast, the dense Mob topology stress, the bounded TLC
+`machine-verify --all` sweep, the feature matrices, audit, the SDK suites, and
+the whole BuildBuddy/Bazel graph do not run in PR CI. `cargo.yml` remains a separate reusable/manually
 dispatchable Cargo workflow with its own `Cargo lane gate`; `ci.yml` does not
 call it. Local Make commands still default to Cargo.
 

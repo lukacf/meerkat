@@ -1,0 +1,63 @@
+name: Setup TLC for CI
+description: >-
+  Install a JDK and the TLA+ tools jar, and put a `tlc` wrapper on PATH. The
+  default is the repository's immutable mirror of the tlaplus v1.8.0 build of
+  2026-10-04 (tlaplus rebuilds its v1.8.0 pre-release in place), pinned by
+  sha256: a mismatch fails the step and never falls back. The jar's source,
+  sha256 and TLC version are always printed, so every lane records the build
+  it ran.
+
+inputs:
+  url:
+    description: Download URL of tla2tools.jar.
+    required: false
+    default: https://github.com/lukacf/meerkat/releases/download/tlc-tla2tools-v1.8.0-20261004/tla2tools.jar
+  sha256:
+    description: Expected sha256 of the jar (lowercase hex). Change it together with url.
+    required: false
+    default: c2fe4e56e43bde19f213b4a7e441d037297fda733e503579623e859b79348239
+  setup-java:
+    description: Install a Temurin JDK first ("false" when the job already set one up).
+    required: false
+    default: "true"
+  java-version:
+    description: Temurin JDK version.
+    required: false
+    default: "21"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Java
+      if: ${{ inputs.setup-java == 'true' }}
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
+
+    - name: Install TLC
+      shell: bash
+      env:
+        TLC_JAR_URL: ${{ inputs.url }}
+        TLC_JAR_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        lib="$HOME/.local/lib"
+        bin="$HOME/.local/bin"
+        mkdir -p "${lib}" "${bin}"
+        curl --fail --location --retry 5 --retry-delay 2 \
+          "${TLC_JAR_URL}" --output "${lib}/tla2tools.jar"
+        actual="$(sha256sum "${lib}/tla2tools.jar" | cut -d' ' -f1)"
+        echo "tla2tools.jar sha256: ${actual} (${TLC_JAR_URL})"
+        if [[ -z "${TLC_JAR_SHA256}" ]]; then
+          echo "::error::setup-tlc-ci needs a sha256 pin for ${TLC_JAR_URL}"
+          exit 1
+        fi
+        if [[ "${actual}" != "${TLC_JAR_SHA256}" ]]; then
+          echo "::error::tla2tools.jar sha256 ${actual} does not match the pinned ${TLC_JAR_SHA256}"
+          exit 1
+        fi
+        printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' "${lib}" > "${bin}/tlc"
+        chmod +x "${bin}/tlc"
+        echo "${bin}" >> "$GITHUB_PATH"
+        java -cp "${lib}/tla2tools.jar" tlc2.TLC -version 2>/dev/null | head -1 || true

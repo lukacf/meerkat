@@ -183,6 +183,17 @@ them.
   must leave the audit's goal unreachable. Dropping the bootstrap-summary
   conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
   previously checked only by hand (#1607).
+- PR CI runs the bounded TLC audits. When a pull request or push touches
+  machine authority, a `Bounded TLC audits` job runs both hand-written audit
+  shards of the canonical TLC lane in parallel, and the `CI gate` requires
+  it (#1720). The audit shards take no xtask argument.
+- One pinned TLC build for every lane. The new `setup-tlc-ci` action
+  installs the repository's immutable mirror of the tlaplus v1.8.0 jar
+  (release `tlc-tla2tools-v1.8.0-20261004`), pinned by sha256 with no
+  fallback, and prints the jar's source, digest and TLC version. tlaplus
+  rebuilds its v1.8.0 pre-release in place, so PR, nightly and BuildBuddy
+  lanes could run different TLC builds. The PR, nightly and `cargo.yml`
+  TLC lanes and `setup-buildbuddy-ci` now all install through the action.
 
 ## [0.8.51] - 2026-10-05
 

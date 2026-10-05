@@ -76,6 +76,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "main-unit-archive-run",
             "ratchets",
             "sdk-host",
+            "tlc-audits",
             "unit",
             "wasm-check",
             "wasm-timers",
@@ -207,6 +208,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "changes",
         "fmt-governance",
         "ratchets",
+        "tlc-audits",
         "clippy",
         "unit",
         "integration",
@@ -226,6 +228,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
     // the closure check; a classifier error or an empty plan fails the gate.
     for contract in [
         "require_success \"Change classification\"",
+        "require_ran \"Bounded TLC audits\"",
         "require_ran \"Clippy\"",
         "require_ran \"Unit tests\"",
         "require_ran \"Main unit tests\"",
@@ -391,7 +394,7 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
             .is_some_and(|run| run.contains("make machine-verify"))
     }));
     assert!(cargo.contains("actions/setup-java@v5"));
-    assert!(cargo.contains("tlaplus/releases/download/v1.8.0/tla2tools.jar"));
+    assert!(cargo.contains("uses: ./.github/actions/setup-tlc-ci"));
     assert!(cargo.contains("scripts/machine-authority-changed"));
     assert!(cargo.contains("machine_authority_changed:"));
 
@@ -594,5 +597,63 @@ fn buildbuddy_workflow_is_called_only_by_nightly_and_release() {
     assert!(
         release.contains(".schema_version == 4") && release.contains("github-hosted-cargo"),
         "require_ci_green must accept the Cargo PR CI attestation"
+    );
+}
+
+/// Bounded TLC runs on pull requests that touch machine authority: the
+/// hand-written audits model check the generated machines against their
+/// invariants and goals, which the drift ratchet alone does not. The lane
+/// runs both audit shards of the canonical TLC lane on a machine-authority
+/// change, inside the PR budget, with TLC from the shared setup-tlc-ci action
+/// (its contents are pinned by scripts/tests/xtask_scripts_dogma_gates.sh),
+/// and the CI gate requires it on such a change.
+#[test]
+fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
+    let ci_yml = workflow_yml_path("ci.yml");
+    let doc = read_workflow(&ci_yml);
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("ci workflow jobs mapping");
+    let job = jobs
+        .get(serde_yaml::Value::String("tlc-audits".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("tlc-audits job");
+    assert_eq!(
+        job.get("if").and_then(serde_yaml::Value::as_str),
+        Some("${{ needs.changes.outputs.machine_authority == 'true' }}"),
+        "the TLC audit lane runs exactly on machine-authority changes"
+    );
+    let parts: Vec<&str> = job
+        .get("strategy")
+        .and_then(|strategy| strategy.get("matrix"))
+        .and_then(|matrix| matrix.get("part"))
+        .and_then(serde_yaml::Value::as_sequence)
+        .expect("tlc-audits matrix parts")
+        .iter()
+        .filter_map(serde_yaml::Value::as_str)
+        .collect();
+    assert_eq!(parts, ["audits-a", "audits-b"], "both audit shards run");
+    assert_eq!(
+        job.get("timeout-minutes")
+            .and_then(serde_yaml::Value::as_u64),
+        Some(20),
+        "a TLC shard times out inside the PR execution budget"
+    );
+    let job_text = serde_yaml::to_string(job).expect("render tlc-audits job");
+    for required in [
+        "crates/xtask/tests/machine_verify_all_tlc_test.sh",
+        "--part \"${{ matrix.part }}\"",
+        "uses: ./.github/actions/setup-tlc-ci",
+    ] {
+        assert!(
+            job_text.contains(required),
+            "tlc-audits must contain `{required}`; job:\n{job_text}"
+        );
+    }
+    let ci = std::fs::read_to_string(&ci_yml).expect("read ci.yml");
+    assert!(
+        ci.contains("require_ran \"Bounded TLC audits\" \"${TLC_AUDITS_RESULT}\""),
+        "the CI gate must require the TLC audits on a machine-authority change"
     );
 }

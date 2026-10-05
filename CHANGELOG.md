@@ -53,6 +53,27 @@ them.
   must leave the audit's goal unreachable. Dropping the bootstrap-summary
   conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
   previously checked only by hand (#1607).
+- Repository scripts, hooks and Make targets that need Python 3.11 now pick
+  it explicitly and refuse an older interpreter up front. They used whatever
+  `python3` came first in `PATH`, so on macOS, where Apple's Python 3.9 can
+  come first, the pre-push nextest archive contract failed mid-hook with an
+  `AttributeError` on `hashlib.file_digest`. The new `scripts/require-python
+  MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.13 through
+  python3.11 over `python3`, and fails with "WHO needs Python >= MIN; found
+  <version> (<path>)". It replaces the per-script copies of that selection,
+  which had no version check, in 15 scripts plus `release-hook.sh` (still
+  >= 3.10), `buildbuddy-doctor`, `gcp-buildbuddy-ci-image` (`tomllib`) and
+  the archive contract test. `scripts/restore-ci-unit-mob-archive.py` also
+  refuses Python < 3.11 itself when run directly. When no interpreter
+  qualifies, `PYTHON` in the Makefile becomes a lazy error, so only targets
+  that use Python stop, with that reason.
+- `make test-sdk-python`, `publish-dry-run-python` and
+  `smoke-sdk-python-artifact` install into a venv (`SDK_PYTHON_VENV`, default
+  `sdks/python/.venv`, created by `scripts/python-venv`) instead of the base
+  interpreter. uv-, Homebrew- and distro-managed Pythons refuse those
+  installs under PEP 668, which failed `make test-sdk-suites` in the 0.8.51
+  release gate.
+  `make path-classifier-selftest` runs `scripts/tests/require_python_test.sh`.
 
 ## [0.8.51] - 2026-10-05
 

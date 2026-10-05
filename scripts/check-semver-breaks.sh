@@ -38,7 +38,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+PYTHON="$("$ROOT/scripts/require-python" 3.11 "$(basename "${BASH_SOURCE[0]}")")" || exit 1
 
 selftest_log="$(mktemp)"
 report_file="$(mktemp)"

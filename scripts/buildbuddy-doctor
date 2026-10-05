@@ -115,7 +115,7 @@ else
 fi
 rm -f "${generate_check_log}"
 
-path_patch_python="$(command -v python3.11 2>/dev/null || command -v python3)"
+path_patch_python="$("${workspace_root}/scripts/require-python" 3.11 "buildbuddy-doctor" 2>/dev/null || true)"
 if "${path_patch_python}" scripts/check-bazel-path-patch-runfiles.py . >/dev/null 2>&1 &&
   scripts/test-bazel-path-patch-runfiles-gate.sh >/dev/null 2>&1; then
   pass "Cargo path patches are complete in Bazel workspace runfiles"

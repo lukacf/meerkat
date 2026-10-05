@@ -67,7 +67,7 @@ fi
 
 # ---- Gate 2: Cargo path patches included in Bazel runfiles ------------------
 
-PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+PYTHON="$("${ROOT}/scripts/require-python" 3.11 "$(basename "${BASH_SOURCE[0]}")")" || exit 1
 
 if "${PYTHON}" scripts/check-bazel-path-patch-runfiles.py "${ROOT}"; then
   printf '%bCargo path patches are present in Bazel workspace runfiles%b\n' "${GREEN}" "${NC}"

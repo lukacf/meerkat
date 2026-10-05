@@ -330,7 +330,9 @@ assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "gcp-buildbuddy
 assert_file_contains "$RELEASE_WORKFLOW" '.component_results.gcp_buildbuddy == "success"'
 assert_file_contains "$RELEASE_WORKFLOW" '.component_results.github_hosted_dense_mob == "success"'
 
-python3 "$ROOT/scripts/test_restore_ci_unit_mob_archive.py"
+# The restore helper uses hashlib.file_digest (Python 3.11+).
+restore_python="$("$ROOT/scripts/require-python" 3.11 "the nextest archive restore test")" || exit 1
+"$restore_python" "$ROOT/scripts/test_restore_ci_unit_mob_archive.py"
 
 unit_job="$(sed -n '/^  unit:$/,/^  int-archives:$/p' "$WORKFLOW")"
 [[ "$unit_job" == *'      - unit-archive'* ]] || {

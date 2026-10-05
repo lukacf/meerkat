@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Restore only a digest-verified unit archive from successful exact-commit CI."""
 
+import sys
+
+if sys.version_info < (3, 11):
+    sys.exit(
+        "restore-ci-unit-mob-archive.py needs Python >= 3.11 (hashlib.file_digest); "
+        f"found Python {sys.version.split()[0]} ({sys.executable})"
+    )
+
 import argparse
 import hashlib
 import json
@@ -9,7 +17,6 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import zipfile
 

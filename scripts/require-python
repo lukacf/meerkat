@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Print the path of a Python interpreter at least MIN (for example 3.11).
+#
+#   require-python MIN [WHO]
+#
+# An explicit $PYTHON is the caller's choice and is the only candidate.
+# Otherwise python3.13, python3.12, python3.11 and python3 are tried in that
+# order, because PATH can put an older python3 first (Apple's 3.9 on macOS).
+# Fails with "WHO needs Python >= MIN; found ..." instead of letting a script
+# hit an AttributeError or ImportError partway through.
+set -euo pipefail
+
+min="${1:?usage: require-python MIN [WHO]}"
+who="${2:-this script}"
+if [[ ! "${min}" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+  echo "require-python: MIN must look like 3.11, got '${min}'" >&2
+  exit 2
+fi
+want_major="${BASH_REMATCH[1]}"
+want_minor="${BASH_REMATCH[2]}"
+
+candidates=()
+if [[ -n "${PYTHON:-}" ]]; then
+  candidates=("${PYTHON}")
+else
+  for name in python3.13 python3.12 python3.11 python3; do
+    path="$(command -v "${name}" 2>/dev/null || true)"
+    [[ -n "${path}" ]] && candidates+=("${path}")
+  done
+fi
+
+found=()
+for candidate in "${candidates[@]}"; do
+  if "${candidate}" -c "import sys; raise SystemExit(0 if sys.version_info >= (${want_major}, ${want_minor}) else 1)" 2>/dev/null; then
+    printf '%s\n' "${candidate}"
+    exit 0
+  fi
+  version="$("${candidate}" --version 2>/dev/null || true)"
+  found+=("${version:-not runnable} (${candidate})")
+done
+
+if [[ "${#found[@]}" -eq 0 ]]; then
+  summary="no python3 on PATH"
+else
+  summary="$(IFS=';'; printf '%s' "${found[*]}" | sed 's/;/, /g')"
+fi
+echo "error: ${who} needs Python >= ${min}; found ${summary}. Install Python ${min}+ or set PYTHON to one" >&2
+exit 1

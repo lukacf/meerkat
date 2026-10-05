@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
-PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+PYTHON="$("$(dirname "${BASH_SOURCE[0]}")/require-python" 3.11 "$(basename "${BASH_SOURCE[0]}")")" || exit 1
 JOBS="${MEERKAT_RELEASE_PACKAGING_JOBS:-${MEERKAT_PUBLISH_DRY_RUN_JOBS:-4}}"
 LANE_PREFIX="${RUST_LANE_ID:-release-packaging}"
 

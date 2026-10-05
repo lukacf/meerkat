@@ -12,12 +12,17 @@ checkpoint. At the 19:24 UTC remote check it remained a draft at
 the accepted model-review/consent ADR, and a test-only OAuth fixture migration.
 Documentation commit `c982b3b52ca7f0dff3d25328bb73caeeb3baf3e1` additionally
 refreshed this record and the Codex source comparison. At the coordinator's
-direction, the current checkpoint integrates main through
-`be2932374793ae84d3b844129cf58229509a1f0c`, including connector OAuth. The upstream
-memory-test correction described below must also land and be integrated before
-the next qualification; that correction changes no production behavior.
-The local candidate's normal push and CI are still pending; earlier published
-results do not qualify the integrated candidate.
+direction, commit `c25ba2969b1c4e66be05e1f8150cc56c173958a8` integrated main
+through `be2932374793ae84d3b844129cf58229509a1f0c`, including connector OAuth.
+The current successor also integrates actual main merge
+`74b6c7473797cb904f554c8c2cc1bb7386ec3c66`, containing the upstream memory-test
+correction described below. That correction changes no production behavior.
+Normal local and GCP qualification remain pending; earlier published results
+do not qualify the integrated candidate. Luka's explicit 2026-10-05 instruction
+in the 0.9 coordinator chat temporarily removes GitHub CI as a blocker during
+the Actions outage. CI is recorded as skipped, never passed. Existing local
+checks, source identity, consumer acceptance and publication ownership remain;
+normal CI resumes when the service is healthy.
 
 The connector merge needed four integration repairs: preserve typed stale
 preparation, use coordinated mode-constrained logout, adapt the generated
@@ -85,13 +90,14 @@ reproduced the assertion on current main and owns the upstream correction in
 and durable-text checks, preserving the earlier search assertions. Root withdrew
 its duplicate hunk and retained it at
 `/private/tmp/adr-001-envelope-v4-r1/superseded-local-memory-oracle.patch`.
-PR1759 was still open at the 19:48 UTC check. GCP reported runner shutdown as the
-cause of cancelled CI jobs and owns their normal retry. Its upstream merge and fresh
-candidate qualification remain pending; the local trial is not an executed pass
-of the upstream variant.
+GCP reported runner capacity as the cause of cancelled CI jobs. Under Luka's
+outage exception, its owner merged PR1759 at 20:29:08 UTC as `74b6c7473`, with
+CI explicitly skipped and local evidence recorded on the PR. The actual merge
+is integrated here. Fresh candidate qualification remains pending; the earlier
+local trial is not an executed pass of the upstream variant.
 
-The combined cohort's owned processes drained. After integrating the upstream
-test correction, PR1730 has the next normal push, using the existing isolated
+The combined cohort's owned processes drained. PR1730 has the next normal push,
+using the existing isolated
 detached target and a 1,800-second unit timeout
 within the unchanged two-hour overall bound. Publication does not require
 merging the separate runtime-correctness branch first. One broad test cohort

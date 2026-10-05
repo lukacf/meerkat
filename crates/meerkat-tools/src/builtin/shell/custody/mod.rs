@@ -1164,7 +1164,7 @@ pub struct PreparedCustodySpawn {
 }
 
 impl PreparedCustodySpawn {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(in crate::builtin::shell) fn spawn_confined(
         &self,
         prepared: meerkat_sandbox::PreparedConfinement,

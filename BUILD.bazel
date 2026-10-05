@@ -808,6 +808,7 @@ test_suite(
         "//crates/meerkat-runtime:whole_blob_repair_test",
         "//crates/meerkat-sandbox:bootstrap_integrity_test",
         "//crates/meerkat-sandbox:compiled_confinement_test",
+        "//crates/meerkat-sandbox:linux_confinement_test",
         "//crates/meerkat-sandbox:meerkat_sandbox_unit_test",
         "//crates/meerkat-sandbox:process_confinement_test",
         "//crates/meerkat-schedule:exact_catalog_test",

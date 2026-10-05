@@ -1,6 +1,7 @@
 //! Required-confinement acceptance tests at the real shell entry points.
 //!
-//! Platform cases use the fixed system executor. Unsupported requirements
+//! Platform cases enter the OS backend (the fixed Seatbelt executor on macOS,
+//! child-installed Landlock and seccomp on Linux). Unsupported requirements
 //! refuse the operation without an unrestricted fallback.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -462,7 +463,10 @@ async fn recovered_monitor_refusal_remains_typed_at_each_recovery_tool_owner() {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "integration-real-tests"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux"),
+    feature = "integration-real-tests"
+))]
 mod platform {
     use super::*;
 

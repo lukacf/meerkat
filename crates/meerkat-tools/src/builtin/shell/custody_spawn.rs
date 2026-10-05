@@ -138,7 +138,7 @@ pub(super) async fn spawn_in_custody(
             let prepared = compiled
                 .bind_launch(launch)
                 .map_err(std::io::Error::other)?;
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 if let Some(custody) = binding.custody.as_ref() {
                     let gate = custody
@@ -155,7 +155,7 @@ pub(super) async fn spawn_in_custody(
                 let child = prepared.spawn()?.into();
                 Ok(finish_ungated_spawn(child, make_group))
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
                 let _ = (prepared, binding, identity, make_group);
                 Err(std::io::Error::other(

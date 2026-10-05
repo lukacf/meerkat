@@ -436,15 +436,25 @@ impl JobOutboxProjector {
     pub async fn sessions_with_pending_deliveries(
         &self,
     ) -> Result<Vec<meerkat_core::SessionId>, JobOutboxProjectionError> {
-        let mut sessions = Vec::new();
-        for runtime_id in self
+        let runtimes = self
             .runtime_inbox
             .runtimes_with_pending_deliveries()
-            .await?
-        {
+            .await?;
+        self.sessions_for_runtimes(&runtimes).await
+    }
+
+    /// Origin sessions this projector owns among `runtimes`, by the same
+    /// provenance rule as [`Self::sessions_with_pending_deliveries`]. A
+    /// runtime with no pending row is skipped.
+    pub async fn sessions_for_runtimes(
+        &self,
+        runtimes: &[LogicalRuntimeId],
+    ) -> Result<Vec<meerkat_core::SessionId>, JobOutboxProjectionError> {
+        let mut sessions = Vec::new();
+        for runtime_id in runtimes {
             let Some(first) = self
                 .runtime_inbox
-                .list_pending(&runtime_id, 1)
+                .list_pending(runtime_id, 1)
                 .await?
                 .into_iter()
                 .next()
@@ -454,7 +464,7 @@ impl JobOutboxProjector {
             let Some((job_id, origin_session_id)) = pending_delivery_provenance(&first)? else {
                 continue;
             };
-            if LogicalRuntimeId::for_session(&origin_session_id) != runtime_id {
+            if &LogicalRuntimeId::for_session(&origin_session_id) != runtime_id {
                 continue;
             }
             let Some(job) = self.job_store.get(&job_id).await? else {

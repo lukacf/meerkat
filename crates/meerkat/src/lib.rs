@@ -195,6 +195,12 @@ pub use job_delivery::{
     JobTerminalDeliveryPayload, PreparedJobDelivery, ProjectedJobDelivery, RuntimeJobDeliveryDrain,
     SkippedJobOutboxEntry,
 };
+#[cfg(not(target_arch = "wasm32"))]
+mod runtime_delivery_owner;
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime_delivery_owner::{
+    RuntimeDeliveryHost, RuntimeDeliveryOwner, RuntimeDeliveryOwnerHandle, RuntimeDeliveryPass,
+};
 mod job_composition;
 pub use job_composition::{
     JobAwaitActivity, JobAwaitCoordinator, JobAwaitDeliverySink, JobAwaitReceipt,

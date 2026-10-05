@@ -409,6 +409,19 @@ impl PersistenceBundle {
         self.runtime_delivery_inbox.clone()
     }
 
+    /// The delivery owner over this bundle's job store and runtime delivery
+    /// inbox, retrying blocked sessions when the bundle's runtime attaches
+    /// one. Arm it once per bundle with the surface's delivery host; a second
+    /// arming on the same inbox is refused.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn runtime_delivery_owner(&self) -> crate::RuntimeDeliveryOwner {
+        crate::RuntimeDeliveryOwner::new(
+            self.job_store.clone(),
+            self.runtime_delivery_inbox.clone(),
+        )
+        .with_attachment_commits(self.runtime_adapter.subscribe_attachment_commits())
+    }
+
     #[cfg(feature = "session-store")]
     pub fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
         self.session_persistence_profile

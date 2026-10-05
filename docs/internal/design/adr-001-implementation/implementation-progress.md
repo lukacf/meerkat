@@ -18,7 +18,7 @@ The current successor also integrates actual main merge
 `74b6c7473797cb904f554c8c2cc1bb7386ec3c66`, containing the upstream memory-test
 correction described below. That correction changes no production behavior.
 Qualification of that integrated source, `f3ebf2a02e19330aa926b61a205fcd62466ca2fc`,
-failed as described below. A test-fixture successor is under preparation;
+failed as described below. Its fixture successor is in GCP qualification;
 earlier published results do not qualify it. Luka's explicit 2026-10-05 instruction
 in the 0.9 coordinator chat temporarily removes GitHub CI as a blocker during
 the Actions outage. CI is recorded as skipped, never passed. Existing local
@@ -37,13 +37,36 @@ remain under `/tmp/rb/toolkit-work/receipts/adr1730-f3ebf2a0` on GCP.
 
 The redundant Mac normal push was stopped after the deterministic compile
 failures were reported. Its process exited 143 and its owned group was confirmed
-absent at 21:05:58 UTC; no push occurred. The successor handles constructor
-failure in the three reported fixtures and three analogous live/replay fixtures
-found by a finite source review, including the replay's fallible mob composition.
-It preserves production behavior, every existing assertion and the intentional
-negative constructor test. A local workspace all-targets compile check with the
-replay feature will precede the next GCP handoff. These repairs have no executed
-GREEN result yet.
+absent at 21:05:58 UTC; no push occurred. The fixture successor `970fa7a0181ae8aa1fdb05b4024794c387efe21e`, tree
+`2beafcd1907974dedf1ac291e921187f43c6a0de`, handled constructor failure in those
+three fixtures and three analogous live/replay fixtures, including fallible mob
+composition. Its local workspace all-targets check with the replay feature
+exited 101 after 1424.17 seconds and ran no tests. It found one remaining setup
+mismatch: the profile tool-denial fixture also needed to handle the fallible
+`wire_mob_tools` result. All nine other calls already handled that result. Raw
+output is `envelope-main-fixture-all-targets-check.log` in the local evidence
+directory below.
+
+The sole GCP qualification owner applied the fixture changes as `feebf5f327`,
+whose tree is identical to local `970fa7a01`, and added the final positive-fixture
+unwrap as `c7f42abbd2fb9bb3df0b724a83f6df8ce3659681`, tree
+`c3d5133b9b68c8a31d0fa2d3ca3af711017b0f0e`. Root verified the returned bundle
+and the one-line difference against local `970fa7a01`. The GCP owner reports
+format checking and the default-feature workspace all-targets check passed;
+the latter ran from 21:59:47 to 22:10:37 UTC. That command did not include the
+replay feature. The workspace library command started at 22:10:38, followed by
+the existing integration, cold-restart and E2E commands. Their results remain
+pending. The GCP transport commit skipped commit hooks; its explicit format
+check and the final normal Mac hooks are separate evidence. The fixture changes
+preserve all production behavior, existing assertions and negative tests.
+
+The Mac candidate adds one test-build correction to that GCP source:
+`StdioChildCustody::spawned_pid` is compiled only for Linux tests, matching its
+only caller. The Mac compile check emitted an unused-method warning for its
+former all-platform test configuration, which conflicts with the normal strict
+lint policy. Both predicates are true for Linux tests, so their helper and
+caller behavior are unchanged. This is a source-level conclusion; the final
+normal Mac gate still must execute. The current GCP run remains unchanged.
 
 The connector merge needed four integration repairs: preserve typed stale
 preparation, use coordinated mode-constrained logout, adapt the generated
@@ -139,8 +162,10 @@ integrated candidate. The historical six-cell study below missed every
 conditional mean threshold; fresh-turn overhead was 137.01 and 145.20 percent
 at grant depths 1 and 3. The required added authorization p99 below 1 ms per
 operation and representative overhead at most 10 percent remain unchanged.
-The accepted W20/N32 representative study needs a confirmed quiet GCP window
-and must finish within 20 minutes. It measures conditional mean ratios, not
+The accepted W20/N32 representative study follows functional qualification and
+optimized correctness at the earliest actual quiet GCP window. Meta publication
+is not a prerequisite, and no idle window is reserved. It must finish within
+20 minutes. It measures conditional mean ratios, not
 individual-operation p99; the latter still needs separate valid evidence.
 
 Full implementation remains incomplete under the

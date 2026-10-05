@@ -51,6 +51,7 @@ chmod +x "$FAKE_CLASSIFIER" "$FAKE_CARGO" "$FAKE_MAKE" "$FAKE_GIT"
 run_case() {
   local classifier_status="$1"
   local dirty_codegen="$2"
+  local mode="${3:-}"
   : > "$CALL_LOG"
   (
     ROOT="$TEST_ROOT" \
@@ -63,7 +64,7 @@ run_case() {
       MEERKAT_MACHINE_TEST_DIRTY_CODEGEN="$dirty_codegen" \
       MEERKAT_MACHINE_TEST_CALL_LOG="$CALL_LOG" \
       MEERKAT_MACHINE_TEST_ROOT="$TEST_ROOT" \
-      "$REPO_ROOT/scripts/pre-push-machines.sh"
+      "$REPO_ROOT/scripts/pre-push-machines.sh" ${mode:+"$mode"}
   )
 }
 
@@ -78,6 +79,34 @@ expected_calls=$'cargo xtask machine-codegen --all\ncargo xtask protocol-codegen
 if [[ "$(cat "$CALL_LOG")" != "$expected_calls" ]]; then
   echo "changed machine authority ran unexpected commands:" >&2
   cat "$CALL_LOG" >&2
+  exit 1
+fi
+
+# The split hooks: machine-codegen-drift runs only the two codegens under the
+# clean-tree contract, machine-codegen-verify only the TLC lane, each behind
+# the same classifier.
+run_case 0 0 --codegen-only
+expected_calls=$'cargo xtask machine-codegen --all\ncargo xtask protocol-codegen'
+if [[ "$(cat "$CALL_LOG")" != "$expected_calls" ]]; then
+  echo "--codegen-only ran unexpected commands:" >&2
+  cat "$CALL_LOG" >&2
+  exit 1
+fi
+run_case 0 0 --verify-only
+if [[ "$(cat "$CALL_LOG")" != "make -C ${TEST_ROOT} machine-verify" ]]; then
+  echo "--verify-only ran unexpected commands:" >&2
+  cat "$CALL_LOG" >&2
+  exit 1
+fi
+for mode in --codegen-only --verify-only; do
+  run_case 1 0 "$mode"
+  if [[ -s "$CALL_LOG" ]]; then
+    echo "unchanged machine authority ran validation under ${mode}" >&2
+    exit 1
+  fi
+done
+if "$REPO_ROOT/scripts/pre-push-machines.sh" --bogus >/dev/null 2>&1; then
+  echo "an unknown mode was accepted" >&2
   exit 1
 fi
 

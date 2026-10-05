@@ -169,7 +169,7 @@ semantic_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
     PRE_COMMIT_TO_REF="$semantic_head" \
     "$REPO_ROOT/scripts/pre-push-clippy.sh"
 )
-if [[ "$(cat "$CALL_LOG")" != "agent-gate --committed --clippy-only" ]]; then
+if [[ "$(cat "$CALL_LOG")" != "agent-gate --committed --clippy-only --machine-drift-by-hook" ]]; then
   echo "semantic change bypassed the ordinary clippy gate" >&2
   cat "$CALL_LOG" >&2
   exit 1

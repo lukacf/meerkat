@@ -19,14 +19,18 @@ if ! [[ "${tlc_run_cap_secs}" =~ ^[0-9]+$ ]] || (( tlc_run_cap_secs < 1 )); then
   exit 2
 fi
 
-tlc_run_cap_pids=()
+tlc_run_cap_tlc_pid=""
+tlc_run_cap_watchdog_pgid=""
 
 tlc_run_cap_reap() {
-  local pid
-  for pid in "${tlc_run_cap_pids[@]+"${tlc_run_cap_pids[@]}"}"; do
-    kill -TERM "${pid}" 2>/dev/null || true
-  done
-  tlc_run_cap_pids=()
+  if [[ -n "${tlc_run_cap_tlc_pid}" ]]; then
+    kill -TERM "${tlc_run_cap_tlc_pid}" 2>/dev/null || true
+  fi
+  if [[ -n "${tlc_run_cap_watchdog_pgid}" ]]; then
+    kill -TERM -- "-${tlc_run_cap_watchdog_pgid}" 2>/dev/null || true
+  fi
+  tlc_run_cap_tlc_pid=""
+  tlc_run_cap_watchdog_pgid=""
 }
 
 tlc_run_capped() {
@@ -37,22 +41,30 @@ tlc_run_capped() {
   tlc "$@" > "${log}" 2>&1 &
   local tlc_pid=$!
   # The watchdog ends TLC (which execs java) when the cap elapses first, and
-  # is itself ended, with its sleep, when TLC exits first.
+  # is itself ended, with its sleep, when TLC exits first. It starts as its
+  # own process group (job control is on only while it is launched), so
+  # ending the group ends the sleep too: there is no moment at which the
+  # sleep runs but cannot be named. Its stdio is /dev/null, so nothing it
+  # leaves behind can hold a caller's pipe (for example a `$(...)` capture)
+  # open.
+  local job_control_was_on=false
+  [[ $- == *m* ]] && job_control_was_on=true
+  set -m
   (
-    trap 'kill "${sleep_pid}" 2>/dev/null; exit 0' TERM
-    sleep "${tlc_run_cap_secs}" &
-    sleep_pid=$!
-    wait "${sleep_pid}"
+    sleep "${tlc_run_cap_secs}"
     : > "${capped}"
     kill -TERM "${tlc_pid}" 2>/dev/null
-  ) &
-  local watchdog_pid=$!
-  tlc_run_cap_pids=("${tlc_pid}" "${watchdog_pid}")
+  ) </dev/null >/dev/null 2>&1 &
+  local watchdog_pgid=$!
+  [[ "${job_control_was_on}" == true ]] || set +m
+  tlc_run_cap_tlc_pid="${tlc_pid}"
+  tlc_run_cap_watchdog_pgid="${watchdog_pgid}"
   local status=0
   wait "${tlc_pid}" || status=$?
-  kill -TERM "${watchdog_pid}" 2>/dev/null || true
-  wait "${watchdog_pid}" 2>/dev/null || true
-  tlc_run_cap_pids=()
+  kill -TERM -- "-${watchdog_pgid}" 2>/dev/null || true
+  wait "${watchdog_pgid}" 2>/dev/null || true
+  tlc_run_cap_tlc_pid=""
+  tlc_run_cap_watchdog_pgid=""
   if [[ -e "${capped}" ]]; then
     rm -f "${capped}"
     echo "TLC INCOMPLETE for ${slug} (${config}): hit the ${tlc_run_cap_secs} s per-run cap and was killed; an unexhausted state space is not a pass" >&2

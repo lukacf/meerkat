@@ -858,6 +858,7 @@ test_suite(
         "//crates/meerkat:brain_swap_pre_dequeue_loop_test",
         "//crates/meerkat:brain_swap_realization_saga_test",
         "//crates/meerkat:brain_swap_surface_parity_test",
+        "//crates/meerkat:callback_resume_ordinary_continuation_test",
         "//crates/meerkat:catalog_control_agent_boundary_test",
         "//crates/meerkat:cold_restart_resume_after_compaction_test",
         "//crates/meerkat:cold_restart_resume_test",

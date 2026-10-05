@@ -423,9 +423,20 @@ impl AgentToolDispatcher for RetainedPolicyBundle {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
+#[derive(Clone, Copy)]
+enum RetainedProfileRestriction {
+    Unrestricted,
+    ReadOnly,
+    DenyEdit,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn assert_retained_profile_policy_matches_native_gate(
+    restriction: RetainedProfileRestriction,
+) {
     use meerkat_core::{ToolExecutionPolicy, ToolMutationClass};
 
+    let permits_edit = matches!(restriction, RetainedProfileRestriction::Unrestricted);
     for head_canonical in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("profile-policy.sqlite3");
@@ -447,8 +458,8 @@ async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
                 .unwrap();
             profile.model = "gpt-5.5".into();
             profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
-            profile.tools.read_only = read_only;
-            if !read_only {
+            profile.tools.read_only = matches!(restriction, RetainedProfileRestriction::ReadOnly);
+            if matches!(restriction, RetainedProfileRestriction::DenyEdit) {
                 // The name belongs to the registered profile bundle, so this
                 // passes the same declared vocabulary validation as production.
                 profile.tools.deny = vec!["retained_edit".into()];
@@ -474,13 +485,19 @@ async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
                 .unwrap()
                 .session_metadata
                 .unwrap();
-            let effective = metadata
-                .tooling
-                .tool_access_policy
-                .expect("profile-only restriction is persisted in the effective field");
-            let expected_policy = ToolExecutionPolicy::resolve(effective.clone()).unwrap();
+            let effective = metadata.tooling.tool_access_policy;
+            assert_eq!(effective.is_none(), permits_edit);
+            let expected_policy = effective
+                .clone()
+                .map(ToolExecutionPolicy::resolve)
+                .transpose()
+                .unwrap()
+                .unwrap_or_else(ToolExecutionPolicy::unrestricted);
             assert!(expected_policy.permits_call("retained_read", ToolMutationClass::ReadOnly));
-            assert!(!expected_policy.permits_call("retained_edit", ToolMutationClass::Mutating));
+            assert_eq!(
+                expected_policy.permits_call("retained_edit", ToolMutationClass::Mutating),
+                permits_edit
+            );
             assert_eq!(
                 metadata.tooling.spawn_tool_access_policy,
                 Some(meerkat_core::ops::SpawnToolAccessPolicy::Unrestricted),
@@ -497,7 +514,7 @@ async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
                 .unwrap_or_else(ToolExecutionPolicy::unrestricted);
             assert!(
                 launch_only.permits_call("retained_edit", ToolMutationClass::Mutating),
-                "negative control: the separate spawn field would over-grant edit"
+                "the unrestricted spawn field alone admits edit even for a restricted profile"
             );
             for (name, class) in [
                 ("retained_read", ToolMutationClass::ReadOnly),
@@ -528,7 +545,12 @@ async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
                     );
                 }
             }
-            assert_eq!(*dispatched.lock().unwrap(), ["retained_read"]);
+            let expected_calls: &[&str] = if permits_edit {
+                &["retained_read", "retained_edit"]
+            } else {
+                &["retained_read"]
+            };
+            assert_eq!(dispatched.lock().unwrap().as_slice(), expected_calls);
             handle.retire(identity).await.unwrap();
             assert!(
                 service
@@ -555,7 +577,7 @@ async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
                 .unwrap()
                 .tooling
                 .tool_access_policy,
-            Some(expected_policy)
+            expected_policy
         );
     }
 }
@@ -563,11 +585,18 @@ async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn retained_metadata_profile_read_only_matches_native_gate_after_retirement() {
-    assert_retained_profile_policy_matches_native_gate(true).await;
+    assert_retained_profile_policy_matches_native_gate(RetainedProfileRestriction::ReadOnly).await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn retained_metadata_profile_deny_matches_native_gate_after_retirement() {
-    assert_retained_profile_policy_matches_native_gate(false).await;
+    assert_retained_profile_policy_matches_native_gate(RetainedProfileRestriction::DenyEdit).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn retained_metadata_profile_unrestricted_matches_native_gate_after_retirement() {
+    assert_retained_profile_policy_matches_native_gate(RetainedProfileRestriction::Unrestricted)
+        .await;
 }

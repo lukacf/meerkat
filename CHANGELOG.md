@@ -240,6 +240,19 @@ them.
   `e2e_fast_lane` join the macOS real-loopback comms group: they use the same
   comms support as the cross-host binaries already serialized there; the rest
   of that binary stays parallel.
+- Pre-push: the machine/protocol drift check runs once per push instead of
+  twice. The clippy hook's governance gate ran `make machine-check-drift --all`
+  (about 108 s) on top of the machine hook's own codegen clean-tree check. The
+  machine hook is now two hooks behind the same machine-authority classifier
+  and the exact pushed refs:
+  - `machine-codegen-drift` runs machine and protocol codegen under the
+    clean-tree contract. It is the only local drift check, and the
+    dispatcher refuses `SKIP=machine-codegen-drift`.
+  - `machine-codegen-verify` runs the canonical TLC lane. Skipping it skips
+    only TLC.
+
+  The agent gates leave drift to the hook when given
+  `--machine-drift-by-hook`, which only the clippy hook passes.
 - `meerkat-memory` `released_v2_store_with_empty_rows_is_purged_on_open` no
   longer treats approximate HNSW search recall as an exact oracle. Its final
   reopen check asserted three hits for one query and failed 5 of 200 serial

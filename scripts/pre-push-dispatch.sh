@@ -141,6 +141,19 @@ hook_stamp="${hook_cache_dir}/${CACHE_VERSION}-${pushed_tree}.ok"
 # with the skipped hook set. It is reused only by a push whose own SKIP covers
 # that set, so a later full push of the same tree re-runs the skipped hooks.
 skip_set="$(normalize_skip_set "${SKIP:-}")"
+# Hooks that are the only local check of their contract and are cheap enough
+# never to need skipping. machine-codegen-drift is the one machine/protocol
+# drift check: the clippy hook's governance gate leaves drift to it.
+unskippable_hooks="machine-codegen-drift"
+for unskippable in ${unskippable_hooks}; do
+  case ",${skip_set}," in
+    *",${unskippable},"*)
+      echo "error: SKIP=${skip_set} names ${unskippable}, which cannot be skipped: it is the only local check of its contract." >&2
+      echo "       Skip the expensive hooks instead (for example machine-codegen-verify for the TLC lane)." >&2
+      exit 1
+      ;;
+  esac
+done
 partial_stamp_prefix="${hook_cache_dir}/${CACHE_VERSION}-${pushed_tree}.partial-"
 partial_stamp=""
 if [[ -n "$skip_set" ]]; then

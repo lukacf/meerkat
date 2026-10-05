@@ -123,10 +123,11 @@ async fn completed_job(
     session_id: SessionId,
     key: &str,
 ) -> JobId {
-    let receipt = jobs
-        .submit(spec(realm_id, key, session_id))
-        .await
-        .expect("submit");
+    completed_job_from_spec(jobs, spec(realm_id, key, session_id)).await
+}
+
+async fn completed_job_from_spec(jobs: &DetachedJobService, spec: JobSpec) -> JobId {
+    let receipt = jobs.submit(spec).await.expect("submit");
     let claim = jobs
         .claim_attempt(
             &receipt.job_id,
@@ -322,4 +323,75 @@ async fn a_commit_landing_during_a_pass_is_delivered_by_the_next_pass() {
     })
     .await
     .expect("the entry committed during the first pass is delivered by a later pass");
+}
+
+/// A terminal whose producer applies it (the shell's completion feed) is
+/// committed already acknowledged, by whichever of the producer and the owner
+/// projects it first, so no sink ever runs for it and it never holds the
+/// cursor.
+#[tokio::test]
+async fn a_producer_applied_terminal_never_reaches_a_sink() {
+    let fixture = Fixture::new();
+    let session_id = SessionId::new();
+    let handle = fixture.owner().arm(fixture.host()).expect("arm owner");
+    let mut passes = handle.subscribe_passes();
+
+    let produced = completed_job_from_spec(
+        &fixture.jobs,
+        spec("default", "producer-applied", session_id.clone())
+            .with_terminal_application(meerkat::JobTerminalApplication::Producer),
+    )
+    .await;
+    let subscribed = completed_job(&fixture.jobs, "default", session_id, "subscribers").await;
+    wait_for_applied(&fixture.sink, &subscribed, &mut passes).await;
+    assert_eq!(
+        fixture.sink.applied().await,
+        vec![subscribed],
+        "the producer-applied terminal {produced} never reaches the sink"
+    );
+    assert_eq!(
+        fixture
+            .inbox
+            .pending_delivery_total()
+            .await
+            .expect("backlog read"),
+        0
+    );
+}
+
+/// The shell projects its own terminal before any owner runs; the row is
+/// already acknowledged when the owner's reconcile pass reads it.
+#[tokio::test]
+async fn a_producer_projected_terminal_is_acknowledged_before_the_owner_reads_it() {
+    use meerkat_tools::builtin::shell::ShellJobDeliveryProjector as _;
+
+    let fixture = Fixture::new();
+    let session_id = SessionId::new();
+    let produced = completed_job_from_spec(
+        &fixture.jobs,
+        spec("default", "shell-projected", session_id)
+            .with_terminal_application(meerkat::JobTerminalApplication::Producer),
+    )
+    .await;
+    meerkat::JobOutboxProjector::new(fixture.job_store.clone(), fixture.inbox.clone())
+        .project_job(produced.as_str())
+        .await
+        .expect("producer projects its terminal");
+
+    let handle = fixture.owner().arm(fixture.host()).expect("arm owner");
+    let mut passes = handle.subscribe_passes();
+    let reconciled = wait_for_pass(&mut passes, "the reconcile pass", |pass| {
+        pass.generation >= 1
+    })
+    .await;
+    assert_eq!((reconciled.projected, reconciled.failures.len()), (0, 0));
+    assert!(fixture.sink.applied().await.is_empty());
+    assert_eq!(
+        fixture
+            .inbox
+            .pending_delivery_total()
+            .await
+            .expect("backlog read"),
+        0
+    );
 }

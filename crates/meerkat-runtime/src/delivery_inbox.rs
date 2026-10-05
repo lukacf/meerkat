@@ -439,6 +439,34 @@ impl RuntimeDeliveryInbox {
         runtime_id: &LogicalRuntimeId,
         submission: RuntimeDeliverySubmission,
     ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
+        self.submit_with_acknowledgement(runtime_id, submission, false)
+            .await
+    }
+
+    /// Commit a delivery whose effect its producer applies itself, already
+    /// acknowledged, in the same authority compare-and-swap as the insert.
+    ///
+    /// No applier ever runs a sink for the new row: it is consumed when the
+    /// cursor reaches it, exactly like a row acknowledged out of band, but
+    /// with no window in which a delivery owner can observe it unacknowledged.
+    /// The producer must be able to re-derive its effect after a crash from
+    /// its own durable state. An exact replay of an existing row acknowledges
+    /// it as [`Self::acknowledge`] would.
+    pub async fn submit_acknowledged(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        submission: RuntimeDeliverySubmission,
+    ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
+        self.submit_with_acknowledgement(runtime_id, submission, true)
+            .await
+    }
+
+    async fn submit_with_acknowledgement(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        submission: RuntimeDeliverySubmission,
+        acknowledge: bool,
+    ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
             let observed = self
                 .store
@@ -480,6 +508,9 @@ impl RuntimeDeliveryInbox {
                         stored.sequence()
                     )));
                 }
+                if acknowledge {
+                    self.acknowledge(runtime_id, &delivery_id, sequence).await?;
+                }
                 return Ok(RuntimeDeliveryReceipt {
                     delivery_id,
                     sequence,
@@ -487,6 +518,18 @@ impl RuntimeDeliveryInbox {
                 });
             }
 
+            if acknowledge {
+                let transition = dsl::RuntimeDeliveryMachineMutator::apply(
+                    &mut authority,
+                    dsl::RuntimeDeliveryInput::AcknowledgeDelivery {
+                        delivery_id: delivery_id.as_str().to_string(),
+                        delivery_sequence: sequence,
+                    },
+                )
+                .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+                classify_acknowledgement_effects(transition.effects(), &delivery_id, sequence)?;
+                advance_acknowledged_prefix(&mut authority)?;
+            }
             let next_revision = observed
                 .as_ref()
                 .map_or(Ok(1), |record| next_revision(record.revision()))?;

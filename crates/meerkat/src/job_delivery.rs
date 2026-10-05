@@ -420,6 +420,27 @@ fn pending_delivery_provenance(
 pub struct PreparedJobDelivery {
     pub runtime_id: LogicalRuntimeId,
     pub submission: RuntimeDeliverySubmission,
+    /// The row's effect is applied by the job's producer
+    /// ([`meerkat_jobs::JobTerminalApplication::Producer`] terminal), so it is
+    /// committed already acknowledged.
+    pub producer_applied: bool,
+}
+
+impl PreparedJobDelivery {
+    /// Commit this delivery into `inbox`, acknowledged when its producer
+    /// applies it.
+    pub async fn submit(
+        self,
+        inbox: &RuntimeDeliveryInbox,
+    ) -> Result<meerkat_runtime::RuntimeDeliveryReceipt, RuntimeDeliveryError> {
+        if self.producer_applied {
+            inbox
+                .submit_acknowledged(&self.runtime_id, self.submission)
+                .await
+        } else {
+            inbox.submit(&self.runtime_id, self.submission).await
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -661,6 +682,8 @@ impl JobOutboxProjector {
         Ok(PreparedJobDelivery {
             runtime_id: LogicalRuntimeId::for_session(&job.spec.origin_session_id),
             submission,
+            producer_applied: matches!(entry.payload, JobOutboxPayload::Terminal(_))
+                && job.spec.terminal_application == meerkat_jobs::JobTerminalApplication::Producer,
         })
     }
 
@@ -721,10 +744,7 @@ impl JobOutboxProjector {
             }
         }
         let prepared = self.prepare(entry).await?;
-        let runtime = self
-            .runtime_inbox
-            .submit(&prepared.runtime_id, prepared.submission)
-            .await?;
+        let runtime = prepared.submit(&self.runtime_inbox).await?;
         self.job_service
             .mark_delivery_applied(&entry.job_id, entry.delivery_sequence)
             .await?;
@@ -758,8 +778,12 @@ impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for JobOutboxProje
                 .prepare(&entry)
                 .await
                 .map_err(|error| error.to_string())?;
-            self.runtime_inbox
-                .submit(&prepared.runtime_id, prepared.submission)
+            // A producer-applied terminal (the shell's) is committed already
+            // acknowledged, whichever of the shell and the delivery owner
+            // projects it first. Monitor notifications are applied by the
+            // delivery owner.
+            prepared
+                .submit(&self.runtime_inbox)
                 .await
                 .map_err(|error| error.to_string())?;
             if let Err(error) = self

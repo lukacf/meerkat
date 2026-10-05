@@ -656,3 +656,41 @@ async fn a_stale_census_live_column_fails_closed_on_read() {
         "the refusal must name the disagreement: {error}"
     );
 }
+
+/// Who applies a job's terminal survives reopen, and it is part of the
+/// submission identity: the same key with another application conflicts.
+#[tokio::test]
+async fn sqlite_reopen_preserves_terminal_application() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.sqlite3");
+    let produced = spec("terminal-application", RestartClass::Adoptable)
+        .with_terminal_application(meerkat_jobs::JobTerminalApplication::Producer);
+    let job_id = {
+        let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("open"));
+        DetachedJobService::new(store)
+            .submit(produced.clone())
+            .await
+            .expect("submit")
+            .job_id
+    };
+    let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("reopen"));
+    let reopened = store
+        .get(&job_id)
+        .await
+        .expect("read")
+        .expect("job survives reopen");
+    assert_eq!(
+        reopened.spec.terminal_application,
+        meerkat_jobs::JobTerminalApplication::Producer
+    );
+
+    let mut conflicting = produced;
+    conflicting.terminal_application = meerkat_jobs::JobTerminalApplication::Subscribers;
+    assert!(
+        DetachedJobService::new(store)
+            .submit(conflicting)
+            .await
+            .is_err(),
+        "the same submission key with another terminal application conflicts"
+    );
+}

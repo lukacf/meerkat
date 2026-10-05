@@ -64,6 +64,8 @@ struct PersistedJobSpec {
     canonical_arguments_hash: CanonicalArgumentsHash,
     credential_context_refs: Vec<PersistedCredentialContextRef>,
     submission_key: JobSubmissionKey,
+    #[serde(default)]
+    terminal_application: crate::JobTerminalApplication,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1162,6 +1164,7 @@ impl From<&JobSpec> for PersistedJobSpec {
                 .map(PersistedCredentialContextRef::from)
                 .collect(),
             submission_key: spec.submission_key.clone(),
+            terminal_application: spec.terminal_application,
         }
     }
 }
@@ -1185,6 +1188,7 @@ impl From<PersistedJobSpec> for JobSpec {
                 .map(ToolCredentialContextRef::from)
                 .collect(),
             submission_key: spec.submission_key,
+            terminal_application: spec.terminal_application,
         }
     }
 }

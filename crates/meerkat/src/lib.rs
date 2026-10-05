@@ -443,9 +443,9 @@ pub use meerkat_jobs::{
     JobHealthCondition, JobHealthCoverage, JobHealthReading, JobHealthSnapshot, JobId,
     JobNotification, JobOutboxCommitSignal, JobOutboxEntry, JobPhase, JobProgress, JobProgressKind,
     JobReceipt, JobReference, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey,
-    JobSubscription, JobSubscriptionId, JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore,
-    OriginMemberId, RestartClass, RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef,
-    ToolIdentity, WorkerId,
+    JobSubscription, JobSubscriptionId, JobTerminalApplication, JobTerminalKind, JobTerminalResult,
+    MemoryDetachedJobStore, OriginMemberId, RestartClass, RunnerHandleRef, RunnerIdentity,
+    RunnerSpecificationRef, ToolIdentity, WorkerId,
 };
 pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]

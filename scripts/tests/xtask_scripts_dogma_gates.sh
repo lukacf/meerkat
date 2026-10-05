@@ -442,6 +442,61 @@ else
   bad "TLC lane parts drop, duplicate, or misplace a hand audit, or the machine-verify part runs one"
 fi
 
+# tlc_run_cap.sh: the per-run watchdog must never outlive a run that ended
+# first, or hold a caller's `$(...)` capture open. A sleep orphaned between
+# its start and the recording of its pid used to block such a capture for
+# the whole cap (900 s). The watchdog is its own process group, killed as a
+# group, with its stdio on /dev/null. Each probe runs an instant TLC inside
+# a capture, in a child bounded by `timeout` that writes to a file, so a
+# regression fails here in seconds instead of hanging this script.
+# cap_probe <tlc_run_cap.sh>: succeeds when the capture returned rc=0
+# within 5 s.
+cap_fake_bin="$(mktemp -d)"
+printf '#!/bin/sh\nexit 0\n' > "$cap_fake_bin/tlc"
+chmod +x "$cap_fake_bin/tlc"
+cap_probe() {
+  local start_s rc
+  start_s="$(date +%s)"
+  rc=0
+  PATH="$cap_fake_bin:$PATH" TLC_RUN_CAP_SECS=120 timeout 20 bash -c \
+    'out="$(source "$1"; tlc_run_capped selftest cfg "$2/log"; echo "rc=$?")"; printf "%s" "$out"' \
+    _ "$1" "$cap_fake_bin" > "$cap_fake_bin/out" 2>/dev/null || rc=$?
+  [ "$rc" = 0 ] && [ "$(cat "$cap_fake_bin/out")" = "rc=0" ] \
+    && [ $(( $(date +%s) - start_s )) -le 5 ]
+}
+cap_runs_ok=true
+for _ in $(seq 1 30); do
+  cap_probe specs/machines/meerkat_machine/tlc_run_cap.sh || { cap_runs_ok=false; break; }
+done
+# Force the ordering that used to orphan the sleep: a copy of the script
+# whose watchdog pauses before starting its sleep, so the caller's TERM
+# always lands while the sleep is not yet running.
+cap_window_ok=false
+if python3 - specs/machines/meerkat_machine/tlc_run_cap.sh "$cap_fake_bin/tlc_run_cap.sh" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+anchor = '  (\n    sleep "${tlc_run_cap_secs}"\n'
+assert text.count(anchor) == 1, "watchdog sleep anchor not found exactly once"
+open(dst, "w").write(text.replace(anchor, '  (\n    /bin/sleep 1\n    sleep "${tlc_run_cap_secs}"\n'))
+PY
+then
+  cap_window_ok=true
+  for _ in 1 2 3; do
+    cap_probe "$cap_fake_bin/tlc_run_cap.sh" || { cap_window_ok=false; break; }
+  done
+fi
+rm -rf "$cap_fake_bin"
+cap_script=specs/machines/meerkat_machine/tlc_run_cap.sh
+if [ "$cap_runs_ok" = true ] && [ "$cap_window_ok" = true ] \
+  && grep -Fq 'set -m' "$cap_script" \
+  && grep -Fq ') </dev/null >/dev/null 2>&1 &' "$cap_script" \
+  && grep -Fq 'kill -TERM -- "-${watchdog_pgid}"' "$cap_script"; then
+  ok "tlc_run_cap: the watchdog is a process group with null stdio; instant runs inside captures return at once, even when TERM lands before its sleep starts"
+else
+  bad "tlc_run_cap: an instant run inside a capture hung or failed (or did when TERM landed before the sleep), or the watchdog is no longer an isolated process group"
+fi
+
 # The audit shards never execute xtask, so the PR lane runs them without an
 # xtask argument; every other part still requires one.
 if noxtask_a="$(PATH="$tlc_env_tmp:$PATH" \

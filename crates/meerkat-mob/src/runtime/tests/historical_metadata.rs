@@ -225,8 +225,9 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
         path: &std::path::Path,
         head_canonical: bool,
     ) -> (
-        meerkat_session::PersistentSessionService<PersistentMockBuilder>,
+        meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>,
         Arc<dyn meerkat_runtime::RuntimeStore>,
+        HeadCanonicalQueueGateClient,
     ) {
         let sessions: Arc<dyn SessionStore> = Arc::new(
             meerkat_store::SqliteSessionStore::open(path).expect("open session projection"),
@@ -239,15 +240,34 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
             }
             .expect("open native runtime authority"),
         );
+        let root = path.parent().expect("fixture database parent");
+        for name in ["store", "user", "runtime", "project", "context"] {
+            std::fs::create_dir_all(root.join(name)).expect("isolated factory root");
+        }
+        let factory = meerkat::AgentFactory::new(root.join("store"))
+            .user_config_root(root.join("user"))
+            .runtime_root(root.join("runtime"))
+            .project_root(root.join("project"))
+            .context_root(root.join("context"))
+            .builtins(false)
+            .shell(false)
+            .comms(false);
+        let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
+        builder.default_session_store =
+            Some(Arc::new(meerkat_store::StoreAdapter::new(sessions.clone())));
+        let client = HeadCanonicalQueueGateClient::new();
+        client.release();
+        builder.default_llm_client = Some(Arc::new(client.clone()));
         (
             meerkat_session::PersistentSessionService::new(
-                PersistentMockBuilder,
+                builder,
                 4,
                 sessions,
                 runtime.clone(),
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
             ),
             runtime,
+            client,
         )
     }
 
@@ -260,7 +280,7 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
             member: "same-logical-member".into(),
         };
         let (source_id, successor_id) = {
-            let (service, runtime) = open(&path, head_canonical);
+            let (service, runtime, client) = open(&path, head_canonical);
             let machine = meerkat_runtime::MeerkatMachine::persistent(
                 runtime,
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
@@ -270,7 +290,7 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
                 let result = service
                     .create_session(CreateSessionRequest {
                         injected_context: Vec::new(),
-                        model: "retained-source".into(),
+                        model: "gpt-5.5".into(),
                         prompt: ContentInput::Text("no provider turn needed".into()),
                         system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                         max_tokens: None,
@@ -303,12 +323,17 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
                     .unwrap()
                     .is_none()
             );
+            assert_eq!(
+                client.request_count(),
+                0,
+                "deferred fixture makes no LLM calls"
+            );
             MobSessionService::cancel_all_checkpointers(&service).await;
             (created.remove(0), created.remove(0))
         };
 
         // The original service, machine and store handles have left scope.
-        let (reopened, _) = open(&path, head_canonical);
+        let (reopened, _, _) = open(&path, head_canonical);
         let retained = reopened
             .load_retained_session_metadata(&source_id)
             .await

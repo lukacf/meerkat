@@ -105,7 +105,8 @@ const AWAITING_PEER_HISTORY_PAGE: usize = 200;
 use schedule::{
     LIVE_DELEGATION_CHANNEL_WORKER_CAP, VoiceWorkGraph, VoiceWorkItem, WorkItemDisposition,
     delegation_title_transcript, fork_work_instructions, narration_text, narration_title,
-    post_close_merge_text, task_after_failed_blockers, task_with_waited_results,
+    post_close_merge_text, post_close_request, task_after_failed_blockers,
+    task_with_waited_results,
 };
 
 const LIVE_DELEGATION_RESULT_BYTES: usize = 16 * 1024;
@@ -342,6 +343,10 @@ struct PendingDelegation {
     workgraph: Option<VoiceWorkGraph>,
     work: Option<VoiceWorkItem>,
     title: String,
+    /// The user's words for the request at the post-close bound
+    /// ([`post_close_request`]): a result merged after the call closed is
+    /// replayed under them, read-back request included.
+    request: String,
     /// The machine holds the item as Blocked; dispatch requeues it first.
     blocked: bool,
     /// Returned to the queue after a busy source or a WorkGraph refusal;
@@ -936,6 +941,9 @@ struct RetainedDelegation {
     work: Option<VoiceWorkItem>,
     workgraph: Option<VoiceWorkGraph>,
     title: String,
+    /// The user's words for the request at the post-close bound: the title
+    /// a post-close merge records for the reopened channel's replay.
+    request: String,
     append_lane: Arc<Mutex<()>>,
     /// Source mob handle for post-close merging and owned-child retirement.
     mob_handle: Option<MobHandle>,
@@ -3572,11 +3580,13 @@ impl ExperimentalLiveDelegationCoordinator {
         represented_user_rows: Vec<meerkat_core::RepresentedLiveUserRow>,
         executor_input: LiveDelegationExecutorInput,
     ) {
-        let title = narration_title(delegation_title_transcript(
+        let request_words = delegation_title_transcript(
             &final_transcript,
             &represented_user_rows,
             &executor_input.request_transcript,
-        ));
+        );
+        let title = narration_title(request_words);
+        let request = post_close_request(request_words);
         let workgraph = self.voice_workgraph(&mob_handle);
         let work = match workgraph.as_ref() {
             Some(workgraph) => match workgraph
@@ -3618,6 +3628,7 @@ impl ExperimentalLiveDelegationCoordinator {
             workgraph,
             work,
             title,
+            request,
             blocked: false,
             deferred: false,
             queued_narrated: false,
@@ -4030,6 +4041,7 @@ impl ExperimentalLiveDelegationCoordinator {
             pending.workgraph.clone(),
             work,
             pending.title.clone(),
+            pending.request.clone(),
             task,
             member,
             append_lane,
@@ -4729,6 +4741,14 @@ impl ExperimentalLiveDelegationCoordinator {
             operation_id.clone(),
             retained.runtime_binding.session_id().clone(),
         );
+        // The merge reply commits under the delegation's interaction (the
+        // delivery correlation below): a reopened channel replays it framed
+        // as this request's result, in the user's own words (S104 R3/R4).
+        self.runtime.record_post_close_result_title(
+            retained.runtime_binding.session_id(),
+            retained.operation.domain_correlation().interaction_id(),
+            retained.request.clone(),
+        );
         let Some(handle) = self
             .start_post_close_merge(retained, work, result_spec)
             .await
@@ -4828,6 +4848,7 @@ impl ExperimentalLiveDelegationCoordinator {
         workgraph: Option<VoiceWorkGraph>,
         work: Option<VoiceWorkItem>,
         title: String,
+        request_words: String,
         task: String,
         member: DelegationMemberOptions,
         append_lane: Arc<Mutex<()>>,
@@ -4847,6 +4868,7 @@ impl ExperimentalLiveDelegationCoordinator {
             workgraph,
             work,
             title,
+            request_words,
             task,
             member,
             append_lane,
@@ -4874,6 +4896,7 @@ impl ExperimentalLiveDelegationCoordinator {
         workgraph: Option<VoiceWorkGraph>,
         work: Option<VoiceWorkItem>,
         title: String,
+        request_words: String,
         task: String,
         member: DelegationMemberOptions,
         append_lane: Arc<Mutex<()>>,
@@ -5047,6 +5070,7 @@ impl ExperimentalLiveDelegationCoordinator {
             work,
             workgraph,
             title,
+            request: request_words,
             append_lane,
             mob_handle: Some(mob_handle),
             source_identity,
@@ -8677,6 +8701,7 @@ mod tests {
             work: None,
             workgraph: None,
             title: "exact result projection".to_string(),
+            request: "exact result projection, and read the result back to me".to_string(),
             append_lane: Arc::new(Mutex::new(())),
             mob_handle: None,
             source_identity: AgentIdentity::from("exact-result-source"),
@@ -8805,10 +8830,20 @@ mod tests {
         );
 
         // No source handle in this fixture: the merge is refused at once and
-        // holds no entry of its own.
+        // holds no entry of its own. The request's title is recorded under
+        // the delegation's interaction before admission (S104 R3/R4): the
+        // merge reply commits under it.
         coordinator
             .merge_result_into_source(&retained, "the result")
             .await;
+        assert_eq!(
+            coordinator.runtime.post_close_result_title(
+                &session_id,
+                operation.domain_correlation().interaction_id(),
+            ),
+            Some(retained.request.clone()),
+            "the merge records its request's words under the delegation's interaction"
+        );
         assert!(
             lock_unpoisoned(&coordinator.merges_awaiting_commit).is_empty(),
             "a merge that was not admitted is not awaited"
@@ -9349,6 +9384,7 @@ mod tests {
             work: None,
             workgraph: None,
             title: "two results b".to_string(),
+            request: "two results b".to_string(),
             append_lane: Arc::clone(&append_lane),
             mob_handle: None,
             source_identity: AgentIdentity::from("two-results-source"),
@@ -9681,6 +9717,7 @@ mod tests {
             work: None,
             workgraph: None,
             title: "exact result projection".to_string(),
+            request: "exact result projection, and read the result back to me".to_string(),
             append_lane: Arc::new(Mutex::new(())),
             mob_handle: None,
             source_identity: AgentIdentity::from("exact-result-source"),

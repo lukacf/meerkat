@@ -9034,6 +9034,14 @@ pub struct MeerkatMachineShared {
     #[cfg(feature = "live")]
     live_context_queued_rows:
         StdMutex<HashMap<(SessionId, u64), crate::live_execution::LiveContextQueuedRow>>,
+    /// Titles of voice delegations whose result was merged into the session
+    /// after their channel closed, keyed by the delegation's interaction (the
+    /// merge reply's transcript interaction): a reopened channel replays the
+    /// reply framed as that request's result
+    /// ([`crate::live_execution::post_close_result_context`]).
+    #[cfg(feature = "live")]
+    post_close_result_titles:
+        StdMutex<HashMap<(SessionId, meerkat_core::interaction::InteractionId), String>>,
     #[cfg(feature = "live")]
     live_context_preparation_leases: StdMutex<
         HashMap<
@@ -10739,6 +10747,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                post_close_result_titles: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_preparation_leases: StdMutex::new(HashMap::new()),
@@ -10855,6 +10865,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                post_close_result_titles: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_preparation_leases: StdMutex::new(HashMap::new()),
@@ -10970,6 +10982,8 @@ impl MeerkatMachine {
                 live_channel_closes_in_flight: Arc::default(),
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                post_close_result_titles: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]

@@ -2398,9 +2398,20 @@ mod live_context_mirror_tests {
         session_id: &SessionId,
         reply_text: &str,
     ) -> meerkat_core::lifecycle::core_executor::BoundSessionCommit {
+        merge_turn_commit_under(session_id, reply_text, None)
+    }
+
+    /// A post-close merge turn whose rows carry the voice delegation's
+    /// interaction, as the mob's delivery correlation stamps them.
+    fn merge_turn_commit_under(
+        session_id: &SessionId,
+        reply_text: &str,
+        interaction_id: Option<meerkat_core::interaction::InteractionId>,
+    ) -> meerkat_core::lifecycle::core_executor::BoundSessionCommit {
         let mut session = meerkat_core::Session::with_id(session_id.clone());
         let mut merged = meerkat_core::UserMessage::text("Result of the voice request");
         merged.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
+        merged.identity.interaction_id = interaction_id;
         session.push(meerkat_core::Message::User(merged));
         let mut reply = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
             meerkat_core::AssistantBlock::Text {
@@ -2408,6 +2419,7 @@ mod live_context_mirror_tests {
                 meta: None,
             },
         ]);
+        reply.identity.interaction_id = interaction_id;
         reply.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored);
         session.push(meerkat_core::Message::BlockAssistant(reply));
         meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
@@ -2596,9 +2608,111 @@ mod live_context_mirror_tests {
             .expect("the turn-finish drain completes");
         let appends = host.appends.lock().expect("appends");
         assert_eq!(appends.len(), 1, "{appends:?}");
+        assert!(
+            !appends[0].1.contains("Finished voice request"),
+            "runtime work with no recorded voice request keeps its plain row"
+        );
         assert_eq!(
             host.append_kinds.lock().expect("kinds").as_slice(),
             &[crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay],
+        );
+    }
+
+    /// Turbo S S104 R3/R4 on 10f4f053c: the reply to a post-close merge,
+    /// committed under the voice delegation's interaction whose title the
+    /// merge recorded, replays on the reopened channel framed as that
+    /// request's result (the user's own words and the typed fact that they
+    /// have not heard it), at the same release point as any runtime work.
+    #[tokio::test]
+    async fn a_post_close_merge_reply_replays_as_its_voice_request_result() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        let interaction = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+        let title = "Start a job for me: write a short ode to coffee. Read it back to me.";
+        machine.record_post_close_result_title(&session_id, interaction, title);
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &merge_turn_commit_under(
+                    &session_id,
+                    "The completed ode reads: O coffee, a faithful lantern.",
+                    Some(interaction),
+                ),
+                "store-commit",
+            )
+            .await
+            .expect("enqueue the merge turn");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("drain while quiet");
+        assert!(
+            host.appends.lock().expect("appends").is_empty(),
+            "never appended into silence"
+        );
+        let key = (session_id.clone(), channel_id.clone());
+        let (provider_binding, turn) = first_user_turn(&machine, &session_id, &channel_id).await;
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user's first turn starts");
+        let started = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned()
+            .expect("the turn start requested a drain");
+        started
+            .wait()
+            .await
+            .expect("the turn-start drain completes");
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "what happened while I was gone".into(),
+                },
+            ))
+            .await
+            .expect("the user's first turn finishes");
+        let finished = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned()
+            .expect("the turn finish requested a drain");
+        finished
+            .wait()
+            .await
+            .expect("the turn-finish drain completes");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 1, "{appends:?}");
+        let context = &appends[0].1;
+        assert!(
+            context.starts_with(&crate::live_execution::post_close_result_context(title, "")),
+            "framed as the request's result: {context}"
+        );
+        assert!(
+            context.contains("O coffee, a faithful lantern."),
+            "{context}"
+        );
+        assert_eq!(
+            host.append_kinds.lock().expect("kinds").as_slice(),
+            &[crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay],
+            "still quiet runtime work"
         );
     }
 
@@ -7842,6 +7956,40 @@ impl MeerkatMachine {
     /// This is a read-only restart projection. It intentionally omits the
     /// provider delegation reference and therefore cannot reconstruct an
     /// execution admission or provider-result send authority.
+    /// Record the title of a voice delegation whose result is being merged
+    /// into `session_id` after its channel closed, keyed by the delegation's
+    /// interaction: the merge reply commits under it, and a reopened channel
+    /// replays that reply framed as the request's result.
+    #[cfg(feature = "live")]
+    pub fn record_post_close_result_title(
+        &self,
+        session_id: &SessionId,
+        interaction_id: meerkat_core::interaction::InteractionId,
+        title: impl Into<String>,
+    ) {
+        self.shared
+            .post_close_result_titles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((session_id.clone(), interaction_id), title.into());
+    }
+
+    /// The recorded post-close result title for a row committed under
+    /// `interaction_id`, if any ([`Self::record_post_close_result_title`]).
+    #[cfg(feature = "live")]
+    pub fn post_close_result_title(
+        &self,
+        session_id: &SessionId,
+        interaction_id: meerkat_core::interaction::InteractionId,
+    ) -> Option<String> {
+        self.shared
+            .post_close_result_titles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(session_id.clone(), interaction_id))
+            .cloned()
+    }
+
     #[cfg(feature = "live")]
     pub async fn live_delegation_recovery_snapshots(
         &self,
@@ -12436,6 +12584,14 @@ impl MeerkatMachine {
                             .to_string(),
                     )
                 })?
+            } else if authority.kind()
+                == crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay
+                && let Some(title) = queued
+                    .row()
+                    .interaction_id()
+                    .and_then(|interaction| self.post_close_result_title(session_id, interaction))
+            {
+                crate::live_execution::post_close_result_context(&title, &context)
             } else {
                 context
             };

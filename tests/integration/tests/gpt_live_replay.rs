@@ -814,6 +814,12 @@ fn runtime_work_reply(fixture: &Fixture, channel: u32) -> Option<String> {
     let row = content
         .strip_prefix(LIVE_RUNTIME_WORK_PREFIX)?
         .trim_start_matches('\n');
+    // A post-close merge reply leads with its voice request's framing line
+    // (`post_close_result_context`) before the row.
+    let row = match row.split_once('\n') {
+        Some((framing, rest)) if framing.starts_with("Finished voice request: \"") => rest,
+        _ => row,
+    };
     let value: Value = serde_json::from_str(row).ok()?;
     value["text"].as_str().map(str::to_owned)
 }

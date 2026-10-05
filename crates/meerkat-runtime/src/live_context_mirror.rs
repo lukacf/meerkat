@@ -190,6 +190,11 @@ pub struct CommittedLiveContextRow {
     causal_context: Option<String>,
     #[cfg(feature = "live")]
     observation_id: Option<meerkat_core::LiveContextObservationId>,
+    /// The interaction of the turn that committed the row (its transcript
+    /// identity): for a post-close merge reply, the voice delegation's own
+    /// interaction, the typed key of its title.
+    #[cfg(feature = "live")]
+    interaction_id: Option<meerkat_core::interaction::InteractionId>,
 }
 
 impl CommittedLiveContextRow {
@@ -297,6 +302,11 @@ impl CommittedLiveContextRow {
             provider_context,
             causal_context,
             observation_id,
+            interaction_id: match message {
+                Message::User(user) => user.identity.interaction_id,
+                Message::BlockAssistant(assistant) => assistant.identity.interaction_id,
+                _ => None,
+            },
         })
     }
 
@@ -356,6 +366,12 @@ impl CommittedLiveContextRow {
     #[cfg(feature = "live")]
     pub(crate) const fn author(&self) -> crate::meerkat_machine::dsl::LiveContextRowAuthor {
         self.author
+    }
+
+    /// The interaction of the turn that committed this row.
+    #[cfg(feature = "live")]
+    pub(crate) fn interaction_id(&self) -> Option<meerkat_core::interaction::InteractionId> {
+        self.interaction_id
     }
 
     /// What drove the turn that committed this row (see
@@ -627,6 +643,29 @@ mod tests {
             "store-authority",
         )
         .expect("generated classification succeeds")
+    }
+
+    /// A committed row keeps the interaction of the turn that committed it:
+    /// the typed key a post-close merge reply's title is recorded under.
+    #[test]
+    fn a_committed_row_keeps_its_turn_interaction() {
+        let interaction = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+        let mut reply =
+            meerkat_core::types::BlockAssistantMessage::snapshot(vec![AssistantBlock::Text {
+                text: "The completed ode reads: O coffee".into(),
+                meta: None,
+            }]);
+        reply.identity.interaction_id = Some(interaction);
+        let row = classify(
+            &Message::BlockAssistant(reply),
+            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+        );
+        assert_eq!(row.interaction_id(), Some(interaction));
+        let plain = classify(
+            &Message::User(UserMessage::text("no interaction")),
+            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+        );
+        assert_eq!(plain.interaction_id(), None);
     }
 
     #[test]

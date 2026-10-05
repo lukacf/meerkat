@@ -59,6 +59,12 @@ struct RunnerScript {
     sender: mpsc::UnboundedSender<RunnerStep>,
     apply_started: Notify,
     apply_calls: AtomicUsize,
+    /// Applies that are fully observable: their primitive recorded and their
+    /// run set inside `apply`. A waiter keyed on `apply_calls` alone could
+    /// read `active_run` or `primitives` before the newest apply recorded
+    /// them (the counter moves at entry), which lost the race on a loaded
+    /// CI runner (`current_run` saw no run right after the stop).
+    applies_observable: tokio::sync::watch::Sender<usize>,
     steps_done: AtomicUsize,
     primitives: std::sync::Mutex<Vec<Vec<InputId>>>,
     applied_durable: std::sync::Mutex<Vec<InputId>>,
@@ -101,6 +107,7 @@ impl RunnerScript {
             sender,
             apply_started: Notify::new(),
             apply_calls: AtomicUsize::new(0),
+            applies_observable: tokio::sync::watch::Sender::new(0),
             steps_done: AtomicUsize::new(0),
             primitives: std::sync::Mutex::new(Vec::new()),
             applied_durable: std::sync::Mutex::new(Vec::new()),
@@ -307,6 +314,9 @@ impl CoreExecutor for DurableSteerExecutor {
             .primitive_applied(run_id.clone())
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
         *self.script.active_run.lock().unwrap() = Some(run_id.clone());
+        self.script
+            .applies_observable
+            .send_modify(|observable| *observable += 1);
         self.script.apply_started.notify_one();
         let mut steps = self.script.steps.lock().await;
         let outcome = loop {
@@ -558,14 +568,18 @@ impl DurableSteerRig {
         .unwrap_or_else(|_| panic!("expected {expected} applied durable appends"));
     }
 
+    /// Wait until `expected` applies are fully observable (their primitive
+    /// recorded and their run inside `apply`), on the script's event, not a
+    /// poll of the entry counter.
     async fn wait_for_apply_calls(&self, expected: usize) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while self.script.apply_calls.load(Ordering::SeqCst) < expected {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
+        let mut observable = self.script.applies_observable.subscribe();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            observable.wait_for(|applies| *applies >= expected),
+        )
         .await
-        .unwrap_or_else(|_| panic!("expected {expected} apply calls"));
+        .unwrap_or_else(|_| panic!("expected {expected} apply calls"))
+        .expect("the runner script outlives the rig");
     }
 
     async fn steer_queue(&self) -> Vec<InputId> {

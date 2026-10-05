@@ -251,7 +251,8 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
 /// `NotificationCommitted`; it then commits the runtime delivery and feeds the
 /// committed/reused acknowledgement back to the job. A commit made by another
 /// process is found by the owner's boot/attach reconcile read of the pending
-/// outbox, never by polling.
+/// outbox, never by polling. A generated driver replaces the hand projector:
+/// #1762.
 pub fn job_runtime_delivery_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("job_runtime_delivery"),

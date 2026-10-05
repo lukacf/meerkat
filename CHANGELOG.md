@@ -70,6 +70,12 @@ them.
   - Behaviour-only: an `Event` job subscription delivery now wakes an idle
     origin session instead of waiting queued for an unrelated turn, and the
     CLI, REST and MCP server now apply job deliveries.
+  - Behaviour-only: a host `append_system_context` while the session's
+    callback tool batch awaits its results is now refused as a retryable
+    `SessionError::Busy` (RPC `SESSION_BUSY`) instead of being appended.
+    Retry it after the callback results are staged and the run resumes. The
+    live session agent reports it as the new
+    `AgentError::ControlAppendBlockedByCallbackBatch`.
 
 ### Added
 

@@ -1445,6 +1445,37 @@ mod tests {
     use super::{JOBS_DOMAIN, PersistedPhase};
     use crate::machines::detached_job::DetachedJobPhase;
 
+    /// A job spec persisted before `terminal_application` existed reads as
+    /// `Subscribers`, the behaviour every such job had.
+    #[test]
+    fn a_spec_persisted_without_terminal_application_reads_as_subscribers() {
+        let spec = crate::JobSpec::new(
+            "realm-a",
+            meerkat_core::SessionId::new(),
+            crate::ExecutionIntentId::new(),
+            crate::InteractionLineageId::new(),
+            crate::ToolIdentity::new("scan", "v1").expect("tool"),
+            crate::RunnerIdentity::new("runner.scan", "v1").expect("runner"),
+            crate::RestartClass::Adoptable,
+            crate::CanonicalArgumentsHash::new("sha256:args").expect("hash"),
+            crate::JobSubmissionKey::new("legacy-spec").expect("key"),
+        )
+        .with_terminal_application(crate::JobTerminalApplication::Producer);
+        let mut legacy = serde_json::to_value(super::PersistedJobSpec::from(&spec))
+            .expect("encode persisted spec");
+        legacy
+            .as_object_mut()
+            .expect("persisted spec is an object")
+            .remove("terminal_application")
+            .expect("current persisted specs carry the field");
+        let decoded: super::PersistedJobSpec =
+            serde_json::from_value(legacy).expect("decode a legacy persisted spec");
+        assert_eq!(
+            crate::JobSpec::from(decoded).terminal_application,
+            crate::JobTerminalApplication::Subscribers
+        );
+    }
+
     #[test]
     fn revision_encoding_round_trips_the_full_u64_domain() {
         for revision in [1, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {

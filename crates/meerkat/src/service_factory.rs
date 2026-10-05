@@ -397,7 +397,12 @@ impl SessionAgent for FactoryAgent {
                 req.idempotency_key,
                 meerkat_core::types::message_timestamp_now(),
             )
-            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+            .map_err(|error| match error {
+                meerkat_core::session::SystemMessageAppendError::CallbackBatchPending => {
+                    meerkat_core::error::AgentError::ControlAppendBlockedByCallbackBatch
+                }
+                other => meerkat_core::error::AgentError::ConfigError(other.to_string()),
+            })
     }
 
     fn append_system_notice_control(

@@ -682,6 +682,8 @@ impl JobOutboxProjector {
         Ok(PreparedJobDelivery {
             runtime_id: LogicalRuntimeId::for_session(&job.spec.origin_session_id),
             submission,
+            // Interim routing choice until the generated driver declares it
+            // (#1762): reads only immutable admission data (the job spec).
             producer_applied: matches!(entry.payload, JobOutboxPayload::Terminal(_))
                 && job.spec.terminal_application == meerkat_jobs::JobTerminalApplication::Producer,
         })

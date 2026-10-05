@@ -461,3 +461,77 @@ async fn a_run_settlement_with_nothing_blocked_runs_no_pass() {
         "the settlements ran no pass; the commit ran the second"
     );
 }
+
+/// Only a producer-applied TERMINAL takes the acknowledged path: a
+/// notification of the same job (a monitor line) is still applied by the
+/// owner.
+#[tokio::test]
+async fn a_producer_jobs_notification_is_applied_while_its_terminal_is_not() {
+    let fixture = Fixture::new();
+    let session_id = SessionId::new();
+    let handle = fixture.owner().arm(fixture.host()).expect("arm owner");
+    let mut passes = handle.subscribe_passes();
+
+    let receipt = fixture
+        .jobs
+        .submit(
+            spec("default", "producer-monitor", session_id)
+                .with_terminal_application(meerkat::JobTerminalApplication::Producer),
+        )
+        .await
+        .expect("submit");
+    let job = receipt.job_id;
+    let claim = fixture
+        .jobs
+        .claim_attempt(
+            &job,
+            AttemptClaim::new(
+                WorkerId::new("worker").expect("worker"),
+                1,
+                100,
+                RunnerHandleRef::new("runner-handle").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    fixture
+        .jobs
+        .emit_notification(
+            &job,
+            (&claim).into(),
+            2,
+            meerkat::JobNotification::new("line", "line:1", "Match", "pattern seen")
+                .expect("notification"),
+        )
+        .await
+        .expect("emit notification");
+    wait_for_applied(&fixture.sink, &job, &mut passes).await;
+
+    fixture
+        .jobs
+        .complete_attempt(&job, (&claim).into(), 3, None)
+        .await
+        .expect("complete");
+    tokio::time::timeout(EVENT_GUARD, async {
+        loop {
+            if fixture
+                .inbox
+                .pending_delivery_total()
+                .await
+                .expect("backlog read")
+                == 0
+                && passes.borrow().generation >= 2
+            {
+                return;
+            }
+            passes.changed().await.expect("owner pass channel open");
+        }
+    })
+    .await
+    .expect("the terminal is consumed without a sink");
+    assert_eq!(
+        fixture.sink.applied().await,
+        vec![job],
+        "the notification reached the sink once; the producer-applied terminal never did"
+    );
+}

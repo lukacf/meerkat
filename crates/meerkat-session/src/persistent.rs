@@ -14724,10 +14724,14 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 req.idempotency_key,
                 meerkat_core::types::message_timestamp_now(),
             )
-            .map_err(|error| {
-                SessionControlError::Session(SessionError::Agent(AgentError::ConfigError(
-                    error.to_string(),
-                )))
+            .map_err(|error| match error {
+                // Retryable once the callback batch resolves.
+                meerkat_core::session::SystemMessageAppendError::CallbackBatchPending => {
+                    SessionControlError::Session(SessionError::Busy { id: id.clone() })
+                }
+                other => SessionControlError::Session(SessionError::Agent(
+                    AgentError::ConfigError(other.to_string()),
+                )),
             })?;
         if status == meerkat_core::service::AppendSystemContextStatus::Duplicate {
             return Ok(AppendSystemContextResult { status });

@@ -604,8 +604,9 @@ fn buildbuddy_workflow_is_called_only_by_nightly_and_release() {
 /// hand-written audits model check the generated machines against their
 /// invariants and goals, which the drift ratchet alone does not. The lane
 /// runs both audit shards of the canonical TLC lane on a machine-authority
-/// change, fails closed when the lane script lacks the part, and the CI gate
-/// requires it on such a change.
+/// change, inside the PR budget, with TLC from the shared setup-tlc-ci action
+/// (its contents are pinned by scripts/tests/xtask_scripts_dogma_gates.sh),
+/// and the CI gate requires it on such a change.
 #[test]
 fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
     let ci_yml = workflow_yml_path("ci.yml");
@@ -633,12 +634,17 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         .filter_map(serde_yaml::Value::as_str)
         .collect();
     assert_eq!(parts, ["audits-a", "audits-b"], "both audit shards run");
+    assert_eq!(
+        job.get("timeout-minutes")
+            .and_then(serde_yaml::Value::as_u64),
+        Some(20),
+        "a TLC shard times out inside the PR execution budget"
+    );
     let job_text = serde_yaml::to_string(job).expect("render tlc-audits job");
     for required in [
         "crates/xtask/tests/machine_verify_all_tlc_test.sh",
         "--part \"${{ matrix.part }}\"",
-        "run_part ${{ matrix.part }}",
-        "tla2tools.jar",
+        "uses: ./.github/actions/setup-tlc-ci",
     ] {
         assert!(
             job_text.contains(required),

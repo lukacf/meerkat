@@ -442,6 +442,33 @@ else
   bad "TLC lane parts drop, duplicate, or misplace a hand audit, or the machine-verify part runs one"
 fi
 
+# The audit shards never execute xtask, so the PR lane runs them without an
+# xtask argument; every other part still requires one.
+if noxtask_a="$(PATH="$tlc_env_tmp:$PATH" \
+      TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+      TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+      bash crates/xtask/tests/machine_verify_all_tlc_test.sh --part audits-a 2>&1)" \
+  && [ "$(printf '%s\n' "$noxtask_a" | audit_lines)" = "$(printf '%s\n' "$a_out" | audit_lines)" ] \
+  && ! PATH="$tlc_env_tmp:$PATH" bash crates/xtask/tests/machine_verify_all_tlc_test.sh --part machine-verify >/dev/null 2>&1; then
+  ok "TLC lane: audit shards run without an xtask argument; machine-verify still requires one"
+else
+  bad "TLC lane: an audit shard needs an xtask argument, or machine-verify runs without one"
+fi
+
+# setup-tlc-ci (the PR TLC lane's install) records the jar's digest and
+# enforces a pinned one when set.
+tlc_action=.github/actions/setup-tlc-ci/action.yml
+if [ -f "$tlc_action" ] \
+  && grep -Fq 'tla2tools.jar' "$tlc_action" \
+  && grep -Fq 'distribution: temurin' "$tlc_action" \
+  && grep -Fq 'sha256sum' "$tlc_action" \
+  && grep -Fq 'does not match the pinned' "$tlc_action" \
+  && grep -Fq 'GITHUB_PATH' "$tlc_action"; then
+  ok "setup-tlc-ci installs TLC, prints the jar digest and enforces a pinned sha256"
+else
+  bad "setup-tlc-ci is missing, or no longer reports or enforces the jar digest"
+fi
+
 echo ""
 echo "gate summary: ${pass} passed, ${fail} failed"
 if [ "$fail" -ne 0 ]; then

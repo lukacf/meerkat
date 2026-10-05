@@ -53,6 +53,12 @@ them.
   must leave the audit's goal unreachable. Dropping the bootstrap-summary
   conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
   previously checked only by hand (#1607).
+- PR CI runs the bounded TLC audits. When a pull request or push touches
+  machine authority, a `Bounded TLC audits` job runs both hand-written audit
+  shards of the canonical TLC lane in parallel, and the `CI gate` requires
+  it (#1720). TLC is installed by the new `setup-tlc-ci` action, which prints
+  the jar's sha256 and enforces a pinned one when set. The audit shards take
+  no xtask argument.
 
 ## [0.8.51] - 2026-10-05
 

@@ -1,0 +1,53 @@
+name: Setup TLC for CI
+description: >-
+  Install a JDK and the TLA+ tools jar, and put a `tlc` wrapper on PATH. The
+  jar's sha256 is always printed with the TLC version. When `sha256` is set the
+  download must match it, or the step fails. Leave it empty only for a source
+  that is known to be rebuilt in place (the tlaplus v1.8.0 pre-release is), so
+  the run records which build it used.
+
+inputs:
+  url:
+    description: Download URL of tla2tools.jar.
+    required: false
+    default: https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+  sha256:
+    description: Expected sha256 of the jar (lowercase hex); empty skips the check.
+    required: false
+    default: ""
+  java-version:
+    description: Temurin JDK version.
+    required: false
+    default: "21"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Java
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
+
+    - name: Install TLC
+      shell: bash
+      env:
+        TLC_JAR_URL: ${{ inputs.url }}
+        TLC_JAR_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        lib="$HOME/.local/lib"
+        bin="$HOME/.local/bin"
+        mkdir -p "${lib}" "${bin}"
+        curl --fail --location --retry 5 --retry-delay 2 \
+          "${TLC_JAR_URL}" --output "${lib}/tla2tools.jar"
+        actual="$(sha256sum "${lib}/tla2tools.jar" | cut -d' ' -f1)"
+        echo "tla2tools.jar sha256: ${actual} (${TLC_JAR_URL})"
+        if [[ -n "${TLC_JAR_SHA256}" && "${actual}" != "${TLC_JAR_SHA256}" ]]; then
+          echo "::error::tla2tools.jar sha256 ${actual} does not match the pinned ${TLC_JAR_SHA256}"
+          exit 1
+        fi
+        printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' "${lib}" > "${bin}/tlc"
+        chmod +x "${bin}/tlc"
+        echo "${bin}" >> "$GITHUB_PATH"
+        java -cp "${lib}/tla2tools.jar" tlc2.TLC -version 2>/dev/null | head -1 || true

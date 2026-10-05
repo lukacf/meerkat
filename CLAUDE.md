@@ -363,8 +363,9 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
 - `tlc-audits`: on a machine-authority change, the two hand-written TLC
   audit shards of the canonical TLC lane
   (`machine_verify_all_tlc_test.sh --part audits-a|audits-b`) in parallel,
-  needing only a JDK and the pinned TLC jar; the `CI gate` requires them on
-  such a change. The `machine-verify --all` sweep is not in PR CI.
+  needing only a JDK and the TLC jar (`.github/actions/setup-tlc-ci`, which
+  prints the jar's sha256 and enforces a pinned one when set); the `CI gate`
+  requires them on such a change. The `machine-verify --all` sweep is not in PR CI.
 - `clippy`: one lane per shard of every directly changed package
   (`clippy --no-deps --all-targets --all-features -D warnings`).
 - `unit`: `nextest --lib --bins --profile ci-pr` (`fast` plus a 4-minute hung-test kill) for

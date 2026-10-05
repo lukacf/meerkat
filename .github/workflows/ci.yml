@@ -541,8 +541,9 @@ jobs:
   # Bounded TLC on machine-authority changes. The hand-written audits model
   # check the generated machines against their invariants and goals (drift
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
-  # the canonical TLC lane needs only a JDK and the pinned TLC jar (the
-  # audit parts never run xtask), runs in parallel, and fits the PR budget.
+  # the canonical TLC lane needs only a JDK and the TLC jar
+  # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
+  # fits the PR budget.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -550,7 +551,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.machine_authority == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Past ~24 minutes a shard fails the PR execution budget anyway; 20 leaves
+    # headroom over the expected 5-8 minutes.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -564,40 +567,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - name: Install pinned TLC
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
-            --output "$HOME/.local/lib/tla2tools.jar"
-          printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' \
-            "$HOME/.local/lib" > "$HOME/.local/bin/tlc"
-          chmod +x "$HOME/.local/bin/tlc"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Setup TLC
+        uses: ./.github/actions/setup-tlc-ci
 
       - name: Run the audit shard
         shell: bash
         run: |
           set -euo pipefail
-          lane=crates/xtask/tests/machine_verify_all_tlc_test.sh
-          # Fail closed: a lane script without parts would ignore --part and
-          # run the whole lane, including machine-verify against a stand-in
-          # xtask binary.
-          if ! grep -q 'run_part ${{ matrix.part }}' "${lane}"; then
-            echo "::error::${lane} has no --part ${{ matrix.part }}; this lane cannot run it."
-            exit 1
-          fi
-          # The audit parts never execute xtask; any absolute executable
-          # satisfies the lane's argument.
-          bash "${lane}" "$(command -v true)" --part "${{ matrix.part }}"
+          # The audit parts never execute xtask, so they take no xtask
+          # argument; the lane rejects an unknown part.
+          bash crates/xtask/tests/machine_verify_all_tlc_test.sh --part "${{ matrix.part }}"
 
   clippy:
     name: Clippy (${{ matrix.name }})

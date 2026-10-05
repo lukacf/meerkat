@@ -303,13 +303,12 @@ fn mob_definition() -> MobDefinition {
 async fn a_stopped_run_does_not_break_the_next_model_selected_turn() {
     let temp = tempfile::tempdir().expect("temp dir");
     let client = Arc::new(ScriptedClient::new());
-    // The surface's machine, which carries the LLM reconfigure host, is also
-    // the mob's runtime (as a host wires it).
+    // The surface's machine, which carries the LLM reconfigure host. The
+    // service carries it too, so the mob runs on it without explicit wiring.
     let (service, adapter) = build_service(temp.path(), Arc::clone(&client)).await;
     let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
     let handle = MobBuilder::new(mob_definition(), storage)
         .with_session_service(service.clone())
-        .with_runtime_adapter(adapter.clone())
         .with_default_llm_client(client.clone())
         .create()
         .await
@@ -437,13 +436,12 @@ async fn a_stopped_run_does_not_break_the_next_model_selected_turn() {
 async fn a_stopped_peer_driven_run_does_not_break_the_next_model_selected_turn() {
     let temp = tempfile::tempdir().expect("temp dir");
     let client = Arc::new(ScriptedClient::new());
-    // The surface's machine, which carries the LLM reconfigure host, is also
-    // the mob's runtime (as a host wires it).
+    // The surface's machine, which carries the LLM reconfigure host. The
+    // service carries it too, so the mob runs on it without explicit wiring.
     let (service, adapter) = build_service(temp.path(), Arc::clone(&client)).await;
     let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
     let handle = MobBuilder::new(mob_definition(), storage)
         .with_session_service(service.clone())
-        .with_runtime_adapter(adapter.clone())
         .with_default_llm_client(client.clone())
         .create()
         .await
@@ -563,7 +561,6 @@ async fn control_a_stopped_run_without_a_joined_steer() {
     let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
     let handle = MobBuilder::new(mob_definition(), storage)
         .with_session_service(service.clone())
-        .with_runtime_adapter(adapter.clone())
         .with_default_llm_client(client.clone())
         .create()
         .await
@@ -639,11 +636,10 @@ async fn an_errored_run_does_not_break_the_next_model_selected_turn() {
     let mut scripted = ScriptedClient::new();
     scripted.fail_after_first = true;
     let client = Arc::new(scripted);
-    let (service, adapter) = build_service(temp.path(), Arc::clone(&client)).await;
+    let (service, _adapter) = build_service(temp.path(), Arc::clone(&client)).await;
     let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
     let handle = MobBuilder::new(mob_definition(), storage)
         .with_session_service(service.clone())
-        .with_runtime_adapter(adapter.clone())
         .with_default_llm_client(client.clone())
         .create()
         .await
@@ -696,4 +692,42 @@ async fn an_errored_run_does_not_break_the_next_model_selected_turn() {
         .find(|request| mentions(&request.user_texts, NEXT_PROMPT))
         .expect("the successor reached the provider");
     assert_eq!(successor_request.model, SELECTED_MODEL);
+}
+
+/// The persistent service a surface composition builds carries the machine
+/// that composition returns: a mob asking the service for its runtime gets
+/// exactly that machine, with its reconfigure host.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_persistent_service_carries_the_surface_machine() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let client = Arc::new(ScriptedClient::new());
+    let (service, adapter) = build_service(temp.path(), client).await;
+    let served = meerkat_mob::MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+        .expect("acquire runtime authority")
+        .expect("the persistent service serves a runtime adapter");
+    assert!(
+        Arc::ptr_eq(&served, &adapter),
+        "the service's runtime is the surface machine, not a private second one"
+    );
+    assert!(served.has_session_llm_reconfigure_host());
+}
+
+/// The service owns the machine and the machine's reconfigure host holds the
+/// service weakly, so dropping the composition frees the machine.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_composition_frees_its_machine() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let client = Arc::new(ScriptedClient::new());
+    let (service, adapter) = build_service(temp.path(), client).await;
+    let machine = Arc::downgrade(&adapter);
+    drop(adapter);
+    assert!(
+        machine.upgrade().is_some(),
+        "the service keeps its machine alive"
+    );
+    drop(service);
+    assert!(
+        machine.upgrade().is_none(),
+        "no reference cycle keeps the machine alive after the service is gone"
+    );
 }

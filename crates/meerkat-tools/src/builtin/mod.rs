@@ -15,6 +15,56 @@
 //! The [`memory_store`] module provides [`MemoryTaskStore`] for testing.
 //! The [`file_store`] module provides [`FileTaskStore`] for persistent storage.
 
+/// Tool names of the shell family. Available on every target (the family
+/// itself is native-only) so a tool name a deny list declares means the same
+/// thing everywhere; [`shell::ShellToolSet::tool_names`] returns it and its
+/// drift test pins it to the tool definitions.
+pub const SHELL_TOOL_NAMES: &[&str] = &[
+    "shell",
+    "shell_job_status",
+    "shell_jobs",
+    "shell_job_cancel",
+    "monitor_start",
+];
+
+/// Tool names of the comms family (`meerkat_comms::comms_tool_defs`, as
+/// [`CommsToolSurface`] composes it), available whatever the compiled
+/// features; pinned by a drift test where the family is compiled.
+pub const COMMS_TOOL_NAMES: &[&str] = &[
+    "send_message",
+    "reply_to_peer",
+    "send_request",
+    "send_response",
+    "peers",
+];
+
+/// Tool names of the builtin utilities on every target: `datetime`, the
+/// native-only `apply_patch` and `view_image`, and the blob file tools.
+pub const UTILITY_TOOL_NAMES: &[&str] = &[
+    "datetime",
+    "apply_patch",
+    "view_image",
+    "blob_save_file",
+    "blob_load_file",
+    "blob_inspect",
+];
+
+/// Tool names of the skills family, available whatever the compiled
+/// features.
+pub const SKILL_TOOL_NAMES: &[&str] = &[
+    "browse_skills",
+    "load_skill",
+    "skill_list_resources",
+    "skill_read_resource",
+    "skill_invoke_function",
+];
+
+/// Tool names of the web search family.
+pub const WEB_SEARCH_TOOL_NAMES: &[&str] = &["web_search"];
+
+/// Tool names of the model-switch family.
+pub const BRAIN_SWAP_TOOL_NAMES: &[&str] = &[brain_swap::BRAIN_SWAP_TOOL_NAME];
+
 #[cfg(feature = "comms")]
 pub mod comms;
 // Staging-only, so it is wasm-safe by construction; the surfaces that cannot

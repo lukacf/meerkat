@@ -1134,6 +1134,14 @@ pub enum PeerConversationProjection {
     ResponseTerminal {
         fact: PeerResponseTerminalFact,
     },
+    /// One-way peer lifecycle notice (member-kickoff status). It carries no
+    /// request id and asks for no reply.
+    Lifecycle {
+        peer_id: crate::comms::PeerId,
+        display_name: Option<String>,
+        kind: crate::comms::PeerLifecycleKind,
+        payload: Option<serde_json::Value>,
+    },
 }
 
 impl PeerConversationProjection {
@@ -1146,7 +1154,8 @@ impl PeerConversationProjection {
             Self::Message { peer_id } => Some(format!("Peer message from {peer_id}")),
             Self::Request { .. }
             | Self::ResponseProgress { .. }
-            | Self::ResponseTerminal { .. } => None,
+            | Self::ResponseTerminal { .. }
+            | Self::Lifecycle { .. } => None,
         }
     }
 
@@ -1188,13 +1197,27 @@ impl PeerConversationProjection {
                 format_peer_projection_payload(payload.as_ref())
             ),
             Self::ResponseTerminal { fact } => fact.prompt_text(),
+            Self::Lifecycle {
+                peer_id,
+                display_name,
+                kind,
+                payload,
+            } => crate::interaction::format_peer_lifecycle_projection(
+                Some(*peer_id),
+                display_name.as_deref(),
+                kind.as_str(),
+                payload.as_ref().unwrap_or(&serde_json::Value::Null),
+            ),
         }
     }
 
     pub fn context_key(&self) -> Option<String> {
         match self {
             Self::ResponseTerminal { fact } => Some(fact.context_key()),
-            Self::Message { .. } | Self::Request { .. } | Self::ResponseProgress { .. } => None,
+            Self::Message { .. }
+            | Self::Request { .. }
+            | Self::ResponseProgress { .. }
+            | Self::Lifecycle { .. } => None,
         }
     }
 }

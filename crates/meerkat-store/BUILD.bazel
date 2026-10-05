@@ -58,11 +58,13 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
     proc_macro_deps = all_crate_deps(
@@ -93,13 +95,15 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
     proc_macro_deps = all_crate_deps(
@@ -136,11 +140,13 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
     tags = [
@@ -201,13 +207,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/conformance.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "conformance",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -258,13 +266,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/legacy_text_json_upgrade_carry.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "legacy_text_json_upgrade_carry",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -315,13 +325,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/model_routing_handoff_resume.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "model_routing_handoff_resume",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -372,13 +384,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/rct_contracts.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "rct_contracts",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -429,13 +443,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/schedule_atomic_mutation.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "schedule_atomic_mutation",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -486,13 +502,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/schedule_live_waiter_gate.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "schedule_live_waiter_gate",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -543,13 +561,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/schedule_machine_state_projection.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "schedule_machine_state_projection",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -600,13 +620,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/schedule_occurrence_list_pushdown.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "schedule_occurrence_list_pushdown",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -657,13 +679,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/schedule_receipt_projection.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "schedule_receipt_projection",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -714,13 +738,15 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/schedule_row_fault_tolerance.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "schedule_row_fault_tolerance",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
@@ -771,14 +797,75 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
     ],
     srcs = [
         "tests/stress_high_concurrency.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "stress_high_concurrency",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-store",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-schedule:meerkat_schedule",
+        "//crates/meerkat-sqlite:meerkat_sqlite",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-store",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "whole_blob_retention_bytes_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-store",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "whole_blob_retention_bytes",
+    crate_root = "tests/whole_blob_retention_bytes.rs",
+    crate_features = [
+        "jsonl",
+        "memory",
+        "sqlite",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json",
+        "tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3",
+    ],
+    srcs = [
+        "tests/whole_blob_retention_bytes.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_BIN_NAME": "whole_blob_retention_bytes",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
     tags = [
@@ -823,5 +910,6 @@ test_suite(
         ":schedule_receipt_projection_test",
         ":schedule_row_fault_tolerance_test",
         ":stress_high_concurrency_test",
+        ":whole_blob_retention_bytes_test",
     ],
 )

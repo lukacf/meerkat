@@ -26,7 +26,7 @@ use super::{
         dsl_schedule_lifecycle_machine, dsl_session_document_machine,
         dsl_session_turn_admission_machine, dsl_temporary_council_lifecycle_machine,
         dsl_work_attention_lifecycle_machine, dsl_work_execution_lifecycle_machine,
-        dsl_workgraph_lifecycle_machine,
+        dsl_work_item_admission_machine, dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -40,11 +40,122 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolRef(String);
 
+/// Why a coverage anchor path is not a portable, repository-relative path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SymbolRefError {
+    #[error("coverage anchor path is empty")]
+    Empty,
+    #[error("coverage anchor path must be repository-relative, not absolute")]
+    Absolute,
+    #[error("coverage anchor path must use `/` separators")]
+    Backslash,
+    #[error("coverage anchor path cannot contain a drive or stream separator `:`")]
+    Colon,
+    #[error("coverage anchor path cannot contain control characters")]
+    ControlCharacter,
+    #[error("coverage anchor path cannot contain an empty, `.` or `..` component")]
+    InvalidComponent,
+    #[error("coverage anchor path component `{0}` is not portable")]
+    NonPortableComponent(NonPortableComponentKind),
+}
+
+/// Which portability rule a path component breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonPortableComponentKind {
+    /// Ends with `.` or a space, which Windows strips.
+    TrailingDotOrSpace,
+    /// Contains one of `< > " | ? *`.
+    ReservedCharacter,
+    /// Is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`..`COM9`,
+    /// `LPT1`..`LPT9`, with or without an extension).
+    ReservedDeviceName,
+}
+
+impl std::fmt::Display for NonPortableComponentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TrailingDotOrSpace => "ends with a dot or space",
+            Self::ReservedCharacter => "contains a reserved character",
+            Self::ReservedDeviceName => "is a reserved device name",
+        })
+    }
+}
+
 impl SymbolRef {
+    /// Parse a repository-relative coverage anchor path.
+    ///
+    /// The check is lexical and never touches the filesystem: the path is
+    /// non-empty, relative, `/`-separated, free of control characters, drive
+    /// or stream separators, empty/`.`/`..` components, and of components
+    /// that are not portable to Windows. It does not prove that the file
+    /// exists, that it stays inside the repository through symlinks, or that
+    /// it realizes the anchored semantics: the coverage validator that owns
+    /// the catalog checks those.
+    pub fn parse(path: impl Into<String>) -> Result<Self, SymbolRefError> {
+        let path = path.into();
+        if path.is_empty() {
+            return Err(SymbolRefError::Empty);
+        }
+        if path.starts_with('/') {
+            return Err(SymbolRefError::Absolute);
+        }
+        if path.contains('\\') {
+            return Err(SymbolRefError::Backslash);
+        }
+        if path.contains(':') {
+            return Err(SymbolRefError::Colon);
+        }
+        if path.chars().any(char::is_control) {
+            return Err(SymbolRefError::ControlCharacter);
+        }
+        for component in path.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err(SymbolRefError::InvalidComponent);
+            }
+            if let Some(kind) = non_portable_component(component) {
+                return Err(SymbolRefError::NonPortableComponent(kind));
+            }
+        }
+        Ok(Self(path))
+    }
+
     /// Borrow the underlying repo-relative path.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn non_portable_component(component: &str) -> Option<NonPortableComponentKind> {
+    if component.ends_with(['.', ' ']) {
+        return Some(NonPortableComponentKind::TrailingDotOrSpace);
+    }
+    if component.contains(['<', '>', '"', '|', '?', '*']) {
+        return Some(NonPortableComponentKind::ReservedCharacter);
+    }
+    let stem = component.split('.').next().unwrap_or_default();
+    let device = stem.eq_ignore_ascii_case("CON")
+        || stem.eq_ignore_ascii_case("PRN")
+        || stem.eq_ignore_ascii_case("AUX")
+        || stem.eq_ignore_ascii_case("NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+                && matches!(
+                    &stem[prefix.len()..],
+                    "1" | "2"
+                        | "3"
+                        | "4"
+                        | "5"
+                        | "6"
+                        | "7"
+                        | "8"
+                        | "9"
+                        | "\u{b9}"
+                        | "\u{b2}"
+                        | "\u{b3}"
+                )
+        });
+    device.then_some(NonPortableComponentKind::ReservedDeviceName)
 }
 
 /// The schema element an anchor claims to realize.
@@ -1384,24 +1495,33 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "runtime_delivery_authority",
                 "RuntimeDeliveryMachine",
                 "crates/meerkat-runtime/src/delivery_inbox.rs",
-                "generated runtime delivery identity, sequence, and ordered application authority with mechanical store CAS",
+                "generated runtime delivery identity, sequence, ordered application, and out-of-band acknowledgement authority with mechanical store CAS",
                 CoverageClaims::none()
                     .transitions(&[
                         "CommitNewDelivery",
                         "ReuseCommittedDelivery",
                         "ApplyNextDelivery",
                         "ObserveAlreadyAppliedDelivery",
+                        "AcknowledgeNextDelivery",
+                        "AcknowledgeAheadOfCursor",
+                        "ObserveAlreadyAppliedAcknowledgement",
+                        "AdvanceOverAcknowledgedDelivery",
+                        "AdvanceAcknowledgedPrefixNothingParked",
                     ])
                     .effects(&[
                         "DeliveryCommitted",
                         "DeliveryReused",
                         "DeliveryApplied",
+                        "DeliveryAcknowledged",
+                        "AcknowledgedPrefixAdvanced",
+                        "AcknowledgedPrefixAtRest",
                     ])
                     .invariants(&[
                         "applied_cursor_does_not_pass_committed_sequence",
                         "empty_delivery_set_has_zero_sequence",
                         "delivery_identity_and_sequence_cardinality_match",
                         "committed_sequence_cardinality_tracks_high_water",
+                        "applied_cursor_is_never_acknowledged_pending",
                     ]),
             )],
             &[
@@ -1421,6 +1541,25 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ObserveAlreadyAppliedDelivery",
                         ])
                         .effects(&["DeliveryApplied"]),
+                ),
+                scenario(
+                    "runtime_delivery_out_of_band_acknowledgement",
+                    "an acknowledgement at the cursor applies the row; one ahead of the cursor is recorded instead of refused, and the cursor later advances over the contiguous acknowledged prefix without re-application, so out-of-order acknowledgement never wedges the queue",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AcknowledgeNextDelivery",
+                            "AcknowledgeAheadOfCursor",
+                            "ObserveAlreadyAppliedAcknowledgement",
+                            "AdvanceOverAcknowledgedDelivery",
+                            "AdvanceAcknowledgedPrefixNothingParked",
+                        ])
+                        .effects(&[
+                            "DeliveryApplied",
+                            "DeliveryAcknowledged",
+                            "AcknowledgedPrefixAdvanced",
+                            "AcknowledgedPrefixAtRest",
+                        ])
+                        .invariants(&["applied_cursor_is_never_acknowledged_pending"]),
                 ),
             ],
         ),
@@ -1802,11 +1941,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "workgraph_lifecycle",
                 "WorkGraphLifecycleMachine",
                 "crates/meerkat-workgraph/src/machine.rs",
-                "WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality",
+                "WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, CreateOpenRejectedUnpairedAdmission, CreateBlockedRejectedUnpairedAdmission, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, UnpairedAdmissionIdentityRejected, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality",
                 CoverageClaims::none()
                     .transitions(&[
                         "CreateOpen",
                         "CreateBlocked",
+                        "CreateOpenRejectedUnpairedAdmission",
+                        "CreateBlockedRejectedUnpairedAdmission",
                         "UpdateOpen",
                         "UpdateInProgress",
                         "UpdateBlocked",
@@ -2034,6 +2175,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     ])
                     .effects(&[
                         "Created",
+                        "UnpairedAdmissionIdentityRejected",
                         "Updated",
                         "Claimed",
                         "Released",
@@ -2061,11 +2203,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[
                 scenario(
                     "workgraph_create_update_ready_claim",
-                    "CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision",
+                    "CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, a half-present admission identity refused (CreateOpenRejectedUnpairedAdmission, CreateBlockedRejectedUnpairedAdmission, UnpairedAdmissionIdentityRejected), UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision",
                     CoverageClaims::none()
                         .transitions(&[
                             "CreateOpen",
                             "CreateBlocked",
+                            "CreateOpenRejectedUnpairedAdmission",
+                            "CreateBlockedRejectedUnpairedAdmission",
                             "UpdateOpen",
                             "UpdateInProgress",
                             "UpdateBlocked",
@@ -2078,7 +2222,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "RefreshEligibilityInProgress",
                             "RefreshEligibilityBlocked",
                         ])
-                        .effects(&["Created", "Updated", "Claimed", "Blocked"]),
+                        .effects(&[
+                            "Created",
+                            "UnpairedAdmissionIdentityRejected",
+                            "Updated",
+                            "Claimed",
+                            "Blocked",
+                        ]),
                 ),
                 scenario(
                     "workgraph_claim_release_recovery",
@@ -2144,6 +2294,47 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         .effects(&["Blocked", "LinkValidated"]),
                 ),
             ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_work_item_admission_machine(),
+            &[machine_anchor(
+                "work_item_admission",
+                "WorkItemAdmissionMachine",
+                "crates/meerkat-workgraph/src/machine.rs",
+                "WorkItemAdmissionMachine owner of a work item's exact keyed admission identity: BindKeyed and BindUnkeyed record (or decline) the identity delivered by the lifecycle Created route, and ClassifyAdmissionReplayExact, ClassifyAdmissionReplayConflict and ClassifyAdmissionReplayKeyMismatch decide, over the recovered identity, whether a keyed create that found an existing item is an exact replay, a typed conflict, or a store-index mismatch; effects Bound, AdmissionReplayClassified; invariants admitted_has_identity, non_admitted_has_no_identity",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "BindKeyed",
+                        "BindUnkeyed",
+                        "ClassifyAdmissionReplayExactUnkeyed",
+                        "ClassifyAdmissionReplayExactAdmitted",
+                        "ClassifyAdmissionReplayConflictUnkeyed",
+                        "ClassifyAdmissionReplayConflictAdmitted",
+                        "ClassifyAdmissionReplayKeyMismatchAbsent",
+                        "ClassifyAdmissionReplayKeyMismatchUnkeyed",
+                        "ClassifyAdmissionReplayKeyMismatchAdmitted",
+                    ])
+                    .effects(&["Bound", "AdmissionReplayClassified"])
+                    .invariants(&["admitted_has_identity", "non_admitted_has_no_identity"]),
+            )],
+            &[scenario(
+                "work_item_admission_replay",
+                "a keyed create binds its identity once; an exact replay under the same key and digest is Replayed, the same key with another digest is Conflict, and another key (or an unkeyed or never-bound item) is KeyMismatch, in every phase",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "BindKeyed",
+                        "BindUnkeyed",
+                        "ClassifyAdmissionReplayExactUnkeyed",
+                        "ClassifyAdmissionReplayExactAdmitted",
+                        "ClassifyAdmissionReplayConflictUnkeyed",
+                        "ClassifyAdmissionReplayConflictAdmitted",
+                        "ClassifyAdmissionReplayKeyMismatchAbsent",
+                        "ClassifyAdmissionReplayKeyMismatchUnkeyed",
+                        "ClassifyAdmissionReplayKeyMismatchAdmitted",
+                    ])
+                    .effects(&["Bound", "AdmissionReplayClassified"])
+                    .invariants(&["admitted_has_identity", "non_admitted_has_no_identity"]),
+            )],
         ),
         machine_manifest_from_schema(
             &dsl_work_attention_lifecycle_machine(),
@@ -3155,7 +3346,7 @@ fn machine_anchor(
 ) -> CoverageAnchor {
     CoverageAnchor {
         id: id.into(),
-        symbol: SymbolRef(symbol.into()),
+        symbol: SymbolRef::parse(symbol).expect("portable coverage anchor path"),
         target: CoverageSchemaTarget::Machine(
             MachineId::parse(machine).expect("valid machine slug"),
         ),
@@ -3178,7 +3369,7 @@ fn route_anchor(
 ) -> CoverageAnchor {
     CoverageAnchor {
         id: id.into(),
-        symbol: SymbolRef(symbol.into()),
+        symbol: SymbolRef::parse(symbol).expect("portable coverage anchor path"),
         target: CoverageSchemaTarget::Route(RouteId::parse(route).expect("valid route slug")),
         note: note.into(),
         claims,

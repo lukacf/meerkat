@@ -923,6 +923,7 @@ mod scenario_10_memory {
             recent_turn_budget: 1, // Keep only 1 recent turn
             max_summary_tokens: 256,
             min_turns_between_compactions: 1,
+            history_retained_rewrites: 4,
         };
         let mut config = Config::default();
         config.compaction.auto_compact_threshold = compactor_config.auto_compact_threshold;

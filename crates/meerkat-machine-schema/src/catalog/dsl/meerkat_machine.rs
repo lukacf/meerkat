@@ -650,6 +650,7 @@ pub enum PeerIngressInputClass {
     SilentRequest,
     Ack,
     PlainEvent,
+    PeerLifecycleKickoff,
 }
 
 /// DSL-owned peer lifecycle classifier.
@@ -659,6 +660,12 @@ pub enum PeerIngressLifecycleClass {
     PeerAdded,
     PeerRetired,
     PeerUnwired,
+    KickoffPending,
+    KickoffStarting,
+    KickoffStarted,
+    KickoffCallbackPending,
+    KickoffFailed,
+    KickoffCancelled,
 }
 
 /// DSL-owned peer ingress auth classifier.
@@ -1620,6 +1627,13 @@ pub enum LiveContextRowDisposition {
     /// speech. Kept apart from heard user speech because only the user's
     /// newer speech supersedes a typed row held behind the summary.
     ReassertAssistantOutput,
+    /// Runtime-minted quiet replay of a text-chat row (see
+    /// `LiveContextRowSource::TextChat`): the user typed it and read the reply
+    /// in the chat, so it is never voiced. Like runtime work output it waits
+    /// for the conversation; like a voiced typed row it waits for the turn
+    /// boundary and is superseded by the user's newer heard speech
+    /// (`AuthorizeLiveContextAppendSuperseded`).
+    ReplayTextChat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -1634,13 +1648,17 @@ pub enum LiveContextPayloadAvailability {
 /// spoken, or a peer message); a `RuntimeWork` row is the assistant's reply
 /// to runtime-authored injected execution context, such as a voice job's
 /// result merged into the source member after its channel closed. Runtime
-/// work output is history the model has not seen, never speech to voice.
+/// work output is history the model has not seen, never speech to voice. A
+/// `TextChat` row belongs to a host-typed turn (the text chat): the user typed
+/// it and read the reply there, so it is quiet context, never voiced, and
+/// still a typed row that the user's newer speech supersedes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum LiveContextRowSource {
     #[default]
     Conversation,
     RuntimeWork,
+    TextChat,
 }
 
 /// Who authored a committed row queued for a live channel: the user's own
@@ -1702,8 +1720,8 @@ pub enum LiveContextDeliveryReadiness {
 /// `SpokenCanonicalRow` is a queued canonical row the channel will voice
 /// (`MirrorParentText` with a materializable payload from a conversational
 /// turn): that row produces speech on its own, so holding the summary for the
-/// user would deadlock it. Runtime work output is replayed quietly and does
-/// not start the conversation.
+/// user would deadlock it. Runtime work output and text-chat rows are replayed
+/// quietly and do not start the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveConversationStartCause {
     #[default]
@@ -2376,6 +2394,31 @@ pub enum InputAbandonReason {
 /// DSL-side mirror of the shell's `meerkat_core::types::HandlingMode`; the
 /// DSL owns the typed mirror so transitions can carry it without depending
 /// on the shell's domain enum.
+/// Why a runtime's run starts are held (#1500). The runtime starts no new run
+/// while any reason holds it; each holder releases only its own reason.
+/// `RegisterSession` unions `initial_run_start_holds` one reason at a time, so
+/// a new reason needs its line in every `RegisterSession` arm.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RunStartHoldReason {
+    /// A mob Stop holds its members until Resume.
+    #[default]
+    MobStop,
+    /// A restored member waits until its host has published its tools.
+    ToolsNotPublished,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InputLane {
     #[default]
@@ -3845,6 +3888,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // different run clears it, and every guard compares it with an
             // exact run id, so a stale value can never touch a newer run.
             run_stop_requested: Option<RunId>,
+            // Run-start hold (#1500). A mob Stop pauses the member: while set,
+            // no transition establishes a new run (Prepare, the retired
+            // drain, or a direct turn start); each such input takes its Held
+            // arm instead and changes nothing, so admitted input stays queued
+            // until Resume releases the hold. The current run, its turn
+            // start, steer joins, cancels and terminals are unaffected.
+            run_start_holds: Set<Enum<RunStartHoldReason>>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
 
             // --- Ops lifecycle substate ---
@@ -4118,6 +4168,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_status_result_sequence: u64,
             live_channel_status_observation_sequence_by_channel: Map<String, u64>,
             live_channel_status_by_channel: Map<String, Enum<LiveChannelPublicStatus>>,
+            // --- Live media health ---
+            //
+            // The first assistant output of each channel is judged once: the
+            // runtime requests the client's raw decoded-audio counters for
+            // that exact output at its typed end, and the generated edge
+            // judges them. An output whose transcript is non-empty but whose
+            // decoded audio stayed silent is a media fault: the channel closes
+            // with that reason. Each session may recommend one reopen on a
+            // media fault; a second fault on the same session closes without
+            // the recommendation, so a broken media path never loops.
+            //
+            // Lifetime: a channel close (committed close or abandoned open)
+            // clears the requested output and the judged mark, because a
+            // closed channel takes no further request or report. The verdict
+            // in live_media_fault_reopen_recommended_by_channel deliberately
+            // survives the close as a tombstone, like
+            // live_close_status_by_channel: live/status and the
+            // LiveChannelClosed media_fault reason read it after the channel
+            // is gone. It is not a leak: every UnregisterSession* transition
+            // and every resume from Stopped (RegisterSessionResumesStopped,
+            // RegisterSessionNewBindingFromStopped) clears all four maps, so
+            // growth is bounded by one session lifetime, and the reopen
+            // budget is earned again per session lifetime.
+            live_media_health_requested_output_by_channel: Map<String, String>,
+            live_media_health_judged_channels: Set<String>,
+            live_media_fault_reopen_recommended_by_channel: Map<String, bool>,
+            live_media_fault_reopens_by_session: Map<String, u64>,
 
             // --- RPC event-stream public result authority ---
             //
@@ -4505,6 +4582,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_live_boundary_join_run = EmptyMap,
             input_live_boundary_join_phase = EmptyMap,
             run_stop_requested = None,
+            run_start_holds = EmptySet,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -4705,6 +4783,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_status_result_sequence = 0,
             live_channel_status_observation_sequence_by_channel = EmptyMap,
             live_channel_status_by_channel = EmptyMap,
+            live_media_health_requested_output_by_channel = EmptyMap,
+            live_media_health_judged_channels = EmptySet,
+            live_media_fault_reopen_recommended_by_channel = EmptyMap,
+            live_media_fault_reopens_by_session = EmptyMap,
             // RPC event-stream public result authority
             session_event_stream_open_result_sequence = 0,
             session_event_stream_close_result_sequence = 0,
@@ -4831,6 +4913,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RegisterSession {
                 session_id: SessionId,
                 runtime_epoch_id: Option<RuntimeEpochId>,
+                initial_run_start_holds: Set<Enum<RunStartHoldReason>>,
             },
             // Durable-tail recovery authorization (spec: SessionDocumentMachine
             // classifies, THIS machine authorizes, RuntimeStore realizes the
@@ -4989,6 +5072,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 staged_promotion_busy: bool,
             },
             CancelAfterBoundary { reason: String },
+            HoldRunStarts { reason: Enum<RunStartHoldReason> },
+            ReleaseRunStarts { reason: Enum<RunStartHoldReason> },
             CancelAfterBoundaryForRun { run_id: RunId, reason: String },
             AbortCancelAfterBoundaryDispatch { dispatch_generation: u64 },
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness> },
@@ -6237,6 +6322,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_cursor: u64,
                 next_cursor: u64,
             },
+            // One append for the contiguous run of queued replays of heard
+            // speech (the causal tail) at the outbox head: `append_id` is the
+            // head row's, `tail_cursors` every cursor in (previous, next].
+            AuthorizeLiveContextCausalTailBatch {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                append_id: String,
+                previous_cursor: u64,
+                next_cursor: u64,
+                tail_cursors: Set<u64>,
+            },
             EnqueueLiveContextRow {
                 channel_id: String,
                 runtime_id: AgentRuntimeId,
@@ -6385,6 +6483,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                 status_observation_sequence: u64,
                 degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
                 degradation_detail: Option<String>,
+            },
+            RequestLiveMediaHealth {
+                session_id: String,
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                output_id: String,
+                assistant_transcript_nonempty: bool,
+            },
+            ObserveLiveChannelMediaHealth {
+                session_id: String,
+                channel_id: String,
+                output_id: String,
+                decoded_frames: u64,
+                audible_frames: u64,
+                max_rms_micros: u64,
             },
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
@@ -6850,6 +6965,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // a boundary-cancel dispatch was already outstanding. No
             // RuntimeEffectFact is emitted, so nothing re-dispatches.
             BoundaryCancelAlreadyPending,
+            // #1500 run-start hold. `current_run` is the run current when the
+            // hold took effect: the only run a stop may still cancel.
+            RunStartsHeld { current_run: Option<RunId> },
+            RunStartsReleased { queued: bool },
+            RunStartHeld,
             WakeInterrupt,
             CommittedVisibleSetPublished { revision: u64 },
             // `kind` is a closed classifier of runtime lifecycle markers;
@@ -7704,9 +7824,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 append_id: String,
                 previous_cursor: u64,
                 next_cursor: u64,
-                // The row would be voiced (MirrorParentText) but the channel
-                // already heard newer speech while the row waited behind the
-                // late summary: it goes out as a quiet replay instead.
+                // A typed row (voiced MirrorParentText, or a quiet text-chat
+                // ReplayTextChat row) whose channel already heard newer user
+                // speech while the row waited behind the late summary: it goes
+                // out as a quiet replay framed as superseded.
                 superseded_by_heard_speech: bool,
             },
             LiveContextAppendDeferred {
@@ -7818,6 +7939,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 status_observation_sequence: u64,
                 degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
                 degradation_detail: Option<String>,
+                media_fault_reopen_recommended: Option<bool>,
+            },
+            LiveMediaHealthRequested {
+                session_id: String,
+                channel_id: String,
+                output_id: String,
+            },
+            LiveChannelMediaHealthJudged {
+                session_id: String,
+                channel_id: String,
+                output_id: String,
+                media_faulted: bool,
+                reopen_recommended: bool,
             },
             // #51: machine-owned realtime transcript staging fact. Emitted when
             // a realtime turn stages a transcript item (the explicit-commit
@@ -8088,6 +8222,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition TurnCheckCompaction => local seam NoOwnerRealization,
         disposition RequestCancellationAtBoundary => local seam NoOwnerRealization,
         disposition BoundaryCancelAlreadyPending => local seam NoOwnerRealization,
+        disposition RunStartsHeld => local seam SurfaceResultAlignment,
+        disposition RunStartsReleased => local seam SurfaceResultAlignment,
+        disposition RunStartHeld => local seam SurfaceResultAlignment,
         disposition WakeInterrupt => local seam NoOwnerRealization,
         disposition CommittedVisibleSetPublished => external seam SurfaceResultAlignment,
         disposition RuntimeNotice => external seam SurfaceResultAlignment,
@@ -8282,6 +8419,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition MobEventStreamTerminalResolved => local seam SurfaceResultAlignment,
         disposition MobEventStreamCloseResolved => local seam SurfaceResultAlignment,
         disposition LiveChannelStatusResolved => local seam SurfaceResultAlignment,
+        disposition LiveMediaHealthRequested => external seam OwnerRealizationOnly,
+        disposition LiveChannelMediaHealthJudged => external seam OwnerRealizationOnly,
         disposition RealtimeTranscriptAppended => local seam SurfaceResultAlignment,
         disposition PeerIngressClassified => local seam NoOwnerRealization,
         disposition PeerResponseReplyClassified => local seam NoOwnerRealization,
@@ -8865,6 +9004,28 @@ macro_rules! meerkat_catalog_machine_dsl {
                 == self.live_delegation_steer_operation_by_continuation.keys()
             && for_all(continuation_id in self.live_delegation_steer_delivered_by_continuation.keys(),
                 self.live_delegation_steer_operation_by_continuation.contains_key(continuation_id))
+        }
+
+        // Live media health: each session recommends at most one media-fault
+        // reopen, a recorded verdict belongs to a judged open channel or to a
+        // closed channel (its close tombstone), and a judged channel's first
+        // output was requested.
+        invariant live_media_health_budget_and_verdicts_are_consistent {
+            for_all(budget_session in self.live_media_fault_reopens_by_session.keys(),
+                self.live_media_fault_reopens_by_session.get_copied(budget_session).get("value") <= 1)
+            && for_all(verdict_channel in self.live_media_fault_reopen_recommended_by_channel.keys(),
+                self.live_media_health_judged_channels.contains(verdict_channel)
+                || self.live_close_status_by_channel.contains_key(verdict_channel))
+            && for_all(judged_channel in self.live_media_health_judged_channels,
+                self.live_media_health_requested_output_by_channel.contains_key(judged_channel))
+            // An unregistered session holds no media-health state: every
+            // UnregisterSession* transition clears the four maps, so the
+            // close tombstones and the reopen budget end with the session.
+            && (self.session_id != None
+                || (self.live_media_health_requested_output_by_channel == EmptyMap
+                    && self.live_media_health_judged_channels == EmptySet
+                    && self.live_media_fault_reopen_recommended_by_channel == EmptyMap
+                    && self.live_media_fault_reopens_by_session == EmptyMap))
         }
 
         invariant fence_requires_bound_runtime {
@@ -10365,7 +10526,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition RegisterSession {
             per_phase [Idle, Attached, Running, Retired]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "new_session_binding" { self.session_id != Some(session_id) }
             update {
@@ -10373,6 +10534,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // The entry epoch is born here, with the registration that
                 // owns it. Placement (`PrepareBindings`) only asserts it.
                 self.active_runtime_epoch_id = runtime_epoch_id;
+                // A new binding starts with exactly the holds its registration
+                // carries (#1500), applied before any run can start.
+                self.run_start_holds = EmptySet;
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
                 self.current_session_llm_identity = None;
                 self.current_session_capability_surface = None;
                 self.current_session_capability_surface_status =
@@ -10399,11 +10569,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         // a stopped session (2c below).
         transition RegisterSessionIdempotent {
             per_phase [Idle, Attached, Running, Retired]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             guard "same_registered_epoch" { self.active_runtime_epoch_id == runtime_epoch_id }
-            update {}
+            update {
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
+            }
             to Idle
         }
 
@@ -10418,7 +10595,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // minted epoch, which arms 2c/2d install.
         transition RegisterSessionEpochConflictRejected {
             per_phase [Idle, Attached, Running, Retired]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             guard "registered_epoch_differs" { self.active_runtime_epoch_id != runtime_epoch_id }
@@ -10472,7 +10649,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the unregister saga, and a refused registration must not perturb them.
         transition RegisterSessionRefusedUnregisterDraining {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
             update {}
             to Idle
@@ -10523,17 +10700,30 @@ macro_rules! meerkat_catalog_machine_dsl {
         // coordinator holds the real minted epoch, so absent-vs-minted is a
         // permanent mismatch, not a race.
         transition RegisterSessionResumesStopped {
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {
+                // A resumed session starts a new lifetime: its media-health
+                // reopen is available again.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
                 self.active_runtime_generation = None;
                 self.active_runtime_epoch_id = runtime_epoch_id;
+                // The stopped runtime's holds are preserved (#1500).
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
@@ -10549,16 +10739,29 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the new registration's epoch (clearing it would leave the new tenant
         // epochless and unable to persist compaction).
         transition RegisterSessionNewBindingFromStopped {
-            on input RegisterSession { session_id, runtime_epoch_id }
+            on input RegisterSession { session_id, runtime_epoch_id, initial_run_start_holds }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "new_session_binding" { self.session_id != Some(session_id) }
             guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {
+                // A resumed session starts a new lifetime: its media-health
+                // reopen is available again.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = Some(session_id);
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
                 self.active_runtime_generation = None;
                 self.active_runtime_epoch_id = runtime_epoch_id;
+                self.run_start_holds = EmptySet;
+                if initial_run_start_holds.contains(RunStartHoldReason::MobStop) {
+                    self.run_start_holds.insert(RunStartHoldReason::MobStop);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
+                    self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
                 self.current_session_llm_identity = None;
@@ -11057,6 +11260,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11104,6 +11309,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -11208,6 +11419,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11255,6 +11468,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -11357,6 +11576,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11404,6 +11625,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.input_live_boundary_join_run = EmptyMap;
                 self.input_live_boundary_join_phase = EmptyMap;
                 self.session_id = None;
@@ -11508,6 +11735,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11555,6 +11784,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -11657,6 +11892,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_session_by_append == EmptyMap
                 && self.live_delegation_active_worker_count_by_channel == EmptyMap
                 && self.live_execution_fence_by_channel == EmptyMap
+                && self.live_media_health_requested_output_by_channel == EmptyMap
+                && self.live_media_health_judged_channels == EmptySet
                 && self.live_execution_generation_by_channel == EmptyMap
                 && self.live_execution_runtime_id_by_channel == EmptyMap
                 && self.live_experimental_execution_channels == EmptySet
@@ -11704,6 +11941,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value")))
             }
             update {
+                // Media health is per session lifetime: a re-registered or
+                // resumed session starts with its reopen and no verdicts.
+                self.live_media_health_requested_output_by_channel = EmptyMap;
+                self.live_media_health_judged_channels = EmptySet;
+                self.live_media_fault_reopen_recommended_by_channel = EmptyMap;
+                self.live_media_fault_reopens_by_session = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -14043,6 +14286,55 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_cancel_dispatch_pending = false;
             }
             to Idle
+        }
+
+        // #1500 run-start holds, one per reason: a mob Stop holds with
+        // MobStop until its Resume, and a restored member can wait with
+        // ToolsNotPublished. No run starts while any reason holds. Total over
+        // every phase. A Stopped runtime records the hold, so a resumed
+        // registration keeps it; only a Destroyed runtime ignores it.
+        transition HoldRunStarts {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input HoldRunStarts { reason }
+            update {
+                self.run_start_holds.insert(reason);
+            }
+            to Idle
+            emit RunStartsHeld { current_run: self.current_run_id }
+        }
+        transition HoldRunStartsInert {
+            per_phase [Destroyed]
+            on input HoldRunStarts { reason }
+            update {}
+            to Idle
+            emit RunStartsHeld { current_run: None }
+        }
+        // Releasing the last reason lets runs start again: the shell wakes a
+        // parked runtime loop when input is queued. Releasing one reason while
+        // another still holds changes nothing else. An absent reason is a
+        // no-op release.
+        transition ReleaseRunStartsLast {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ReleaseRunStarts { reason }
+            guard "no_other_reason_holds" { for_all(held in self.run_start_holds, held == reason) }
+            update {
+                self.run_start_holds.remove(reason);
+            }
+            to Idle
+            emit RunStartsReleased {
+                queued: exists(input_id in self.input_phases.keys(),
+                    self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued))
+            }
+        }
+        transition ReleaseRunStartsStillHeld {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ReleaseRunStarts { reason }
+            guard "other_reason_holds" { exists(held in self.run_start_holds, held != reason) }
+            update {
+                self.run_start_holds.remove(reason);
+            }
+            to Idle
+            emit RunStartsReleased { queued: false }
         }
 
         // 12. BoundaryAppliedPublish: Running self-loop (signal)
@@ -19522,6 +19814,82 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_terminality: None
             }
         }
+        // Member-kickoff status notices (`mob.kickoff_*`) are one-way
+        // lifecycle notices the receiving agent sees, not requests: the class
+        // is actionable (routed to runtime admission like an actionable
+        // request, in the same phases) but emits no request id, so no inbound
+        // peer request lifecycle opens and no reply is owed (#1608).
+        transition ClassifyExternalEnvelopeLifecycleKickoffAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_kickoff" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && (lifecycle_kind == PeerIngressLifecycleClass::KickoffPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarting
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarted
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCallbackPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffFailed
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCancelled)
+            }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
+            update {}
+            to Attached
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleKickoff,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: Some(lifecycle_kind),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        // Member-kickoff status notices (`mob.kickoff_*`) are one-way
+        // lifecycle notices the receiving agent sees, not requests: the class
+        // is actionable (routed to runtime admission like an actionable
+        // request, in the same phases) but emits no request id, so no inbound
+        // peer request lifecycle opens and no reply is owed (#1608).
+        transition ClassifyExternalEnvelopeLifecycleKickoffRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_kickoff" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && (lifecycle_kind == PeerIngressLifecycleClass::KickoffPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarting
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffStarted
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCallbackPending
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffFailed
+                    || lifecycle_kind == PeerIngressLifecycleClass::KickoffCancelled)
+            }
+            guard "lifecycle_peer_subject_present" {
+                lifecycle_peer_param.is_some() && lifecycle_peer_param.get("value") != ""
+            }
+            update {}
+            to Running
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleKickoff,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: Some(lifecycle_kind),
+                lifecycle_peer: Some(lifecycle_peer_param.get("value")),
+                request_id: None,
+                response_terminality: None
+            }
+        }
         transition ClassifyExternalEnvelopeResponseAcceptedAttached {
             on signal ClassifyExternalEnvelope {
                 item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
@@ -19825,6 +20193,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id == None
                 || self.runtime_completion_result_resolved == true
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19846,6 +20215,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id != None
                 && self.runtime_completion_result_resolved == false
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19857,6 +20227,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit SubmitRunPrimitive
         }
+        // #1500: while run starts are held this input establishes no run.
+        transition PrepareHeldIdle {
+            on input Prepare { session_id, run_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Idle
+            emit RunStartHeld
+        }
         transition PrepareAttached {
             on input Prepare { session_id, run_id }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -19865,6 +20244,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id == None
                 || self.runtime_completion_result_resolved == true
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19886,6 +20266,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id != None
                 && self.runtime_completion_result_resolved == false
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19897,6 +20278,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit SubmitRunPrimitive
         }
+        // #1500: while run starts are held this input establishes no run.
+        transition PrepareHeldAttached {
+            on input Prepare { session_id, run_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Attached
+            emit RunStartHeld
+        }
 
         // 29. DrainQueuedRun: Retired→Running (signal)
         transition DrainQueuedRunRetired {
@@ -19906,6 +20296,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id == None
                 || self.runtime_completion_result_resolved == true
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19926,6 +20317,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_run_id != None
                 && self.runtime_completion_result_resolved == false
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19936,6 +20328,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit SubmitRunPrimitive
+        }
+        // #1500: while run starts are held this input establishes no run.
+        transition DrainQueuedRunHeldRetired {
+            on signal DrainQueuedRun { run_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Retired
+            emit RunStartHeld
         }
 
         // 30. Turn execution absorption
@@ -19954,6 +20355,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (admitted_content_shape == ContentShape::Conversation
                     || admitted_content_shape == ContentShape::Empty)
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -19988,6 +20390,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
+        }
+        // #1500: while run starts are held this input establishes no run.
+        transition StartConversationRunHeldIdle {
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Idle
+            emit RunStartHeld
         }
         transition StartConversationRunInitializing {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
@@ -20003,6 +20414,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (admitted_content_shape == ContentShape::Conversation
                     || admitted_content_shape == ContentShape::Empty)
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -20038,6 +20450,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnRunStarted { run_id: run_id }
         }
+        // #1500: while run starts are held this input establishes no run.
+        transition StartConversationRunHeldInitializing {
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Initializing
+            emit RunStartHeld
+        }
         transition StartConversationRunAttached {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -20052,6 +20473,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (admitted_content_shape == ContentShape::Conversation
                     || admitted_content_shape == ContentShape::Empty)
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -20086,6 +20508,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
+        }
+        // #1500: while run starts are held this input establishes no run.
+        transition StartConversationRunHeldAttached {
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Attached
+            emit RunStartHeld
         }
         transition StartConversationRunRunning {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
@@ -20149,6 +20580,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -20184,6 +20616,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnRunStarted { run_id: run_id }
         }
+        // #1500: while run starts are held this input establishes no run.
+        transition StartImmediateAppendHeldInitializing {
+            on input StartImmediateAppend { run_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Initializing
+            emit RunStartHeld
+        }
         transition StartImmediateAppendAttached {
             on input StartImmediateAppend { run_id }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -20193,6 +20634,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
             }
+            guard "run_starts_not_held" { self.run_start_holds == EmptySet }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -20227,6 +20669,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit TurnRunStarted { run_id: run_id }
+        }
+        // #1500: while run starts are held this input establishes no run.
+        transition StartImmediateAppendHeldAttached {
+            on input StartImmediateAppend { run_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "run_starts_held" { self.run_start_holds != EmptySet }
+            update {}
+            to Attached
+            emit RunStartHeld
         }
         transition StartImmediateAppendRunning {
             on input StartImmediateAppend { run_id }
@@ -25759,6 +26210,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_open_admission_sequence += 1;
                 self.live_active_channel_by_session.remove(session_id);
                 self.live_channel_session_by_channel.remove(channel_id);
+                // A closed channel takes no media-health request or report;
+                // its verdict stays as the close tombstone (status reads it).
+                self.live_media_health_requested_output_by_channel.remove(channel_id);
+                self.live_media_health_judged_channels.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);
                 self.live_execution_runtime_id_by_channel.remove(channel_id);
                 self.live_execution_fence_by_channel.remove(channel_id);
@@ -26840,6 +27295,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A worker start authorized under the channel's exact binding may
+        // resolve after that channel closed (Turbo S S104 R7: a durable
+        // worker accepted its turn 86 ms after the close). Close unbinds the
+        // channel, so the start resolves either under the current exact
+        // binding or, once the operation's own channel carries no runtime,
+        // fence, or generation binding at all (as the revoked-worker
+        // reconciliation requires), on the exact worker authority alone. No aliasing:
+        // every open mints a fresh channel id, so a later incarnation never
+        // reuses a retired channel's id, and a still-bound channel with a
+        // different fence or generation is refused as before.
         transition ResolveLiveDelegationWorkerStart {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveDelegationWorkerStart {
@@ -26848,12 +27313,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_worker_start_authority" {
                 self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
@@ -28369,11 +28846,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 disposition
             }
             guard "result_digest_present" { result_digest != "" }
-            guard "bootstrap_and_causal_tail_are_delivered" {
+            // Results follow the bootstrap summary only; queued context rows
+            // do not hold them (the ObserveLiveContextDeliveryReadiness rule).
+            guard "bootstrap_summary_is_acknowledged" {
                 !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
-                || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
-                    && self.live_context_queued_append_by_cursor.len() == 0
-                    && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
@@ -29620,11 +30097,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id, provider_call_ref, output_kind, output_digest
             }
             guard "output_digest_present" { output_digest != "" }
-            guard "bootstrap_and_causal_tail_are_delivered" {
+            // Results follow the bootstrap summary only; queued context rows
+            // do not hold them (the ObserveLiveContextDeliveryReadiness rule).
+            guard "bootstrap_summary_is_acknowledged" {
                 !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
-                || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
-                    && self.live_context_queued_append_by_cursor.len() == 0
-                    && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
             }
             guard "active_binding_matches" {
                 self.live_execution_phase_by_channel.get_copied(channel_id)
@@ -29899,6 +30376,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         // provider-side send is attempted. The sealed runtime bridge accepts
         // only SessionDocument/store commit authority, so surfaces cannot
         // manufacture an append obligation or infer provenance from content.
+        // Delegation results wait only for the bootstrap summary's provider
+        // acknowledgement: the summary is the history a newer result must
+        // follow. Queued context rows do not hold results. They are the
+        // user's own speech the provider already heard, replayed quietly
+        // after the summary with explicit earlier-speech framing, plus typed
+        // and runtime-work rows that ride their own generated edges. Those
+        // replays wait for a provider turn boundary, so holding results behind
+        // them would block results for as long as the user keeps speaking.
+        // AuthorizeLiveDelegationResultDelivery and
+        // AuthorizeLiveBridgeSubmission guard on the same rule
+        // ("bootstrap_summary_is_acknowledged"); readiness and authorization
+        // must never disagree.
         transition ObserveLiveContextDeliveryReadiness {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ObserveLiveContextDeliveryReadiness { session_id, channel_id }
@@ -29912,9 +30401,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if self.live_revoked_execution_channels.contains(channel_id) { LiveContextDeliveryReadiness::Revoked }
                     else { if self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Failed) { LiveContextDeliveryReadiness::Failed }
                     else { if !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
-                        || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
-                            && self.live_context_queued_append_by_cursor.len() == 0
-                            && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+                        || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
                     { LiveContextDeliveryReadiness::Ready }
                     else { LiveContextDeliveryReadiness::Pending } } }
             }
@@ -30256,6 +30743,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 disposition != LiveContextRowDisposition::ReassertCausalTail
                 && disposition != LiveContextRowDisposition::ReplayRuntimeWork
                 && disposition != LiveContextRowDisposition::ReassertAssistantOutput
+                && disposition != LiveContextRowDisposition::ReplayTextChat
             }
             guard "ordinary_mirror_has_materializable_payload" {
                 disposition != LiveContextRowDisposition::MirrorParentText
@@ -30281,6 +30769,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.live_cancelled_recovery_channels.contains(
                         self.live_result_recovery_replacement_by_channel.get_cloned(source).get("value"))
                     || canonical_cursor > self.live_result_recovery_seed_cursor_by_channel.get_copied(source).get("value"))
+            }
+            // A row is never queued inside an append still in flight: a
+            // causal-tail batch covers its whole run under the head append id
+            // alone, so without this a row of an in-flight batch could be
+            // queued again and delivered twice.
+            guard "canonical_cursor_is_above_the_pending_append" {
+                !self.live_context_pending_append_by_channel.contains_key(channel_id)
+                || self.live_context_pending_next_cursor_by_append.get_copied(
+                        self.live_context_pending_append_by_channel.get_cloned(channel_id).get("value"))
+                    .get("value") < canonical_cursor
             }
             guard "canonical_cursor_is_unique" {
                 !self.live_context_queued_append_by_cursor.contains_key(canonical_cursor)
@@ -30324,7 +30822,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                     // is read aloud unprompted; it is replayed on the quiet
                     // lane instead, once the conversation has started.
                     { LiveContextRowDisposition::ReplayRuntimeWork }
-                    else { disposition } } });
+                    else { if disposition == LiveContextRowDisposition::MirrorParentText
+                        && payload_availability == LiveContextPayloadAvailability::Materializable
+                        && row_source == LiveContextRowSource::TextChat
+                    // A text-chat row (a host-typed turn's input or reply) was
+                    // typed and read in the chat. Voiced, it is read aloud and
+                    // stale results are replayed with it (#1614); it rides the
+                    // quiet lane instead, still supersedable as a typed row.
+                    { LiveContextRowDisposition::ReplayTextChat }
+                    else { disposition } } } });
                 self.live_context_queued_append_by_cursor.insert(canonical_cursor, append_id);
                 // A row this channel will voice (the Ordinary append of a
                 // materializable parent text row of a conversational turn)
@@ -30449,13 +30955,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
             }
             // A voiced row that the channel's later live speech already
             // superseded is authorized by AuthorizeLiveContextAppendSuperseded.
             guard "not_superseded_by_heard_speech" {
-                !(self.live_context_queued_disposition_by_append.get_copied(append_id)
+                !((self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && exists(later in self.live_context_queued_cursor_by_append.keys(),
                     self.live_context_queued_session_by_append.get_cloned(later)
                         == self.live_channel_session_by_channel.get_cloned(channel_id)
@@ -30501,8 +31011,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // aloud over the user's first question 4/5), so replayed runtime
             // work output waits for the conversation to start.
             guard "quiet_history_waits_for_the_conversation" {
-                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     != Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    != Some(LiveContextRowDisposition::ReplayTextChat))
                 || self.live_conversation_started_channels.contains_key(channel_id)
             }
             guard "channel_has_no_recovery_obligation" {
@@ -30521,6 +31033,118 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_context_queued_commit_token_by_append.remove(append_id);
                 self.live_context_queued_disposition_by_append.remove(append_id);
                 self.live_context_queued_append_by_cursor.remove(next_cursor);
+                self.live_context_pending_append_by_channel.insert(channel_id, append_id);
+                self.live_context_pending_channel_by_append.insert(append_id, channel_id);
+                self.live_context_pending_previous_cursor_by_append.insert(append_id, previous_cursor);
+                self.live_context_pending_next_cursor_by_append.insert(append_id, next_cursor);
+            }
+            to Idle
+            emit LiveContextAppendAuthorized {
+                channel_id: channel_id,
+                append_id: append_id,
+                previous_cursor: previous_cursor,
+                next_cursor: next_cursor,
+                superseded_by_heard_speech: false
+            }
+        }
+
+        // The causal tail (replays of speech the provider already heard,
+        // held behind a late summary) goes out as ONE quiet append instead of
+        // one per row. Each replayed row was a separate thinking append, and
+        // gpt-live-1 answered them one by one ("level nine", "I don't know
+        // yet", "Cobalt"), which pushed a delegation result's readout into
+        // the user's next question (Turbo S S99 on 7f770753 R3). The batch
+        // covers exactly the contiguous run (previous, next] of queued
+        // ReassertCausalTail/ReassertAssistantOutput rows at the outbox head,
+        // under the same binding, bootstrap, recovery and safe-boundary
+        // guards as one row; its single pending append is acknowledged,
+        // rejected or recovered by the ordinary resolve edges, which pin the
+        // exact range by the pending append. Every other row keeps one-row
+        // appends (cursor_edge_is_next).
+        transition AuthorizeLiveContextCausalTailBatch {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextCausalTailBatch {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor, tail_cursors
+            }
+            guard "append_present" { append_id != "" }
+            guard "bootstrap_is_acknowledged" {
+                !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            // At least two rows (one row takes the ordinary edge), and the
+            // cursor set is exactly (previous, next]: as many cursors as the
+            // range is wide, every one inside it.
+            guard "tail_run_is_the_exact_cursor_range" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor > previous_cursor + 1
+                && tail_cursors.len() == next_cursor - previous_cursor
+                && for_all(tail_cursor in tail_cursors,
+                    tail_cursor > previous_cursor && tail_cursor <= next_cursor)
+            }
+            guard "head_row_is_the_batch_append" {
+                self.live_context_queued_append_by_cursor.get_cloned(previous_cursor + 1) == Some(append_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(previous_cursor + 1)
+            }
+            guard "every_tail_row_is_a_queued_heard_speech_replay" {
+                for_all(tail_cursor in tail_cursors,
+                    self.live_context_queued_append_by_cursor.contains_key(tail_cursor)
+                    && self.live_context_queued_session_by_append.get_cloned(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                        == self.live_channel_session_by_channel.get_cloned(channel_id)
+                    && self.live_context_queued_digest_by_append.contains_key(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                    && self.live_context_queued_commit_token_by_append.contains_key(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                    && (self.live_context_queued_disposition_by_append.get_copied(
+                            self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                            == Some(LiveContextRowDisposition::ReassertCausalTail)
+                        || self.live_context_queued_disposition_by_append.get_copied(
+                            self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                            == Some(LiveContextRowDisposition::ReassertAssistantOutput)))
+            }
+            guard "channel_has_no_pending_append" {
+                !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "channel_accepts_context_delivery" {
+                !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            // Replays of heard speech wait for the turn boundary, as one row does.
+            guard "safe_provider_turn_boundary" {
+                !self.live_provider_turn_by_channel.contains_key(channel_id)
+            }
+            guard "channel_has_no_recovery_obligation" {
+                !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
+            }
+            guard "append_identity_is_fresh" {
+                !self.live_context_pending_channel_by_append.contains_key(append_id)
+                && !self.live_context_delivered_append_ids.contains(append_id)
+                && !self.live_context_ambiguous_no_retry.contains(append_id)
+            }
+            update {
+                for tail_cursor in tail_cursors {
+                    self.live_context_queued_session_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_cursor_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_digest_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_commit_token_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_disposition_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_append_by_cursor.remove(tail_cursor);
+                }
                 self.live_context_pending_append_by_channel.insert(channel_id, append_id);
                 self.live_context_pending_channel_by_append.insert(append_id, channel_id);
                 self.live_context_pending_previous_cursor_by_append.insert(append_id, previous_cursor);
@@ -30572,7 +31196,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
             }
             // A typed row held behind the late summary acknowledgement while
             // the user said something newer aloud (a later queued
@@ -30590,9 +31216,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Causal-tail rows only ever enter above the channel's seed or
             // context cursor (guard canonical_cursor_is_future), so a retired
             // incarnation's rows at or below it cannot count as later.
+            // A text-chat row (ReplayTextChat) is such a typed row too: its
+            // quiet text-chat framing would otherwise present the stale typed
+            // value as current over the newer speech (S99, #1623: 3/10).
             guard "superseded_by_heard_speech" {
-                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && exists(later in self.live_context_queued_cursor_by_append.keys(),
                     self.live_context_queued_session_by_append.get_cloned(later)
                         == self.live_channel_session_by_channel.get_cloned(channel_id)
@@ -30608,6 +31239,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "safe_provider_turn_boundary" {
                 !self.live_provider_turn_by_channel.contains_key(channel_id)
+            }
+            // A text-chat row is quiet history and waits for the conversation
+            // (AuthorizeLiveContextAppendDeferredByConversation).
+            guard "quiet_history_waits_for_the_conversation" {
+                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    != Some(LiveContextRowDisposition::ReplayTextChat)
+                || self.live_conversation_started_channels.contains_key(channel_id)
             }
             guard "channel_has_no_recovery_obligation" {
                 !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
@@ -30692,6 +31330,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat)
                     // Complement of the runtime-work exemption in guard
                     // `safe_provider_turn_boundary`: on a channel seeded at
                     // open (no context preparation) it waits for the user's
@@ -30718,8 +31358,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // Replayed runtime work output queued before the conversation
-        // started waits for it (guard `quiet_history_waits_for_the_conversation`);
+        // Replayed runtime work output and text-chat rows queued before the
+        // conversation started wait for it (guard `quiet_history_waits_for_the_conversation`);
         // the conversation start requests a drain.
         transition AuthorizeLiveContextAppendDeferredByConversation {
             per_phase [Idle, Attached, Running]
@@ -30741,8 +31381,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
                 && self.live_context_queued_digest_by_append.contains_key(append_id)
                 && self.live_context_queued_commit_token_by_append.contains_key(append_id)
-                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "conversation_not_started" {
@@ -30785,7 +31427,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "close_revoked_delivery" { self.live_revoked_execution_channels.contains(channel_id) }
@@ -30823,7 +31467,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayTextChat))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "recovery_owns_replacement" {
@@ -30894,7 +31540,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "cursor_matches" {
                 self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
             }
             guard "not_ambiguously_sent" { !self.live_context_ambiguous_no_retry.contains(append_id) }
             guard "append_not_already_delivered" { !self.live_context_delivered_append_ids.contains(append_id) }
@@ -30950,7 +31596,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "cursor_matches_without_advance" {
                 self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
             }
             guard "ambiguity_not_recorded" { !self.live_context_ambiguous_no_retry.contains(append_id) }
             guard "append_not_already_delivered" { !self.live_context_delivered_append_ids.contains(append_id) }
@@ -31322,7 +31968,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_pending_previous_cursor_by_append.get_copied(append_id) == Some(previous_cursor)
                 && self.live_context_pending_next_cursor_by_append.get_copied(append_id) == Some(next_cursor)
                 && self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
                 && !self.live_context_ambiguous_no_retry.contains(append_id)
                 && !self.live_context_delivered_append_ids.contains(append_id)
             }
@@ -31368,7 +32014,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "cursor_has_not_advanced" {
                 self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
             }
             update {
                 self.live_context_pending_append_by_channel.remove(channel_id);
@@ -31497,6 +32143,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 self.live_active_channel_by_session.remove(session_id);
                 self.live_channel_session_by_channel.remove(channel_id);
+                // A closed channel takes no media-health request or report;
+                // its verdict stays as the close tombstone (status reads it).
+                self.live_media_health_requested_output_by_channel.remove(channel_id);
+                self.live_media_health_judged_channels.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);
                 self.live_execution_runtime_id_by_channel.remove(channel_id);
                 self.live_execution_fence_by_channel.remove(channel_id);
@@ -32630,7 +33280,165 @@ macro_rules! meerkat_catalog_machine_dsl {
                 sequence: self.live_channel_status_result_sequence,
                 status_observation_sequence: status_observation_sequence,
                 degradation_reason: degradation_reason,
-                degradation_detail: degradation_detail
+                degradation_detail: degradation_detail,
+                media_fault_reopen_recommended: self.live_media_fault_reopen_recommended_by_channel.get_copied(channel_id)
+            }
+        }
+
+        // RequestLiveMediaHealth: the typed end of a channel's first assistant
+        // output with a non-empty transcript. The runtime asks the client for
+        // its raw decoded-audio counters for exactly that output; the request
+        // is made once per channel, only while the channel's execution
+        // binding is the exact active one. A live channel serves only an
+        // attached runtime (idle, the session has no attached runtime to bind
+        // a channel to), so these edges exist in Attached and Running only.
+        transition RequestLiveMediaHealth {
+            per_phase [Attached, Running]
+            on input RequestLiveMediaHealth {
+                session_id, channel_id, runtime_id, fence_token, generation,
+                output_id, assistant_transcript_nonempty
+            }
+            guard "output_present" { output_id != "" }
+            guard "assistant_transcript_nonempty" { assistant_transcript_nonempty == true }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "first_output_only" {
+                !self.live_media_health_requested_output_by_channel.contains_key(channel_id)
+            }
+            update {
+                self.live_media_health_requested_output_by_channel.insert(channel_id, output_id);
+            }
+            to Idle
+            emit LiveMediaHealthRequested {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id
+            }
+        }
+
+        // ObserveLiveChannelMediaHealth: the client's raw counters for the
+        // requested output. The exact requested output on the session's
+        // active channel is the report's authority (the client holds no
+        // runtime binding). Audible when any decoded frame reached the
+        // audible floor (2000 micro-RMS, the peer's non-silent floor).
+        transition ObserveLiveChannelMediaHealthAudible {
+            per_phase [Attached, Running]
+            on input ObserveLiveChannelMediaHealth {
+                session_id, channel_id, output_id, decoded_frames, audible_frames,
+                max_rms_micros
+            }
+            guard "audible" { audible_frames > 0 || max_rms_micros >= 2000 }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "exact_requested_output" {
+                self.live_media_health_requested_output_by_channel.get_cloned(channel_id) == Some(output_id)
+                && !self.live_media_health_judged_channels.contains(channel_id)
+            }
+            update {
+                self.live_media_health_judged_channels.insert(channel_id);
+            }
+            to Idle
+            emit LiveChannelMediaHealthJudged {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id,
+                media_faulted: false,
+                reopen_recommended: false
+            }
+        }
+
+        // A requested output whose transcript is non-empty decoded no audible
+        // frame: a media fault. The session's first media fault recommends a
+        // reopen.
+        transition ObserveLiveChannelMediaHealthSilentReopen {
+            per_phase [Attached, Running]
+            on input ObserveLiveChannelMediaHealth {
+                session_id, channel_id, output_id, decoded_frames, audible_frames,
+                max_rms_micros
+            }
+            guard "silent" { audible_frames == 0 && max_rms_micros < 2000 }
+            guard "reopen_budget_remains" {
+                !self.live_media_fault_reopens_by_session.contains_key(session_id)
+            }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "exact_requested_output" {
+                self.live_media_health_requested_output_by_channel.get_cloned(channel_id) == Some(output_id)
+                && !self.live_media_health_judged_channels.contains(channel_id)
+            }
+            update {
+                self.live_media_health_judged_channels.insert(channel_id);
+                self.live_media_fault_reopen_recommended_by_channel.insert(channel_id, true);
+                self.live_media_fault_reopens_by_session.insert(session_id, 1);
+            }
+            to Idle
+            emit LiveChannelMediaHealthJudged {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id,
+                media_faulted: true,
+                reopen_recommended: true
+            }
+        }
+
+        // A media fault after the session already spent its reopen: the
+        // channel closes with the fault and no reopen recommendation.
+        transition ObserveLiveChannelMediaHealthSilentExhausted {
+            per_phase [Attached, Running]
+            on input ObserveLiveChannelMediaHealth {
+                session_id, channel_id, output_id, decoded_frames, audible_frames,
+                max_rms_micros
+            }
+            guard "silent" { audible_frames == 0 && max_rms_micros < 2000 }
+            guard "reopen_budget_spent" {
+                self.live_media_fault_reopens_by_session.contains_key(session_id)
+            }
+            guard "channel_belongs_to_session" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "channel_execution_active" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+            }
+            guard "exact_requested_output" {
+                self.live_media_health_requested_output_by_channel.get_cloned(channel_id) == Some(output_id)
+                && !self.live_media_health_judged_channels.contains(channel_id)
+            }
+            update {
+                self.live_media_health_judged_channels.insert(channel_id);
+                self.live_media_fault_reopen_recommended_by_channel.insert(channel_id, false);
+            }
+            to Idle
+            emit LiveChannelMediaHealthJudged {
+                session_id: session_id,
+                channel_id: channel_id,
+                output_id: output_id,
+                media_faulted: true,
+                reopen_recommended: false
             }
         }
 
@@ -37018,6 +37826,8 @@ mod live_close_classification_tests {
         "live_result_delivery_channel_by_operation",
         "live_result_delivery_digest_by_operation",
         "live_result_delivery_operation_by_channel",
+        "live_media_health_judged_channels",
+        "live_media_health_requested_output_by_channel",
     ];
 
     const RESIDUE: &[&str] = &[

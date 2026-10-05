@@ -116,6 +116,9 @@ class _StdoutDispatcher:
         self._task: asyncio.Task[None] | None = None
         self._closed = False
         self._tool_handler: Any = None  # ToolRegistry, set lazily
+        # Channel-scoped ``live/*`` notifications (no session_id) go here,
+        # never into a session event queue.
+        self._live_notification_sink: Callable[[str, Any], None] | None = None
         self._stdin_writer: asyncio.StreamWriter | None = None  # set on connect
         # Permanent transport-failed state: once the read loop classifies the
         # stream as untrustworthy (corrupted frame) or closed, later requests
@@ -176,6 +179,10 @@ class _StdoutDispatcher:
 
     def unsubscribe_pending_stream(self, request_id: int) -> None:
         self._pending_stream_queues.pop(request_id, None)
+
+    def set_live_notification_sink(self, sink: Callable[[str, Any], None]) -> None:
+        """Route ``live/*`` notifications to ``sink(method, params)``."""
+        self._live_notification_sink = sink
 
     def set_tool_handler(self, handler: Any) -> None:
         """Set the tool registry for handling callback tool requests."""
@@ -293,6 +300,10 @@ class _StdoutDispatcher:
             elif "method" in data:
                 method = str(data.get("method", ""))
                 params = data.get("params", {})
+                if method.startswith("live/"):
+                    if self._live_notification_sink is not None:
+                        self._live_notification_sink(method, params)
+                    continue
                 if method in {"session/stream_event", "mob/stream_event"}:
                     stream_id = str(params.get("stream_id", ""))
                     raw_event = params.get("event") or params

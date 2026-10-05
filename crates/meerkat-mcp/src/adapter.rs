@@ -575,6 +575,19 @@ impl McpRouterAdapter {
         }
     }
 
+    /// Host-channel status: MCP targets waiting for human OAuth authorization
+    /// through the host. See [`McpRouter::servers_awaiting_authorization`].
+    /// Not an agent event; it carries no authorize URL, state or code.
+    pub async fn servers_awaiting_authorization(
+        &self,
+    ) -> Vec<meerkat_auth_core::McpServerIdentity> {
+        let router = self.router.read().await;
+        match router.as_ref() {
+            Some(r) => r.servers_awaiting_authorization(),
+            None => Vec::new(),
+        }
+    }
+
     /// Stage an MCP server reload operation.
     pub async fn stage_reload<T: Into<McpReloadTarget>>(&self, target: T) -> Result<(), String> {
         let mut router = self.router.write().await;
@@ -615,6 +628,129 @@ impl McpRouterAdapter {
         }
         self.sync_router_projection(router);
         Ok(actions)
+    }
+
+    /// Drive draining (Removing) servers to finalization in a background
+    /// task, forwarding their lifecycle actions to `lifecycle_tx`.
+    ///
+    /// `running` guards one drain per adapter: a call while a drain runs is a
+    /// no-op. The drain is woken by typed progress, never a timer poll: a
+    /// finished tool call (a draining server's in-flight count drops) or the
+    /// earliest removal timeout of a draining server. It ends when no server
+    /// is draining, and reclaims the drain for a removal staged between that
+    /// check and releasing `running`.
+    pub fn spawn_removal_drain(
+        self: &Arc<Self>,
+        running: Arc<AtomicBool>,
+        lifecycle_tx: tokio::sync::mpsc::UnboundedSender<crate::McpLifecycleAction>,
+    ) {
+        if running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let adapter = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let next = match adapter.progress_removals_and_next_wait(&lifecycle_tx).await {
+                    Ok(next) => next,
+                    Err(error) => {
+                        tracing::warn!("background MCP drain apply failed: {error}");
+                        running.store(false, Ordering::Release);
+                        return;
+                    }
+                };
+                if let Some(wait) = next {
+                    wait.wait(None).await;
+                    continue;
+                }
+                running.store(false, Ordering::Release);
+                // A removal staged after the check above saw `running` set and
+                // spawned no drain of its own.
+                match adapter.has_removing_servers().await {
+                    Ok(true)
+                        if running
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok() => {}
+                    _ => return,
+                }
+            }
+        });
+    }
+
+    /// [`Self::progress_removals`], forwarding its lifecycle actions, plus
+    /// what the drain waits on next. All under one router lock: whoever then
+    /// observes a removal finalized also finds its action queued, and no
+    /// progress between the pass and the wait is missed.
+    async fn progress_removals_and_next_wait(
+        &self,
+        lifecycle_tx: &tokio::sync::mpsc::UnboundedSender<crate::McpLifecycleAction>,
+    ) -> Result<Option<crate::router::McpProgressWait>, String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        let delta = router
+            .progress_removals()
+            .await
+            .map_err(|e| e.to_string())?;
+        self.sync_router_projection(router);
+        for action in delta.lifecycle_actions {
+            let _ = lifecycle_tx.send(action);
+        }
+        Ok(router.removal_progress_wait())
+    }
+
+    /// Wait until every spawned connect attempt has delivered its result to
+    /// the router, without consuming the results: the next boundary still
+    /// processes them and emits their lifecycle actions. Returns `false` if
+    /// `limit` elapses first (a hang guard for tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_connect_results_delivered(&self, limit: Duration) -> bool {
+        let limit = tokio::time::Instant::now() + limit;
+        loop {
+            let wait = {
+                let router = self.router.read().await;
+                let Some(router) = router.as_ref() else {
+                    return true;
+                };
+                let wait = router.progress_wait();
+                if !router.connect_results_outstanding() {
+                    return true;
+                }
+                wait
+            };
+            if tokio::time::Instant::now() >= limit {
+                return false;
+            }
+            wait.wait(Some(limit)).await;
+        }
+    }
+
+    /// Wait until no server is draining (every removal finalized by the
+    /// drain). Returns `false` if `limit` elapses first (a hang guard for
+    /// tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_removals_finalized(&self, limit: Duration) -> bool {
+        let limit = tokio::time::Instant::now() + limit;
+        loop {
+            let wait = {
+                let router = self.router.read().await;
+                let Some(router) = router.as_ref() else {
+                    return true;
+                };
+                let wait = router.progress_wait();
+                if !router.has_removing_servers() {
+                    return true;
+                }
+                wait
+            };
+            if tokio::time::Instant::now() >= limit {
+                return false;
+            }
+            wait.wait(Some(limit)).await;
+        }
     }
 
     /// Progress only Removing server finalization (drain/timeout) without applying staged ops.
@@ -661,6 +797,14 @@ impl McpRouterAdapter {
         let started = tokio::time::Instant::now();
         let deadline = started + timeout;
         loop {
+            // Taken before the poll: a connect result delivered after the
+            // poll read the pending set wakes the wait.
+            let next = self
+                .router
+                .read()
+                .await
+                .as_ref()
+                .map(McpRouter::progress_wait);
             let update = self.poll_external_updates().await;
             all_notices.extend(update.notices);
             if update.pending.is_empty() {
@@ -673,7 +817,10 @@ impl McpRouterAdapter {
                     waited: started.elapsed(),
                 });
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            match next {
+                Some(wait) => wait.wait(Some(deadline)).await,
+                None => tokio::time::sleep_until(deadline).await,
+            }
         }
     }
 
@@ -712,7 +859,9 @@ impl McpRouterAdapter {
         let router = router
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
-        router.set_inflight_calls_for_testing(server_name, count);
+        router
+            .set_inflight_calls_for_testing(server_name, count)
+            .map_err(|error| error.to_string())?;
         self.sync_router_projection(router);
         Ok(())
     }

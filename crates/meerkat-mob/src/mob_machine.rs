@@ -170,7 +170,10 @@ pub(crate) enum MobMachineCommand {
     SetSpawnPolicy {
         policy: Option<Arc<dyn crate::runtime::SpawnPolicy>>,
     },
-    Shutdown,
+    Shutdown {
+        /// Caller-owned bound for the Shutdown's waits (`ShutdownOptions`).
+        deadline: Option<meerkat_core::time_compat::Instant>,
+    },
     ForceCancel {
         agent_identity: AgentIdentity,
     },
@@ -237,6 +240,8 @@ pub(crate) struct SubmitWorkCommand {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum MobMachineCommandResult {
     Unit,
+    /// Result for `Stop` (#1500): what the stop did to each member.
+    Stopped(crate::runtime::stop_report::MobStopReport),
     WireMembersBatchReport(crate::runtime::MobWireMembersBatchReport),
     RunId(RunId),
     WorkReceipt {

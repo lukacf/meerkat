@@ -169,6 +169,56 @@ fn controller_feedback_params(
     Some(params)
 }
 
+/// Which failure the retry loop is recovering from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LlmFailureOrigin {
+    /// The call succeeded with no visible or actionable output.
+    EmptyOutput,
+    /// The call returned an error, timed out, or stalled.
+    CallFailed,
+}
+
+/// What the retry loop does after a failure's machine verdict.
+enum LlmFailureStep {
+    /// The machine accepted recovery: the retry was scheduled, waited out and
+    /// requested, so the loop issues the next attempt.
+    Retry,
+    /// Exhausted or fatal: the loop surfaces this error.
+    Fail(AgentError),
+}
+
+/// The per-call inputs of the retry loop that the failure-recovery step
+/// reads.
+#[derive(Clone, Copy)]
+struct LlmRecoveryContext<'a> {
+    run_id: &'a RunId,
+    turn_count: u32,
+    assistant_message_id: crate::types::AssistantMessageId,
+    event_tx: &'a Option<mpsc::Sender<AgentEvent>>,
+    temperature: Option<f32>,
+    extraction_output_schema: Option<&'a crate::types::OutputSchema>,
+}
+
+/// The retry loop's mutable request state, which a machine-accepted model
+/// fallback rewrites for the next attempt.
+struct LlmRetryLoopState<'a> {
+    controller_feedback: bool,
+    messages: &'a mut Arc<Vec<Message>>,
+    tools: &'a mut Arc<[Arc<ToolDef>]>,
+    max_tokens: &'a mut u32,
+    provider_params: &'a mut Option<ProviderParamsOverride>,
+    attempt: &'a mut u32,
+    durable_visibility_parent: &'a mut Option<crate::SessionToolVisibilityState>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type LlmFailureStepFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<LlmFailureStep, AgentError>> + Send + 'a>,
+>;
+#[cfg(target_arch = "wasm32")]
+type LlmFailureStepFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmFailureStep, AgentError>> + 'a>>;
+
 /// Promote this turn's provider claims into authored evidence, discarding any
 /// claim whose reported identity does not match the active lowering.
 ///
@@ -2071,21 +2121,18 @@ where
         let mut next_request_attempt = Some(prepared_attempt);
         let mut authorization_reprepared = false;
 
+        let recovery_context = LlmRecoveryContext {
+            run_id,
+            turn_count,
+            assistant_message_id,
+            event_tx,
+            temperature,
+            extraction_output_schema: extraction_output_schema.as_ref(),
+        };
+
         loop {
-            if !*controller_feedback
-                && let Some(metadata) = self
-                    .session
-                    .try_session_metadata()
-                    .map_err(|error| AgentError::ConfigError(error.to_string()))?
-                && let Some(provenance) = metadata.model_fallback.as_ref()
-                && provenance.target == metadata.llm_identity()
-            {
-                let profile = self.active_model_profile.as_ref().ok_or_else(|| {
-                    AgentError::ConfigError(
-                        "fallback-origin resume lacks an active model profile".into(),
-                    )
-                })?;
-                let request = crate::model_fallback::ModelFallbackRequest {
+            if !*controller_feedback {
+                self.admit_fallback_origin_resume(&crate::model_fallback::ModelFallbackRequest {
                     messages: &current_messages,
                     tools: &current_tools,
                     max_tokens: current_max_tokens,
@@ -2093,42 +2140,7 @@ where
                     provider_params: current_provider_params.as_ref(),
                     output_schema: extraction_output_schema.as_ref(),
                     attempt: attempt + 1,
-                };
-                if !crate::model_fallback::fallback_credential_authorized(
-                    self.auth_lease_handle.as_ref(),
-                    self.auth_credential_identity.as_ref(),
-                )? {
-                    return Err(AgentError::ModelFallbackResumeHeld {
-                        target: Box::new(crate::AgentLlmFallbackSkippedTarget::new(
-                            provenance.target.clone(),
-                            crate::model_fallback::ModelFallbackSkipReason::AuthUnavailable,
-                        )),
-                    });
-                }
-                let pressure = self
-                    .client
-                    .request_pressure(
-                        request.messages,
-                        request.tools,
-                        request.max_tokens,
-                        request.temperature,
-                        request.provider_params,
-                    )?
-                    .ok_or_else(|| AgentError::ModelFallbackResumeHeld {
-                        target: Box::new(crate::AgentLlmFallbackSkippedTarget::new(
-                            provenance.target.clone(),
-                            crate::model_fallback::ModelFallbackSkipReason::AdmissionUnavailable,
-                        )),
-                    })?;
-                crate::model_fallback::admit_model_fallback(
-                    &provenance.previous,
-                    &provenance.target,
-                    profile,
-                    &provenance.policy,
-                    &request,
-                    Some(pressure),
-                )
-                .map_err(|target| AgentError::ModelFallbackResumeHeld { target })?;
+                })?;
             }
             // 1. Budget gate at loop entry
             if let Some(exceeded) = self.budget.observe().exceeded() {
@@ -2323,6 +2335,7 @@ where
             // re-arms the stall window; the hard deadline is fixed at call
             // start. Timers route through the crate tokio alias, so this works
             // identically on wasm32 (tokio_with_wasm) and native.
+            let model_call_started = crate::time_compat::Instant::now();
             let wait_outcome = {
                 let call_fut = request_attempt.stream_response(assistant_message_id);
                 let mut call_fut = std::pin::pin!(call_fut);
@@ -2369,6 +2382,21 @@ where
                     }
                 }
             };
+            // One line per model call, attributable to its session: a slow
+            // delegated turn is otherwise indistinguishable from tool time.
+            tracing::debug!(
+                session_id = %self.session.id(),
+                turn = turn_count,
+                attempt,
+                elapsed_ms = u64::try_from(model_call_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                outcome = match &wait_outcome {
+                    LlmCallWait::Completed(Ok(_)) => "completed",
+                    LlmCallWait::Completed(Err(_)) => "error",
+                    LlmCallWait::HardTimeout { .. } => "hard_timeout",
+                    LlmCallWait::Stalled { .. } => "stalled",
+                },
+                "model call settled"
+            );
             let call_result = match wait_outcome {
                 LlmCallWait::Completed(result) => result,
                 LlmCallWait::HardTimeout { limit, source } => {
@@ -2445,146 +2473,29 @@ where
                                 client.selection().provider()
                             });
                         let error = AgentError::llm_empty_response(provider.as_str());
-                        // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
-                        // owns the recoverable-vs-fatal/exhaustion verdict. Only
-                        // a machine `Recover` verdict drives the retry path;
-                        // `Exhausted`/`Fatal` bubble the error up.
-                        let recovery = self.classify_llm_failure_recovery(
-                            &error,
-                            attempt,
-                            self.retry_policy.max_retries,
-                        )?;
-                        if let LlmFailureRecoveryKind::Recover = recovery {
-                            // P0 Dogma Invariant 1: the MeerkatMachine
-                            // `RecoverableFailure` gate must commit BEFORE the
-                            // fallback target is selected or any durable/client
-                            // mutation happens. Keep this as a boolean
-                            // precondition only; the actual candidate proposal
-                            // is requested after the machine accepts recovery.
-                            let may_activate_fallback = !*controller_feedback
-                                && fallback_activation_is_pre_stream_safe(
-                                    &error,
-                                    self.client.stream_output_observed(),
-                                );
-                            let retry_schedule = self
-                                .retry_policy
-                                .schedule_retry(&error, attempt, self.budget.remaining_duration())
-                                .ok_or_else(|| {
-                                    AgentError::InternalError(
-                                        "MeerkatMachine classified LLM failure as Recover but the \
-                                         retry policy produced no schedule"
-                                            .to_string(),
-                                    )
-                                })?;
-                            tracing::warn!(
-                                "LLM completed without visible/actionable output (attempt {}), retrying in {}ms",
-                                retry_schedule.plan.attempt,
-                                retry_schedule.plan.selected_delay_ms,
-                            );
-                            let recover =
-                                self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
-                                    run_id: run_id.clone(),
-                                    retry: retry_schedule.clone(),
-                                })?;
-                            // Machine accepted the recovery: only now ask the
-                            // client for a fallback proposal, wrap it in the
-                            // machine-accepted activation authority, then
-                            // mutate identity/policy/tool visibility atomically
-                            // for the retry attempt.
-                            let fallback_request = crate::model_fallback::ModelFallbackRequest {
-                                messages: &current_messages,
-                                tools: &current_tools,
-                                max_tokens: current_max_tokens,
-                                temperature,
-                                provider_params: current_provider_params.as_ref(),
-                                output_schema: extraction_output_schema.as_ref(),
-                                attempt: retry_schedule.plan.attempt,
-                            };
-                            if may_activate_fallback
-                                && let Some(switch) = self
-                                    .select_model_fallback(
-                                        &error,
-                                        &fallback_request,
-                                        &retry_schedule,
-                                        event_tx,
-                                    )
-                                    .await
-                            {
-                                let activation = MachineAcceptedModelFallbackActivation::authorize(
-                                    switch,
-                                    &recover,
-                                    &retry_schedule,
-                                    self.effective_model_registry.as_deref(),
-                                )?;
-                                let previous_output_schema_section =
-                                    self.output_schema_request_instructions();
-                                match self
-                                    .apply_model_fallback_switch(
-                                        activation,
-                                        &error,
-                                        current_tools.as_ref(),
-                                        extraction_output_schema.as_ref(),
-                                        durable_visibility_parent.as_ref(),
-                                        &fallback_request,
-                                    )
-                                    .await?
-                                {
-                                    ModelFallbackSwitchOutcome::Applied((
-                                        next_tools,
-                                        next_params,
-                                        next_max_tokens,
-                                        notice,
-                                        next_durable_visibility_parent,
-                                    )) => {
-                                        current_tools = next_tools;
-                                        current_provider_params = next_params;
-                                        current_max_tokens = next_max_tokens;
-                                        let messages = Arc::make_mut(&mut current_messages);
-                                        self.reproject_output_schema_instructions_after_fallback(
-                                            messages,
-                                            previous_output_schema_section.as_deref(),
-                                        );
-                                        messages.push(notice);
-                                        *durable_visibility_parent =
-                                            Some(next_durable_visibility_parent);
-                                    }
-                                    ModelFallbackSwitchOutcome::SkippedNonDurable { reason } => {
-                                        tracing::warn!(
-                                            %reason,
-                                            "sticky model fallback skipped without teardown; \
-                                             continuing the machine-accepted retry on the \
-                                             previous model"
-                                        );
-                                    }
-                                }
-                            }
-                            self.execute_turn_effects(&recover, turn_count, event_tx)
-                                .await?;
-                            let _ = crate::event_tap::tap_emit(
-                                &self.event_tap,
-                                event_tx.as_ref(),
-                                AgentEvent::Retrying {
-                                    retry: retry_schedule.clone(),
-                                    assistant_message_id: Some(assistant_message_id),
+                        match self
+                            .recover_llm_failure_in_own_frame(
+                                error,
+                                LlmFailureOrigin::EmptyOutput,
+                                recovery_context,
+                                LlmRetryLoopState {
+                                    controller_feedback: *controller_feedback,
+                                    messages: &mut current_messages,
+                                    tools: &mut current_tools,
+                                    max_tokens: &mut current_max_tokens,
+                                    provider_params: &mut current_provider_params,
+                                    attempt: &mut attempt,
+                                    durable_visibility_parent: &mut *durable_visibility_parent,
                                 },
                             )
-                            .await;
-                            attempt += 1;
-                            tokio::time::sleep(retry_schedule.plan.selected_delay()).await;
-                            if let Some(exceeded) = self.budget.observe().exceeded() {
-                                return Err(exceeded.to_agent_error());
+                            .await?
+                        {
+                            LlmFailureStep::Retry => {
+                                retry_request_pressure_recheck = true;
+                                continue;
                             }
-                            let retry =
-                                self.apply_turn_input(TurnExecutionInput::RetryRequested {
-                                    run_id: run_id.clone(),
-                                    retry_attempt: retry_schedule.plan.attempt,
-                                })?;
-                            self.execute_turn_effects(&retry, turn_count, event_tx)
-                                .await?;
-                            retry_request_pressure_recheck = true;
-                            continue;
+                            LlmFailureStep::Fail(error) => return Err(error),
                         }
-                        return Err(error);
                     }
                     return Ok(LlmRetryOutcome::Completed(result));
                 }
@@ -2615,167 +2526,269 @@ where
                     return Err(error);
                 }
                 Err(e) => {
-                    // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
-                    // owns the recoverable-vs-fatal/exhaustion verdict. Only a
-                    // machine `Recover` verdict drives the retry path;
-                    // `Exhausted`/`Fatal` bubble the error up.
-                    if let Some(metadata) = self
-                        .session
-                        .try_session_metadata()
-                        .map_err(|error| AgentError::ConfigError(error.to_string()))?
-                        && let Some(provenance) = metadata.model_fallback.as_ref()
-                        && provenance.target == metadata.llm_identity()
+                    match self
+                        .recover_llm_failure_in_own_frame(
+                            e,
+                            LlmFailureOrigin::CallFailed,
+                            recovery_context,
+                            LlmRetryLoopState {
+                                controller_feedback: *controller_feedback,
+                                messages: &mut current_messages,
+                                tools: &mut current_tools,
+                                max_tokens: &mut current_max_tokens,
+                                provider_params: &mut current_provider_params,
+                                attempt: &mut attempt,
+                                durable_visibility_parent: &mut *durable_visibility_parent,
+                            },
+                        )
+                        .await?
                     {
-                        let _ = crate::event_tap::tap_emit(
-                            &self.event_tap,
-                            event_tx.as_ref(),
-                            AgentEvent::ModelFallbackTargetFailed {
-                                previous: provenance.previous.clone(),
-                                target: provenance.target.clone(),
-                                error: crate::event::AgentErrorReport::from_agent_error(&e),
-                            },
-                        )
-                        .await;
-                    }
-                    let recovery = self.classify_llm_failure_recovery(
-                        &e,
-                        attempt,
-                        self.retry_policy.max_retries,
-                    )?;
-                    if let LlmFailureRecoveryKind::Recover = recovery {
-                        // P0 Dogma Invariant 1: the MeerkatMachine
-                        // `RecoverableFailure` gate must commit BEFORE the
-                        // fallback target is selected or any durable/client
-                        // mutation happens. Keep this as a boolean precondition
-                        // only; the actual candidate proposal is requested
-                        // after the machine accepts recovery.
-                        let may_activate_fallback = !*controller_feedback
-                            && fallback_activation_is_pre_stream_safe(
-                                &e,
-                                self.client.stream_output_observed(),
-                            );
-                        let retry_schedule = self
-                            .retry_policy
-                            .schedule_retry(&e, attempt, self.budget.remaining_duration())
-                            .ok_or_else(|| {
-                                AgentError::InternalError(
-                                    "MeerkatMachine classified LLM failure as Recover but the \
-                                     retry policy produced no schedule"
-                                        .to_string(),
-                                )
-                            })?;
-                        tracing::warn!(
-                            "LLM call failed (attempt {}), retrying in {}ms: {}",
-                            retry_schedule.plan.attempt,
-                            retry_schedule.plan.selected_delay_ms,
-                            e
-                        );
-                        let recover =
-                            self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
-                                run_id: run_id.clone(),
-                                retry: retry_schedule.clone(),
-                            })?;
-                        // Machine accepted the recovery: only now ask the client
-                        // for a fallback proposal, wrap it in the
-                        // machine-accepted activation authority, then mutate
-                        // identity/policy/tool visibility atomically for the
-                        // retry attempt.
-                        let fallback_request = crate::model_fallback::ModelFallbackRequest {
-                            messages: &current_messages,
-                            tools: &current_tools,
-                            max_tokens: current_max_tokens,
-                            temperature,
-                            provider_params: current_provider_params.as_ref(),
-                            output_schema: extraction_output_schema.as_ref(),
-                            attempt: retry_schedule.plan.attempt,
-                        };
-                        if may_activate_fallback
-                            && let Some(switch) = self
-                                .select_model_fallback(
-                                    &e,
-                                    &fallback_request,
-                                    &retry_schedule,
-                                    event_tx,
-                                )
-                                .await
-                        {
-                            let activation = MachineAcceptedModelFallbackActivation::authorize(
-                                switch,
-                                &recover,
-                                &retry_schedule,
-                                self.effective_model_registry.as_deref(),
-                            )?;
-                            let previous_output_schema_section =
-                                self.output_schema_request_instructions();
-                            match self
-                                .apply_model_fallback_switch(
-                                    activation,
-                                    &e,
-                                    current_tools.as_ref(),
-                                    extraction_output_schema.as_ref(),
-                                    durable_visibility_parent.as_ref(),
-                                    &fallback_request,
-                                )
-                                .await?
-                            {
-                                ModelFallbackSwitchOutcome::Applied((
-                                    next_tools,
-                                    next_params,
-                                    next_max_tokens,
-                                    notice,
-                                    next_durable_visibility_parent,
-                                )) => {
-                                    current_tools = next_tools;
-                                    current_provider_params = next_params;
-                                    current_max_tokens = next_max_tokens;
-                                    let messages = Arc::make_mut(&mut current_messages);
-                                    self.reproject_output_schema_instructions_after_fallback(
-                                        messages,
-                                        previous_output_schema_section.as_deref(),
-                                    );
-                                    messages.push(notice);
-                                    *durable_visibility_parent =
-                                        Some(next_durable_visibility_parent);
-                                }
-                                ModelFallbackSwitchOutcome::SkippedNonDurable { reason } => {
-                                    tracing::warn!(
-                                        %reason,
-                                        "sticky model fallback skipped without teardown; \
-                                         continuing the machine-accepted retry on the previous \
-                                         model"
-                                    );
-                                }
-                            }
+                        LlmFailureStep::Retry => {
+                            retry_request_pressure_recheck = true;
+                            continue;
                         }
-                        self.execute_turn_effects(&recover, turn_count, event_tx)
-                            .await?;
-                        let _ = crate::event_tap::tap_emit(
-                            &self.event_tap,
-                            event_tx.as_ref(),
-                            AgentEvent::Retrying {
-                                retry: retry_schedule.clone(),
-                                assistant_message_id: Some(assistant_message_id),
-                            },
-                        )
-                        .await;
-                        attempt += 1;
-                        tokio::time::sleep(retry_schedule.plan.selected_delay()).await;
-                        if let Some(exceeded) = self.budget.observe().exceeded() {
-                            return Err(exceeded.to_agent_error());
-                        }
-                        let retry = self.apply_turn_input(TurnExecutionInput::RetryRequested {
-                            run_id: run_id.clone(),
-                            retry_attempt: retry_schedule.plan.attempt,
-                        })?;
-                        self.execute_turn_effects(&retry, turn_count, event_tx)
-                            .await?;
-                        retry_request_pressure_recheck = true;
-                        continue;
+                        LlmFailureStep::Fail(error) => return Err(error),
                     }
-                    return Err(e);
                 }
             }
         }
+    }
+
+    /// A resumed session whose active identity is a model-fallback target
+    /// re-admits that fallback before the next attempt. Synchronous and kept
+    /// out of line: the session-metadata decode and its temporaries never sit
+    /// in the retry loop's poll frame.
+    #[inline(never)]
+    fn admit_fallback_origin_resume(
+        &self,
+        request: &crate::model_fallback::ModelFallbackRequest<'_>,
+    ) -> Result<(), AgentError> {
+        let Some(metadata) = self
+            .session
+            .try_session_metadata()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let Some(provenance) = metadata.model_fallback.as_ref() else {
+            return Ok(());
+        };
+        if provenance.target != metadata.llm_identity() {
+            return Ok(());
+        }
+        let profile = self.active_model_profile.as_ref().ok_or_else(|| {
+            AgentError::ConfigError("fallback-origin resume lacks an active model profile".into())
+        })?;
+        if !crate::model_fallback::fallback_credential_authorized(
+            self.auth_lease_handle.as_ref(),
+            self.auth_credential_identity.as_ref(),
+        )? {
+            return Err(AgentError::ModelFallbackResumeHeld {
+                target: Box::new(crate::AgentLlmFallbackSkippedTarget::new(
+                    provenance.target.clone(),
+                    crate::model_fallback::ModelFallbackSkipReason::AuthUnavailable,
+                )),
+            });
+        }
+        let pressure = self
+            .client
+            .request_pressure(
+                request.messages,
+                request.tools,
+                request.max_tokens,
+                request.temperature,
+                request.provider_params,
+            )?
+            .ok_or_else(|| AgentError::ModelFallbackResumeHeld {
+                target: Box::new(crate::AgentLlmFallbackSkippedTarget::new(
+                    provenance.target.clone(),
+                    crate::model_fallback::ModelFallbackSkipReason::AdmissionUnavailable,
+                )),
+            })?;
+        crate::model_fallback::admit_model_fallback(
+            &provenance.previous,
+            &provenance.target,
+            profile,
+            &provenance.policy,
+            request,
+            Some(pressure),
+        )
+        .map_err(|target| AgentError::ModelFallbackResumeHeld { target })?;
+        Ok(())
+    }
+
+    /// [`Self::recover_llm_failure`], built and boxed in its own frame so
+    /// neither its construction temporaries nor its state sit in the retry
+    /// loop's poll frame (debug builds give every local its own slot).
+    #[inline(never)]
+    fn recover_llm_failure_in_own_frame<'s>(
+        &'s mut self,
+        error: AgentError,
+        origin: LlmFailureOrigin,
+        context: LlmRecoveryContext<'s>,
+        state: LlmRetryLoopState<'s>,
+    ) -> LlmFailureStepFuture<'s> {
+        Box::pin(self.recover_llm_failure(error, origin, context, state))
+    }
+
+    /// One LLM failure through the machine's recovery gate. MeerkatMachine,
+    /// not the shell, owns the recoverable-vs-fatal/exhaustion verdict (P0
+    /// Dogma Invariant 1): only a machine `Recover` verdict drives the retry
+    /// path; `Exhausted`/`Fatal` hand the error back.
+    async fn recover_llm_failure(
+        &mut self,
+        error: AgentError,
+        origin: LlmFailureOrigin,
+        context: LlmRecoveryContext<'_>,
+        state: LlmRetryLoopState<'_>,
+    ) -> Result<LlmFailureStep, AgentError> {
+        if origin == LlmFailureOrigin::CallFailed
+            && let Some(metadata) = self
+                .session
+                .try_session_metadata()
+                .map_err(|error| AgentError::ConfigError(error.to_string()))?
+            && let Some(provenance) = metadata.model_fallback.as_ref()
+            && provenance.target == metadata.llm_identity()
+        {
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                context.event_tx.as_ref(),
+                AgentEvent::ModelFallbackTargetFailed {
+                    previous: provenance.previous.clone(),
+                    target: provenance.target.clone(),
+                    error: crate::event::AgentErrorReport::from_agent_error(&error),
+                },
+            )
+            .await;
+        }
+        let recovery = self.classify_llm_failure_recovery(
+            &error,
+            *state.attempt,
+            self.retry_policy.max_retries,
+        )?;
+        let LlmFailureRecoveryKind::Recover = recovery else {
+            return Ok(LlmFailureStep::Fail(error));
+        };
+        // P0 Dogma Invariant 1: the MeerkatMachine `RecoverableFailure` gate
+        // must commit BEFORE the fallback target is selected or any
+        // durable/client mutation happens. Keep this as a boolean
+        // precondition only; the actual candidate proposal is requested
+        // after the machine accepts recovery.
+        let may_activate_fallback = !state.controller_feedback
+            && fallback_activation_is_pre_stream_safe(&error, self.client.stream_output_observed());
+        let retry_schedule = self
+            .retry_policy
+            .schedule_retry(&error, *state.attempt, self.budget.remaining_duration())
+            .ok_or_else(|| {
+                AgentError::InternalError(
+                    "MeerkatMachine classified LLM failure as Recover but the \
+                     retry policy produced no schedule"
+                        .to_string(),
+                )
+            })?;
+        match origin {
+            LlmFailureOrigin::EmptyOutput => tracing::warn!(
+                "LLM completed without visible/actionable output (attempt {}), retrying in {}ms",
+                retry_schedule.plan.attempt,
+                retry_schedule.plan.selected_delay_ms,
+            ),
+            LlmFailureOrigin::CallFailed => tracing::warn!(
+                "LLM call failed (attempt {}), retrying in {}ms: {}",
+                retry_schedule.plan.attempt,
+                retry_schedule.plan.selected_delay_ms,
+                error
+            ),
+        }
+        let recover = self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
+            run_id: context.run_id.clone(),
+            retry: retry_schedule.clone(),
+        })?;
+        // Machine accepted the recovery: only now ask the client for a
+        // fallback proposal, wrap it in the machine-accepted activation
+        // authority, then mutate identity/policy/tool visibility atomically
+        // for the retry attempt.
+        let fallback_request = crate::model_fallback::ModelFallbackRequest {
+            messages: state.messages.as_slice(),
+            tools: &state.tools[..],
+            max_tokens: *state.max_tokens,
+            temperature: context.temperature,
+            provider_params: state.provider_params.as_ref(),
+            output_schema: context.extraction_output_schema,
+            attempt: retry_schedule.plan.attempt,
+        };
+        if may_activate_fallback
+            && let Some(switch) = self
+                .select_model_fallback(&error, &fallback_request, &retry_schedule, context.event_tx)
+                .await
+        {
+            let activation = MachineAcceptedModelFallbackActivation::authorize(
+                switch,
+                &recover,
+                &retry_schedule,
+                self.effective_model_registry.as_deref(),
+            )?;
+            let previous_output_schema_section = self.output_schema_request_instructions();
+            match self
+                .apply_model_fallback_switch(
+                    activation,
+                    &error,
+                    state.tools.as_ref(),
+                    context.extraction_output_schema,
+                    state.durable_visibility_parent.as_ref(),
+                    &fallback_request,
+                )
+                .await?
+            {
+                ModelFallbackSwitchOutcome::Applied((
+                    next_tools,
+                    next_params,
+                    next_max_tokens,
+                    notice,
+                    next_durable_visibility_parent,
+                )) => {
+                    *state.tools = next_tools;
+                    *state.provider_params = next_params;
+                    *state.max_tokens = next_max_tokens;
+                    let messages = Arc::make_mut(state.messages);
+                    self.reproject_output_schema_instructions_after_fallback(
+                        messages,
+                        previous_output_schema_section.as_deref(),
+                    );
+                    messages.push(notice);
+                    *state.durable_visibility_parent = Some(next_durable_visibility_parent);
+                }
+                ModelFallbackSwitchOutcome::SkippedNonDurable { reason } => {
+                    tracing::warn!(
+                        %reason,
+                        "sticky model fallback skipped without teardown; continuing the \
+                         machine-accepted retry on the previous model"
+                    );
+                }
+            }
+        }
+        self.execute_turn_effects(&recover, context.turn_count, context.event_tx)
+            .await?;
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            context.event_tx.as_ref(),
+            AgentEvent::Retrying {
+                retry: retry_schedule.clone(),
+                assistant_message_id: Some(context.assistant_message_id),
+            },
+        )
+        .await;
+        *state.attempt += 1;
+        tokio::time::sleep(retry_schedule.plan.selected_delay()).await;
+        if let Some(exceeded) = self.budget.observe().exceeded() {
+            return Err(exceeded.to_agent_error());
+        }
+        let retry = self.apply_turn_input(TurnExecutionInput::RetryRequested {
+            run_id: context.run_id.clone(),
+            retry_attempt: retry_schedule.plan.attempt,
+        })?;
+        self.execute_turn_effects(&retry, context.turn_count, context.event_tx)
+            .await?;
+        Ok(LlmFailureStep::Retry)
     }
 
     async fn drain_turn_boundary(
@@ -3305,11 +3318,21 @@ where
                             // session value. Its exact TranscriptRewriteCommit
                             // becomes the identity of any paired memory stage.
                             let mut compacted_session = self.session.clone();
+                            let retention = compactor.transcript_history_retention();
                             let prepared_rewrite = compacted_session
                                 .replace_messages_for_compaction_internal(
                                     outcome.new_messages,
                                     &outcome.rewrite_authority,
-                                );
+                                )
+                                .and_then(|commit| {
+                                    // Bound the graph in the same prepared
+                                    // value: retired bodies never reach a
+                                    // persisted document.
+                                    if commit.is_some() {
+                                        compacted_session.retire_transcript_history(retention)?;
+                                    }
+                                    Ok(commit)
+                                });
                             let compacted_session = match prepared_rewrite {
                                 Ok(Some(commit)) => Some((compacted_session, commit)),
                                 Ok(None) => {
@@ -8171,6 +8194,7 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                     }
                     let effective_timeout = plan.effective_timeout();
                     tracing::debug!(
+                        session_id = ?tool_dispatch_context.origin_session_id(),
                         tool = %tc.name,
                         execution_mode = ?plan.mode(),
                         effective_deadline_ms = ?effective_timeout

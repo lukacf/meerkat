@@ -609,6 +609,7 @@ fn decompile_portable_spec_with_env(
             schedule: spec.profile.tools.schedule,
             image_generation: spec.profile.tools.image_generation,
             read_only: spec.profile.tools.read_only,
+            deny: spec.profile.tools.deny.clone(),
             // The host-surface MCP allowlist and rust bundles are
             // structurally absent from the portable vocabulary (A4) —
             // nothing to map.
@@ -3131,6 +3132,7 @@ mod tests {
                     schedule: false,
                     image_generation: false,
                     read_only: false,
+                    deny: Vec::new(),
                     mcp_servers: BTreeMap::new(),
                     non_portable_disabled: Vec::new(),
                 },

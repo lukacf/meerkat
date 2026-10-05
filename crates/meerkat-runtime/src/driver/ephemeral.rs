@@ -2186,6 +2186,7 @@ impl EphemeralRuntimeDriver {
                 // Contract-test authority: no runtime session entry exists, so
                 // there is no entry epoch to register under.
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "ContractRegisterSession",
         )?;
@@ -2196,6 +2197,22 @@ impl EphemeralRuntimeDriver {
     /// Contract helper for external tests that need to start a run through the
     /// same DSL authority used by the runtime loop.
     #[doc(hidden)]
+    /// A held run start (#1500) establishes nothing; this path cannot park,
+    /// so it refuses.
+    fn refuse_held_run_start(
+        effects: &[mm_dsl::MeerkatMachineEffect],
+    ) -> Result<(), RuntimeDriverError> {
+        if effects
+            .iter()
+            .any(|effect| matches!(effect, mm_dsl::MeerkatMachineEffect::RunStartHeld))
+        {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "run starts are held: the member's mob is stopped".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn contract_begin_run_authority(
         &mut self,
         run_id: RunId,
@@ -2211,25 +2228,26 @@ impl EphemeralRuntimeDriver {
             let mut authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority
+            let transition = authority
                 .apply_signal(mm_dsl::MeerkatMachineSignal::DrainQueuedRun {
                     run_id: mm_dsl::RunId::from_domain(&run_id),
                 })
-                .map(|_| ())
                 .map_err(|err| {
                     RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
                         err,
                         "ContractDrainQueuedRun",
                     ))
                 })?;
+            Self::refuse_held_run_start(transition.effects())?;
         } else {
-            self.dsl_apply(
+            let effects = self.dsl_apply_effects(
                 mm_dsl::MeerkatMachineInput::Prepare {
                     session_id,
                     run_id: mm_dsl::RunId::from_domain(&run_id),
                 },
                 "ContractPrepareRun",
             )?;
+            Self::refuse_held_run_start(&effects)?;
         }
         self.sync_control_projection_from_dsl_authority();
         Ok(())

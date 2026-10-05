@@ -500,6 +500,7 @@ type AgentEvent =
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
   | BackgroundJobCompletedEvent
+  | LiveChannelClosedEvent
   | TranscriptRewriteCommittedEvent
   | MalformedEvent
   | UnknownEvent;
@@ -522,6 +523,15 @@ use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `turn_usage_accounting_identity_disputed`, `interaction_callback_pending`,
 `peer_content_ingested`, and `provider_cache_breakpoints_discarded`. See the
 [RPC event reference](/api/rpc#notifications) for their wire contracts.
+
+`live_channel_closed` has a handwritten parser and arrives as a typed
+`LiveChannelClosedEvent`: `sessionId`, `channelId`, `reason` and
+`reopenRecommended`. It is published once for every committed close of one of
+the session's live channels. `reason` is a `LiveChannelCloseReason`:
+`client_requested`, `client_disconnected`, `provider_closed`, `error`,
+`media_fault`, `replaced` or `open_abandoned`; any other value is a malformed
+payload. `reopenRecommended` is true only for a `media_fault` whose session
+may still reopen the channel with its retained context.
 
 `RunStartedEvent.input` preserves the typed `RunInput`: either
 `{ kind: "content", content: ... }` or `{ kind: "pending_tool_results" }`.
@@ -898,7 +908,7 @@ source UUID explicitly when multiple sources provide that name.
 
 ```typescript
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // "0.8.50"
+console.log(CONTRACT_VERSION);  // "0.8.51"
 ```
 
 - While the major version is `0`, minor versions must match exactly between SDK and server.

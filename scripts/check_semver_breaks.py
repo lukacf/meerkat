@@ -65,6 +65,7 @@ PASCAL_CASE_RE = re.compile(r"\b[A-Z][A-Za-z0-9_]*\b")
 CHANGELOG_SECTION_RE = re.compile(r"^## \[([^\]]+)\](.*)$")
 STAMPED_SUFFIX_RE = re.compile(r"^\s*-\s*\d{4}-\d{2}-\d{2}\s*$")
 BREAKING_HEADING_RE = re.compile(r"^### Breaking\b")
+DEPRECATED_HEADING_RE = re.compile(r"^### Deprecated\b")
 SUBSECTION_RE = re.compile(r"^###\s")
 
 
@@ -186,12 +187,6 @@ def _symbols_function_missing(text: str) -> tuple[str, ...] | None:
     return (match.group(1),) if match else None
 
 
-def _symbols_type_method_marked_deprecated(text: str) -> tuple[str, ...] | None:
-    # method meerkat_rpc::session_runtime::SessionRuntime::set_callback_channel
-    match = re.fullmatch(r"method\s+([A-Za-z0-9_:]+)", text)
-    return _symbols_path_member(match.group(1)) if match else None
-
-
 def _symbols_struct_pub_field_missing(text: str) -> tuple[str, ...] | None:
     # field delivery_backlog of struct JobHealthSummary
     match = re.fullmatch(
@@ -229,6 +224,27 @@ def _symbols_auto_trait_impl_removed(text: str) -> tuple[str, ...] | None:
     if not match:
         return None
     return _path_symbols(match.group(1)) + _path_symbols(match.group(2))
+
+
+def _symbols_trait_missing(text: str) -> tuple[str, ...] | None:
+    # trait meerkat_core::SomeTrait (", previously in file ..." is stripped)
+    match = re.fullmatch(r"trait\s+([A-Za-z0-9_:]+)", text)
+    return _path_symbols(match.group(1)) if match else None
+
+
+def _symbols_type_method(text: str) -> tuple[str, ...] | None:
+    # method meerkat_rpc::session_runtime::SessionRuntime::set_callback_channel
+    match = re.fullmatch(r"method\s+([A-Za-z0-9_:]+)", text)
+    return _symbols_path_member(match.group(1)) if match else None
+
+
+def _symbols_module_level_const_missing(text: str) -> tuple[str, ...] | None:
+    # LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS (" in file ..." is stripped)
+    match = re.fullmatch(r"([A-Za-z0-9_:]+)", text)
+    if not match:
+        return None
+    segments = [seg for seg in re.split(r":+", match.group(1)) if seg]
+    return tuple(segments[-1:])
 
 
 def _symbols_struct_missing(text: str) -> tuple[str, ...] | None:
@@ -281,6 +297,8 @@ STRUCTURAL_EXTRACTORS = {
         _symbols_enum_no_repr_variant_discriminant_changed
     ),
     "enum_struct_variant_field_added": _symbols_enum_struct_variant_field_added,
+    # "variant Enum::Variant in <file>:<line>", from the v0.50.0 lint template.
+    "enum_unit_variant_changed_kind": _symbols_enum_variant_missing,
     # Same message shape as the added case, read off the 0.8.38 report.
     "enum_struct_variant_field_missing": _symbols_enum_struct_variant_field_added,
     "enum_variant_added": _symbols_enum_variant_added,
@@ -293,11 +311,18 @@ STRUCTURAL_EXTRACTORS = {
     "method_requires_different_generic_type_params": _symbols_method_generic_count_changed,
     "partial_ord_enum_variants_reordered": _symbols_enum_variant_added,
     "partial_ord_struct_fields_reordered": _symbols_partial_ord_struct_field_reordered,
+    # "{{name}} in file <file>:<line>" (v0.50.0 template; caught by the
+    # fail-closed check on the 0.8.51 tip).
+    "pub_module_level_const_missing": _symbols_module_level_const_missing,
     "struct_missing": _symbols_struct_missing,
     "struct_pub_field_missing": _symbols_struct_pub_field_missing,
+    # "trait <path>, previously in file <file>:<line>" (v0.50.0 template).
+    "trait_missing": _symbols_trait_missing,
     "trait_method_added": _symbols_trait_method_added,
     "trait_method_parameter_count_changed": _symbols_callable_parameter_count_changed,
-    "type_method_marked_deprecated": _symbols_type_method_marked_deprecated,
+    # "method <path>::<method> in <file>:<line>" (v0.50.0 template; first
+    # seen on the 0.8.51 report for SessionRuntime::set_callback_channel).
+    "type_method_marked_deprecated": _symbols_type_method,
 }
 
 
@@ -320,10 +345,10 @@ def extract_symbols(lint_id: str, item_text: str) -> tuple[tuple[str, ...], bool
     """Return (required symbols, structural?) for one de-located item line.
 
     Structural extraction is exact for the lint ids whose message shape has been
-    read off a real report. Anything else falls back to PascalCase tokens, which
-    cannot pick up prose (lint prose is lowercase) but also cannot see field or
-    method names. The fallback is reported, never silent, and a fallback that
-    extracts nothing is a hard failure rather than a free pass.
+    read off a real report or the tool's lint template. Anything else falls back
+    to PascalCase tokens, which cannot see field or method names; such a finding
+    is marked non-structural and fails the gate in `check_recognized`, so a new
+    lint or a changed message shape can never pass on a partial reading.
     """
     extractor = STRUCTURAL_EXTRACTORS.get(lint_id)
     if extractor is not None:
@@ -512,11 +537,30 @@ def breaking_body(section: Section) -> str | None:
     Scoped to the subsection: a break named under `### Fixed` is not a
     declaration, and matching against the whole section would accept one.
     """
+    return subsection_body(section, BREAKING_HEADING_RE)
+
+
+def deprecated_body(section: Section) -> str | None:
+    """The `### Deprecated` subsection body, or None when there is no such heading."""
+    return subsection_body(section, DEPRECATED_HEADING_RE)
+
+
+def is_deprecation_lint(lint_id: str) -> bool:
+    """A `*_marked_deprecated` finding is a deprecation, not a break.
+
+    Keep a Changelog, and this repository, declare it under `### Deprecated`;
+    requiring a duplicate `### Breaking` line would misstate what changed.
+    """
+    return lint_id.endswith("_marked_deprecated")
+
+
+def subsection_body(section: Section, heading_re: re.Pattern[str]) -> str | None:
+    """One `###` subsection's body, or None when the section has no such heading."""
     lines = section.body.splitlines()
     collected: list[str] = []
     inside = False
     for line in lines:
-        if BREAKING_HEADING_RE.match(line):
+        if heading_re.match(line):
             inside = True
             continue
         if inside and SUBSECTION_RE.match(line):
@@ -716,18 +760,56 @@ def check_stamped(sections: list[Section], version: str) -> list[str]:
     return []
 
 
-def check_named(parsed: ReportParse, section: Section) -> list[str]:
-    """Every reported break must be named, at finding granularity."""
-    body = breaking_body(section)
-    if body is None:
-        return [
-            f"the pending CHANGELOG.md section `{section.heading.strip()}` has no "
-            f"`### Breaking` heading, but cargo-semver-checks reported "
-            f"{len(parsed.findings)} break(s)"
-        ]
+def check_recognized(parsed: ReportParse) -> list[str]:
+    """Fail closed on every finding whose message shape no extractor reads.
 
-    errors: list[str] = []
+    A break the gate can only read through the PascalCase fallback cannot be
+    checked for a complete declaration (field and method names are invisible
+    to it), so it is an error naming the lint, never a note: a cargo-semver-
+    checks lint added in a later version, or a known lint whose message shape
+    changed, stops the gate until the shape is taught.
+    """
+    unknown: dict[str, list[str]] = {}
     for finding in parsed.findings:
+        if not finding.structural:
+            unknown.setdefault(finding.lint_id, []).append(finding.item)
+    return [
+        f"[{lint_id}] no structural extractor reads this lint's message shape "
+        f"(for example `{items[0]}`); a break the gate cannot read in full cannot be "
+        "checked for its declaration. Teach STRUCTURAL_EXTRACTORS in "
+        "scripts/check_semver_breaks.py the shape."
+        for lint_id, items in sorted(unknown.items())
+    ]
+
+
+def check_named(parsed: ReportParse, section: Section) -> list[str]:
+    """Every reported finding must be named, at finding granularity.
+
+    Breaks are declared under `### Breaking`; deprecations
+    (`*_marked_deprecated` lints) under `### Deprecated`.
+    """
+    bodies = {
+        "### Breaking": breaking_body(section),
+        "### Deprecated": deprecated_body(section),
+    }
+    errors: list[str] = []
+    for heading, kind in (("### Breaking", "break"), ("### Deprecated", "deprecation")):
+        count = sum(
+            1
+            for finding in parsed.findings
+            if (heading == "### Deprecated") == is_deprecation_lint(finding.lint_id)
+        )
+        if count and bodies[heading] is None:
+            errors.append(
+                f"the pending CHANGELOG.md section `{section.heading.strip()}` has no "
+                f"`{heading}` heading, but cargo-semver-checks reported {count} {kind}(s)"
+            )
+    if errors:
+        return errors
+
+    for finding in parsed.findings:
+        heading = "### Deprecated" if is_deprecation_lint(finding.lint_id) else "### Breaking"
+        body = bodies[heading] or ""
         if not finding.symbols:
             errors.append(
                 f"[{finding.crate}] {finding.lint_id}: `{finding.item}` yielded no "
@@ -743,7 +825,7 @@ def check_named(parsed: ReportParse, section: Section) -> list[str]:
         if missing:
             errors.append(
                 f"[{finding.crate}] {finding.lint_id}: `{finding.item}` is not named "
-                f"under `### Breaking` (missing: {', '.join('`' + m + '`' for m in missing)})"
+                f"under `{heading}` (missing: {', '.join('`' + m + '`' for m in missing)})"
             )
     return errors
 
@@ -830,17 +912,7 @@ def main() -> int:
     if parsed.findings and section is not None:
         errors.extend(check_named(parsed, section))
 
-    fallback_lints = sorted({f.lint_id for f in parsed.findings if not f.structural})
-    if fallback_lints:
-        print(
-            "semver-breaks: NOTE: no structural extractor matched the message shape of "
-            "lint(s) "
-            + ", ".join(fallback_lints)
-            + "; fell back to PascalCase symbols, which cannot see field or method names. "
-            "Either the lint is new or its message shape changed: teach "
-            "scripts/check_semver_breaks.py the shape to restore full granularity.",
-            file=sys.stderr,
-        )
+    errors.extend(check_recognized(parsed))
 
     # Say out loud which published crates no tool is checking. A coverage gap
     # that only exists in the parser's head is the same shape of defect as an
@@ -896,8 +968,8 @@ def main() -> int:
         section.heading.strip() if section is not None else f"the {version} release notes"
     )
     print(
-        f"semver-breaks: {len(parsed.findings)} public-API break(s) detected, all named under "
-        f"`### Breaking` in `{declared_in}`:"
+        f"semver-breaks: {len(parsed.findings)} public-API finding(s) detected, every break named "
+        f"under `### Breaking` and every deprecation under `### Deprecated` in `{declared_in}`:"
     )
     for finding in parsed.findings:
         print(f"  [{finding.crate}] {finding.lint_id}: {finding.item}")

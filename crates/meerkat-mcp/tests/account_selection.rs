@@ -116,7 +116,12 @@ enum Stored {
     Token,
     Mismatch,
     ReauthRequired,
+    /// The stored token's refresh was refused by a token endpoint whose body
+    /// echoes secrets, rendered exactly as the refresh path renders it.
+    RefreshRefusedEchoingSecrets,
 }
+
+const REFRESH_BODY_CANARY: &str = "mcp-refresh-error-body-secret-canary";
 
 #[derive(Clone, Copy)]
 enum Login {
@@ -146,6 +151,16 @@ impl McpAuthResolver for Resolver {
             Stored::Mismatch => Err(ConnectorOAuthRefusal::AccountMismatch.into()),
             Stored::ReauthRequired => Err(McpOAuthError::ReauthRequired {
                 server_name: target.server_name().to_string(),
+            }),
+            Stored::RefreshRefusedEchoingSecrets => Err(McpOAuthError::RefreshFailed {
+                server_name: target.server_name().to_string(),
+                reason: meerkat_auth_core::auth_oauth::OAuthError::TokenEndpoint {
+                    status: 500,
+                    body: format!(
+                        r#"{{"error":"server_error","error_description":"{REFRESH_BODY_CANARY}","refresh_token":"{REFRESH_BODY_CANARY}"}}"#
+                    ),
+                }
+                .to_string(),
             }),
         }
     }
@@ -413,6 +428,31 @@ async fn selected_stored_account_mismatch_is_typed_without_login_or_http() {
     .await;
     assert_account_mismatch(&error);
     assert_eq!(events, [Event::Factory(config), Event::Stored(target)]);
+}
+
+/// A refused refresh never puts the token endpoint's body into the MCP
+/// connection failure: that error's text is the agent-visible connection
+/// notice (`ExternalToolDelta` detail) and tool error.
+#[tokio::test]
+async fn refused_refresh_body_never_reaches_the_connection_failure() {
+    let endpoint = Endpoint::start().await;
+    let config = selected(&endpoint, ACCOUNT);
+    let (error, _events) = observe(
+        endpoint,
+        &config,
+        McpAuthMode::Stored,
+        Some((Stored::RefreshRefusedEchoingSecrets, Login::Token)),
+    )
+    .await;
+    let rendered = format!("{error} {error:?}");
+    assert!(
+        !rendered.contains(REFRESH_BODY_CANARY),
+        "the refresh error body reached the connection failure: {rendered}"
+    );
+    assert!(
+        rendered.contains("status=500 error=server_error"),
+        "{rendered}"
+    );
 }
 
 #[tokio::test]

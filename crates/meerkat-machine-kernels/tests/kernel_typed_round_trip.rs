@@ -188,6 +188,10 @@ fn applying_typed_input_yields_typed_transition_outcome() {
                 fields: BTreeMap::from([
                     (field("session_id"), named_string("SessionId", "sess-1")),
                     (field("runtime_epoch_id"), KernelValue::None),
+                    (
+                        field("initial_run_start_holds"),
+                        KernelValue::Set(std::collections::BTreeSet::new()),
+                    ),
                 ]),
             },
         )
@@ -623,6 +627,10 @@ fn no_matching_transition_refusal_carries_typed_route_variant() {
                 fields: BTreeMap::from([
                     (field("session_id"), named_string("SessionId", "sess-early")),
                     (field("runtime_epoch_id"), KernelValue::None),
+                    (
+                        field("initial_run_start_holds"),
+                        KernelValue::Set(std::collections::BTreeSet::new()),
+                    ),
                 ]),
             },
         )

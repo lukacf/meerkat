@@ -278,6 +278,7 @@ export interface MobLifecycleResult {
   destroy_report?: unknown;
   mob_id: string;
   ok: boolean;
+  stop_report?: unknown;
 }
 
 export interface ApplicationToolPolicyBindingUnmanaged {

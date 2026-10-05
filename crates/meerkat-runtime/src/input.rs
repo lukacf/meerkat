@@ -195,7 +195,13 @@ impl Input {
             Input::Prompt(_) => InputKind::Prompt,
             Input::Peer(p) => match &p.convention {
                 Some(PeerConvention::Message) | None => InputKind::PeerMessage,
-                Some(PeerConvention::Request { .. }) => InputKind::PeerRequest,
+                // A one-way lifecycle notice shares the peer-request
+                // admission row (as the kickoff notices did when they were
+                // requests) and, like a request, mints no message-reply
+                // capability.
+                Some(PeerConvention::Request { .. } | PeerConvention::Lifecycle { .. }) => {
+                    InputKind::PeerRequest
+                }
                 Some(PeerConvention::ResponseProgress { .. }) => InputKind::PeerResponseProgress,
                 Some(PeerConvention::ResponseTerminal { .. }) => InputKind::PeerResponseTerminal,
             },
@@ -530,6 +536,12 @@ pub enum PeerConvention {
     ResponseTerminal {
         request_id: String,
         status: ResponseTerminalStatus,
+    },
+    /// One-way lifecycle notice (member-kickoff status). Not a request: it
+    /// carries no request id, opens no inbound request lifecycle and asks for
+    /// no reply.
+    Lifecycle {
+        kind: meerkat_core::comms::PeerLifecycleKind,
     },
 }
 
@@ -905,6 +917,25 @@ fn peer_projection_from_peer_input_with_id(
             })
         }
         Some(PeerConvention::ResponseTerminal { .. }) => None,
+        Some(PeerConvention::Lifecycle { kind }) => {
+            let peer_id = match meerkat_core::comms::PeerId::parse(peer_id.as_str()) {
+                Ok(peer_id) => peer_id,
+                Err(error) => {
+                    tracing::warn!(
+                        peer_id,
+                        error = %error,
+                        "dropping peer lifecycle projection with non-canonical peer_id"
+                    );
+                    return None;
+                }
+            };
+            Some(PeerConversationProjection::Lifecycle {
+                peer_id,
+                display_name: peer_display_label(peer),
+                kind: *kind,
+                payload: peer.payload.clone(),
+            })
+        }
         None => None,
     }
 }
@@ -1107,11 +1138,21 @@ fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
             None,
             Some(status.label().to_owned()),
         ),
+        Some(PeerConvention::Lifecycle { kind }) => (
+            CommsNoticeKind::Lifecycle,
+            None,
+            Some(kind.as_str().to_owned()),
+            None,
+        ),
     };
     let summary = match kind {
         CommsNoticeKind::Request => intent.as_ref().map_or_else(
             || "Peer request".to_string(),
             |intent| format!("Peer request: {intent}"),
+        ),
+        CommsNoticeKind::Lifecycle => intent.as_ref().map_or_else(
+            || "Peer lifecycle".to_string(),
+            |kind| format!("Peer lifecycle: {kind}"),
         ),
         CommsNoticeKind::ResponseProgress => "Peer response progress".to_string(),
         CommsNoticeKind::ResponseTerminal => "Peer response terminal".to_string(),
@@ -1797,6 +1838,121 @@ mod tests {
             payload: None,
             handling_mode: None,
         })
+    }
+
+    /// #1608 contract: every member-kickoff lifecycle notice, classified by
+    /// the generated peer-ingress authority and projected through the comms
+    /// bridge, appends a visible `lifecycle` comms notice: the kind as
+    /// `intent`, the typed params as `payload`, no request id, and content
+    /// that asks for no reply. The serialized block is the session-history
+    /// shape the console renders (printed for fixture capture).
+    #[test]
+    fn kickoff_lifecycle_notice_appends_a_lifecycle_comms_notice() {
+        use meerkat_core::comms::{PeerId, PeerLifecycleKind};
+        use meerkat_core::interaction::{
+            InboxInteraction, InteractionContent, InteractionId, PeerIngressEnvelopeFacts,
+            PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity, PeerInputCandidate,
+        };
+        let handle = crate::test_peer_comms_handle();
+        let sender = PeerId::parse("6f6114cd-2cf7-590f-a172-0e36feacd12c").expect("peer id");
+        let display = "incident-command-center/delivery/delivery-lead";
+        let params = serde_json::json!({ "peer": "delivery-lead", "role": "delivery" });
+        for kind in [
+            PeerLifecycleKind::KickoffPending,
+            PeerLifecycleKind::KickoffStarting,
+            PeerLifecycleKind::KickoffStarted,
+            PeerLifecycleKind::KickoffCallbackPending,
+            PeerLifecycleKind::KickoffFailed,
+            PeerLifecycleKind::KickoffCancelled,
+        ] {
+            let id = InteractionId(uuid::Uuid::new_v4());
+            let admission = handle
+                .classify_external_envelope(PeerIngressEnvelopeFacts {
+                    item_id: id.to_string(),
+                    from_peer: display.to_string(),
+                    from_peer_id: sender,
+                    kind: PeerIngressEnvelopeKind::Lifecycle {
+                        kind,
+                        params: params.clone(),
+                    },
+                })
+                .expect("kickoff lifecycle classifies");
+            let classification = admission.classification;
+            let candidate = PeerInputCandidate::new(
+                InboxInteraction {
+                    objective_id: None,
+                    sender_taint: None,
+                    id,
+                    from_route: Some(sender),
+                    from: display.to_string(),
+                    content: InteractionContent::Request {
+                        intent: kind.as_str().to_string(),
+                        params: params.clone(),
+                        blocks: None,
+                    },
+                    rendered_text: admission.rendered_text,
+                    handling_mode: HandlingMode::Queue,
+                    render_metadata: None,
+                },
+                PeerIngressFact::peer(
+                    id,
+                    classification.class,
+                    classification.kind,
+                    Some(classification.auth),
+                    PeerIngressIdentity::new(
+                        sender,
+                        display.to_string(),
+                        meerkat_core::PeerIngressConvention::Lifecycle {
+                            kind,
+                            peer: "delivery-lead".to_string(),
+                        },
+                    ),
+                ),
+                admission.lifecycle_peer,
+            );
+            let input = crate::comms_bridge::classified_interaction_to_runtime_input(
+                &candidate,
+                &crate::identifiers::LogicalRuntimeId::new("fixture"),
+            )
+            .expect("kickoff notice projects to runtime input");
+            assert_eq!(input.kind(), InputKind::PeerRequest);
+            let append = input_to_append(&input).expect("kickoff notice appends");
+            assert_eq!(append.role, ConversationAppendRole::SystemNotice);
+            let CoreRenderable::SystemNotice { body, blocks, .. } = &append.content else {
+                panic!("kickoff notice must append a system notice");
+            };
+            let summary = format!("Peer lifecycle: {kind}");
+            assert_eq!(body.as_deref(), Some(summary.as_str()));
+            let [block] = blocks.as_slice() else {
+                panic!("one comms block");
+            };
+            let json = serde_json::to_value(block).expect("serialize block");
+            assert_eq!(json["type"], "comms");
+            assert_eq!(json["kind"], "lifecycle");
+            assert_eq!(json["direction"], "incoming");
+            assert_eq!(json["intent"], kind.as_str());
+            assert_eq!(json["summary"], summary.as_str());
+            assert_eq!(json["payload"], params);
+            assert_eq!(json["peer"]["id"], sender.to_string());
+            assert!(
+                json.get("request_id")
+                    .is_none_or(serde_json::Value::is_null)
+            );
+            let text = json["content"][0]["text"].as_str().unwrap_or_default();
+            assert!(
+                text.contains("not a request") && !text.contains("Request ID"),
+                "{kind} content must ask for no reply: {text}"
+            );
+            println!(
+                "FIXTURE {kind} {}",
+                serde_json::json!({
+                    "role": "system_notice",
+                    "kind": "comms",
+                    "body": body,
+                    "blocks": [json],
+                })
+            );
+        }
     }
 
     /// Only the `InputKind::PeerMessage` grouping mints a reply capability:

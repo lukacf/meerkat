@@ -110,6 +110,15 @@ pub(super) struct ShellLaunch<'a> {
 
 /// Spawn one exact shell launch and establish its group before releasing custody.
 /// Required confinement never passes through a mutable command builder.
+///
+/// Stdin is always `/dev/null`: a tool's child never shares the host's
+/// stdin, which in a stdio JSON-RPC host is the protocol transport.
+/// Trusted launches set null stdin below; confined launches use null stdin
+/// through `SpawnIo::default`, including their custody-gated prologue.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(unused_variables)
+)]
 pub(super) async fn spawn_in_custody(
     binding: &CustodyBinding,
     identity: SpawnIdentity<'_>,
@@ -197,6 +206,7 @@ fn configure_trusted(
     command
         .current_dir(directory)
         .envs(environment)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

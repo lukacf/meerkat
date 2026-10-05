@@ -223,10 +223,12 @@ fn map_ingress_convention(
                 .ok_or(PeerIngressProjectionError::MissingResponseTerminality { interaction_id })?;
             map_response_convention(interaction_id, *in_reply_to, terminality)
         }
-        PeerIngressConvention::Lifecycle { kind, .. } => Ok(PeerConvention::Request {
-            request_id: ingress.interaction_id.to_string(),
-            intent: kind.to_string(),
-        }),
+        // Only visible lifecycle notices (member-kickoff status) reach runtime
+        // admission; topology notices are consumed silently by the drain. A
+        // notice is not a request: no request id, no reply instruction.
+        PeerIngressConvention::Lifecycle { kind, .. } => {
+            Ok(PeerConvention::Lifecycle { kind: *kind })
+        }
         PeerIngressConvention::Ack { .. } | PeerIngressConvention::PlainEvent { .. } => {
             Err(PeerIngressProjectionError::UnsupportedPeerConvention {
                 interaction_id,
@@ -513,12 +515,13 @@ mod tests {
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
-            assert!(matches!(p.convention, Some(PeerConvention::Request { .. })));
+            // A lifecycle-classed request projects as a one-way lifecycle
+            // notice: no request id, so nothing invites a reply (#1608).
             match p.convention.as_ref() {
-                Some(PeerConvention::Request { request_id, .. }) => {
-                    assert_eq!(request_id, &interaction.id.0.to_string());
+                Some(PeerConvention::Lifecycle { kind }) => {
+                    assert_eq!(*kind, meerkat_core::comms::PeerLifecycleKind::PeerAdded);
                 }
-                other => panic!("Expected request convention, got {other:?}"),
+                other => panic!("Expected lifecycle convention, got {other:?}"),
             }
             assert_eq!(p.header.durability, InputDurability::Durable);
             assert_eq!(

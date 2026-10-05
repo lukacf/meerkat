@@ -53,6 +53,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         recent_turn_budget: 2,
         max_summary_tokens: 1024,
         min_turns_between_compactions: 2,
+        history_retained_rewrites: 4,
     };
     let mut config = Config::default();
     config.compaction.auto_compact_threshold = compaction_config.auto_compact_threshold;

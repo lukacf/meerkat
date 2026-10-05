@@ -230,8 +230,9 @@ async fn make_stack_over(
     (router, mob_state)
 }
 
-fn mob_definition(mob_id: &str) -> MobDefinition {
-    serde_json::from_value(json!({
+/// The public definition shape: what a model's `mob_create` may pass.
+fn mob_definition_json(mob_id: &str) -> Value {
+    json!({
         "id": mob_id,
         "profiles": {
             "keeper": {
@@ -242,8 +243,11 @@ fn mob_definition(mob_id: &str) -> MobDefinition {
             }
         },
         "wiring": { "auto_wire_orchestrator": false, "role_wiring": [] }
-    }))
-    .expect("detached fork_off mob definition")
+    })
+}
+
+fn mob_definition(mob_id: &str) -> MobDefinition {
+    serde_json::from_value(mob_definition_json(mob_id)).expect("detached fork_off mob definition")
 }
 
 async fn session_history(router: &MethodRouter, session_id: &SessionId) -> Value {
@@ -1512,7 +1516,7 @@ impl LlmClient for ConvenerScript {
                     &request.model,
                     "toolu_mob_create",
                     "mob_create",
-                    json!({"definition": serde_json::to_value(mob_definition(mob_id)).unwrap()}),
+                    json!({"definition": mob_definition_json(mob_id)}),
                 ),
                 1 => scripted_tool_call(
                     &request.model,

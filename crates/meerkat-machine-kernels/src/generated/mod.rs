@@ -15,3 +15,4 @@ pub mod temporary_council_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
 pub mod work_graph_lifecycle;
+pub mod work_item_admission;

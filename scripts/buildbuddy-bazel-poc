@@ -363,17 +363,19 @@ case "${command}" in
       --color=no
       --curses=no
     )
-    # Turbo-S is a Bazel sh_test cohort, not a Nextest run. Retry a failed
-    # shard once at the Bazel boundary where aggregate-load flakes occur,
-    # while preserving Bazel/BuildBuddy parallelism across independent shards.
+    # Turbo-S is a Bazel sh_test cohort, not a Nextest run. Exactly one
+    # attempt per run: a scenario that passes only on a retry is a failure to
+    # classify (product bug, oracle/fixture brittleness, or a provider-degraded
+    # void verdict), never a pass. A retry here is what let failing scenarios
+    # report green.
     enforced_args+=(
-      --flaky_test_attempts=2
+      --flaky_test_attempts=1
     )
     ;;
   machine-authority-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//crates/xtask:machine_verify_all_tlc_test //crates/xtask:machines_contracts_test //crates/xtask:protocol_codegen_drift_test //crates/xtask:runtime_authority_bypass_test //crates/meerkat-machine-schema:docs_machine_authority_alignment_test //crates/meerkat-machine-codegen:render_contracts_test //crates/meerkat-machine-codegen:runtime_alphabet_parity_test //crates/meerkat-machine-codegen:runtime_schema_parity_test"
+    default_target="//crates/xtask:machine_verify_all_tlc_test //crates/xtask:machine_verify_audits_a_tlc_test //crates/xtask:machine_verify_audits_b_tlc_test //crates/xtask:machines_contracts_test //crates/xtask:protocol_codegen_drift_test //crates/xtask:runtime_authority_bypass_test //crates/meerkat-machine-schema:docs_machine_authority_alignment_test //crates/meerkat-machine-codegen:render_contracts_test //crates/meerkat-machine-codegen:runtime_alphabet_parity_test //crates/meerkat-machine-codegen:runtime_schema_parity_test"
     extra_args+=(
       --test_output=errors
       --test_summary=terse
@@ -994,24 +996,109 @@ fi
 if [[ "${#gcp_buildbuddy_test_env[@]}" -gt 0 ]]; then
   bb_args+=("${gcp_buildbuddy_test_env[@]}")
 fi
-if [[ -n "${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES:-}" ]]; then
-  if [[ "${meerkat_bazel_backend}" == "gcp-local" ]]; then
+# --- Secrets never travel in the Bazel client environment or argv ------------
+# Bazel records every client environment variable as `--client_env=NAME=value`
+# and the full command line in the build event stream it sends to BuildBuddy,
+# and argv is visible in `ps`. Provider keys for the live lanes therefore go
+# only through BuildBuddy's secret-env-overrides platform header, written into
+# the same 0600 temp bazelrc as the API key (removed on exit). The client
+# process itself runs under `env -i` with an explicit allowlist (see
+# bb_client_exec below), so nothing else from this environment reaches it.
+live_provider_lane=0
+case "${requested_command}" in
+  e2e-live-rbe|e2e-auth-rbe|e2e-smoke-remote-rbe|e2e-smoke-turbo-s-rbe)
+    live_provider_lane=1
+    ;;
+esac
+# Names in the secret-key import set that are configuration, not credentials;
+# they are forwarded through the client allowlist instead.
+provider_key_is_non_secret() {
+  case "$1" in
+    BUILDBUDDY_API_KEY|SMOKE_*|OPENAI_SMOKE_MODEL|MEERKAT_E2E_AUTH_ANTHROPIC_MODEL|MEERKAT_E2E_AUTH_GEMINI_MODEL|MEERKAT_E2E_AUTH_VERTEX_CANARY)
+      return 0
+      ;;
+  esac
+  return 1
+}
+secret_env_overrides="${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES:-}"
+if [[ "${live_provider_lane}" == "1" ]]; then
+  provider_keys=()
+  while IFS= read -r exported_key; do
+    if meerkat_secret_env_key_allowed "${exported_key}" \
+      && ! provider_key_is_non_secret "${exported_key}" \
+      && [[ -n "${!exported_key:-}" ]]; then
+      provider_keys+=("${exported_key}")
+    fi
+  done < <(compgen -e | LC_ALL=C sort)
+  if [[ "${#provider_keys[@]}" -gt 0 ]]; then
+    if [[ "${meerkat_bazel_backend}" == "gcp-local" ]]; then
+      echo "error: live lane ${requested_command} needs provider keys (${provider_keys[*]}) but MEERKAT_BAZEL_BACKEND=gcp-local has no BuildBuddy secret-env-overrides; refusing to forward them through the Bazel client environment" >&2
+      exit 1
+    fi
+    for provider_key in "${provider_keys[@]}"; do
+      if [[ ",${secret_env_overrides}" == *",${provider_key}="* ]]; then
+        continue
+      fi
+      provider_value="${!provider_key}"
+      # The plain header is a comma-separated K=V list inside a bazelrc
+      # token: a value it cannot carry exactly is refused, never mangled.
+      if [[ "${provider_value}" == *[,[:space:]\"\'\\]* ]]; then
+        echo "error: ${provider_key} contains characters the secret-env-overrides header cannot carry (comma, whitespace, quote or backslash); pass it through MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64 or unset it" >&2
+        exit 1
+      fi
+      secret_env_overrides="${secret_env_overrides:+${secret_env_overrides},}${provider_key}=${provider_value}"
+    done
+  fi
+fi
+if [[ -n "${secret_env_overrides}" || -n "${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64:-}" ]]; then
+  if [[ "${meerkat_bazel_backend}" == "gcp-local" || -z "${secret_bazelrc}" ]]; then
     echo "error: BuildBuddy secret environment overrides require remote execution" >&2
     exit 1
   fi
-  bb_args+=(
-    --remote_exec_header="x-buildbuddy-platform.secret-env-overrides=${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES}"
-  )
-fi
-if [[ -n "${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64:-}" ]]; then
-  if [[ "${meerkat_bazel_backend}" == "gcp-local" ]]; then
-    echo "error: BuildBuddy base64 secret environment overrides require remote execution" >&2
-    exit 1
+  if [[ -n "${secret_env_overrides}" ]]; then
+    if [[ "${secret_env_overrides}" == *[[:space:]\"\'\\]* ]]; then
+      echo "error: MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES contains whitespace, a quote or a backslash, which a bazelrc token cannot carry exactly" >&2
+      exit 1
+    fi
+    printf 'build --remote_exec_header=x-buildbuddy-platform.secret-env-overrides=%s\n' "${secret_env_overrides}" >>"${secret_bazelrc}"
   fi
-  bb_args+=(
-    --remote_exec_header="x-buildbuddy-platform.secret-env-overrides-base64=${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64}"
-  )
+  if [[ -n "${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64:-}" ]]; then
+    if [[ "${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64}" == *[[:space:]\"\'\\]* ]]; then
+      echo "error: MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64 contains whitespace, a quote or a backslash" >&2
+      exit 1
+    fi
+    printf 'build --remote_exec_header=x-buildbuddy-platform.secret-env-overrides-base64=%s\n' "${MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64}" >>"${secret_bazelrc}"
+  fi
 fi
+unset secret_env_overrides provider_value
+
+# The Bazel/bb client runs under `env -i` with exactly these variables (those
+# that are set): process basics, toolchain/cache locations, the non-secret
+# e2e test-selection names the lanes forward with `--test_env=NAME`, and CI
+# metadata BuildBuddy shows in its UI. Credentials are never on this list.
+bb_client_env=()
+for allowed_var in PATH HOME USER LOGNAME SHELL TMPDIR TERM LANG TZ \
+  XDG_CACHE_HOME CARGO_HOME RUSTUP_HOME MEERKAT_HOST_CARGO_HOME \
+  TEST SCENARIO SUITE OPENAI_SMOKE_MODEL FLOW_SMOKE_MODEL \
+  MEERKAT_FLOW_RUNTIME_TURBO_MODEL MEERKAT_CLEAN_E2E_SCENARIO_TARGETS \
+  MEERKAT_E2E_AUTH_ANTHROPIC_MODEL MEERKAT_E2E_AUTH_GEMINI_MODEL \
+  MEERKAT_E2E_AUTH_VERTEX_CANARY \
+  CI GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_SHA GITHUB_REF GITHUB_RUN_ID \
+  GITHUB_RUN_ATTEMPT GITHUB_SERVER_URL GITHUB_WORKFLOW; do
+  if [[ -n "${!allowed_var+set}" ]]; then
+    bb_client_env+=("${allowed_var}=${!allowed_var}")
+  fi
+done
+while IFS= read -r exported_key; do
+  case "${exported_key}" in
+    LC_*|SMOKE_*)
+      bb_client_env+=("${exported_key}=${!exported_key}")
+      ;;
+  esac
+done < <(compgen -e | LC_ALL=C sort)
+bb_client_exec() {
+  env -i "${bb_client_env[@]}" "${bb_bin}" "$@"
+}
 if [[ "${#extra_args[@]}" -gt 0 ]]; then
   bb_args+=("${extra_args[@]}")
 fi
@@ -1058,7 +1145,7 @@ lane_output_base_has_stale_external_links() {
 
 repair_lane_output_base() {
   echo "buildbuddy-bazel-poc: repairing corrupt external repository state (clean --expunge of lane output base)" >&2
-  "${bb_bin}" "${startup_args[@]}" clean --expunge 1>&2 || true
+  bb_client_exec "${startup_args[@]}" clean --expunge 1>&2 || true
 }
 
 fetch_corruption_signature() {
@@ -1091,7 +1178,7 @@ status=0
 for attempt in 1 2; do
   : >"${run_log}"
   set +e
-  "${bb_bin}" "${bb_args[@]}" 2> >(tee "${run_log}" >&2)
+  bb_client_exec "${bb_args[@]}" 2> >(tee "${run_log}" >&2)
   status="$?"
   # Let the tee process substitution finish flushing before the log is read.
   wait 2>/dev/null

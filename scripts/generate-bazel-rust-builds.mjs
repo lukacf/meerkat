@@ -1512,6 +1512,10 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `            "bazel-*/**",`,
     `            "**/node_modules/**",`,
     `            "target/**",`,
+    `            # Stray logs (a CI step's tee) are never inputs: one growing`,
+    `            # while Bazel hashes it fails the upload.`,
+    `            "*.log",`,
+    `            "**/*.log",`,
     `            "secrets.env",`,
     `            "**/secrets.env",`,
     `            "*credential*.json",`,
@@ -2636,10 +2640,29 @@ for (const pkg of localPackages.values()) {
     const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";
     const rustfmtLinux = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin";
     const rustfmtLinuxLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib";
-    rules.push(`sh_test(
-    name = "machine_verify_all_tlc_test",
+    // The canonical TLC lane runs as three parts, so each fits a CI job
+    // limit and the machine-authority lane runs them in parallel: the
+    // machine-verify sweep plus adaptive witness, and two hand-written audit
+    // shards. `make machine-verify` runs all of them (`--part all`).
+    // Each part reserves its share of a c3d-standard-30 executor, so the
+    // BuildBuddy pool does not pack it with a heavy cargo-equivalent action,
+    // and sizes TLC to that reservation (workers, heap) rather than to the
+    // whole machine it may share.
+    for (const [name, part, cpu, memory, tlcEnv] of [
+      ["machine_verify_all_tlc_test", "machine-verify", "16", "48GB",
+        `"TLC_WORKERS": "16",
+        "TLC_HEAP_BUDGET_MB": "40000",`],
+      ["machine_verify_audits_a_tlc_test", "audits-a", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_b_tlc_test", "audits-b", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+    ]) {
+      rules.push(`sh_test(
+    name = "${name}",
     srcs = ["tests/machine_verify_all_tlc_test.sh"],
-    args = ["$(rootpath :xtask_bin)"],
+    args = ["$(rootpath :xtask_bin)", "--part", "${part}"],
     data = [
         ":xtask_bin",
         "//:workspace_runfiles",
@@ -2653,6 +2676,11 @@ for (const pkg of localPackages.values()) {
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath ${rustfmt})",
         "RUSTFMT_LINUX": "$(rootpath ${rustfmtLinux})",
+        ${tlcEnv}
+    },
+    exec_properties = {
+        "EstimatedCPU": "${cpu}",
+        "EstimatedMemory": "${memory}",
     },
     size = "enormous",
     timeout = "eternal",
@@ -2661,6 +2689,7 @@ for (const pkg of localPackages.values()) {
         "required-feature",
     ],
 )`);
+    }
   }
 
   if (rules.length === 0) continue;

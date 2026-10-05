@@ -2053,6 +2053,46 @@
         ],
         "type": "string"
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -5177,11 +5217,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -6702,6 +6747,35 @@
         },
         "required": [
           "type"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/LiveChannelCloseReason"
+          },
+          "reopen_recommended": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "live_channel_closed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "channel_id",
+          "reason",
+          "reopen_recommended"
         ],
         "type": "object"
       },
@@ -8539,6 +8613,35 @@
             "type": "object"
           },
           {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A real operation returned, but its protected audit outcome could not\nbe retained. This safe diagnostic is nonterminal and grants no retry.",
             "properties": {
               "operation_id": {
@@ -10221,6 +10324,46 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a committed live channel close.",
+        "oneOf": [
+          {
+            "const": "client_requested",
+            "description": "A caller asked to close the channel (`live/close`, a member host\nclose, or the client's own close request on the channel transport).",
+            "type": "string"
+          },
+          {
+            "const": "client_disconnected",
+            "description": "The client's transport went away (socket or peer connection lost).",
+            "type": "string"
+          },
+          {
+            "const": "provider_closed",
+            "description": "The provider ended the session.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "A terminal adapter, provider or transport protocol error (including a\nconfiguration the provider rejected).",
+            "type": "string"
+          },
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          },
+          {
+            "const": "replaced",
+            "description": "The runtime retired the channel for a replacement (context or result\nrecovery reopens the session on a fresh channel).",
+            "type": "string"
+          },
+          {
+            "const": "open_abandoned",
+            "description": "The channel's open was abandoned before it activated.",
+            "type": "string"
+          }
+        ]
       },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
@@ -13389,11 +13532,16 @@
         ]
       },
       "TranscriptTurnInput": {
-        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "description": "Authorship of a turn's input that readers act on (see\n[`TranscriptMessageIdentity::turn_input`]). Absent for every other turn\n(spoken, peer-driven, or a batch whose inputs disagree).",
         "oneOf": [
           {
             "const": "runtime_authored",
             "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
+          },
+          {
+            "const": "typed_text",
+            "description": "Text a host submitted as a turn (`turn/start`, a session's initial\nprompt): the text chat. Its user row and its reply are shown in the\nchat, so a live voice channel takes them as context, never as speech\nto voice.",
             "type": "string"
           }
         ]
@@ -13640,7 +13788,8 @@
       "peer_content_ingested",
       "provider_cache_breakpoints_discarded",
       "boundary_append_applied",
-      "boundary_appends_discarded"
+      "boundary_appends_discarded",
+      "live_channel_closed"
     ],
     "known_payloads": {
       "tool_config_changed": {

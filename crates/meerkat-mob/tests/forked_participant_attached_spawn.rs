@@ -1293,10 +1293,13 @@ async fn unprovable_release_blocks_completion_and_retry_converges() {
         .retire(identity("branch"))
         .await
         .expect_err("an unprovable release may not publish a completed teardown");
-    let blocked = match &blocked {
-        MobError::SharedRetirementFailure(shared) => shared.as_ref(),
-        other => other,
-    };
+    // The retirement durably started, so it is owned and reported stuck with
+    // its typed cause; the exact retry is an explicit re-drive (OB3).
+    assert!(
+        matches!(blocked, MobError::MemberRetirementStuck { .. }),
+        "a failed owned retirement is reported stuck, got {blocked:?}"
+    );
+    let blocked = blocked.retirement_root_cause();
     assert!(
         matches!(
             blocked,
@@ -1324,7 +1327,7 @@ async fn unprovable_release_blocks_completion_and_retry_converges() {
         .expect("repair the routing evidence");
     controlling
         .handle
-        .retire(identity("branch"))
+        .redrive_retirement(identity("branch"))
         .await
         .expect("the exact retry converges");
     assert!(

@@ -403,23 +403,86 @@ pub async fn build_agent_config(
         explicit => explicit,
     };
 
-    // A read-only profile is a declaration by the mob author. It composes
-    // conjunctively with a narrower member or parent name policy; replacing
-    // that policy would widen an allow-list to every declared read-only tool.
-    if profile.tools.read_only {
-        config.tool_access_policy = Some(match config.tool_access_policy.take() {
-            None => meerkat_core::ops::ToolAccessPolicy::ReadOnly,
-            Some(policy) => policy
-                .conjoin(meerkat_core::ops::ToolAccessPolicy::ReadOnly)
-                .map_err(|error| {
-                    MobError::WiringError(format!(
-                        "failed to compose profile tool constraints: {error}"
-                    ))
-                })?,
-        });
-    }
+    // The profile's read-only and deny declarations are the mob author's tool
+    // restriction. The factory conjoins it with the per-spawn policy at the
+    // execution gate (a spawn narrows, never widens it) and persists only the
+    // spawn part, so every build, a resume included, recomputes the
+    // declaration from the current profile.
+    let restriction = meerkat_core::ops::DeclaredToolRestriction {
+        declared_by: format!("profile '{profile_name}'"),
+        enabled_families: enabled_tool_families(&profile.tools),
+        read_only: profile.tools.read_only,
+        deny: {
+            let mut deny = meerkat_core::ToolNameSet::new();
+            for name in &profile.tools.deny {
+                deny.insert(meerkat_core::ToolName::new(name.clone()));
+            }
+            deny
+        },
+        vocabulary: profile_tool_vocabulary(&profile.tools),
+        deferred_mcp_servers: deferred_mcp_servers(&profile.tools),
+    };
+    config.declared_tool_restriction = (!restriction.is_unrestricted()).then_some(restriction);
 
     Ok(config)
+}
+
+/// The tool names a profile's deny list may name beyond the factory's
+/// built-in families: the mob operator and agent mob tools (known whether or
+/// not this build mounts them) and the exposed names its declared MCP servers
+/// map. A name in no vocabulary fails the build.
+fn profile_tool_vocabulary(
+    tools: &crate::profile::ToolConfig,
+) -> std::collections::BTreeMap<meerkat_core::ToolVocabularySource, meerkat_core::ToolNameSet> {
+    let mut vocabulary = std::collections::BTreeMap::new();
+    vocabulary.insert(
+        meerkat_core::ToolVocabularySource::MobOperator,
+        crate::runtime::mob_operator_tool_names(),
+    );
+    vocabulary.insert(
+        meerkat_core::ToolVocabularySource::AgentMob,
+        crate::runtime::agent_mob_tool_names(),
+    );
+    for server in &tools.mcp_servers {
+        if !server.tool_names.is_empty() {
+            vocabulary.insert(
+                meerkat_core::ToolVocabularySource::McpServer(server.name.clone()),
+                server.tool_names.values().map(String::as_str).collect(),
+            );
+        }
+    }
+    vocabulary
+}
+
+/// The profile's declared MCP servers that map no tool names: their tools are
+/// unknown until they connect, so the factory defers deny names in no
+/// vocabulary to the execution gate while any is declared.
+fn deferred_mcp_servers(tools: &crate::profile::ToolConfig) -> std::collections::BTreeSet<String> {
+    tools
+        .mcp_servers
+        .iter()
+        .filter(|server| server.tool_names.is_empty())
+        .map(|server| server.name.clone())
+        .collect()
+}
+
+/// The tool families a profile enables, in declaration order, for errors that
+/// name what a profile's tool declaration could have referred to.
+fn enabled_tool_families(tools: &crate::profile::ToolConfig) -> Vec<String> {
+    [
+        ("builtins", tools.builtins),
+        ("shell", tools.shell),
+        ("comms", tools.comms),
+        ("memory", tools.memory),
+        ("workgraph", tools.workgraph),
+        ("mob", tools.mob),
+        ("schedule", tools.schedule),
+        ("image_generation", tools.image_generation),
+    ]
+    .into_iter()
+    .filter(|(_, enabled)| *enabled)
+    .map(|(family, _)| family.to_string())
+    .collect()
 }
 
 /// Build an [`AgentBuildConfig`] for a resumed mob member.
@@ -1119,6 +1182,7 @@ mod tests {
                     schedule: false,
                     image_generation: true,
                     read_only: false,
+                    deny: Vec::new(),
                     mcp: vec![],
                     mcp_servers: vec![],
                     rust_bundles: vec![],
@@ -1153,6 +1217,7 @@ mod tests {
                     schedule: false,
                     image_generation: false,
                     read_only: false,
+                    deny: Vec::new(),
                     mcp: vec![],
                     mcp_servers: vec![],
                     rust_bundles: vec![],
@@ -1339,6 +1404,7 @@ mod tests {
                     image_generation: meerkat_core::session::ToolCategoryOverride::Enable,
                     web_search: meerkat_core::session::ToolCategoryOverride::Inherit,
                     tool_access_policy: None,
+                    spawn_tool_access_policy: None,
                     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: None,
                 },
@@ -1615,11 +1681,27 @@ mod tests {
             system_prompt_override: None,
         };
 
+        // The declaration travels separately from the spawn-site policy, so
+        // the factory can persist the spawn part and recompute the
+        // declaration from the current definition on every resume.
         let config = build_agent_config(params(None))
             .await
             .expect("build_agent_config");
         assert_eq!(
-            config.tool_access_policy,
+            config.tool_access_policy, None,
+            "the spawn-site policy must not absorb the profile declaration"
+        );
+        let restriction = config
+            .declared_tool_restriction
+            .clone()
+            .expect("a read-only profile declares a restriction");
+        assert!(restriction.read_only);
+        assert!(restriction.deny.is_empty());
+        assert_eq!(restriction.declared_by, "profile 'lead'");
+        assert_eq!(
+            restriction
+                .conjoin_with_launch_policy(None)
+                .expect("declaration resolves"),
             Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly),
             "a read-only profile must resolve to read-only intent with no spec policy"
         );
@@ -1627,12 +1709,16 @@ mod tests {
         // A narrow spawn request and read-only profile remain a conjunction.
         let narrow =
             meerkat_core::ops::ToolAccessPolicy::AllowList(["only_this"].into_iter().collect());
-        let config = build_agent_config(params(Some(narrow)))
+        let config = build_agent_config(params(Some(narrow.clone())))
             .await
             .expect("build_agent_config");
+        assert_eq!(config.tool_access_policy, Some(narrow.clone()));
         let effective = meerkat_core::ToolExecutionPolicy::resolve(
             config
-                .tool_access_policy
+                .declared_tool_restriction
+                .expect("declaration present")
+                .conjoin_with_launch_policy(config.tool_access_policy)
+                .expect("composed policy resolves")
                 .expect("composed policy must be present"),
         )
         .expect("composed policy resolves");
@@ -1677,6 +1763,101 @@ mod tests {
             Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
                 Default::default()
             ))
+        );
+        assert_eq!(config.declared_tool_restriction, None);
+    }
+
+    #[tokio::test]
+    async fn test_profile_deny_declares_named_restriction_with_enabled_families() {
+        let mut def = sample_definition();
+        let profile_name = ProfileName::from("lead");
+        {
+            let tools = &mut def
+                .profiles
+                .get_mut(&profile_name)
+                .and_then(|binding| binding.as_inline_mut())
+                .expect("lead profile is inline")
+                .tools;
+            tools.read_only = false;
+            tools.deny = vec!["task_create".to_string(), "send".to_string()];
+        }
+        let profile = def.profiles[&profile_name].as_inline().unwrap();
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &profile_name,
+            agent_identity: &AgentIdentity::from("lead-1"),
+            profile,
+            definition: &def,
+            external_tools: None,
+            compaction_curator_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            tool_access_policy: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+        assert_eq!(config.tool_access_policy, None);
+        let restriction = config
+            .declared_tool_restriction
+            .expect("a deny list declares a restriction");
+        assert!(!restriction.read_only);
+        assert!(restriction.deny.contains("task_create"));
+        assert!(restriction.deny.contains("send"));
+        assert_eq!(restriction.deny.len(), 2);
+        assert_eq!(
+            restriction.enabled_families,
+            enabled_tool_families(&profile.tools)
+        );
+        assert!(!restriction.enabled_families.is_empty());
+    }
+
+    #[test]
+    fn profile_vocabulary_names_mob_tools_and_declared_mcp_tool_names() {
+        let mut tools = crate::profile::ToolConfig::default();
+        let mut server = meerkat_core::mcp_config::McpServerConfig::stdio(
+            "lookup-server",
+            "lookup".to_string(),
+            Vec::new(),
+            std::collections::HashMap::new(),
+        );
+        server
+            .tool_names
+            .insert("raw_lookup".to_string(), "lookup".to_string());
+        tools.mcp_servers = vec![
+            server,
+            meerkat_core::mcp_config::McpServerConfig::stdio(
+                "unmapped",
+                "unmapped".to_string(),
+                Vec::new(),
+                std::collections::HashMap::new(),
+            ),
+        ];
+        let vocabulary = profile_tool_vocabulary(&tools);
+        // Known whether or not this profile mounts them.
+        assert!(vocabulary[&meerkat_core::ToolVocabularySource::AgentMob].contains("mob_create"));
+        assert!(
+            vocabulary[&meerkat_core::ToolVocabularySource::MobOperator].contains("spawn_member")
+        );
+        // A declared server's exposed names, never its raw operation names.
+        let declared =
+            &vocabulary[&meerkat_core::ToolVocabularySource::McpServer("lookup-server".into())];
+        assert!(declared.contains("lookup"));
+        assert!(!declared.contains("raw_lookup"));
+        // A server that maps no names declares none; deny names in no
+        // vocabulary are deferred to the gate because of it.
+        assert!(
+            !vocabulary.contains_key(&meerkat_core::ToolVocabularySource::McpServer(
+                "unmapped".into()
+            ))
+        );
+        assert_eq!(
+            deferred_mcp_servers(&tools),
+            std::collections::BTreeSet::from(["unmapped".to_string()])
         );
     }
 

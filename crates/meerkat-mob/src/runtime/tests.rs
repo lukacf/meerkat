@@ -141,11 +141,8 @@ async fn crash_stop_and_release_routes(handle: MobHandle) {
     await_supervisor_route_release(&mob_id).await;
 }
 
-fn retirement_error_cause(mut error: &MobError) -> &MobError {
-    while let MobError::SharedRetirementFailure(shared) = error {
-        error = shared.as_ref();
-    }
-    error
+fn retirement_error_cause(error: &MobError) -> &MobError {
+    error.retirement_root_cause()
 }
 
 fn is_retirement_in_progress(error: &MobError) -> bool {
@@ -191,6 +188,7 @@ fn initialized_test_peer_projection_dsl(session_id: String) -> TestMeerkatMachin
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
             session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id.clone()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
         "test::register_session",
     )
@@ -1068,7 +1066,7 @@ impl MockCommsRuntime {
         if let Some(gate) = gate
             && gate.parks(source)
         {
-            gate.barrier.boundary_calls.fetch_add(1, Ordering::Release);
+            gate.barrier.record_boundary_call();
             gate.barrier.wait_for_release().await;
         }
         let peer_id = peer.peer_id.to_string();
@@ -1370,7 +1368,10 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     .behavior
                     .read()
                     .expect("poisoned behavior lock in mock runtime");
-                if behavior.peer_lifecycle_delay_ms > 0 {
+                // The delay models topology notices (`mob.peer_*`), as the
+                // request arm below does; kickoff status notices are not
+                // topology and stay undelayed.
+                if behavior.peer_lifecycle_delay_ms > 0 && !kind.is_kickoff() {
                     let in_flight = self
                         .peer_lifecycle_in_flight
                         .fetch_add(1, Ordering::Relaxed)
@@ -1860,6 +1861,12 @@ impl MockCommsRuntime {
 struct TestRuntimeControlBarrier {
     boundary_calls: AtomicU64,
     hard_calls: AtomicU64,
+    /// Signalled (with a stored permit) each time a hard call enters the
+    /// barrier.
+    hard_entered: tokio::sync::Notify,
+    /// Signalled (with a stored permit) each time a boundary call enters the
+    /// barrier.
+    boundary_entered: tokio::sync::Notify,
     released: AtomicBool,
     release: tokio::sync::Notify,
 }
@@ -1869,9 +1876,16 @@ impl TestRuntimeControlBarrier {
         Self {
             boundary_calls: AtomicU64::new(0),
             hard_calls: AtomicU64::new(0),
+            hard_entered: tokio::sync::Notify::new(),
+            boundary_entered: tokio::sync::Notify::new(),
             released: AtomicBool::new(false),
             release: tokio::sync::Notify::new(),
         }
+    }
+
+    fn record_boundary_call(&self) {
+        self.boundary_calls.fetch_add(1, Ordering::Release);
+        self.boundary_entered.notify_one();
     }
 
     async fn wait_for_release(&self) {
@@ -1890,6 +1904,11 @@ impl TestRuntimeControlBarrier {
         self.released.store(true, Ordering::Release);
         self.release.notify_waiters();
     }
+
+    /// Resolves once a hard call has entered the barrier.
+    async fn wait_hard_call_entered(&self) {
+        self.hard_entered.notified().await;
+    }
 }
 
 struct MockSessionService {
@@ -1906,6 +1925,9 @@ struct MockSessionService {
     prepared_resume_sessions: RwLock<HashMap<SessionId, Session>>,
     resume_prepare_calls: AtomicU64,
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
+    /// Sessions whose keep-alive turn has entered its wait: the runtime has
+    /// the turn's run current (see [`Self::wait_keep_alive_turn_entered`]).
+    keep_alive_turns_entered: tokio::sync::watch::Sender<HashSet<SessionId>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     /// Optional test-only key seed for the next materialization of a durable
     /// session. The public comms name/address stay canonical; only the
@@ -2002,6 +2024,8 @@ struct MockSessionService {
     interaction_event_injector_release: tokio::sync::Notify,
     checkpointers_armed: AtomicBool,
     start_turn_calls: AtomicU64,
+    /// Bumped each time `start_turn` is entered, after `start_turn_calls`.
+    start_turns_entered: tokio::sync::watch::Sender<u64>,
     keep_alive_start_turn_calls: AtomicU64,
     non_host_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
@@ -2077,6 +2101,9 @@ struct MockSessionService {
     create_session_in_flight: AtomicU64,
     create_session_max_in_flight: AtomicU64,
     create_session_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
+    /// Parks the supervisor-publish trust install on the next created
+    /// session's comms runtime (see `park_next_session_supervisor_publish`).
+    next_session_supervisor_publish_gate: std::sync::Mutex<Option<Arc<TestRuntimeControlBarrier>>>,
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
     /// Typed turn hold: while set, every non-host `start_turn` parks until
@@ -2108,6 +2135,10 @@ struct MockSessionService {
     /// This remains independent of the machine queue gate: the exact run is
     /// already admitted when this mock-only delivery gap opens.
     pending_runtime_interrupts: RwLock<HashSet<(SessionId, meerkat_core::RunId)>>,
+    /// Exact-run boundary cancels the runtime delivered for a run, latched so
+    /// a keep-alive turn that has not parked yet still sees its cancel (the
+    /// agent reads the machine-owned flag at its boundary the same way).
+    pending_runtime_boundary_cancels: RwLock<HashSet<(SessionId, meerkat_core::RunId)>>,
     inject_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
@@ -2139,6 +2170,10 @@ struct MockSessionService {
     /// Sessions whose turn keeps winding down after an interrupt: their
     /// active flag survives `interrupt` until the test clears it.
     wind_down_held_sessions: RwLock<HashSet<SessionId>>,
+    /// Holds a session's `interrupt` in flight until released.
+    interrupt_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
+    /// One permit per interrupt that entered its gate.
+    interrupt_gate_entered: tokio::sync::Notify,
     runtime_boundary_acknowledgements: RwLock<Vec<RuntimeBoundaryAcknowledgement>>,
 }
 
@@ -2155,6 +2190,7 @@ impl MockSessionService {
             prepared_resume_sessions: RwLock::new(HashMap::new()),
             resume_prepare_calls: AtomicU64::new(0),
             keep_alive_notifiers: RwLock::new(HashMap::new()),
+            keep_alive_turns_entered: tokio::sync::watch::Sender::new(HashSet::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             comms_identity_seeds: RwLock::new(HashMap::new()),
             runtime_adapter: Mutex::new(None),
@@ -2201,6 +2237,7 @@ impl MockSessionService {
             interaction_event_injector_release: tokio::sync::Notify::new(),
             checkpointers_armed: AtomicBool::new(true),
             start_turn_calls: AtomicU64::new(0),
+            start_turns_entered: tokio::sync::watch::channel(0).0,
             keep_alive_start_turn_calls: AtomicU64::new(0),
             non_host_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
@@ -2254,6 +2291,7 @@ impl MockSessionService {
             create_session_in_flight: AtomicU64::new(0),
             create_session_max_in_flight: AtomicU64::new(0),
             create_session_gates: RwLock::new(HashMap::new()),
+            next_session_supervisor_publish_gate: std::sync::Mutex::new(None),
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
             hold_start_turns: AtomicBool::new(false),
@@ -2267,6 +2305,7 @@ impl MockSessionService {
             start_turn_interrupts: RwLock::new(HashMap::new()),
             runtime_apply_runs: RwLock::new(HashMap::new()),
             pending_runtime_interrupts: RwLock::new(HashSet::new()),
+            pending_runtime_boundary_cancels: RwLock::new(HashSet::new()),
             inject_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
@@ -2282,6 +2321,8 @@ impl MockSessionService {
             active_sessions: RwLock::new(HashSet::new()),
             activity_flags: std::sync::Mutex::new(HashMap::new()),
             wind_down_held_sessions: RwLock::new(HashSet::new()),
+            interrupt_gates: RwLock::new(HashMap::new()),
+            interrupt_gate_entered: tokio::sync::Notify::new(),
             runtime_boundary_acknowledgements: RwLock::new(Vec::new()),
         }
     }
@@ -2717,6 +2758,20 @@ impl MockSessionService {
         }
     }
 
+    /// Hold the next `interrupt` of `session_id` in flight until the returned
+    /// barrier is released; `interrupt_gate_entered` signals its entry.
+    async fn install_interrupt_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Arc<TestRuntimeControlBarrier> {
+        let gate = Arc::new(TestRuntimeControlBarrier::new());
+        self.interrupt_gates
+            .write()
+            .await
+            .insert(session_id.clone(), Arc::clone(&gate));
+        gate
+    }
+
     /// Keep `session_id`'s turn active through an interrupt, modelling a turn
     /// that is slow to wind down; the test ends it with
     /// [`Self::set_session_active`].
@@ -2736,6 +2791,15 @@ impl MockSessionService {
             .await
             .iter()
             .any(|(id, _)| id == session_id)
+    }
+
+    /// Wait until `session_id`'s keep-alive turn has entered its wait, so its
+    /// run is current in the runtime.
+    async fn wait_keep_alive_turn_entered(&self, session_id: &SessionId) {
+        let mut entered = self.keep_alive_turns_entered.subscribe();
+        let _ = entered
+            .wait_for(|entered| entered.contains(session_id))
+            .await;
     }
 
     /// Let a keep-alive (autonomous host) turn on `session_id` return the
@@ -2882,6 +2946,18 @@ impl MockSessionService {
     fn set_create_session_delay_ms(&self, delay_ms: u64) {
         self.create_session_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    /// Park the supervisor private-trust publish on the next session this
+    /// service creates (the spawn's `finalize_spawn_admit` trust stage), and
+    /// only that install: other trust traffic on the runtime proceeds.
+    fn park_next_session_supervisor_publish(&self) -> Arc<TestRuntimeControlBarrier> {
+        let gate = Arc::new(TestRuntimeControlBarrier::new());
+        *self
+            .next_session_supervisor_publish_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
     }
 
     async fn park_session_creation(&self, session_id: SessionId) -> Arc<TestRuntimeControlBarrier> {
@@ -3488,6 +3564,17 @@ impl MockSessionService {
         comms.default_name.clone_from(&comms_name);
         comms.default_address = format!("inproc://{comms_name}");
         let comms = Arc::new(comms);
+        if let Some(gate) = self
+            .next_session_supervisor_publish_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            comms.park_trust_mutations_from(
+                gate,
+                [meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish],
+            );
+        }
         let transient_turn_context_state = meerkat_core::TransientTurnContextStateHandle::new();
         let local_actor_witness_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
         let actor_witness_slot = actor_witness_slot.unwrap_or(&local_actor_witness_slot);
@@ -3568,6 +3655,7 @@ impl MockSessionService {
                         .map(|b| b.override_web_search)
                         .unwrap_or(ToolCategoryOverride::Inherit),
                     tool_access_policy: build.and_then(|b| b.tool_access_policy.clone()),
+                    spawn_tool_access_policy: None,
                     application_tool_policy: build
                         .map(|b| b.application_tool_policy.clone())
                         .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
@@ -3868,6 +3956,8 @@ impl SessionService for MockSessionService {
         // committed. Tests use this counter as the readiness signal before
         // reading those async record buffers.
         self.start_turn_calls.fetch_add(1, Ordering::Release);
+        self.start_turns_entered
+            .send_modify(|entered| *entered += 1);
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
@@ -3963,20 +4053,43 @@ impl SessionService for MockSessionService {
                     .store(true, Ordering::Release);
                 self.keep_alive_before_wait_release.notified().await;
             }
-            match interrupt_rx.as_mut() {
-                Some(interrupt_rx) => {
-                    tokio::select! {
-                        () = notifier.notified() => {}
-                        changed = interrupt_rx.changed() => {
-                            if changed.is_ok() {
-                                return Err(SessionError::Agent(
-                                    meerkat_core::error::AgentError::Cancelled,
-                                ));
+            // Register for the wake before consulting the exact-run boundary
+            // cancel latch: a cancel latched before this point is seen below,
+            // and one delivered after it reaches this waiter.
+            let woken = notifier.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            let active_runtime_run = self.runtime_apply_runs.read().await.get(id).cloned();
+            let boundary_cancelled = match active_runtime_run {
+                Some(run_id) => self
+                    .pending_runtime_boundary_cancels
+                    .write()
+                    .await
+                    .remove(&(id.clone(), run_id)),
+                None => false,
+            };
+            self.keep_alive_turns_entered.send_modify(|entered| {
+                entered.insert(id.clone());
+            });
+            if !boundary_cancelled {
+                match interrupt_rx.as_mut() {
+                    Some(interrupt_rx) => {
+                        // A hard interrupt also wakes the keep-alive notifier;
+                        // it cancels the turn, as the agent loop does.
+                        tokio::select! {
+                            biased;
+                            changed = interrupt_rx.changed() => {
+                                if changed.is_ok() {
+                                    return Err(SessionError::Agent(
+                                        meerkat_core::error::AgentError::Cancelled,
+                                    ));
+                                }
                             }
+                            () = woken.as_mut() => {}
                         }
                     }
+                    None => woken.await,
                 }
-                None => notifier.notified().await,
             }
             return Ok(mock_run_result(
                 id.clone(),
@@ -4059,6 +4172,11 @@ impl SessionService for MockSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
+        let gate = self.interrupt_gates.read().await.get(id).cloned();
+        if let Some(gate) = gate {
+            self.interrupt_gate_entered.notify_one();
+            gate.wait_for_release().await;
+        }
         if let Some(interrupt_tx) = self.start_turn_interrupts.read().await.get(id) {
             interrupt_tx.send_modify(|generation| *generation = generation.saturating_add(1));
         }
@@ -4086,6 +4204,11 @@ impl SessionService for MockSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
+        let gate = self.interrupt_gates.read().await.get(id).cloned();
+        if let Some(gate) = gate {
+            self.interrupt_gate_entered.notify_one();
+            gate.wait_for_release().await;
+        }
         if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
             notifier.notify_waiters();
             return Ok(());
@@ -5066,6 +5189,7 @@ impl MobSessionService for MockSessionService {
         };
         if let Some(barrier) = barrier {
             barrier.hard_calls.fetch_add(1, Ordering::Relaxed);
+            barrier.hard_entered.notify_one();
             barrier.wait_for_release().await;
         }
         self.pending_runtime_interrupts
@@ -5108,9 +5232,16 @@ impl MobSessionService for MockSessionService {
             None => self.runtime_control_barrier.read().await.clone(),
         };
         if let Some(barrier) = barrier {
-            barrier.boundary_calls.fetch_add(1, Ordering::Relaxed);
+            barrier.record_boundary_call();
             barrier.wait_for_release().await;
         }
+        // The runtime delivers this only for its exact current run, which may
+        // not have reached this service yet: latch it for that run before
+        // the ambient delivery below can miss a turn that has not parked.
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .insert((session_id.clone(), expected_run_id.clone()));
         let active_runs = self.runtime_apply_runs.read().await;
         if active_runs.get(session_id) != Some(expected_run_id) {
             return Err(SessionError::NotRunning {
@@ -5408,6 +5539,10 @@ impl MobSessionService for MockSessionService {
             .write()
             .await
             .remove(&(session_id.clone(), run_id.clone()));
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .remove(&(session_id.clone(), run_id.clone()));
         turn_result?;
         let receipt = meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
             run_id,
@@ -5503,6 +5638,10 @@ impl MobSessionService for MockSessionService {
             .write()
             .await
             .retain(|(candidate, _)| candidate != session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.external_tools_by_session
             .write()
@@ -5557,6 +5696,10 @@ impl MobSessionService for MockSessionService {
         self.start_turn_interrupts.write().await.remove(session_id);
         self.runtime_apply_runs.write().await.remove(session_id);
         self.pending_runtime_interrupts
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
+        self.pending_runtime_boundary_cancels
             .write()
             .await
             .retain(|(candidate, _)| candidate != session_id);
@@ -7122,6 +7265,7 @@ fn sample_definition() -> MobDefinition {
                 schedule: false,
                 image_generation: false,
                 read_only: false,
+                deny: Vec::new(),
                 mcp: vec![],
                 mcp_servers: vec![],
                 rust_bundles: vec![],
@@ -7757,6 +7901,14 @@ struct LiveExternalPeerHarness {
     drop_next_authorize_response: Arc<AtomicBool>,
     reject_next_rotation: Arc<AtomicBool>,
     advertise_rotation_observe_hold: Arc<AtomicBool>,
+    /// Whether the bind reply advertises the run-start hold (#1500).
+    advertise_run_start_hold: Arc<AtomicBool>,
+    /// `cancel_current_run` of every HoldRunStarts received.
+    run_start_holds: Arc<RwLock<Vec<bool>>>,
+    run_start_releases: Arc<AtomicUsize>,
+    /// Reject HoldRunStarts and ReleaseRunStarts as Unsupported while still
+    /// advertising the capability: a host that predates the commands (#1500).
+    reject_run_start_hold_as_unsupported: Arc<AtomicBool>,
     reject_held_rotation_observes: Arc<AtomicBool>,
     held_rotation_observes: Arc<AtomicUsize>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
@@ -7885,6 +8037,24 @@ impl LiveExternalPeerHarness {
     }
 
     /// Whether the next bind reply advertises held rotation observation.
+    fn advertise_run_start_hold(&self, advertise: bool) {
+        self.advertise_run_start_hold
+            .store(advertise, Ordering::Relaxed);
+    }
+
+    async fn run_start_holds(&self) -> Vec<bool> {
+        self.run_start_holds.read().await.clone()
+    }
+
+    fn reject_run_start_hold_as_unsupported(&self, reject: bool) {
+        self.reject_run_start_hold_as_unsupported
+            .store(reject, Ordering::Relaxed);
+    }
+
+    fn run_start_releases(&self) -> usize {
+        self.run_start_releases.load(Ordering::Relaxed)
+    }
+
     fn advertise_rotation_observe_hold(&self, advertise: bool) {
         self.advertise_rotation_observe_hold
             .store(advertise, Ordering::Relaxed);
@@ -8220,6 +8390,15 @@ async fn spawn_live_external_peer_with_transport(
     let responder_reject_next_rotation = reject_next_rotation.clone();
     let advertise_rotation_observe_hold = Arc::new(AtomicBool::new(true));
     let responder_advertise_rotation_observe_hold = advertise_rotation_observe_hold.clone();
+    let advertise_run_start_hold = Arc::new(AtomicBool::new(false));
+    let responder_advertise_run_start_hold = advertise_run_start_hold.clone();
+    let run_start_holds = Arc::new(RwLock::new(Vec::new()));
+    let responder_run_start_holds = run_start_holds.clone();
+    let run_start_releases = Arc::new(AtomicUsize::new(0));
+    let responder_run_start_releases = run_start_releases.clone();
+    let reject_run_start_hold_as_unsupported = Arc::new(AtomicBool::new(false));
+    let responder_reject_run_start_hold_as_unsupported =
+        reject_run_start_hold_as_unsupported.clone();
     let reject_held_rotation_observes = Arc::new(AtomicBool::new(false));
     let responder_reject_held_rotation_observes = reject_held_rotation_observes.clone();
     let held_rotation_observes = Arc::new(AtomicUsize::new(0));
@@ -8708,6 +8887,9 @@ async fn spawn_live_external_peer_with_transport(
                                                                     rotation_observe_hold:
                                                                         responder_advertise_rotation_observe_hold
                                                                             .load(Ordering::Relaxed),
+                                                                    run_start_hold:
+                                                                        responder_advertise_run_start_hold
+                                                                            .load(Ordering::Relaxed),
                                                                     retire_member: true,
                                                                     destroy_member: true,
                                                                     wire_member: true,
@@ -8899,6 +9081,62 @@ async fn spawn_live_external_peer_with_transport(
                                             ),
                                         )
                                         .expect("revoke ack")
+                                    }
+                                }
+                                super::bridge_protocol::BridgeCommand::HoldRunStarts(_)
+                                    if responder_reject_run_start_hold_as_unsupported
+                                        .load(Ordering::Relaxed) =>
+                                {
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeReply::Rejected {
+                                            cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                                            reason: "unknown bridge command".to_string(),
+                                        },
+                                    )
+                                    .expect("hold rejection")
+                                }
+                                super::bridge_protocol::BridgeCommand::HoldRunStarts(payload) => {
+                                    responder_run_start_holds
+                                        .write()
+                                        .await
+                                        .push(payload.cancel_current_run);
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeReply::RunStartsHeld(
+                                            super::bridge_protocol::BridgeRunStartHoldResponse {
+                                                run: super::bridge_protocol::BridgeHeldRun::NoRun,
+                                            },
+                                        ),
+                                    )
+                                    .expect("run starts held")
+                                }
+                                super::bridge_protocol::BridgeCommand::ReleaseRunStarts(_)
+                                    if responder_reject_run_start_hold_as_unsupported
+                                        .load(Ordering::Relaxed) =>
+                                {
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeReply::Rejected {
+                                            cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                                            reason: "unknown bridge command".to_string(),
+                                        },
+                                    )
+                                    .expect("release rejection")
+                                }
+                                super::bridge_protocol::BridgeCommand::ReleaseRunStarts(_) => {
+                                    // Like a real host: an unbound member refuses.
+                                    if responder_supervisor_state.read().await.is_none() {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
+                                                reason: "release run starts failed: not bound".to_string(),
+                                            },
+                                        )
+                                        .expect("release rejection")
+                                    } else {
+                                        responder_run_start_releases.fetch_add(1, Ordering::Relaxed);
+                                        serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                            super::bridge_protocol::BridgeAck { ok: true },
+                                        ))
+                                        .expect("release ack")
                                     }
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
@@ -9447,6 +9685,10 @@ async fn spawn_live_external_peer_with_transport(
         drop_next_authorize_response,
         reject_next_rotation,
         advertise_rotation_observe_hold,
+        advertise_run_start_hold,
+        run_start_holds,
+        run_start_releases,
+        reject_run_start_hold_as_unsupported,
         reject_held_rotation_observes,
         held_rotation_observes,
         supervisor_state,
@@ -9495,6 +9737,61 @@ async fn create_persistent_runtime_test_mob(
         .await
         .expect("create persistent-runtime test mob");
     (handle, service)
+}
+
+/// #1550: an explicit runtime adapter must be the session service's actual
+/// runtime owner. A cloned handle shares that owner and is accepted; a second
+/// machine over the same store is a different live owner and is refused
+/// before anything is provisioned.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn explicit_runtime_adapter_must_be_the_session_service_owner() {
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let owner = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(Arc::clone(&runtime_store))
+            .expect("construct runtime authority"),
+    );
+    let service = Arc::new(MockSessionService::new());
+    service.set_runtime_adapter(Arc::clone(&owner));
+
+    // A different outer Arc around a clone of the owner: same owner.
+    let shared_owner = Arc::new((*owner).clone());
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "runtime-owner-shared"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_runtime_adapter(shared_owner)
+    .create()
+    .await
+    .expect("a cloned handle to the service's runtime owner is accepted");
+    handle.shutdown().await.expect("shutdown test mob");
+
+    // A separately constructed machine over the exact same store.
+    let other_owner = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(Arc::clone(&runtime_store))
+            .expect("construct runtime authority"),
+    );
+    assert!(other_owner.shares_runtime_persistence_with(&owner));
+    let refused = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "runtime-owner-conflict"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_runtime_adapter(other_owner)
+    .create()
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(MobError::SessionError(SessionError::RuntimeUnavailable {
+                reason: meerkat_runtime::traits::ControllerReadinessFailure::AuthorityChanged,
+            }))
+        ),
+        "a different live runtime owner over the same store must be refused typed, got {:?}",
+        refused.err()
+    );
 }
 
 #[cfg(feature = "openai-live")]
@@ -17115,7 +17412,7 @@ async fn test_resume_retries_retirement_started_anchor_without_operator_command(
 }
 
 #[tokio::test]
-async fn test_shutdown_joins_recovered_retirement_retry_worker_before_reply() {
+async fn test_shutdown_joins_recovered_retirement_worker_before_reply() {
     let definition = with_unique_mob_id(sample_definition(), "retirement-retry-shutdown-join");
     let mob_id = definition.id.clone();
     let events = Arc::new(FaultInjectedMobEventStore::new());
@@ -17177,20 +17474,32 @@ async fn test_shutdown_joins_recovered_retirement_retry_worker_before_reply() {
     .expect("resume retirement-started anchor");
     let resumed_mob_id = resumed.mob_id().clone();
 
-    // Drive the recovered worker to its capped two-second retry delay. A
-    // detached worker would still retain its MobHandle well after Shutdown
-    // replied; actor-owned shutdown must abort and join it first.
-    tokio::time::timeout(Duration::from_secs(6), async {
-        while service.archive_call_count(&bridge_session_id).await < 8 {
-            tokio::task::yield_now().await;
+    // The recovered worker drives the durable retirement through one typed
+    // re-drive; the failing archive leaves it stuck (owned and reported)
+    // instead of retrying on a timer. Its settlement is the signal.
+    let mut changes = resumed.machine_state_changes();
+    let settled = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(mut watch) = resumed.retirement_settlement(&worker)
+                && matches!(watch.current(), RetirementSettlement::InProgress { .. })
+            {
+                break watch.settled().await;
+            }
+            if let Some(watch) = resumed.retirement_settlement(&worker)
+                && watch.current().is_settled()
+            {
+                break Some(watch.current());
+            }
+            changes.changed().await.expect("the actor is alive");
         }
     })
     .await
-    .expect("recovered retirement worker reaches capped retry delay");
+    .expect("the recovered retirement settles");
     assert!(
-        super::builder::latest_actor_owned_startup_worker_count_for_test(&resumed_mob_id) >= 2,
-        "retirement retry and remote-intent reconciler must both be live before shutdown"
+        matches!(settled, Some(RetirementSettlement::Stuck { .. })),
+        "a failing archive leaves the recovered retirement stuck: {settled:?}"
     );
+    assert!(service.archive_call_count(&bridge_session_id).await >= 1);
 
     resumed.shutdown().await.expect("shutdown resumed mob");
     let attempts_after_shutdown = service.archive_call_count(&bridge_session_id).await;
@@ -17992,6 +18301,99 @@ fn external_descriptor_from_published_member(
     .expect("published endpoint forms a consistent descriptor")
 }
 
+/// #1500: a host holds the run starts of exactly the restored members it
+/// lists (MobKit: the ones whose tools are not published yet). After a cold
+/// restart and Resume, a listed member's runtime is held from its
+/// registration and an unlisted one is not; releasing the listed member's
+/// hold through the handle lets it start runs. A non-member is
+/// MemberNotFound, and a member that does not hold the reason is an Ok no-op.
+#[tokio::test]
+async fn test_a_host_holds_exactly_the_restored_members_it_lists() {
+    let definition = with_unique_mob_id(sample_definition(), "host-holds-listed-restored");
+    let service = Arc::new(MockSessionService::new());
+    let _adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let listed = AgentIdentity::from("tools-unpublished");
+    let unlisted = AgentIdentity::from("tools-published");
+    for identity in [&listed, &unlisted] {
+        let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        handle.spawn_spec(spec).await.expect("spawn member");
+    }
+    let session_of = |entry: Option<crate::roster::RosterEntry>| {
+        entry
+            .and_then(|entry| entry.bridge_session_id().cloned())
+            .expect("session-backed member")
+    };
+    let listed_session = session_of(handle.get_member(&listed).await.expect("read listed"));
+    let unlisted_session = session_of(handle.get_member(&unlisted).await.expect("read unlisted"));
+    handle.stop().await.expect("stop before restart");
+
+    let restarted = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let adapter = restarted.enable_runtime_adapter();
+    crash_stop_and_release_routes(handle).await;
+    drop(service);
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(restarted.clone())
+    .notify_orchestrator_on_resume(false)
+    .hold_restored_member_run_starts(
+        crate::HostRunStartHoldReason::ToolsNotPublished,
+        [listed.clone()],
+    )
+    .resume()
+    .await
+    .expect("restore the stopped mob");
+    resumed.resume().await.expect("resume the restored mob");
+    assert_eq!(resumed.status().await.unwrap(), MobState::Running);
+
+    assert_eq!(
+        adapter.run_starts_held_for_test(&listed_session).await,
+        Some(true),
+        "the listed member is held from its registration"
+    );
+    assert_eq!(
+        adapter.run_starts_held_for_test(&unlisted_session).await,
+        Some(false),
+        "an unlisted member is not held"
+    );
+
+    resumed
+        .release_member_run_starts(&listed, crate::HostRunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("release the listed member");
+    assert_eq!(
+        adapter.run_starts_held_for_test(&listed_session).await,
+        Some(false),
+        "the released member starts runs again"
+    );
+    resumed
+        .release_member_run_starts(&unlisted, crate::HostRunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("releasing a member that does not hold the reason is a no-op");
+    assert!(
+        matches!(
+            resumed
+                .release_member_run_starts(
+                    &AgentIdentity::from("not-a-member"),
+                    crate::HostRunStartHoldReason::ToolsNotPublished,
+                )
+                .await,
+            Err(MobError::MemberNotFound(_))
+        ),
+        "a non-member is MemberNotFound"
+    );
+}
+
 async fn assert_stopped_restart_resume_publishes_preserved_member_peer_endpoint(cold: bool) {
     let definition = with_unique_mob_id(sample_definition(), "stopped-restart-peer-endpoint");
     let mob_id = definition.id.clone();
@@ -18715,7 +19117,7 @@ async fn test_detach_failure_defers_runtime_retire_until_correlated_retry() {
     );
 
     handle
-        .retire(identity)
+        .redrive_retirement(identity)
         .await
         .expect("retry must close detach, dispatch one correlated retire, and archive");
     assert!(matches!(
@@ -19167,6 +19569,240 @@ async fn test_rotate_supervisor_converges_with_one_held_observation() {
         external.held_rotation_observes(),
         1,
         "one held attempted-authority read answers at the terminal transition"
+    );
+}
+
+/// #1500: a remote member whose host supports the run-start hold is held by
+/// Stop through its host and released by Resume; the report says it is held.
+#[tokio::test]
+async fn test_stop_holds_a_capable_remote_member_and_resume_releases_it() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-holds-capable-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_run_start_hold(true);
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.members.get(&identity).map(|outcome| &outcome.starts),
+        Some(&crate::MemberRunStarts::Held),
+        "{report:?}"
+    );
+    assert!(
+        !external.run_start_holds().await.is_empty(),
+        "the host received the hold"
+    );
+    assert_eq!(report.not_holdable().count(), 0);
+
+    handle.resume().await.expect("resume the mob");
+    assert!(
+        external.run_start_releases() >= 1,
+        "resume released the host's hold"
+    );
+}
+
+/// #1500: a remote member whose host predates the run-start hold cannot be
+/// held; Stop reports it as not holdable instead of returning a bare Ok.
+#[tokio::test]
+async fn test_stop_reports_a_remote_member_without_the_hold_as_not_holdable() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-reports-not-holdable-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.not_holdable().collect::<Vec<_>>(),
+        vec![(&identity, &crate::NotHoldableReason::PeerLacksCapability)],
+        "{report:?}"
+    );
+    assert!(
+        external.run_start_holds().await.is_empty(),
+        "a host without the capability is never sent the hold"
+    );
+}
+
+/// #1500: a host that advertises the run-start hold but predates the commands
+/// rejects them as Unsupported. Stop reports the member as not holdable, never
+/// silently held, on every Stop, and Resume is not failed by the rejected
+/// release.
+#[tokio::test]
+async fn test_stop_reports_a_stale_capability_remote_member_as_not_holdable() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "stop-reports-stale-capability-remote-member",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_run_start_hold(true);
+    external.reject_run_start_hold_as_unsupported(true);
+    let identity = AgentIdentity::from("w-ext");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.not_holdable().collect::<Vec<_>>(),
+        vec![(&identity, &crate::NotHoldableReason::PeerLacksCapability)],
+        "{report:?}"
+    );
+    assert!(
+        external.run_start_holds().await.is_empty(),
+        "the host accepted no hold"
+    );
+
+    handle
+        .resume()
+        .await
+        .expect("a release the host rejects as Unsupported does not fail resume");
+    assert_eq!(
+        external.run_start_releases(),
+        0,
+        "the host accepted no release"
+    );
+    let report = handle.stop().await.expect("stop the mob again");
+    assert_eq!(
+        report.not_holdable().collect::<Vec<_>>(),
+        vec![(&identity, &crate::NotHoldableReason::PeerLacksCapability)],
+        "{report:?}"
+    );
+    assert!(
+        external.run_start_holds().await.is_empty(),
+        "the host accepted no hold on the second Stop either"
+    );
+}
+
+/// #1500: after a supervisor restart, a peer-only member that binds while a
+/// Stop holds the mob gets the hold on that bind, and Resume releases it.
+///
+/// MobMachine admits a member peer rebind only while Running
+/// (`AuthorizeMemberPeerRebind`), so the one window where a bind meets the
+/// Held posture is a Stop's quiesce. The test opens it with the sealed Stop
+/// quiesce verb and binds through the post-rotation adoption path, the exact
+/// bind every other path uses. The posture comes from the restored machine
+/// state, not from anything the previous process held in memory.
+#[tokio::test]
+async fn test_a_peer_binding_during_a_stop_after_a_restart_is_held_and_resume_releases_it() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "restart-bind-during-stop-held",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let (handle, _service) =
+        create_test_mob_with_real_comms_and_storage(definition.clone(), storage.clone()).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-held-restart")).await;
+    external.advertise_run_start_hold(true);
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-held-restart"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn peer-only member");
+    crash_stop_and_release_routes(handle).await;
+    external.forget_direct_member_fence().await;
+    let (resumed, _resumed_service) = resume_test_mob_with_real_comms(storage.clone()).await;
+    assert_eq!(
+        resumed.status().await.expect("restored mob status"),
+        MobState::Running
+    );
+
+    let quiesce = resumed
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::BeginStopQuiesceForTest { reply_tx })
+        .await
+        .expect("quiesce enqueue");
+    tokio::time::timeout(Duration::from_secs(10), quiesce)
+        .await
+        .expect("quiesce answered")
+        .expect("quiesce reply")
+        .expect("begin the Stop quiesce");
+    let holds_before_bind = external.run_start_holds().await.len();
+    let bound = resumed
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::BindPeerOnlyMembersForTest {
+            reply_tx,
+        })
+        .await
+        .expect("bind enqueue");
+    tokio::time::timeout(Duration::from_secs(10), bound)
+        .await
+        .expect("bind answered")
+        .expect("bind reply")
+        .expect("bind the peer-only member during the Stop");
+    assert_eq!(
+        external.run_start_holds().await.len(),
+        holds_before_bind + 1,
+        "a bind while a Stop holds the mob delivers the hold"
+    );
+
+    resumed.stop().await.expect("finish the Stop");
+    let releases_before_resume = external.run_start_releases();
+    resumed.resume().await.expect("resume the mob");
+    assert!(
+        external.run_start_releases() > releases_before_resume,
+        "resume releases the member"
     );
 }
 
@@ -21458,6 +22094,83 @@ async fn test_rotate_supervisor_final_commit_failure_preserves_attempted_authori
     assert_eq!(retried.public_peer_id, attempted_public_peer_id);
 }
 
+/// Regression (OB3): the mob actor serves other commands while one spawn's
+/// supervisor private-trust install is parked. OB3 saw a mob-phase query and
+/// five spawns go unserved for 70 s behind one `finalize_spawn_admit` whose
+/// trust stage awaited a slow member runtime on the actor. The install now
+/// runs off the actor with the spawn's endpoint observation; finalize
+/// consumes its outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parked_spawn_supervisor_trust_install_does_not_freeze_the_actor() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let gate = service.park_next_session_supervisor_publish();
+    let parked = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .spawn(
+                    ProfileName::from("worker"),
+                    AgentIdentity::from("trust-parked-worker"),
+                    None,
+                )
+                .await
+        }
+    });
+    let entered = tokio::time::timeout(Duration::from_secs(10), async {
+        while gate.boundary_calls.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        entered.is_ok(),
+        "the spawn's supervisor trust install parks"
+    );
+
+    // The actor answers a phase query and admits another spawn meanwhile.
+    let phase = tokio::time::timeout(Duration::from_secs(10), handle.status())
+        .await
+        .expect("a phase query must not wait behind a parked spawn admit")
+        .expect("phase");
+    assert_eq!(phase, MobState::Running);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        handle.spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("trust-free-worker"),
+            None,
+        ),
+    )
+    .await
+    .expect("another spawn must not wait behind a parked spawn admit")
+    .expect("spawn the second worker");
+    assert!(
+        !parked.is_finished(),
+        "the first spawn is still parked in its trust install"
+    );
+
+    gate.release_all();
+    tokio::time::timeout(Duration::from_secs(10), parked)
+        .await
+        .expect("the parked spawn completes once released")
+        .expect("spawn task")
+        .expect("spawn the parked worker");
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("trust-parked-worker"))
+            .await
+            .unwrap()
+            .is_some(),
+        "the parked worker is seated after release"
+    );
+}
+
 #[tokio::test]
 async fn test_rotate_supervisor_private_trust_failure_keeps_durable_operation_for_retry() {
     let definition = with_unique_mob_id(
@@ -22651,7 +23364,7 @@ async fn test_concurrent_terminal_lifecycle_commands_observe_live_state_drift() 
 
     let stop = {
         let handle = handle.clone();
-        tokio::spawn(async move { ("stop", handle.stop().await) })
+        tokio::spawn(async move { ("stop", handle.stop().await.map(|_| ())) })
     };
     let complete = {
         let handle = handle.clone();
@@ -23294,7 +24007,13 @@ async fn test_spawn_fails_when_tool_bundle_not_registered() {
             None,
         )
         .await;
-    assert!(matches!(result, Err(MobError::Internal(_))));
+    assert!(
+        matches!(
+            &result,
+            Err(MobError::ToolBundleUnavailable { bundle }) if bundle == "missing-bundle"
+        ),
+        "a missing bundle is the typed refusal naming it: {result:?}"
+    );
 
     assert!(handle.list_members().await.is_empty());
     let events = handle.events().replay_all().await.expect("replay");
@@ -24085,9 +24804,10 @@ async fn forker_force_cancels_only_running_members_it_owns() {
         }
     };
 
-    // force_cancel_member requests a cooperative boundary cancel of the
-    // member's in-flight run; count those requests to see which calls reached
-    // a member and which were refused before any effect.
+    // force_cancel_member covers the work the member admitted before it: a
+    // run already current gets a cooperative boundary cancel (counted here),
+    // and a run still queued is abandoned at the cancel point (its supervised
+    // run then ends at once). A refused call has neither effect.
     let before = service.cancel_after_boundary_call_count();
     assert!(
         matches!(
@@ -24105,29 +24825,33 @@ async fn forker_force_cancels_only_running_members_it_owns() {
         .await
         .expect("the forker cancels its grandchild's run");
     let after_grandchild = service.cancel_after_boundary_call_count();
-    assert!(
-        after_grandchild > before,
-        "the grandchild's run received the cancel"
-    );
+    let grandchild_run =
+        settle_force_cancelled_fork_run("grandchild", grandchild_run, after_grandchild > before)
+            .await;
     force_cancel("cancel-child")
         .await
         .expect("the forker cancels its child's run");
-    assert!(
+    let child_run = settle_force_cancelled_fork_run(
+        "child",
+        child_run,
         service.cancel_after_boundary_call_count() > after_grandchild,
-        "the child's run received the cancel"
-    );
+    )
+    .await;
     assert!(handle.get_member(&bystander).await.unwrap().is_some());
 
-    // Release the deliberately endless runs: retiring the child cascades to
-    // the grandchild, and both supervised runs then reach an outcome.
+    // Release the deliberately endless runs still in flight: retiring the
+    // child cascades to the grandchild, and each supervised run then reaches
+    // an outcome.
     handle
         .retire_with_descendants(child.clone())
         .await
         .expect("retire the cancelled subtree");
     for (member, run) in [("grandchild", grandchild_run), ("child", child_run)] {
-        tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
-            .await
-            .unwrap_or_else(|_| panic!("the retired {member} run must end"));
+        if let Some(run) = run {
+            tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+                .await
+                .unwrap_or_else(|_| panic!("the retired {member} run must end"));
+        }
     }
     assert!(handle.get_member(&grandchild).await.unwrap().is_none());
 }
@@ -24346,6 +25070,30 @@ async fn owned_member_tools_report_absent_targets_as_typed_not_found() {
             );
         }
     }
+}
+
+/// A force cancel reaches a fork child's run one of two typed ways. A run
+/// already current receives an exact boundary cancel (`boundary_cancelled`);
+/// a run still queued is abandoned at the cancel point, so its supervised run
+/// ends at once as failed. Returns the run that is still in flight.
+async fn settle_force_cancelled_fork_run(
+    member: &str,
+    run: ForkChildRun,
+    boundary_cancelled: bool,
+) -> Option<ForkChildRun> {
+    if boundary_cancelled {
+        return Some(run);
+    }
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the {member}'s run received neither a boundary cancel nor an abandonment")
+        });
+    assert!(
+        matches!(outcome, Some(ForkChildRunOutcome::Failed(_))),
+        "the {member}'s queued run was abandoned at the cancel point: {outcome:?}"
+    );
+    None
 }
 
 async fn caller_turn_fork_child(
@@ -26985,6 +27733,105 @@ async fn caller_turn_fork_on_a_service_without_durable_fork_fails_fast_mid_turn(
     gate.armed.store(false, Ordering::SeqCst);
     gate.release.notify_one();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), turn).await;
+}
+
+/// Regression (OB3 spawn stall): while a member's turn runs (here, held open
+/// as a coordinator's spawn tool call would hold it), a command parked on that
+/// member's session task (it serves none until the turn ends) must not hold
+/// the session service's map. A new member's spawn creates its session through
+/// that map and must complete while the coordinator's turn is still running,
+/// not after it ends.
+///
+/// Before the fix the spawn never completes while the turn is held; the
+/// deadline only bounds that failure, it is not a latency budget.
+#[tokio::test]
+async fn spawn_completes_while_a_member_turn_runs_with_a_command_parked_on_it() {
+    let gate = Arc::new(TurnGate::default());
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        GatedOverlayProbeSessionAgentBuilder {
+            inner: OverlayProbeSessionAgentBuilder {
+                provider_visible_tools: Arc::default(),
+                provider_turn_overlays: Arc::default(),
+                provider_call_sessions: Arc::default(),
+            },
+            gate: Arc::clone(&gate),
+        },
+        16,
+    ));
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create an ephemeral-backed mob");
+    let coordinator = AgentIdentity::from("ob3-coordinator");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), coordinator.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn the coordinator");
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let coordinator_session = handle
+        .member_status(&coordinator)
+        .await
+        .expect("coordinator status")
+        .current_session_id
+        .expect("coordinator session");
+    let member = handle
+        .member(&coordinator)
+        .await
+        .expect("coordinator handle");
+    let turn = tokio::spawn(async move {
+        member
+            .internal_turn(ContentInput::from("spawn the review workers".to_string()))
+            .await
+    });
+    gate.entered.notified().await;
+
+    // A host-side update parks on the coordinator's busy session task.
+    let parked = tokio::spawn({
+        let service = Arc::clone(&service);
+        let coordinator_session = coordinator_session.clone();
+        async move {
+            meerkat_core::service::SessionService::update_session_mob_authority_context(
+                service.as_ref(),
+                &coordinator_session,
+                None,
+            )
+            .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !parked.is_finished(),
+        "the coordinator's task is busy with its turn"
+    );
+
+    let worker = AgentIdentity::from("ob3-review-worker");
+    let mut worker_spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
+    worker_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        handle.spawn_spec(worker_spec),
+    )
+    .await
+    .expect("the worker spawn must not wait for the coordinator's turn to end")
+    .expect("spawn the worker");
+    assert!(
+        handle.get_member(&worker).await.unwrap().is_some(),
+        "the worker is seated"
+    );
+    assert!(
+        !turn.is_finished(),
+        "the coordinator's turn is still running"
+    );
+
+    gate.armed.store(false, Ordering::SeqCst);
+    gate.release.notify_one();
+    let _ = turn.await;
+    let _ = parked.await;
 }
 
 /// Regression (inheritance lost on rebuild), process-restart restore: a
@@ -33336,6 +34183,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("mob-communication")
@@ -34288,6 +35136,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
     );
     handle.stop().await.expect("stop");
     let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    external.advertise_run_start_hold(true);
     let crate::RuntimeBinding::External {
         peer_id,
         address,
@@ -34367,6 +35216,24 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         resumed.status().await.expect("resumed mob status"),
         MobState::Running
     );
+    // #1500: the peer is not bound yet, so the Resume could not release it.
+    // A supervisor restart before the peer binds must not lose that release:
+    // the restored actor starts from the durable Running phase, and the
+    // peer's bind delivers the release.
+    crash_stop_and_release_routes(resumed).await;
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("restore the running peer-only mob");
+    assert_eq!(
+        resumed.status().await.expect("restored mob status"),
+        MobState::Running,
+        "a running mob is restored running"
+    );
     assert_eq!(
         resumed
             .owner_bridge_session_lifecycle_authority()
@@ -34386,6 +35253,13 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         external.delivered_input_ids().await.len(),
         1,
         "peer-only direct turn should use request/ack delivery with one logical input admission"
+    );
+    // The peer was not bound at resume commit, and the supervisor restarted
+    // before it bound: its bind delivered the release (#1500). Every bind
+    // delivers the posture, and the release is idempotent on the host.
+    assert!(
+        external.run_start_releases() >= 1,
+        "the unbound peer's bind delivers the release across a restart"
     );
 
     let peer_member = resumed
@@ -36003,7 +36877,7 @@ async fn test_peer_only_retire_unwire_failure_retains_retry_anchor() {
     );
 
     handle
-        .retire(identity_a.clone())
+        .redrive_retirement(identity_a.clone())
         .await
         .expect("same-handle retry must converge remote trust and retirement");
     assert!(
@@ -36265,7 +37139,7 @@ async fn test_peer_only_retire_revoke_failure_retains_overlay_and_retry_anchor()
     );
 
     handle
-        .retire(identity.clone())
+        .redrive_retirement(identity.clone())
         .await
         .expect("same-actor retry must finish revoke and terminal retirement");
     assert_eq!(external.authorized_supervisor_peer_id().await, None);
@@ -36932,7 +37806,7 @@ async fn test_retire_archive_failure_is_not_silent() {
 
     service.clear_archive_failure(&session_id).await;
     handle
-        .retire(AgentIdentity::from("w-1"))
+        .redrive_retirement(AgentIdentity::from("w-1"))
         .await
         .expect("same-process retry converges after transient archive failure");
     assert!(
@@ -37010,7 +37884,7 @@ async fn test_retire_terminal_publication_failure_retains_anchor_and_retry_conve
 
     events.allow_appends_for("MemberRetired").await;
     handle
-        .retire(AgentIdentity::from("w-1"))
+        .redrive_retirement(AgentIdentity::from("w-1"))
         .await
         .expect("retry terminal publication");
     assert!(
@@ -37112,7 +37986,7 @@ async fn test_retire_trust_removal_failure_is_not_silent() {
         )
         .await;
     handle
-        .retire(AgentIdentity::from("w-1"))
+        .redrive_retirement(AgentIdentity::from("w-1"))
         .await
         .expect("same-handle retry must finish trust cleanup and retirement");
     assert!(
@@ -39225,9 +40099,9 @@ async fn retire_to_terminal_joins_a_saga_that_outlives_the_retire_budget() {
         matches!(
             &error,
             MobError::MemberRetirementInProgress { member_id, stage }
-                if member_id == &retiring && stage == "actor_retirement_saga"
+                if member_id == &retiring && stage == "retire-local-trust-cleanup"
         ),
-        "the caller budget answers the running saga typed in progress: {error:?}"
+        "the caller budget answers the running saga typed in progress at its stage: {error:?}"
     );
 
     let joined = tokio::spawn({
@@ -44871,6 +45745,74 @@ async fn test_retire_retains_late_exact_hard_cancel_rejection_and_retries() {
 }
 
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[test]
+fn test_persistent_acquisition_refuses_builder_seeded_wrong_store_owner() {
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let foreign_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service_with_owner = |owner| {
+        meerkat_session::PersistentSessionService::new(
+            PersistentMockBuilder,
+            16,
+            session_store.clone(),
+            runtime_store.clone(),
+            blob_store.clone(),
+        )
+        .with_canonical_runtime_adapter(owner)
+    };
+    let matching_owner = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent(runtime_store.clone(), blob_store.clone())
+            .expect("construct the matching runtime owner"),
+    );
+    let matching = service_with_owner(matching_owner.clone());
+    assert!(Arc::ptr_eq(
+        &matching
+            .canonical_runtime_adapter()
+            .expect("matching owner"),
+        &matching_owner,
+    ));
+    assert!(Arc::ptr_eq(
+        &MobSessionService::acquire_runtime_adapter(&matching, None)
+            .expect("acquire matching owner")
+            .expect("persistent service has an owner"),
+        &matching_owner,
+    ));
+
+    let foreign_owner = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent(foreign_store, blob_store.clone())
+            .expect("construct a distinct runtime owner"),
+    );
+    assert!(!foreign_owner.shares_runtime_store_authority(&runtime_store));
+    let mismatched = service_with_owner(foreign_owner);
+    assert!(
+        matches!(
+            mismatched.canonical_runtime_adapter(),
+            Err(
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: meerkat_runtime::traits::ControllerReadinessFailure::UnsupportedScope,
+                }
+            )
+        ),
+        "an infallible builder binding must not bypass the service's store authority"
+    );
+    assert!(
+        matches!(
+            MobSessionService::acquire_runtime_adapter(&mismatched, None),
+            Err(
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: meerkat_runtime::traits::ControllerReadinessFailure::UnsupportedScope,
+                }
+            )
+        ),
+        "implicit mob acquisition must refuse the same foreign-store owner"
+    );
+}
+
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 #[tokio::test]
 async fn test_builder_refuses_split_persistent_provisioning_and_archive_owners() {
     let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -45040,6 +45982,7 @@ async fn test_builder_rejects_runtime_adapter_with_mismatched_persistence_author
         Err(err) => err,
     };
 
+    // A different persistence authority is necessarily a different owner.
     assert!(
         matches!(
             err,
@@ -45055,6 +45998,8 @@ async fn test_builder_rejects_runtime_adapter_with_mismatched_persistence_author
 async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain() {
     let service = Arc::new(MockSessionService::new());
     let service_adapter = service.enable_runtime_adapter();
+    // The explicit adapter must be the service's runtime owner (#1550): a
+    // separately constructed machine is refused, so pass a cloned handle.
     let builder_adapter = Arc::new(service_adapter.as_ref().clone());
     assert!(!Arc::ptr_eq(&service_adapter, &builder_adapter));
     let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
@@ -45633,22 +46578,31 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
     // miss the one-shot notification, and make this fixture manufacture a
     // permanently wedged successor callback.
     service.clear_runtime_control_barrier().await;
+    let mut settlement = handle
+        .retirement_settlement(&member_id)
+        .expect("the owned retirement publishes its settlement");
+    // The actor publishes the settlement before it replies to the slot task,
+    // which removes the slot and then publishes the slot's own result. Take
+    // that publication now, while the owned retirement still holds the slot.
+    let mut slot_publication =
+        super::handle::pending_retirement_result_publication(&retirement_key)
+            .expect("the owned retirement still holds its exact singleflight slot");
+    let released = Instant::now();
     control.release_all();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match handle.retire(AgentIdentity::from(member_id.as_str())).await {
-                Ok(()) => break,
-                Err(error) if is_retirement_in_progress(&error) => {
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => {
-                    panic!("retry should converge retained Retiring authority: {error}")
-                }
-            }
-        }
-    })
-    .await
-    .expect("retry should not strand after exact callbacks release");
+    // The single owned retirement re-issues its exact-run cancel once the
+    // released control path is deliverable again and settles on that
+    // signal, well inside the lifecycle hang guard, with no second retire.
+    let settled = tokio::time::timeout(Duration::from_secs(5), settlement.settled())
+        .await
+        .expect("the owned retirement settles once exact callbacks release");
+    assert!(
+        matches!(settled, Some(crate::runtime::RetirementSettlement::Retired)),
+        "the owned retirement retires the member: {settled:?}"
+    );
+    assert!(
+        released.elapsed() < Duration::from_secs(5),
+        "settled on the released control path, not the hang guard"
+    );
     assert!(
         handle
             .get_member(&member_id)
@@ -45656,6 +46610,13 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
             .expect("read roster after retirement convergence")
             .is_none()
     );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        slot_publication.wait_for(Option::is_some),
+    )
+    .await
+    .expect("the slot task publishes its result after the actor replies")
+    .expect("the slot task publishes before dropping its sender");
     assert!(
         super::handle::retirement_result_slot_removed_check_count(&retirement_key)
             > slot_checks_before,
@@ -45763,6 +46724,173 @@ async fn test_retire_deadline_after_archive_commit_retains_anchor_and_retry_conv
             .expect("read roster after convergence")
             .is_none()
     );
+}
+
+/// Force cancel and cancel-all-work on a member whose runtime is attached but
+/// has no run (MobKit CI: "local interrupt_member failed: Runtime not ready:
+/// attached"). Both succeed: the member has no run left that the cancel is
+/// responsible for. Neither leaves a cancel behind for the member's next run:
+/// no boundary cancel is dispatched, and the next turn completes.
+#[tokio::test]
+async fn test_cancel_verbs_on_an_attached_member_without_a_run_succeed_and_leave_no_cancel() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("attached-idle-target");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn runtime-backed target");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+
+    handle
+        .force_cancel_member(member_id.clone())
+        .await
+        .expect("force cancel of an attached member without a run succeeds");
+    handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+        .await
+        .expect("cancel-all-work of an attached member without a run succeeds");
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary,
+        "no boundary cancel is dispatched for a member without a run"
+    );
+
+    let member = handle.member(&member_id).await.expect("member handle");
+    let turn = member
+        .start_turn(
+            ContentInput::Text("after the cancels".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit a turn after the cancels");
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
+        .await
+        .expect("the next turn runs")
+        .expect("the next turn completes: no cancel was left behind for it");
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary,
+        "the next turn received no leftover cancel"
+    );
+}
+
+/// Force cancel and cancel-all-work cover the work a member had admitted at
+/// the cancel point. A turn admitted before the cancel that the runtime loop
+/// has woken for but not started (here: paused before it takes the batch) is
+/// abandoned and never reaches the executor. A turn admitted after the cancel
+/// is untouched: it runs and completes.
+async fn assert_cancel_verb_covers_admitted_unstarted_work(cancel_all_work: bool) {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from(if cancel_all_work {
+        "cancel-all-work-unstarted"
+    } else {
+        "force-cancel-unstarted"
+    });
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let entry = handle
+        .get_member(&identity)
+        .await
+        .unwrap()
+        .expect("member exists");
+    let member = handle.member(&identity).await.expect("member handle");
+
+    let (queue_gap_entered, queue_gap_release) = service
+        .runtime_adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let admitted_before = member
+        .start_turn(
+            ContentInput::Text("admitted before the cancel".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit a turn before the cancel");
+    tokio::time::timeout(Duration::from_secs(30), queue_gap_entered)
+        .await
+        .expect("the runtime loop wakes for the admitted turn")
+        .expect("queue-authority hook armed");
+
+    if cancel_all_work {
+        handle
+            .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+            .await
+            .expect("cancel-all-work");
+    } else {
+        handle
+            .force_cancel_member(identity.clone())
+            .await
+            .expect("force cancel");
+    }
+    let before = tokio::time::timeout(Duration::from_secs(30), admitted_before.wait())
+        .await
+        .expect("the abandoned turn's waiter resolves");
+    assert!(
+        before.is_err(),
+        "the turn admitted before the cancel is abandoned, never completed: {before:?}"
+    );
+
+    queue_gap_release
+        .send(())
+        .expect("release the runtime loop");
+    let admitted_after = member
+        .start_turn(
+            ContentInput::Text("admitted after the cancel".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit a turn after the cancel");
+    tokio::time::timeout(Duration::from_secs(30), admitted_after.wait())
+        .await
+        .expect("the turn admitted after the cancel runs")
+        .expect("the turn admitted after the cancel completes");
+    assert_eq!(
+        service
+            .applied_runtime_contributing_input_ids(&session_id)
+            .await
+            .len(),
+        1,
+        "only the turn admitted after the cancel reached the executor"
+    );
+}
+
+#[tokio::test]
+async fn test_force_cancel_abandons_admitted_unstarted_work_and_spares_later_work() {
+    assert_cancel_verb_covers_admitted_unstarted_work(false).await;
+}
+
+#[tokio::test]
+async fn test_cancel_all_work_abandons_admitted_unstarted_work_and_spares_later_work() {
+    assert_cancel_verb_covers_admitted_unstarted_work(true).await;
 }
 
 #[tokio::test]
@@ -50696,6 +51824,42 @@ fn authority_backed_root_frame_run(
     (run, frame_id, loop_instance_id)
 }
 
+/// A flow bookkeeping input reaching a Stopped mob leaves it Stopped (#1500
+/// follow-up). The flow reducer authorizations used to share one arm guarded on
+/// Running || Stopped || Completed with `to Running`, so a late StartRun
+/// authorization on a mob stopped by Shutdown moved it back to Running,
+/// silently undoing the stop and stranding member run-start holds.
+#[test]
+fn a_late_flow_authorization_on_a_stopped_mob_leaves_it_stopped() {
+    use crate::ids::RunId;
+    use crate::machines::mob_machine::{
+        MobMachineAuthority, MobMachineInput, MobMachineMutator, MobPhase,
+    };
+    use crate::run::MobMachineFlowRunCommand;
+
+    let definition = sample_definition_with_single_step_flow(60_000, 8);
+    let config = crate::run::FlowRunConfig::from_definition(FlowId::from("demo"), &definition)
+        .expect("flow config");
+    let run_id = RunId::new();
+    let mut authority = MobMachineAuthority::new();
+    apply_authority_input_for_test(
+        &mut authority,
+        MobRun::run_flow_input(&run_id, &config).expect("run flow input"),
+    );
+    MobMachineMutator::apply(&mut authority, MobMachineInput::Shutdown)
+        .expect("shutdown stops the mob");
+    assert_eq!(authority.state().lifecycle_phase, MobPhase::Stopped);
+
+    let start = MobMachineFlowRunCommand::StartRun(crate::run::flow_run::inputs::StartRun {});
+    MobMachineMutator::apply(&mut authority, start.authority_input(&run_id))
+        .expect("the late flow authorization is still accepted");
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        MobPhase::Stopped,
+        "a flow bookkeeping input never moves a Stopped mob to Running"
+    );
+}
+
 fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
     use crate::ids::RunId;
     use crate::run::{
@@ -53659,12 +54823,12 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
         MobState::Stopped,
         "stop should transition mob to Stopped"
     );
-    // Stop notifies the orchestrator (autonomous lead) via inject (+1).
-    // Total inject count: 0 (no spawn inject) + 1 (stop notification) = 1.
+    // Stop pauses the orchestrator with the rest of the mob (#1500), so it
+    // sends no lifecycle notice; Resume notifies it.
     assert_eq!(
         service.inject_call_count(),
-        1,
-        "stop should have notified the orchestrator via inject"
+        0,
+        "stop sends the orchestrator no lifecycle notice"
     );
 
     // A fail-closed service discard can remove the exact actor while leaving
@@ -53733,7 +54897,7 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
     // contract does inject one informational coordinator notification.
     assert_eq!(
         service.inject_call_count(),
-        2,
+        1,
         "resume should add exactly one coordinator lifecycle notification"
     );
 }
@@ -55293,7 +56457,7 @@ async fn whole_crew_resume_repoint_moves_parent_owned_worker_to_successor_sessio
 }
 
 #[tokio::test]
-async fn test_stop_notifies_every_active_orchestrator_profile_member() {
+async fn test_lifecycle_notice_reaches_every_active_orchestrator_profile_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;
 
     for identity in ["lead-one", "lead-two"] {
@@ -55313,14 +56477,19 @@ async fn test_stop_notifies_every_active_orchestrator_profile_member() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let baseline = service.inject_call_count();
 
-    handle.stop().await.expect("stop");
+    // Stop sends no lifecycle notice (#1500); lifecycle delivery itself
+    // still fans out to every active orchestrator-profile member.
+    handle
+        .debug_lifecycle_notification_burst(1, "lifecycle notice")
+        .await
+        .expect("lifecycle notice");
     tokio::time::timeout(Duration::from_secs(2), async {
         while service.inject_call_count() < baseline + 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("stop notification should reach every active orchestrator-profile member");
+    .expect("lifecycle notification should reach every active orchestrator-profile member");
 
     assert_eq!(
         service.inject_call_count(),
@@ -57357,8 +58526,7 @@ impl RealCommsSessionService {
                     meerkat_core::PeerInputClass::PeerLifecycleAdded
                         | meerkat_core::PeerInputClass::PeerLifecycleRetired
                         | meerkat_core::PeerInputClass::PeerLifecycleUnwired
-                        | meerkat_core::PeerInputClass::PeerLifecycleKickoffFailed
-                        | meerkat_core::PeerInputClass::PeerLifecycleKickoffCancelled
+                        | meerkat_core::PeerInputClass::PeerLifecycleKickoff
                 ) {
                     // Direct comms tests deliberately inspect other volatile
                     // interactions through the public inbox API. Retain that
@@ -57520,6 +58688,7 @@ impl RealCommsSessionService {
                             .unwrap_or(ToolCategoryOverride::Inherit),
                         tool_access_policy: build
                             .and_then(|options| options.tool_access_policy.clone()),
+                        spawn_tool_access_policy: None,
                         application_tool_policy: build
                             .map(|options| options.application_tool_policy.clone())
                             .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
@@ -58480,6 +59649,8 @@ struct RuntimeBackedRealCommsSessionService {
     append_system_context_delay_ms: AtomicU64,
     block_runtime_turns: AtomicBool,
     fail_runtime_turns: AtomicBool,
+    /// Make the turn-boundary session archive fail (retirement stage error).
+    fail_archive: AtomicBool,
     fail_runtime_boundary_acknowledgement: AtomicBool,
     return_extraction_failure: AtomicBool,
     return_exact_run_result: AtomicBool,
@@ -58508,10 +59679,17 @@ struct RuntimeBackedRealCommsSessionService {
     applied_runtime_contributing_input_ids:
         RwLock<HashMap<SessionId, Vec<Vec<meerkat_core::InputId>>>>,
     turn_finalization_gate: std::sync::RwLock<Option<Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-session turn-finalization gates; a session's own gate takes
+    /// precedence over the service-wide one.
+    session_turn_finalization_gates:
+        std::sync::RwLock<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     /// Calls to `acquire_runtime_turn_finalization_guard`, published before
     /// the call waits on the gate.
     turn_finalization_guard_requests: tokio::sync::watch::Sender<u64>,
     active_runtime_runs: RwLock<HashMap<SessionId, meerkat_core::RunId>>,
+    /// Exact-run boundary cancels, latched for their run (see
+    /// `MockSessionService::pending_runtime_boundary_cancels`).
+    pending_runtime_boundary_cancels: RwLock<HashSet<(SessionId, meerkat_core::RunId)>>,
 }
 
 impl RuntimeBackedRealCommsSessionService {
@@ -58530,6 +59708,7 @@ impl RuntimeBackedRealCommsSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             append_system_context_delay_ms: AtomicU64::new(0),
             block_runtime_turns: AtomicBool::new(false),
+            fail_archive: AtomicBool::new(false),
             fail_runtime_turns: AtomicBool::new(false),
             fail_runtime_boundary_acknowledgement: AtomicBool::new(false),
             return_extraction_failure: AtomicBool::new(false),
@@ -58550,8 +59729,10 @@ impl RuntimeBackedRealCommsSessionService {
             runtime_event_delta_count: AtomicU64::new(1),
             applied_runtime_contributing_input_ids: RwLock::new(HashMap::new()),
             turn_finalization_gate: std::sync::RwLock::new(None),
+            session_turn_finalization_gates: std::sync::RwLock::new(HashMap::new()),
             turn_finalization_guard_requests: tokio::sync::watch::channel(0).0,
             active_runtime_runs: RwLock::new(HashMap::new()),
+            pending_runtime_boundary_cancels: RwLock::new(HashSet::new()),
         }
     }
 
@@ -58674,6 +59855,10 @@ impl RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.runtime_turn_content_barriers
             .write()
             .await
@@ -58697,6 +59882,10 @@ impl RuntimeBackedRealCommsSessionService {
     fn set_append_system_context_delay_ms(&self, delay_ms: u64) {
         self.append_system_context_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn set_fail_archive(&self, enabled: bool) {
+        self.fail_archive.store(enabled, Ordering::Relaxed);
     }
 
     fn set_block_runtime_turns(&self, enabled: bool) {
@@ -58769,6 +59958,20 @@ impl RuntimeBackedRealCommsSessionService {
     fn set_runtime_event_delta_count(&self, count: u64) {
         self.runtime_event_delta_count
             .store(count, Ordering::Relaxed);
+    }
+
+    /// Install a turn-finalization gate for one session only, so holding it
+    /// does not block any other session's boundary.
+    fn install_session_turn_finalization_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        self.session_turn_finalization_gates
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::clone(&gate));
+        gate
     }
 
     fn install_non_reentrant_turn_finalization_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
@@ -59299,6 +60502,13 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
+        if self.fail_archive.load(Ordering::Relaxed) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "injected session archive failure".to_string(),
+                ),
+            ));
+        }
         self.archive_with_mob_lifecycle_authority(session_id).await
     }
 
@@ -59328,16 +60538,23 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
 
     async fn acquire_runtime_turn_finalization_guard(
         &self,
-        _session_id: &SessionId,
+        session_id: &SessionId,
     ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
     {
         self.turn_finalization_guard_requests
             .send_modify(|requests| *requests += 1);
-        let gate = self
-            .turn_finalization_gate
+        let session_gate = self
+            .session_turn_finalization_gates
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .get(session_id)
+            .cloned();
+        let gate = session_gate.or_else(|| {
+            self.turn_finalization_gate
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
         match gate {
             Some(gate) => Ok(Box::new(gate.lock_owned().await)),
             None => Ok(Box::new(())),
@@ -59385,6 +60602,12 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         expected_run_id: &meerkat_core::RunId,
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
+        // Latch the exact-run cancel for a run that has not reached this
+        // service yet (see `MockSessionService`).
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .insert((session_id.clone(), expected_run_id.clone()));
         let active_runs = self.active_runtime_runs.read().await;
         if active_runs.get(session_id) != Some(expected_run_id) {
             return Err(SessionError::NotRunning {
@@ -59595,14 +60818,20 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         }
 
         let block_all_runtime_turns = self.block_runtime_turns.load(Ordering::Relaxed);
-        if block_all_runtime_turns {
-            self.runtime_turn_started.notify_waiters();
-        }
-        if let Some(barrier) = &content_barrier {
-            barrier.entered.notify_one();
-        }
         if block_all_runtime_turns || content_barrier.is_some() {
-            self.release_runtime_turns.notified().await;
+            // Register for the release before announcing the turn: a test
+            // that releases as soon as it sees the announcement must reach
+            // this waiter. `notify_waiters` wakes only registered waiters.
+            let release = self.release_runtime_turns.notified();
+            tokio::pin!(release);
+            release.as_mut().enable();
+            if block_all_runtime_turns {
+                self.runtime_turn_started.notify_waiters();
+            }
+            if let Some(barrier) = &content_barrier {
+                barrier.entered.notify_one();
+            }
+            release.await;
         }
 
         if self.fail_runtime_turns.load(Ordering::Relaxed) {
@@ -59623,10 +60852,27 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 .keep_alive_turns_complete_immediately
                 .load(Ordering::Relaxed)
         {
-            notifier.notified().await;
+            // Register before consulting this run's boundary cancel latch: a
+            // cancel latched before this point is seen here, and one
+            // delivered after it reaches this waiter.
+            let woken = notifier.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            let boundary_cancelled = self
+                .pending_runtime_boundary_cancels
+                .write()
+                .await
+                .remove(&(session_id.clone(), run_id.clone()));
+            if !boundary_cancelled {
+                woken.await;
+            }
         }
 
         self.active_runtime_runs.write().await.remove(session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .remove(&(session_id.clone(), run_id.clone()));
 
         let inject_boundary_acknowledgement_failure = self
             .fail_runtime_boundary_acknowledgement
@@ -59715,6 +60961,10 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.pending_runtime_boundary_cancels
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.runtime_turn_content_barriers
             .write()
             .await
@@ -62766,6 +64016,7 @@ async fn test_member_reads_bypass_saturated_actor_command_queue() {
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
+                redrive: false,
                 expected_incarnation: super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -62885,6 +64136,7 @@ async fn test_retire_saturated_actor_queue_reports_not_admitted_without_authorit
         .try_send(super::scope_gate::RoutedMobCommand::internal(
             super::state::MobCommand::Retire {
                 agent_identity: queued_identity.clone(),
+                redrive: false,
                 expected_incarnation: super::state::RetireMemberIncarnation {
                     agent_identity: queued_identity.clone(),
                     agent_runtime_id: AgentRuntimeId::new(queued_identity, queued_generation),
@@ -63040,10 +64292,20 @@ async fn test_shutdown_releases_the_supervisor_name_for_a_same_id_successor() {
     drop(first);
 }
 
+/// Failure-only bound for the busy-turn actor tests. Their busy turn is held
+/// by the mock executor's typed hold (`hold_start_turns`), not a delay, so
+/// the operations under test succeed whatever the host load. This bound only
+/// turns a parked actor (an operation waiting behind the held turn) into a
+/// failure instead of a hang.
+const ACTOR_DEADLOCK_BOUND: Duration = Duration::from_secs(60);
+
+/// The lead's turn is held by the mock executor's typed hold. A steer sent
+/// mid-turn is admitted (its delivery receipt returns) while the turn is
+/// still held, and an unrelated spawn after it also completes: the steer must
+/// not park the mob actor.
 #[tokio::test]
 async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    service.set_start_turn_delay_ms(600_000);
 
     handle
         .spawn_with_options(
@@ -63056,6 +64318,8 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
         .await
         .expect("spawn turn-driven lead");
 
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
     handle
         .member(&AgentIdentity::from("lead-busy"))
         .await
@@ -63067,14 +64331,10 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
         )
         .await
         .expect("first turn should be admitted");
-
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while service.start_turn_call_count() == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("runtime should start the long-running turn");
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, held.wait_for(|entries| *entries >= 1))
+        .await
+        .expect("runtime should start the held turn")
+        .expect("held-turn signal stays open");
 
     let steer_member = handle
         .member(&AgentIdentity::from("lead-busy"))
@@ -63089,11 +64349,22 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
             )
             .await
     });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The actor's typed admission reply: the steer's delivery receipt
+    // returns while the turn is still held, before the unrelated spawn is
+    // sent.
+    let steer_receipt = tokio::time::timeout(ACTOR_DEADLOCK_BOUND, steer_task)
+        .await
+        .expect("the actor should admit the queued steer while the turn is held")
+        .expect("steer task should not panic")
+        .expect("queued steer should be admitted");
+    assert_eq!(
+        steer_receipt.handling_mode,
+        HandlingMode::Steer,
+        "the steer is admitted as a steer, not demoted to a queued turn"
+    );
 
     tokio::time::timeout(
-        Duration::from_millis(250),
+        ACTOR_DEADLOCK_BOUND,
         handle.spawn_with_options(
             ProfileName::from("worker"),
             AgentIdentity::from("worker-after-steer"),
@@ -63105,8 +64376,13 @@ async fn test_queued_steer_during_running_turn_does_not_block_actor_commands() {
     .await
     .expect("queued steer admission must not park the mob actor")
     .expect("unrelated actor command should still be processed");
+    assert_eq!(
+        *held.borrow(),
+        1,
+        "the spawn completed while the lead's turn was still held"
+    );
 
-    steer_task.abort();
+    service.release_held_start_turns();
 }
 
 #[tokio::test]
@@ -65999,15 +67275,30 @@ async fn test_stalled_member_status_reads_release_capacity_at_the_drain_ceiling(
     };
     let (handle, service) = create_test_mob(sample_definition()).await;
     let live = AgentIdentity::from("status-live");
+    // Turn-driven members: no autonomous turn runs on the runtime loops'
+    // threads, so the paused clock below cannot auto-advance past a bound
+    // while the test runtime waits on work running elsewhere.
     handle
-        .spawn(ProfileName::from("worker"), live.clone(), None)
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            live.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
         .await
         .expect("spawn live member");
     let mut stalled = Vec::new();
     for index in 0..MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS {
         let identity = AgentIdentity::from(format!("status-stalled-{index}"));
         let session_id = handle
-            .spawn(ProfileName::from("worker"), identity.clone(), None)
+            .spawn_with_options(
+                ProfileName::from("worker"),
+                identity.clone(),
+                None,
+                Some(crate::MobRuntimeMode::TurnDriven),
+                None,
+            )
             .await
             .expect("spawn stalled member")
             .bridge_session_id()
@@ -68240,6 +69531,41 @@ async fn test_reset_failure_from_stopped_stays_stopped() {
     );
 }
 
+/// #1500: Stop does not send the orchestrator an "is stopping" notice (its run
+/// starts are held, so it could only read it after Resume); Resume tells it
+/// the pause happened.
+#[tokio::test]
+async fn test_resume_tells_the_orchestrator_about_the_stop_and_stop_does_not() {
+    let def = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(def, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let baseline_injects = service.inject_call_count();
+    handle.stop().await.expect("stop");
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects,
+        "Stop sends the orchestrator no lifecycle notice"
+    );
+
+    handle.resume().await.expect("resume");
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects + 1,
+        "Resume tells the orchestrator the mob resumed"
+    );
+    handle.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     // Create a definition with a TurnDriven orchestrator so lifecycle
@@ -68268,14 +69594,16 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
         .await
         .expect("spawn lead");
 
-    // Make start_turn hang for 10 minutes — simulates a stuck backend.
+    // Make start_turn hang for 10 minutes (a stuck backend), then fire a
+    // lifecycle notification: it is spawned onto the JoinSet, so it becomes a
+    // lifecycle task that does not finish on its own. (Stop no longer sends
+    // one, #1500, and Resume awaits its own notice.)
     service.set_start_turn_delay_ms(600_000);
     let baseline_start_turn_calls = service.start_turn_call_count();
-
-    // Stop the mob. This fires a lifecycle notification that will hang
-    // in start_turn due to the delay. The notification is spawned onto
-    // the JoinSet, so stop itself returns immediately.
-    handle.stop().await.expect("stop");
+    handle
+        .debug_lifecycle_notification_burst(1, "lifecycle notice")
+        .await
+        .expect("fire the lifecycle notice");
     wait_for_start_turn_call_count(
         service.as_ref(),
         baseline_start_turn_calls + 1,
@@ -68294,115 +69622,57 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     shutdown_result.unwrap().expect("shutdown should succeed");
 }
 
-#[tokio::test]
+/// #1494: two typed `LifecycleOperationPending` refusals of Shutdown are
+/// answered without a retry cadence. The first is re-issued at once; the
+/// repeat waits for the machine's next commit, and that commit (not a timer)
+/// re-issues the Shutdown that then succeeds.
+#[tokio::test(start_paused = true)]
 async fn test_shutdown_level_triggers_owned_runtime_unregister_pending() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let (command_tx, mut command_rx) =
         tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
+    let state = handle.machine_state_watch_rx.borrow().clone();
+    let (state_tx, state_rx) = tokio::sync::watch::channel(state.clone());
     let retrying_handle = MobHandle {
         command_tx,
+        machine_state_watch_rx: state_rx,
         ..handle.clone()
     };
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let responder_attempts = Arc::clone(&attempts);
-    let responder = tokio::spawn(async move {
-        while let Some(routed) = command_rx.recv().await {
-            let super::state::MobCommand::Shutdown { reply_tx } = routed.cmd else {
-                panic!("shutdown retry fixture received a non-shutdown command");
-            };
-            let attempt = responder_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            let result = if attempt < 3 {
-                Err(MobError::LifecycleOperationPending {
-                    intent: "shutdown_runtime_unregister".to_string(),
-                })
-            } else {
-                Ok(())
-            };
-            let _ = reply_tx.send(result);
-            if attempt == 3 {
-                break;
-            }
-        }
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), retrying_handle.shutdown())
+    let shutdown = tokio::spawn(async move { retrying_handle.shutdown().await });
+    let mut attempts = 0;
+    let mut answer = |routed: Option<super::scope_gate::RoutedMobCommand>,
+                      result: Result<(), MobError>| {
+        let routed = routed.expect("shutdown command");
+        let super::state::MobCommand::Shutdown { reply_tx, .. } = routed.cmd else {
+            panic!("shutdown fixture received a non-shutdown command");
+        };
+        attempts += 1;
+        let _ = reply_tx.send(result);
+    };
+    let pending = || {
+        Err(MobError::LifecycleOperationPending {
+            intent: "shutdown_runtime_unregister".to_string(),
+        })
+    };
+    answer(command_rx.recv().await, pending());
+    answer(command_rx.recv().await, pending());
+    // Run until idle: the repeated refusal parks on the state watch.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "the repeated refusal is not re-sent before the machine commits"
+    );
+    state_tx.send_replace(state);
+    answer(command_rx.recv().await, Ok(()));
+    shutdown
         .await
-        .expect("shutdown retries remain bounded")
+        .expect("shutdown task joins")
         .expect("shutdown joins retained unregister authority");
     assert_eq!(
-        attempts.load(Ordering::SeqCst),
-        3,
-        "two typed pending observations must be level-triggered before terminal success"
+        attempts, 3,
+        "two typed pending observations, then the committed transition, then success"
     );
-    responder.await.expect("shutdown retry responder joins");
     handle.shutdown().await.expect("clean up real mob actor");
-}
-
-#[tokio::test]
-async fn test_shutdown_retry_stops_member_spawned_after_unregister_admission() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
-    let adapter = service.enable_runtime_adapter();
-    let first_identity = AgentIdentity::from("shutdown-stage-a");
-    let mut first_spec = SpawnMemberSpec::new("worker", first_identity.as_str());
-    first_spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
-    handle
-        .spawn_spec(first_spec)
-        .await
-        .expect("spawn first autonomous member");
-    let first_session = handle
-        .resolve_bridge_session_id(&first_identity)
-        .await
-        .expect("first member bridge session");
-
-    let admission_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match handle.shutdown_once_for_test().await {
-            Err(MobError::LifecycleOperationPending { intent })
-                if intent == "shutdown_runtime_unregister" =>
-            {
-                break;
-            }
-            Err(
-                MobError::AutonomousStopInterruptsPending { .. }
-                | MobError::PlacedCompletionCleanupPending { .. }
-                | MobError::PlacedKickoffCleanupPending { .. },
-            ) => {
-                assert!(
-                    Instant::now() < admission_deadline,
-                    "first shutdown must reach exact unregister admission"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            result => panic!(
-                "first shutdown must retain exact unregister authority before interleaving spawn, got {result:?}"
-            ),
-        }
-    }
-
-    let second_identity = AgentIdentity::from("shutdown-stage-b");
-    let mut second_spec = SpawnMemberSpec::new("worker", second_identity.as_str());
-    second_spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
-    handle
-        .spawn_spec(second_spec)
-        .await
-        .expect("spawn interleaved autonomous member");
-    let second_session = handle
-        .resolve_bridge_session_id(&second_identity)
-        .await
-        .expect("second member bridge session");
-
-    tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-        .await
-        .expect("shutdown retry remains bounded")
-        .expect("shutdown retry stops the interleaved member and converges");
-    assert!(
-        !adapter.contains_session(&first_session).await,
-        "first exact registration must remain unregistered"
-    );
-    assert!(
-        !adapter.contains_session(&second_session).await,
-        "interleaved member must not escape the repeated stop scan"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -68652,7 +69922,7 @@ async fn test_retire_final_event_append_failure_retries_on_same_actor() {
 
     events.allow_appends_for("MemberRetired").await;
     handle
-        .retire(identity.clone())
+        .redrive_retirement(identity.clone())
         .await
         .expect("same-actor retry must accept existing archive authority");
     assert!(
@@ -68930,7 +70200,7 @@ async fn test_autonomous_retire_retry_after_archive_unregister_closes_kickoff_qu
 
     events.allow_appends_for("MemberRetired").await;
     handle
-        .retire(identity.clone())
+        .redrive_retirement(identity.clone())
         .await
         .expect("retry must tolerate the already-absent comms drain");
     assert!(
@@ -75049,6 +76319,9 @@ async fn test_wire_external_peer_not_blocked_by_delayed_turn_driven_submit_work(
         .expect("submit_work should be accepted");
 }
 
+/// The internal turn is held by the mock executor's typed hold. Listing and
+/// spawning must complete while it is still held: neither may wait behind
+/// the turn's TurnCompleted reply.
 #[tokio::test]
 async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -75064,9 +76337,8 @@ async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
         .await
         .expect("spawn turn-driven lead");
 
-    let baseline_start_turn_calls = service.start_turn_call_count();
-    service.set_start_turn_delay_ms(250);
-
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
     let turn_handle = handle.clone();
     let turn_identity = AgentIdentity::from(member_id.as_str());
     let internal_turn = tokio::spawn(async move {
@@ -75076,25 +76348,20 @@ async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
             .internal_turn("long internal turn")
             .await
     });
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while service.start_turn_call_count() < baseline_start_turn_calls + 1 {
-        assert!(
-            Instant::now() < deadline,
-            "delayed internal turn should reach the runtime executor"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, held.wait_for(|entries| *entries >= 1))
+        .await
+        .expect("held internal turn should reach the runtime executor")
+        .expect("held-turn signal stays open");
 
     tokio::time::timeout(
-        Duration::from_millis(100),
+        ACTOR_DEADLOCK_BOUND,
         handle.list_members_including_retiring(),
     )
     .await
     .expect("member listing must not wait behind TurnCompleted runtime completion");
 
     tokio::time::timeout(
-        Duration::from_millis(100),
+        ACTOR_DEADLOCK_BOUND,
         handle.spawn(
             ProfileName::from("worker"),
             AgentIdentity::from("worker-after-internal-turn"),
@@ -75104,10 +76371,15 @@ async fn test_internal_turn_completed_reply_does_not_block_actor_operations() {
     .await
     .expect("spawn must not wait behind TurnCompleted runtime completion")
     .expect("spawn worker while internal turn is still running");
+    assert!(
+        !internal_turn.is_finished(),
+        "listing and spawning completed while the internal turn was still held"
+    );
 
-    tokio::time::timeout(Duration::from_secs(2), internal_turn)
+    service.release_held_start_turns();
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, internal_turn)
         .await
-        .expect("internal_turn should complete once the runtime turn completes")
+        .expect("internal_turn should complete once the held turn is released")
         .expect("internal_turn task should not panic")
         .expect("internal_turn result should succeed");
 }
@@ -77944,6 +79216,11 @@ fn mob_runtime_parity_field_value(
         )),
         "placed_completion_dispatch_sequence" => Some(MobRuntimeParityExprValue::U64(0)),
         "placed_completion_lifecycle_quiescing" => Some(MobRuntimeParityExprValue::Bool(false)),
+        // A Stopped mob holds member run starts (invariant
+        // stopped_mob_holds_member_run_starts); the snapshot carries the phase.
+        "member_run_starts_held" => {
+            Some(MobRuntimeParityExprValue::Bool(snapshot.phase == "Stopped"))
+        }
         "placed_completion_lifecycle_intent" => Some(MobRuntimeParityExprValue::None),
         "pending_placed_completion_outcomes"
         | "cancel_requested_placed_completion_outcomes"
@@ -78296,6 +79573,8 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::HostCapabilityContractViolation { .. } => {
             "host_capability_contract_violation".to_string()
         }
+        MobError::RuntimeOwnerConflict => "runtime_owner_conflict".to_string(),
+        MobError::ToolBundleUnavailable { bundle } => format!("tool_bundle_unavailable:{bundle}"),
         MobError::Internal(reason) => format!("internal:{reason}"),
         MobError::ScopeDenied(denial) => format!("scope_denied:{:?}", denial.required),
         MobError::FlowStepDispatchRejected { kind, .. } => {
@@ -78327,6 +79606,12 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::ForkedParticipantAttachmentReleaseUnproven { .. } => {
             "forked_participant_attachment_release_unproven".to_string()
+        }
+        MobError::MemberRetirementStuck { stage, .. } => {
+            format!("member_retirement_stuck:{stage}")
+        }
+        MobError::RetirementInterrupted { stage, .. } => {
+            format!("retirement_interrupted:{stage}")
         }
     }
 }
@@ -78794,7 +80079,7 @@ async fn mob_runtime_parity_execute_probe(
             .handle
             .stop()
             .await
-            .map(|()| summarize_mob_runtime_success(probe, "unit")),
+            .map(|_| summarize_mob_runtime_success(probe, "unit")),
         MobRuntimeParityProbeInput::Resume => fixture
             .handle
             .resume()
@@ -81076,6 +82361,45 @@ fn kickoff_notice_intent_delivers_every_machine_emitted_phase() {
     );
 }
 
+/// #1608: every kickoff notice leaves the sender as a one-way
+/// `PeerLifecycle` command of the matching typed kind, never as a peer
+/// request (a request opened an inbound request on each receiver that nobody
+/// answered). `mob.peer_added` keeps its existing request carrier.
+#[test]
+fn kickoff_notices_are_sent_as_typed_lifecycle_notices_not_requests() {
+    use crate::machines::mob_machine::KickoffIntent;
+
+    for intent in [
+        KickoffIntent::Pending,
+        KickoffIntent::Starting,
+        KickoffIntent::Started,
+        KickoffIntent::CallbackPending,
+        KickoffIntent::Failed,
+        KickoffIntent::Cancelled,
+    ] {
+        let tag = super::actor::MobActor::kickoff_notice_intent(intent);
+        let kind = super::actor::MobActor::peer_lifecycle_notice_kind(tag)
+            .unwrap_or_else(|| panic!("kickoff notice {tag} must be sent as a lifecycle notice"));
+        assert!(
+            kind.is_kickoff(),
+            "{tag} must map to a kickoff lifecycle kind"
+        );
+        assert_eq!(
+            kind.as_str(),
+            tag,
+            "the lifecycle kind must carry the notice tag"
+        );
+    }
+    assert_eq!(
+        super::actor::MobActor::peer_lifecycle_notice_kind("mob.peer_retired"),
+        Some(meerkat_core::comms::PeerLifecycleKind::PeerRetired)
+    );
+    assert_eq!(
+        super::actor::MobActor::peer_lifecycle_notice_kind("mob.peer_added"),
+        None
+    );
+}
+
 // ===========================================================================
 // 0.7.2 disciplined shell inputs — L5 (mob-kickoff/spawn waiters vs teardown)
 //
@@ -81223,6 +82547,127 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
     );
 }
 
+/// Retiring a member whose autonomous kickoff is in flight records the kickoff
+/// as Cancelled when the retirement is admitted, before any runtime teardown.
+/// The teardown can end the kickoff input (abandoned or terminated) and the
+/// kickoff waiter then delivers that outcome. Here the outcome is delivered
+/// while retirement is wedged inside its runtime quiesce, the window it used
+/// to land in before Cancelled was recorded. It is a late-arrival no-op: the
+/// kickoff is never recorded Failed, and no failure is persisted (notices are
+/// effects of the same committed transitions).
+#[tokio::test]
+async fn test_retire_records_kickoff_cancelled_before_runtime_teardown() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(sample_definition(), storage.clone())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    service.set_start_turn_delay_ms(600_000);
+    let mut turns_entered = service.start_turns_entered.subscribe();
+    let entered_before = *turns_entered.borrow_and_update();
+    let member = AgentIdentity::from("lead-kickoff-retired");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn autonomous lead");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        turns_entered.wait_for(|entered| *entered > entered_before),
+    )
+    .await
+    .expect("the kickoff run reaches the provider")
+    .expect("start-turn watch");
+    let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
+    assert!(
+        handle
+            .query_machine_state()
+            .await
+            .expect("query machine state")
+            .member_kickoff_starting
+            .contains(&dsl_member),
+        "the kickoff is in flight"
+    );
+
+    let control = service.install_runtime_control_barrier().await;
+    let retiring = handle.clone();
+    let retired_member = member.clone();
+    let retire = tokio::spawn(async move { retiring.retire(retired_member).await });
+    tokio::time::timeout(Duration::from_secs(30), control.boundary_entered.notified())
+        .await
+        .expect("retirement wedges inside its runtime quiesce");
+
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        state.member_kickoff_cancelled.contains(&dsl_member),
+        "retirement records the kickoff cancellation before runtime teardown"
+    );
+    // The kickoff waiter delivers the teardown's runtime terminal.
+    handle
+        .debug_inject_kickoff_outcome(
+            member.clone(),
+            Ok(meerkat_runtime::CompletionOutcome::RuntimeTerminated {
+                reason: "retired".to_string(),
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure("retired"),
+            }),
+        )
+        .await
+        .expect("the teardown outcome is acknowledged as a late arrival");
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(state.member_kickoff_cancelled.contains(&dsl_member));
+    assert!(
+        !state.member_kickoff_failed.contains(&dsl_member)
+            && !state.member_kickoff_error.contains_key(&dsl_member),
+        "the teardown outcome never records the kickoff as Failed"
+    );
+
+    let mut settlement = handle
+        .retirement_settlement(&member)
+        .expect("the owned retirement publishes its settlement");
+    service.clear_runtime_control_barrier().await;
+    control.release_all();
+    let settled = tokio::time::timeout(Duration::from_secs(30), settlement.settled())
+        .await
+        .expect("retirement settles once its callback releases");
+    assert!(
+        matches!(settled, Some(crate::runtime::RetirementSettlement::Retired)),
+        "the owned retirement retires the member: {settled:?}"
+    );
+    // The caller's own retire may have answered in-progress at its budget
+    // while retirement was wedged; the settlement above is the outcome.
+    match retire.await.expect("retire task") {
+        Ok(()) => {}
+        Err(error) => assert!(
+            is_retirement_in_progress(&error),
+            "retire answers only typed in-progress while wedged: {error:?}"
+        ),
+    }
+    let failed_updates = storage
+        .events
+        .replay_all()
+        .await
+        .expect("replay events")
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                crate::event::MobEventKind::MemberKickoffUpdated { member: updated, kickoff }
+                    if updated == &member
+                        && kickoff.phase == crate::roster::MobMemberKickoffPhase::Failed
+            )
+        })
+        .count();
+    assert_eq!(failed_updates, 0, "no kickoff failure is persisted");
+}
+
 #[tokio::test]
 async fn test_late_kickoff_outcome_after_retire_is_benign() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -81289,10 +82734,15 @@ async fn test_late_kickoff_outcome_after_retire_is_benign() {
     assert_eq!(handle.status().await.expect("status"), MobState::Destroyed);
 }
 
+/// The kickoff turn is held by the mock executor's typed hold, so it is
+/// still in flight when the member retires, however slowly the host runs.
+/// Before, a 10 s delay could elapse on a loaded host, letting the kickoff
+/// complete before the retire.
 #[tokio::test]
 async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    service.set_start_turn_delay_ms(10_000);
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
 
     let member = AgentIdentity::from("lead-late-failure");
     handle
@@ -81301,23 +82751,23 @@ async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
         .expect("spawn autonomous lead");
 
     let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let state = handle
-                .query_machine_state()
-                .await
-                .expect("query machine state");
-            if state.member_kickoff_starting.contains(&dsl_member) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("autonomous kickoff must reach the machine-owned Starting state");
+    tokio::time::timeout(ACTOR_DEADLOCK_BOUND, held.wait_for(|entries| *entries >= 1))
+        .await
+        .expect("autonomous kickoff turn should reach the runtime executor")
+        .expect("held-turn signal stays open");
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert!(
+        state.member_kickoff_starting.contains(&dsl_member),
+        "a held kickoff turn is in the machine-owned Starting state"
+    );
 
-    handle
-        .retire(member.clone())
+    // Join the retirement saga to its terminal reply. A plain `retire`
+    // answers a typed in-progress error once its wait budget elapses on a
+    // loaded host while the saga keeps running.
+    retire_to_terminal(&handle, &member)
         .await
         .expect("retire of a kickoff-in-flight autonomous member must succeed");
 
@@ -81352,6 +82802,7 @@ async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
         !state.member_kickoff_error.contains_key(&dsl_member),
         "a late failure outcome must not record an error for a quiesced kickoff",
     );
+    service.release_held_start_turns();
 }
 
 #[tokio::test]
@@ -82635,6 +84086,284 @@ async fn dispatch_handles_bind_their_authority_lanes() {
         "dispatcher construction must preserve the exact upcall execution fence"
     );
     handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// #1500: the stop's exact-run cancel can find its run already over; that is a
+/// typed `RunEndedBeforeCancel`, never a failed stop.
+#[test]
+fn a_stop_cancel_that_finds_its_run_over_reports_it_ended() {
+    use super::provisioner::classify_stop_member_cancel;
+    use crate::MemberStopRun;
+    let run_id = meerkat_core::lifecycle::RunId::new();
+    assert_eq!(
+        classify_stop_member_cancel(Ok(true), run_id.clone()).unwrap(),
+        MemberStopRun::CancelledAtBoundary {
+            run_id: run_id.clone()
+        }
+    );
+    for ended in [
+        Ok(false),
+        Err(meerkat_runtime::RuntimeDriverError::StaleAuthority {
+            reason: "attachment replaced".to_string(),
+        }),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Idle,
+        }),
+        // The run committed back to Attached between the hold and the cancel
+        // (MobKit: stop right after a turn reached the model).
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Attached,
+        }),
+    ] {
+        assert_eq!(
+            classify_stop_member_cancel(ended, run_id.clone()).unwrap(),
+            MemberStopRun::RunEndedBeforeCancel {
+                run_id: run_id.clone()
+            }
+        );
+    }
+    assert!(
+        classify_stop_member_cancel(
+            Err(meerkat_runtime::RuntimeDriverError::Internal(
+                "boom".to_string()
+            )),
+            run_id,
+        )
+        .is_err(),
+        "a real cancel failure stays an error"
+    );
+}
+
+/// #1500: a turn-driven member's running turn is not cancelled by Stop; the
+/// report names that run, and the member's run starts are held.
+#[tokio::test]
+async fn test_stop_reports_a_turn_driven_members_running_turn_left_running() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-running-at-stop");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_block_runtime_turns(true);
+    let started = service.runtime_turn_started.notified();
+    tokio::pin!(started);
+    started.as_mut().enable();
+    let member = handle.member(&identity).await.expect("member handle");
+    let turn = member
+        .start_turn(
+            ContentInput::Text("running when the stop lands".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit the input");
+    tokio::time::timeout(Duration::from_secs(30), started)
+        .await
+        .expect("the turn is running");
+    let running = service
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("member runtime snapshot")
+        .control
+        .current_run_id
+        .expect("the member has a current run");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        report.members.get(&identity),
+        Some(&crate::MemberStopOutcome {
+            run: crate::MemberStopRun::LeftRunning { run_id: running },
+            starts: crate::MemberRunStarts::Held,
+        }),
+        "{report:?}"
+    );
+
+    // The turn finishes normally.
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
+        .await
+        .expect("the running turn finishes")
+        .expect("its turn completes");
+}
+
+/// #1500: an input admitted to a member's runtime before a mob Stop, but not
+/// yet prepared into a run, must not start a run while the mob is Stopped.
+/// Stop is a pause: the input stays queued and runs once after Resume.
+#[tokio::test]
+async fn test_stop_holds_an_admitted_member_input_until_resume() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-held-by-stop");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    // Admit an input, then hold the member's runtime loop before it takes
+    // the input into a run: the input is queued and unprepared.
+    let (queue_gap_entered, queue_gap_release) = service
+        .runtime_adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let member = handle.member(&identity).await.expect("member handle");
+    let turn = member
+        .start_turn(
+            ContentInput::Text("admitted before the stop".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("admit the input");
+    tokio::time::timeout(Duration::from_secs(30), queue_gap_entered)
+        .await
+        .expect("the runtime loop reaches the queue gap")
+        .expect("queue-authority hook armed");
+
+    let report = handle.stop().await.expect("stop the mob");
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert_eq!(
+        report.members.get(&identity),
+        Some(&crate::MemberStopOutcome {
+            run: crate::MemberStopRun::NoRun,
+            starts: crate::MemberRunStarts::Held,
+        }),
+        "the report says the member had no run and is held: {report:?}"
+    );
+
+    // Release the loop: it parks on the hold instead of starting a run.
+    let mut parks = service.runtime_adapter.run_start_held_parks();
+    queue_gap_release
+        .send(())
+        .expect("release the runtime loop");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the member's runtime loop parks on the hold")
+        .expect("park signal");
+    assert!(
+        service
+            .applied_runtime_contributing_input_ids(&session_id)
+            .await
+            .is_empty(),
+        "no run starts while the mob is Stopped"
+    );
+
+    // Resume releases the hold: the queued input runs now.
+    handle.resume().await.expect("resume the mob");
+    tokio::time::timeout(Duration::from_secs(30), turn.wait())
+        .await
+        .expect("the queued input runs after resume")
+        .expect("its turn completes");
+    // Resume runs the member's own revival turns too; the held input must
+    // have run exactly once among them.
+    let applied: Vec<_> = service
+        .applied_runtime_contributing_input_ids(&session_id)
+        .await
+        .concat();
+    let unique: std::collections::HashSet<_> = applied.iter().collect();
+    assert_eq!(
+        applied.len(),
+        unique.len(),
+        "no input runs twice: {applied:?}"
+    );
+}
+
+/// #1500: a resume that fails at an internal-error site of its readiness
+/// fan-out must leave the mob Stopped with every member held again. Resume
+/// releases the members at its begin, so a failure that skipped the re-hold
+/// would leave a Stopped mob whose members can start runs.
+async fn assert_failed_resume_readiness_reholds_members(
+    fault: super::state::ResumeReadinessFaultForTest,
+) {
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    let identity = AgentIdentity::from("lead-reheld-after-failed-resume");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle.stop().await.expect("stop the mob");
+    assert_eq!(
+        service
+            .runtime_adapter
+            .run_starts_held_for_test(&session_id)
+            .await,
+        Some(true),
+        "stop holds the member"
+    );
+
+    let armed = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::FailNextResumeReadinessForTest {
+            fault,
+            reply_tx,
+        })
+        .await
+        .expect("arm enqueue");
+    tokio::time::timeout(Duration::from_secs(5), armed)
+        .await
+        .expect("arm answered")
+        .expect("arm reply");
+
+    let error = handle
+        .resume()
+        .await
+        .expect_err("the injected readiness failure fails the resume");
+    assert!(
+        error.to_string().contains("injected"),
+        "the resume fails with the injected error: {error:?}"
+    );
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert_eq!(
+        service
+            .runtime_adapter
+            .run_starts_held_for_test(&session_id)
+            .await,
+        Some(true),
+        "the failed resume holds the member again"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_failing_to_begin_readiness_reholds_members() {
+    assert_failed_resume_readiness_reholds_members(
+        super::state::ResumeReadinessFaultForTest::BeginReadiness,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_resume_exhausting_its_readiness_ticket_reholds_members() {
+    assert_failed_resume_readiness_reholds_members(
+        super::state::ResumeReadinessFaultForTest::TicketExhausted,
+    )
+    .await;
 }
 
 // Runtime-backed tracked-turn LLM identity and terminal-event regressions.
@@ -85160,6 +86889,14 @@ fn placement_fixture_uses_local_mob_authority_types() {
 }
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod host_outage_recovery;
+/// Member-level safe-boundary instruction activation on real persistent
+/// stores (restored member, keyed duplicate, mid-turn refusal).
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod member_instruction_gates;
+/// #1390: stop and shutdown await interrupted members' end of turn as typed
+/// signals, concurrently and off the actor loop.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod owned_retirement;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
 mod retirement_isolation;
@@ -85168,9 +86905,6 @@ mod retirement_isolation;
 /// declined instead of touching its successor.
 mod spawn_activation_isolation;
 mod spawn_rollback;
-/// #1390: stop and shutdown await interrupted members' end of turn as typed
-/// signals, concurrently and off the actor loop.
-#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod stop_member_idle;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod submit_work_pump;

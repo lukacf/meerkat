@@ -505,6 +505,26 @@ pub enum MobError {
         stage: String,
     },
 
+    /// The member's retirement durably started and then stopped at `stage`
+    /// with the typed `cause`. The member stays `Retiring`, owned by the mob
+    /// actor's stuck-retirement registry. Retrying a plain retirement does not
+    /// drive it; `MobHandle::redrive_retirement` or a mob resume does.
+    #[error("member retirement for '{member_id}' is stuck at {stage}: {cause}")]
+    MemberRetirementStuck {
+        member_id: AgentIdentity,
+        stage: String,
+        cause: Arc<MobError>,
+    },
+
+    /// A mob Shutdown interrupted the member's in-flight retirement at
+    /// `stage`. A durably started retirement stays `Retiring` and is driven
+    /// again on the next resume.
+    #[error("member retirement for '{member_id}' was interrupted by shutdown at {stage}")]
+    RetirementInterrupted {
+        member_id: AgentIdentity,
+        stage: String,
+    },
+
     /// One process-owned exact-incarnation retirement is shared by concurrent
     /// callers. The actor produces a single owned error; this transparent Arc
     /// preserves that exact typed cause for every joined observer without
@@ -1145,6 +1165,22 @@ pub enum MobError {
         kind: FlowStepDispatchRejectKind,
     },
 
+    /// An explicit runtime adapter is a different live runtime owner than
+    /// the session service's, even if both use the same runtime store. One
+    /// owner of record holds a mob's sessions, so the build is refused before
+    /// anything is provisioned (#1550).
+    #[error(
+        "explicit mob runtime adapter is a different runtime owner than the session service's runtime owner"
+    )]
+    RuntimeOwnerConflict,
+
+    /// A member's profile names a tool bundle the mob's builder does not
+    /// register, for example a host bundle the host has withdrawn since the
+    /// mob was created. The member is not built: a bundle is never silently
+    /// dropped or granted.
+    #[error("tool bundle '{bundle}' is not registered on this mob; the host no longer provides it")]
+    ToolBundleUnavailable { bundle: String },
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),
@@ -1441,6 +1477,19 @@ impl MobError {
                 "retryable": true,
                 "authority_retained": true,
             })),
+            Self::MemberRetirementStuck {
+                member_id,
+                stage,
+                cause,
+            } => Some(serde_json::json!({
+                "kind": "mob_retirement_stuck",
+                "member_id": member_id.as_str(),
+                "stage": stage,
+                "cause": cause.to_string(),
+                "retryable": false,
+                "redrive": true,
+                "authority_retained": true,
+            })),
             Self::MemberRetirementAdmissionPending { member_id, stage } => {
                 Some(serde_json::json!({
                     "kind": "mob_retirement_admission_pending",
@@ -1578,9 +1627,9 @@ impl MobError {
         match self {
             Self::SessionError(error) => error.durable_resume_hold(),
             Self::MemberRestoreFailed { hold, .. } => *hold,
-            Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
-                error.durable_resume_hold()
-            }
+            Self::SharedRetirementFailure(error)
+            | Self::SharedLifecycleFailure(error)
+            | Self::MemberRetirementStuck { cause: error, .. } => error.durable_resume_hold(),
             other => other
                 .structured_data()
                 .as_ref()
@@ -1637,9 +1686,9 @@ impl MobError {
 
     pub fn bridge_rejection_cause(&self) -> Option<BridgeRejectionCause> {
         match self {
-            Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
-                error.bridge_rejection_cause()
-            }
+            Self::SharedRetirementFailure(error)
+            | Self::SharedLifecycleFailure(error)
+            | Self::MemberRetirementStuck { cause: error, .. } => error.bridge_rejection_cause(),
             // Cloned: `BridgeRejectionCause` carries payload variants since V4.
             Self::BridgeCommandRejected { cause, .. } => Some(cause.clone()),
             _ => None,
@@ -1662,10 +1711,24 @@ impl MobError {
     pub(crate) fn is_closed_runtime_effect_refusal(&self) -> bool {
         match self {
             Self::RuntimeEffectRefused { .. } => true,
-            Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
+            Self::SharedRetirementFailure(error)
+            | Self::SharedLifecycleFailure(error)
+            | Self::MemberRetirementStuck { cause: error, .. } => {
                 error.is_closed_runtime_effect_refusal()
             }
             _ => false,
+        }
+    }
+
+    /// The root cause of a retirement failure: sees through
+    /// [`Self::SharedRetirementFailure`] and [`Self::MemberRetirementStuck`]
+    /// to the typed error the failing stage produced.
+    pub fn retirement_root_cause(&self) -> &MobError {
+        match self {
+            Self::SharedRetirementFailure(cause) | Self::MemberRetirementStuck { cause, .. } => {
+                cause.retirement_root_cause()
+            }
+            other => other,
         }
     }
 
@@ -1766,6 +1829,8 @@ impl MobError {
             // explicit action closes the gap" shape as
             // `SupervisorProtocolUpgradeRequired`, not ordinary backoff.
             | Self::MemberReloadRequired { .. }
+            | Self::MemberRetirementStuck { .. }
+            | Self::RetirementInterrupted { .. }
             | Self::MemberRuntimeDetached { .. }
             | Self::DirectMemberAdoptionPending { .. }
             | Self::WorkInputIdempotencyConflict { .. }

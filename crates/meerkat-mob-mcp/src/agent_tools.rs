@@ -9,7 +9,7 @@
 //! and destroys its owned mobs in a single call.
 
 use async_trait::async_trait;
-use meerkat_contracts::wire::WireHostRef;
+use meerkat_contracts::wire::{MobDefinitionInput, MobProfileInput, WireContentInput, WireHostRef};
 use meerkat_core::error::ToolError;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::types::{
@@ -943,6 +943,22 @@ impl AgentMobToolSurface {
             ));
         };
         let identity = AgentIdentity::from(member_id);
+        // Decode the tooling through the public profile contract before any
+        // implicit-mob mutation; default to InheritParent for delegates.
+        let tooling = args
+            .tooling
+            .map(SpawnToolingInput::decode)
+            .transpose()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?
+            .unwrap_or(meerkat_mob::SpawnTooling::InheritParent {
+                allow_overlay: None,
+                deny_overlay: None,
+            });
+        // A delegate helper runs in a child mob under the host's child policy;
+        // refuse before the implicit mob is created, as mob_create does.
+        self.state
+            .admit_child_tool_policy()
+            .map_err(Self::child_policy_denial)?;
 
         let (mob_id, first_delegate) = self
             .ensure_implicit_mob()
@@ -984,13 +1000,6 @@ impl AgentMobToolSurface {
             );
         }
 
-        // Resolve spawn tooling: default to InheritParent for delegates
-        let tooling = args
-            .tooling
-            .unwrap_or(meerkat_mob::SpawnTooling::InheritParent {
-                allow_overlay: None,
-                deny_overlay: None,
-            });
         let resolved = self.resolve_spawn_tooling(&tooling).await?;
 
         // Transitive containment: the delegate surface carries no explicit
@@ -1096,6 +1105,15 @@ impl AgentMobToolSurface {
         Self::encode_result_with_effects(call, result, session_effects)
     }
 
+    /// The model-facing form of a child-policy refusal: a typed policy denial
+    /// the turn continues past.
+    fn child_policy_denial(refusal: crate::ChildToolPolicyRefused) -> ToolError {
+        ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+            refusal.code(),
+            refusal.to_string(),
+        ))
+    }
+
     async fn dispatch_mob_create(
         &self,
         call: ToolCallView<'_>,
@@ -1104,13 +1122,24 @@ impl AgentMobToolSurface {
         let args: MobCreateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        // The public contract owns what a caller may define: host-only
+        // fields (profile MCP server configs) have no input, and a model may
+        // not name a host path as a skill source.
+        let definition = crate::agent_input::decode_agent_mob_definition(args.definition)
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        // A child mob's members run under the host's child policy; the refusal
+        // returns to the model as a typed tool error before anything is
+        // created. Host tool bundles reach them only through the host.
+        self.state
+            .admit_child_tool_policy()
+            .map_err(Self::child_policy_denial)?;
 
         // Compute the operator grant from the *intended* mob id (the definition
         // carries the id) BEFORE the durable create mutation lands, so the
         // create outcome and the grant effect are produced together (row #211).
         // If the generated authority rejects the intended scope, we fail before
         // any mutation lands — there is no "mob created but grant absent" window.
-        let intended_mob_id = args.definition.id.clone();
+        let intended_mob_id = definition.id.clone();
         let authority_context = meerkat_runtime::mob_operator_authority::grant_manage_mob(
             &self.authority_context_snapshot(),
             intended_mob_id.as_str(),
@@ -1126,7 +1155,7 @@ impl AgentMobToolSurface {
 
         let mob_id = mob_create_with_owner_bridge_boxed(
             Arc::clone(&self.state),
-            args.definition,
+            definition,
             self.owner_bridge_session_id.clone(),
         )
         .await
@@ -1197,6 +1226,18 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id.clone());
+        let initial_message = args
+            .initial_message
+            .clone()
+            .map(crate::agent_input::decode_agent_content_input)
+            .transpose()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+        let tooling = args
+            .tooling
+            .clone()
+            .map(SpawnToolingInput::decode)
+            .transpose()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
 
         self.ensure_spawn_member_scope_boxed(call.name, &mob_id, &args)
             .await?;
@@ -1214,7 +1255,7 @@ impl AgentMobToolSurface {
             ProfileName::from(args.profile),
             AgentIdentity::from(args.member_id),
         );
-        spec.initial_message = args.initial_message;
+        spec.initial_message = initial_message;
         spec.objective_id = objective_id;
         spec.runtime_mode = args.runtime_mode;
         spec.backend = args.backend;
@@ -1222,7 +1263,7 @@ impl AgentMobToolSurface {
         if let Some(auto_wire) = args.auto_wire_parent {
             spec.auto_wire_parent = auto_wire;
         }
-        if let Some(tooling) = args.tooling {
+        if let Some(tooling) = tooling {
             let resolved = self.resolve_spawn_tooling_boxed(&tooling).await?;
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
@@ -1981,9 +2022,11 @@ impl AgentMobToolSurface {
         let args: ProfileCreateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let profile = crate::decode_public_profile(args.profile)
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
         let stored = self
             .state
-            .realm_profile_create(&args.name, &args.profile)
+            .realm_profile_create(&args.name, &profile)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
         Self::encode_result(
@@ -2050,9 +2093,11 @@ impl AgentMobToolSurface {
         let args: ProfileUpdateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let profile = crate::decode_public_profile(args.profile)
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
         let stored = self
             .state
-            .realm_profile_update(&args.name, &args.profile, args.expected_revision)
+            .realm_profile_update(&args.name, &profile, args.expected_revision)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
         Self::encode_result(
@@ -2797,7 +2842,68 @@ struct DelegateArgs {
     /// mode=profile with an inline source to request explicit model/tools.
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
-    tooling: Option<meerkat_mob::SpawnTooling>,
+    tooling: Option<SpawnToolingInput>,
+}
+
+/// The model-facing form of [`meerkat_mob::SpawnTooling`]. An inline profile
+/// is the public [`MobProfileInput`], so host-only profile fields (MCP server
+/// configs, Rust bundles) cannot come from model arguments; naming one is an
+/// argument error.
+#[derive(Clone, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum SpawnToolingInput {
+    InheritParent {
+        #[serde(default)]
+        allow_overlay: Option<Vec<String>>,
+        #[serde(default)]
+        deny_overlay: Option<Vec<String>>,
+    },
+    Minimal,
+    Profile {
+        source: Box<ProfileSourceInput>,
+        #[serde(default)]
+        allow_overlay: Option<Vec<String>>,
+        #[serde(default)]
+        deny_overlay: Option<Vec<String>>,
+    },
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ProfileSourceInput {
+    RealmProfile { name: String },
+    Inline(Box<MobProfileInput>),
+}
+
+impl SpawnToolingInput {
+    fn decode(self) -> Result<meerkat_mob::SpawnTooling, String> {
+        Ok(match self {
+            Self::InheritParent {
+                allow_overlay,
+                deny_overlay,
+            } => meerkat_mob::SpawnTooling::InheritParent {
+                allow_overlay,
+                deny_overlay,
+            },
+            Self::Minimal => meerkat_mob::SpawnTooling::Minimal,
+            Self::Profile {
+                source,
+                allow_overlay,
+                deny_overlay,
+            } => meerkat_mob::SpawnTooling::Profile {
+                source: Box::new(match *source {
+                    ProfileSourceInput::RealmProfile { name } => {
+                        meerkat_mob::ProfileSource::RealmProfile { name }
+                    }
+                    ProfileSourceInput::Inline(profile) => meerkat_mob::ProfileSource::Inline(
+                        Box::new(crate::decode_public_profile(*profile)?),
+                    ),
+                }),
+                allow_overlay,
+                deny_overlay,
+            },
+        })
+    }
 }
 
 // Unknown fields fail closed. A misspelled or invented argument (a model
@@ -3471,7 +3577,7 @@ struct MobCreateArgs {
     /// Explicit mob definition. Minimal useful shape:
     /// {"id":"mob-id","profiles":{"role":{"model":"gpt-5.5","tools":{"builtins":true,"shell":true,"comms":true}}}}.
     #[schemars(with = "serde_json::Value")]
-    definition: MobDefinition,
+    definition: MobDefinitionInput,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -3491,7 +3597,7 @@ struct SpawnMemberArgs {
     /// Initial message/task for the member. Required for autonomous_host members.
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
-    initial_message: Option<ContentInput>,
+    initial_message: Option<WireContentInput>,
     /// autonomous_host (default): runs autonomously. turn_driven: waits for explicit turns.
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
@@ -3509,7 +3615,7 @@ struct SpawnMemberArgs {
     /// Optional tool-surface override for this member (same shape as delegate's tooling).
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
-    tooling: Option<meerkat_mob::SpawnTooling>,
+    tooling: Option<SpawnToolingInput>,
     /// Per-member auth binding (deferral §1). Accepts the struct
     /// `{"realm": "...", "binding": "..."}` (wire-contract shape).
     /// When set, this member resolves credentials via the named
@@ -3631,7 +3737,7 @@ struct ProfileCreateArgs {
     /// Profile definition. Required field: model (string). Optional: tools,
     /// skills, peer_description, runtime_mode, backend, external_addressable.
     #[schemars(with = "serde_json::Value")]
-    profile: meerkat_mob::Profile,
+    profile: MobProfileInput,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -3646,7 +3752,7 @@ struct ProfileUpdateArgs {
     name: String,
     /// Complete updated profile definition (full replacement, not merge).
     #[schemars(with = "serde_json::Value")]
-    profile: meerkat_mob::Profile,
+    profile: MobProfileInput,
     /// Current revision from mob_profile_get. Prevents accidental overwrites.
     expected_revision: u64,
 }
@@ -5888,7 +5994,19 @@ mod tests {
                             "peer_description": "worker",
                             "runtime_mode": "turn_driven"
                         }
-                    },
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Internal lifecycle fields are not part of the public definition
+        // contract, so a caller cannot even ask for a faux implicit mob.
+        let faux_implicit = serde_json::value::RawValue::from_string(
+            json!({
+                "definition": {
+                    "id": "faux-implicit",
+                    "profiles": { "worker": { "model": "claude-sonnet-4-5" } },
                     "is_implicit": true,
                     "session_cleanup_policy": "manual"
                 }
@@ -5896,6 +6014,24 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        let refused = surface
+            .dispatch(ToolCallView {
+                id: "create-0",
+                name: "mob_create",
+                args: &faux_implicit,
+            })
+            .await
+            .expect_err("internal definition fields are refused");
+        assert!(
+            matches!(refused, ToolError::InvalidArguments { .. }),
+            "{refused:?}"
+        );
+        assert!(
+            state
+                .handle_for(&MobId::from("faux-implicit"))
+                .await
+                .is_err()
+        );
         let create_result = surface
             .dispatch(ToolCallView {
                 id: "create-1",
@@ -5986,9 +6122,7 @@ mod tests {
                             "peer_description": "worker",
                             "runtime_mode": "turn_driven"
                         }
-                    },
-                    "is_implicit": false,
-                    "session_cleanup_policy": "manual"
+                    }
                 }
             })
             .to_string(),
@@ -6240,7 +6374,10 @@ mod tests {
 
         let create_args = serde_json::value::RawValue::from_string(
             json!({
-                "definition": sample_definition("provenance-create")
+                "definition": {
+                    "id": "provenance-create",
+                    "profiles": { "delegate": { "model": "claude-sonnet-4-5" } }
+                }
             })
             .to_string(),
         )
@@ -6898,6 +7035,277 @@ mod tests {
         })
     }
 
+    // ── Model arguments go through the public input contract ─────────────
+
+    /// A profile whose stdio MCP server would create `marker` if launched.
+    fn profile_with_stdio_mcp_server(marker: &std::path::Path) -> serde_json::Value {
+        json!({
+            "model": "claude-sonnet-4-5",
+            "runtime_mode": "turn_driven",
+            "tools": {
+                "comms": true,
+                "mcp_servers": [{
+                    "name": "model-supplied",
+                    "command": "/bin/sh",
+                    "args": ["-c", format!("touch {}", marker.display())]
+                }]
+            }
+        })
+    }
+
+    async fn dispatch_err(
+        surface: &AgentMobToolSurface,
+        name: &'static str,
+        args: serde_json::Value,
+    ) -> ToolError {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        surface
+            .dispatch(ToolCallView {
+                id: "public-contract",
+                name,
+                args: &raw,
+            })
+            .await
+            .expect_err("model-supplied host-only fields are refused")
+    }
+
+    fn assert_refused_as_argument_error(error: &ToolError, field: &str) {
+        match error {
+            ToolError::InvalidArguments { reason, .. } => {
+                assert!(reason.contains(field), "{field} not named in: {reason}");
+            }
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mob_create_refuses_a_model_supplied_stdio_mcp_server_and_launches_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("launched");
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_create",
+            json!({ "definition": {
+                "id": "mcp-from-model",
+                "profiles": { "worker": profile_with_stdio_mcp_server(&marker) }
+            } }),
+        )
+        .await;
+        // The public profile binding is untagged, so the decode error does
+        // not name the field; the control below shows the field is the cause.
+        assert!(
+            matches!(error, ToolError::InvalidArguments { .. }),
+            "{error:?}"
+        );
+        assert!(
+            state
+                .handle_for(&MobId::from("mcp-from-model"))
+                .await
+                .is_err(),
+            "no mob is created"
+        );
+        let mut control = profile_with_stdio_mcp_server(&marker);
+        control["tools"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mcp_servers");
+        let raw = serde_json::value::RawValue::from_string(
+            json!({ "definition": {
+                "id": "mcp-from-model",
+                "profiles": { "worker": control }
+            } })
+            .to_string(),
+        )
+        .unwrap();
+        surface
+            .dispatch(ToolCallView {
+                id: "control",
+                name: "mob_create",
+                args: &raw,
+            })
+            .await
+            .expect("the same definition without mcp_servers is accepted");
+        assert!(!marker.exists(), "the model-supplied server never launched");
+    }
+
+    #[tokio::test]
+    async fn spawn_member_and_delegate_tooling_refuse_a_model_supplied_mcp_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("launched");
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let tooling = json!({
+            "mode": "profile",
+            "source": { "type": "inline" }
+        });
+        let mut tooling = tooling;
+        for (key, value) in profile_with_stdio_mcp_server(&marker).as_object().unwrap() {
+            tooling["source"][key] = value.clone();
+        }
+        let spawn = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "tooling": tooling.clone(),
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&spawn, "mcp_servers");
+        let delegate = dispatch_err(
+            &surface,
+            "delegate",
+            json!({
+                "task": "t",
+                "result_label": "r",
+                "max_text_bytes": 64,
+                "member_id": "helper",
+                "tooling": tooling,
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&delegate, "mcp_servers");
+        assert!(
+            state.mob_list().await.unwrap().is_empty(),
+            "no implicit mob is created for a refused delegate"
+        );
+        assert!(!marker.exists(), "the model-supplied server never launched");
+    }
+
+    #[tokio::test]
+    async fn mob_create_refuses_a_host_path_skill_source() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_create",
+            json!({ "definition": {
+                "id": "path-skill",
+                "profiles": { "worker": { "model": "claude-sonnet-4-5", "skills": ["s"] } },
+                "skills": { "s": { "source": "path", "path": "/etc/passwd" } }
+            } }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "host filesystem path");
+        assert!(
+            state.handle_for(&MobId::from("path-skill")).await.is_err(),
+            "no mob is created"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_member_refuses_a_stored_blob_image_reference() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "initial_message": [
+                    { "type": "image", "media_type": "image/png", "source": "blob", "blob_id": "sha256:abc" }
+                ],
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "stored blob");
+    }
+
+    #[tokio::test]
+    async fn spawn_member_refuses_a_provider_fetched_video_uri() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "initial_message": [{
+                    "type": "video", "media_type": "video/mp4", "duration_ms": 1000,
+                    "source": "uri", "uri": "gs://host-bucket/private.mp4"
+                }],
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "host's credentials");
+    }
+
+    /// Only the agent mob_create names bundles (child-available ones); a spawn
+    /// tooling profile could reach a host mob whose builder carries host-only
+    /// bundles, so it may not name any.
+    #[tokio::test]
+    async fn spawn_member_tooling_may_not_name_tool_bundles() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let error = dispatch_err(
+            &surface,
+            "mob_spawn_member",
+            json!({
+                "mob_id": "any",
+                "profile": "worker",
+                "member_id": "w1",
+                "tooling": {
+                    "mode": "profile",
+                    "source": {
+                        "type": "inline",
+                        "model": "claude-sonnet-4-5",
+                        "tools": { "rust_bundles": ["host-only"] }
+                    }
+                },
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&error, "rust_bundles");
+    }
+
+    #[tokio::test]
+    async fn realm_profile_writes_refuse_model_supplied_host_only_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("launched");
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+        let create = dispatch_err(
+            &surface,
+            "mob_profile_create",
+            json!({ "name": "worker", "profile": profile_with_stdio_mcp_server(&marker) }),
+        )
+        .await;
+        assert_refused_as_argument_error(&create, "mcp_servers");
+        assert!(
+            state.realm_profile_get("worker").await.unwrap().is_none(),
+            "nothing is stored for a later realm reference to pick up"
+        );
+        let update = dispatch_err(
+            &surface,
+            "mob_profile_update",
+            json!({
+                "name": "worker",
+                "profile": profile_with_stdio_mcp_server(&marker),
+                "expected_revision": 1,
+            }),
+        )
+        .await;
+        assert_refused_as_argument_error(&update, "mcp_servers");
+        let bundles = dispatch_err(
+            &surface,
+            "mob_profile_create",
+            json!({ "name": "worker", "profile": {
+                "model": "claude-sonnet-4-5",
+                "tools": { "rust_bundles": ["host-only"] }
+            } }),
+        )
+        .await;
+        assert_refused_as_argument_error(&bundles, "rust_bundles");
+    }
+
     fn surface_with_profiles(state: Arc<MobMcpState>) -> AgentMobToolSurface {
         AgentMobToolSurface::new(
             state,
@@ -6925,6 +7333,40 @@ mod tests {
             None,
             None,
         )
+    }
+
+    /// Profile deny lists name agent mob tools through meerkat-mob's canonical
+    /// set; the surface never advertises a name outside it, and the set names
+    /// nothing the fullest surface does not.
+    #[test]
+    fn agent_tool_surface_stays_within_the_canonical_name_set() {
+        let canonical: std::collections::BTreeSet<&str> =
+            meerkat_mob::AGENT_MOB_TOOL_NAMES.iter().copied().collect();
+        let names = |defs: Arc<[Arc<ToolDef>]>| -> std::collections::BTreeSet<String> {
+            defs.iter().map(|def| def.name.to_string()).collect()
+        };
+        for (store, snapshots, packs) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            for name in names(build_tool_defs_with_profile_support(
+                store, snapshots, packs,
+            )) {
+                assert!(
+                    canonical.contains(name.as_str()),
+                    "agent tool '{name}' is missing from meerkat_mob::AGENT_MOB_TOOL_NAMES"
+                );
+            }
+        }
+        let fullest = names(build_tool_defs_with_profile_support(true, true, true));
+        for name in &canonical {
+            assert!(
+                fullest.contains(*name),
+                "meerkat_mob::AGENT_MOB_TOOL_NAMES names '{name}', which no agent surface provides"
+            );
+        }
     }
 
     #[test]

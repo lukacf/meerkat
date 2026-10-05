@@ -149,7 +149,9 @@ impl Session {
         let Some(history) = self.validated_transcript_history_state()? else {
             return Ok(PromptUpdatePredecessor::NotRetained);
         };
-        for commit in history.commits() {
+        // Retired occurrences keep their commits but not their bodies; a
+        // predecessor introduced before the retention window is not retained.
+        for commit in history.commits().skip(history.retired_count()) {
             let parent = history.materialize_revision(&commit.parent_revision)?;
             let child = history.materialize_revision(&commit.revision)?;
             if !contains_exact(&parent.messages, current)

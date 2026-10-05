@@ -932,6 +932,11 @@ pub struct SessionBuildOptions {
     /// `Inherit` must be resolved by the spawn chain before build; an
     /// unresolved `Inherit` fails the build closed.
     pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    /// Tool restriction declared by the agent's configuration (a mob
+    /// profile), conjoined with `tool_access_policy` at the execution gate
+    /// and recomputed on every build rather than persisted into the launch
+    /// policy. Process-local like the build request itself.
+    pub declared_tool_restriction: Option<crate::ops::DeclaredToolRestriction>,
     /// Process-local authority awaited at the outermost actual tool-dispatch
     /// boundary. This carrier is intentionally absent from serialized
     /// contracts and durable metadata; its owner must reconstruct it from
@@ -1739,6 +1744,7 @@ impl Default for SessionBuildOptions {
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
             tool_access_policy: None,
+            declared_tool_restriction: None,
             tool_dispatch_admission: None,
             application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,

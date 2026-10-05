@@ -36,8 +36,14 @@ impl MeerkatMachine {
         Ok((stage, lease))
     }
 
-    /// Join the generated summary/tail barrier before publishing a delegation
-    /// result. Strict channels have no bootstrap barrier.
+    /// Join the generated bootstrap barrier before publishing a delegation
+    /// result: the summary's provider acknowledgement. Strict channels have no
+    /// bootstrap barrier.
+    ///
+    /// Queued context rows are drained (requested on the channel's owned drain
+    /// worker) but never joined here: a replay waits for a provider turn
+    /// boundary, so joining it would hold results for as long as the user
+    /// keeps speaking; see `ObserveLiveContextDeliveryReadiness`.
     pub async fn wait_live_context_ready_for_results(
         &self,
         session_id: &SessionId,
@@ -55,7 +61,7 @@ impl MeerkatMachine {
             return Ok(());
         }
         drop(state);
-        self.drain_live_context_outbox(session_id).await?;
+        self.request_live_context_outbox_drain(session_id).await?;
         let lease = self
             .shared
             .live_context_preparation_leases
@@ -98,15 +104,19 @@ impl MeerkatMachine {
                 })?;
             match readiness {
                 dsl::LiveContextDeliveryReadiness::Ready => return Ok(()),
-                dsl::LiveContextDeliveryReadiness::Failed
-                | dsl::LiveContextDeliveryReadiness::Revoked => {
+                dsl::LiveContextDeliveryReadiness::Failed => {
                     return Err(RuntimeDriverError::ValidationFailed {
-                        reason: "bootstrap delivery barrier failed or was revoked".into(),
+                        reason: "bootstrap delivery barrier failed".into(),
+                    });
+                }
+                dsl::LiveContextDeliveryReadiness::Revoked => {
+                    return Err(RuntimeDriverError::LiveContextBarrierRevoked {
+                        session_id: session_id.to_string(),
+                        channel_id: channel_id.to_string(),
                     });
                 }
                 dsl::LiveContextDeliveryReadiness::Pending => {
-                    self.drain_live_context_outbox_for_channel(session_id, channel_id)
-                        .await?;
+                    drop(self.request_live_context_drain(session_id, channel_id));
                     changed
                         .ok_or_else(|| {
                             RuntimeDriverError::Internal(

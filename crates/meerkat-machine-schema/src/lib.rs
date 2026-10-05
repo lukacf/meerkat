@@ -15,11 +15,16 @@ pub use types::{CommsRuntimeId, McpServerId, MobId, PeerCorrelationId};
 
 pub use catalog::{
     CompositionCoverageManifest, CoverageAnchor, CoverageClaims, CoverageSchemaTarget,
-    MachineCoverageManifest, MachineProductionOwnerRelation, ScenarioCoverage,
-    SemanticCoverageEntry, SymbolRef, canonical_composition_coverage_manifests,
-    canonical_composition_schemas, canonical_machine_coverage_manifests,
-    canonical_machine_production_owner_relations, canonical_machine_schemas,
-    meerkat_mob_seam_composition, scheduler_rule_coverage_name,
+    MachineCoverageManifest, MachineProductionOwnerRelation, NonPortableComponentKind,
+    ScenarioCoverage, SemanticCoverageEntry, SymbolRef, SymbolRefError,
+    canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
+    canonical_machine_schemas, meerkat_mob_seam_composition, scheduler_rule_coverage_name,
+};
+pub use catalog::{
+    CoverageValidationError, CoverageValidationMode, validate_composition_anchor_target,
+    validate_composition_coverage, validate_coverage_catalog, validate_machine_anchor_target,
+    validate_machine_coverage, validate_semantic_entries,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CommsTrustAuthorityOperation,
@@ -39,8 +44,9 @@ pub use composition::{
 pub use machine::{
     CommandPlanSchema, EffectClosureSchema, EffectDisposition, EffectDispositionRule, EffectEmit,
     EnumSchema, Expr, FieldDisclosure, FieldInit, FieldSchema, FieldType, Guard, HelperSchema,
-    InitSchema, InputMatch, InvariantSchema, MachineSchema, MachineSchemaError, Quantifier,
-    RustBinding, StateSchema, TransitionSchema, TriggerKind, TriggerMatch, TypeRef, Update,
+    InitSchema, InputFieldDomain, InputFieldDomainError, InputFieldDomainKind, InputMatch,
+    InvariantSchema, MachineSchema, MachineSchemaError, Quantifier, RustBinding, StateSchema,
+    TLC_MAX_UNSIGNED_INPUT_SAMPLE, TransitionSchema, TriggerKind, TriggerMatch, TypeRef, Update,
     VariantSchema,
 };
 pub use seam::SeamClassification;

@@ -67,6 +67,7 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::NotFound { .. }
             | RuntimeDriverError::Destroyed
             | RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
+            | RuntimeDriverError::LiveContextBarrierRevoked { .. }
             | RuntimeDriverError::StaleAuthority { .. }) => Self::StaleAuthority { context, error },
             // A receipt-less terminal is a legitimate read verdict, but a
             // runless terminal convergence expects the receipt it staged.

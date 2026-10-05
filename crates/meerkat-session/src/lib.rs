@@ -40,9 +40,9 @@ pub mod projector;
 pub use ephemeral::{
     EphemeralSessionService, LiveActorEventSubscription, LiveBridgePreparedSessionOperation,
     LiveBridgeSessionOperationRequest, LiveBridgeSessionOperationTerminalReceiver,
-    LiveSessionActorRegistry, LiveSessionActorWitness, LiveSessionActorWitnessSlot,
-    RuntimeContextAdmissionGuard, SessionActivityWatch, SessionAgent, SessionAgentBuilder,
-    SessionSnapshot,
+    LiveChannelClosedNotPublished, LiveSessionActorRegistry, LiveSessionActorWitness,
+    LiveSessionActorWitnessSlot, RuntimeContextAdmissionGuard, SessionActivityWatch, SessionAgent,
+    SessionAgentBuilder, SessionSnapshot,
 };
 pub use live_durable_source::LiveDurableSourceObservation;
 pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;
@@ -67,10 +67,12 @@ pub use compactor::DefaultCompactor;
 pub use persistent::{
     CommittedBoundaryRecovery, CommittedBoundaryResumePreparationReceipt,
     DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES, DurableSessionForkWithProvenance,
-    LiveContextCommittedBoundary, LiveSessionActorTurnBoundaryLease,
-    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
+    LiveContextCommittedBoundary, LiveResyncRelease, LiveSessionActorTurnBoundaryLease,
+    LiveSessionExport, LiveStalenessPosition, MachineServiceTurnCommitProtocol,
+    MachineSessionArchiveProtocol, PendingLiveResync, PersistentSessionService,
     PreparedActorSessionSeed, PreparedCommittedBoundaryResume,
     PreparedCommittedBoundaryResumeMaterialization, PreparedCommittedBoundaryResumeUnavailable,
+    RealtimeOpenSnapshot, RealtimeRefreshSnapshot,
 };
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)

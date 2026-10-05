@@ -166,6 +166,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_live_boundary_join_run`: `Map<String, RunId>`
 - `input_live_boundary_join_phase`: `Map<String, LiveBoundaryJoinPhase>`
 - `run_stop_requested`: `Option<RunId>`
+- `run_start_holds`: `Set<RunStartHoldReason>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
 - `op_completion_seq`: `Map<String, u64>`
@@ -364,6 +365,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_channel_status_result_sequence`: `u64`
 - `live_channel_status_observation_sequence_by_channel`: `Map<String, u64>`
 - `live_channel_status_by_channel`: `Map<String, LiveChannelPublicStatus>`
+- `live_media_health_requested_output_by_channel`: `Map<String, String>`
+- `live_media_health_judged_channels`: `Set<String>`
+- `live_media_fault_reopen_recommended_by_channel`: `Map<String, Bool>`
+- `live_media_fault_reopens_by_session`: `Map<String, u64>`
 - `session_event_stream_open_result_sequence`: `u64`
 - `session_event_stream_close_result_sequence`: `u64`
 - `session_event_stream_terminal_sequence`: `u64`
@@ -459,7 +464,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_overlay_epoch`: `u64`
 
 ## Inputs
-- `RegisterSession`(session_id: SessionId, runtime_epoch_id: Option<RuntimeEpochId>)
+- `RegisterSession`(session_id: SessionId, runtime_epoch_id: Option<RuntimeEpochId>, initial_run_start_holds: Set<RunStartHoldReason>)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -533,6 +538,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InterruptCurrentRunForRun`(run_id: RunId)
 - `StopCurrentRunForRun`(run_id: RunId)
 - `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
+- `HoldRunStarts`(reason: RunStartHoldReason)
+- `ReleaseRunStarts`(reason: RunStartHoldReason)
 - `CancelAfterBoundaryForRun`(run_id: RunId, reason: String)
 - `AbortCancelAfterBoundaryDispatch`(dispatch_generation: u64)
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)
@@ -758,6 +765,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveLiveContextBootstrapAppend`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64, observation: LiveContextAppendObservation, retained_sessions: Map<String, String>, retained_cursors: Map<String, u64>, retained_digests: Map<String, String>, retained_commits: Map<String, String>, retained_dispositions: Map<String, LiveContextRowDisposition>, retained_append_by_cursor: Map<u64, String>)
 - `FailLiveContextPreparation`(session_id: String, channel_id: String, lease_id: String, reason: LiveContextPreparationFailure)
 - `AuthorizeLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `AuthorizeLiveContextCausalTailBatch`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, tail_cursors: Set<u64>)
 - `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition, payload_availability: LiveContextPayloadAvailability, row_source: LiveContextRowSource, row_author: LiveContextRowAuthor, observation_id: Option<String>)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveContextAppendObservation)
@@ -784,6 +792,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordMobEventStreamTerminated`(stream_id: String, observation: RpcEventStreamTerminalObservationKind, detail: Option<String>)
 - `ResolveMobEventStreamClose`(stream_id: String)
 - `RecordLiveChannelStatus`(channel_id: String, status: LiveChannelPublicStatus, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
+- `RequestLiveMediaHealth`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, output_id: String, assistant_transcript_nonempty: Bool)
+- `ObserveLiveChannelMediaHealth`(session_id: String, channel_id: String, output_id: String, decoded_frames: u64, audible_frames: u64, max_rms_micros: u64)
 - `SpawnDrain`(mode: DrainMode)
 - `StopDrain`
 - `StageVisibilityFilter`(filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness>)
@@ -892,6 +902,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TurnCheckCompaction`
 - `RequestCancellationAtBoundary`
 - `BoundaryCancelAlreadyPending`
+- `RunStartsHeld`(current_run: Option<RunId>)
+- `RunStartsReleased`(queued: Bool)
+- `RunStartHeld`
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)
 - `RuntimeNotice`(kind: RuntimeNoticeKind, detail: String)
@@ -1079,7 +1092,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MobEventStreamOpenResolved`(stream_id: String, opened: Bool, sequence: u64)
 - `MobEventStreamTerminalResolved`(stream_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
-- `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
+- `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>, media_fault_reopen_recommended: Option<Bool>)
+- `LiveMediaHealthRequested`(session_id: String, channel_id: String, output_id: String)
+- `LiveChannelMediaHealthJudged`(session_id: String, channel_id: String, output_id: String, media_faulted: Bool, reopen_recommended: Bool)
 - `RealtimeTranscriptAppended`(channel_id: String, item_id: String, text: String, role: RealtimeTranscriptRoleKind, lane: RealtimeTranscriptLaneKind, sequence: u64)
 - `PeerIngressClassified`(class: PeerIngressInputClass, actionable: Bool, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, from_peer_id: Option<PeerId>, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
@@ -1373,6 +1388,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
+- `live_media_health_budget_and_verdicts_are_consistent`
 - `fence_requires_bound_runtime`
 - `runtime_generation_requires_bound_runtime`
 - `live_execution_binding_is_complete_and_channel_scoped`
@@ -1679,7 +1695,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1687,7 +1703,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1695,7 +1711,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1703,7 +1719,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `new_session_binding`
@@ -1711,7 +1727,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1720,7 +1736,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1729,7 +1745,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1738,7 +1754,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionIdempotentRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1747,7 +1763,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1757,7 +1773,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1767,7 +1783,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1777,7 +1793,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionEpochConflictRejectedRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `not_draining`
   - `same_session_binding`
@@ -1787,7 +1803,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingIdle`
 - From: `Idle`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1795,7 +1811,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingAttached`
 - From: `Attached`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1803,7 +1819,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingRunning`
 - From: `Running`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1811,7 +1827,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingRetired`
 - From: `Retired`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1819,7 +1835,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionRefusedUnregisterDrainingStopped`
 - From: `Stopped`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `unregister_draining`
 - Emits: `SessionRegistrationRejected`
@@ -1827,7 +1843,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionResumesStopped`
 - From: `Stopped`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `same_session_binding`
   - `not_draining`
@@ -1836,7 +1852,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterSessionNewBindingFromStopped`
 - From: `Stopped`
-- On: `RegisterSession`(session_id, runtime_epoch_id)
+- On: `RegisterSession`(session_id, runtime_epoch_id, initial_run_start_holds)
 - Guards:
   - `new_session_binding`
   - `not_draining`
@@ -5217,6 +5233,160 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `dispatch_outstanding`
   - `dispatch_generation_matches`
+- To: `Destroyed`
+
+### `HoldRunStartsInitializing`
+- From: `Initializing`
+- On: `HoldRunStarts`(reason)
+- Emits: `RunStartsHeld`
+- To: `Initializing`
+
+### `HoldRunStartsIdle`
+- From: `Idle`
+- On: `HoldRunStarts`(reason)
+- Emits: `RunStartsHeld`
+- To: `Idle`
+
+### `HoldRunStartsAttached`
+- From: `Attached`
+- On: `HoldRunStarts`(reason)
+- Emits: `RunStartsHeld`
+- To: `Attached`
+
+### `HoldRunStartsRunning`
+- From: `Running`
+- On: `HoldRunStarts`(reason)
+- Emits: `RunStartsHeld`
+- To: `Running`
+
+### `HoldRunStartsRetired`
+- From: `Retired`
+- On: `HoldRunStarts`(reason)
+- Emits: `RunStartsHeld`
+- To: `Retired`
+
+### `HoldRunStartsStopped`
+- From: `Stopped`
+- On: `HoldRunStarts`(reason)
+- Emits: `RunStartsHeld`
+- To: `Stopped`
+
+### `HoldRunStartsInertDestroyed`
+- From: `Destroyed`
+- On: `HoldRunStarts`(reason)
+- Emits: `RunStartsHeld`
+- To: `Destroyed`
+
+### `ReleaseRunStartsLastInitializing`
+- From: `Initializing`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Initializing`
+
+### `ReleaseRunStartsLastIdle`
+- From: `Idle`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Idle`
+
+### `ReleaseRunStartsLastAttached`
+- From: `Attached`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Attached`
+
+### `ReleaseRunStartsLastRunning`
+- From: `Running`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Running`
+
+### `ReleaseRunStartsLastRetired`
+- From: `Retired`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Retired`
+
+### `ReleaseRunStartsLastStopped`
+- From: `Stopped`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Stopped`
+
+### `ReleaseRunStartsLastDestroyed`
+- From: `Destroyed`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `no_other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Destroyed`
+
+### `ReleaseRunStartsStillHeldInitializing`
+- From: `Initializing`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Initializing`
+
+### `ReleaseRunStartsStillHeldIdle`
+- From: `Idle`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Idle`
+
+### `ReleaseRunStartsStillHeldAttached`
+- From: `Attached`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Attached`
+
+### `ReleaseRunStartsStillHeldRunning`
+- From: `Running`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Running`
+
+### `ReleaseRunStartsStillHeldRetired`
+- From: `Retired`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Retired`
+
+### `ReleaseRunStartsStillHeldStopped`
+- From: `Stopped`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
+- To: `Stopped`
+
+### `ReleaseRunStartsStillHeldDestroyed`
+- From: `Destroyed`
+- On: `ReleaseRunStarts`(reason)
+- Guards:
+  - `other_reason_holds`
+- Emits: `RunStartsReleased`
 - To: `Destroyed`
 
 ### `BoundaryAppliedPublish`
@@ -9776,6 +9946,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PeerIngressClassified`
 - To: `Running`
 
+### `ClassifyExternalEnvelopeLifecycleKickoffAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_kickoff`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeLifecycleKickoffRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_kickoff`
+  - `lifecycle_peer_subject_present`
+- Emits: `PeerIngressClassified`
+- To: `Running`
+
 ### `ClassifyExternalEnvelopeResponseAcceptedAttached`
 - From: `Attached`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -10014,6 +10204,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_settled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -10023,8 +10214,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_unsettled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
+
+### `PrepareHeldIdle`
+- From: `Idle`
+- On: `Prepare`(session_id, run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Idle`
 
 ### `PrepareAttached`
 - From: `Attached`
@@ -10032,6 +10232,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_settled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -10041,14 +10242,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `completion_correlation_unsettled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
+
+### `PrepareHeldAttached`
+- From: `Attached`
+- On: `Prepare`(session_id, run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Attached`
 
 ### `DrainQueuedRunRetired`
 - From: `Retired`
 - On: `DrainQueuedRun`(run_id)
 - Guards:
   - `completion_correlation_settled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -10057,8 +10268,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `DrainQueuedRun`(run_id)
 - Guards:
   - `completion_correlation_unsettled`
+  - `run_starts_not_held`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
+
+### `DrainQueuedRunHeldRetired`
+- From: `Retired`
+- On: `DrainQueuedRun`(run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Retired`
 
 ### `StartConversationRunIdleWithBinding`
 - From: `Idle`
@@ -10067,8 +10287,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_binding_present`
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartConversationRunHeldIdle`
+- From: `Idle`
+- On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Idle`
 
 ### `StartConversationRunInitializing`
 - From: `Initializing`
@@ -10076,8 +10305,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartConversationRunHeldInitializing`
+- From: `Initializing`
+- On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Initializing`
 
 ### `StartConversationRunAttached`
 - From: `Attached`
@@ -10085,8 +10323,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartConversationRunHeldAttached`
+- From: `Attached`
+- On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Attached`
 
 ### `StartConversationRunRunning`
 - From: `Running`
@@ -10103,16 +10350,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartImmediateAppend`(run_id)
 - Guards:
   - `turn_resettable`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartImmediateAppendHeldInitializing`
+- From: `Initializing`
+- On: `StartImmediateAppend`(run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Initializing`
 
 ### `StartImmediateAppendAttached`
 - From: `Attached`
 - On: `StartImmediateAppend`(run_id)
 - Guards:
   - `turn_resettable`
+  - `run_starts_not_held`
 - Emits: `TurnRunStarted`
 - To: `Running`
+
+### `StartImmediateAppendHeldAttached`
+- From: `Attached`
+- On: `StartImmediateAppend`(run_id)
+- Guards:
+  - `run_starts_held`
+- Emits: `RunStartHeld`
+- To: `Attached`
 
 ### `StartImmediateAppendRunning`
 - From: `Running`
@@ -16610,7 +16875,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
 - Guards:
   - `result_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -16626,7 +16891,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
 - Guards:
   - `result_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -16642,7 +16907,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
 - Guards:
   - `result_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -17517,7 +17782,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
 - Guards:
   - `output_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `active_binding_matches`
   - `exact_terminal_call_matches`
   - `terminal_authorizes_projection`
@@ -17530,7 +17795,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
 - Guards:
   - `output_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `active_binding_matches`
   - `exact_terminal_call_matches`
   - `terminal_authorizes_projection`
@@ -17543,7 +17808,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
 - Guards:
   - `output_digest_present`
-  - `bootstrap_and_causal_tail_are_delivered`
+  - `bootstrap_summary_is_acknowledged`
   - `active_binding_matches`
   - `exact_terminal_call_matches`
   - `terminal_authorizes_projection`
@@ -17974,6 +18239,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_above_every_live_recovery_seed`
+  - `canonical_cursor_is_above_the_pending_append`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -17993,6 +18259,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_above_every_live_recovery_seed`
+  - `canonical_cursor_is_above_the_pending_append`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -18012,6 +18279,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_above_every_live_recovery_seed`
+  - `canonical_cursor_is_above_the_pending_append`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -18119,6 +18387,66 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveContextAppendAuthorized`
 - To: `Running`
 
+### `AuthorizeLiveContextCausalTailBatchIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextCausalTailBatch`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, tail_cursors)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `tail_run_is_the_exact_cursor_range`
+  - `head_row_is_the_batch_append`
+  - `every_tail_row_is_a_queued_heard_speech_replay`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveContextCausalTailBatchAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextCausalTailBatch`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, tail_cursors)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `tail_run_is_the_exact_cursor_range`
+  - `head_row_is_the_batch_append`
+  - `every_tail_row_is_a_queued_heard_speech_replay`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveContextCausalTailBatchRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextCausalTailBatch`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, tail_cursors)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `tail_run_is_the_exact_cursor_range`
+  - `head_row_is_the_batch_append`
+  - `every_tail_row_is_a_queued_heard_speech_replay`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Running`
+
 ### `AuthorizeLiveContextAppendSupersededIdle`
 - From: `Idle`
 - On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
@@ -18134,6 +18462,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
@@ -18154,6 +18483,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
@@ -18174,6 +18504,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
@@ -20578,6 +20909,106 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `degradation_fields_match_status`
 - Emits: `LiveChannelStatusResolved`
 - To: `Stopped`
+
+### `RequestLiveMediaHealthAttached`
+- From: `Attached`
+- On: `RequestLiveMediaHealth`(session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty)
+- Guards:
+  - `output_present`
+  - `assistant_transcript_nonempty`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `first_output_only`
+- Emits: `LiveMediaHealthRequested`
+- To: `Attached`
+
+### `RequestLiveMediaHealthRunning`
+- From: `Running`
+- On: `RequestLiveMediaHealth`(session_id, channel_id, runtime_id, fence_token, generation, output_id, assistant_transcript_nonempty)
+- Guards:
+  - `output_present`
+  - `assistant_transcript_nonempty`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `first_output_only`
+- Emits: `LiveMediaHealthRequested`
+- To: `Running`
+
+### `ObserveLiveChannelMediaHealthAudibleAttached`
+- From: `Attached`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `audible`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Attached`
+
+### `ObserveLiveChannelMediaHealthAudibleRunning`
+- From: `Running`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `audible`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Running`
+
+### `ObserveLiveChannelMediaHealthSilentReopenAttached`
+- From: `Attached`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_remains`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Attached`
+
+### `ObserveLiveChannelMediaHealthSilentReopenRunning`
+- From: `Running`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_remains`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Running`
+
+### `ObserveLiveChannelMediaHealthSilentExhaustedAttached`
+- From: `Attached`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_spent`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Attached`
+
+### `ObserveLiveChannelMediaHealthSilentExhaustedRunning`
+- From: `Running`
+- On: `ObserveLiveChannelMediaHealth`(session_id, channel_id, output_id, decoded_frames, audible_frames, max_rms_micros)
+- Guards:
+  - `silent`
+  - `reopen_budget_spent`
+  - `channel_belongs_to_session`
+  - `channel_execution_active`
+  - `exact_requested_output`
+- Emits: `LiveChannelMediaHealthJudged`
+- To: `Running`
 
 ### `ResolveWaitAllAdmissionDuplicateRejectedIdle`
 - From: `Idle`

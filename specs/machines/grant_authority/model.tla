@@ -142,12 +142,12 @@ ResolveUse(arg_namespace, arg_generation, arg_incarnation, executor, represented
 
 
 Next ==
-    \/ \E arg_root \in GrantPrincipalValues : \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : Configure(arg_root, arg_namespace, arg_generation, arg_incarnation)
-    \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : IssueRoot(actor, record)
-    \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : \E derived \in DerivedChildRestrictionsValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : IssueChild(actor, record, derived, chain, now_ms)
-    \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : RevokeNew(actor, record)
-    \/ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : RevokeAlready(actor, record)
-    \/ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues : \E represented_subject \in OptionGrantPrincipalValues : \E leaf \in GrantRecordValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : ResolveUse(arg_namespace, arg_generation, arg_incarnation, executor, represented_subject, leaf, chain, now_ms)
+    \/ (phase = "Unconfigured") /\ \E arg_root \in GrantPrincipalValues : \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : Configure(arg_root, arg_namespace, arg_generation, arg_incarnation)
+    \/ (phase = "Active") /\ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : IssueRoot(actor, record)
+    \/ (phase = "Active") /\ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : \E derived \in DerivedChildRestrictionsValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : IssueChild(actor, record, derived, chain, now_ms)
+    \/ (phase = "Active") /\ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : RevokeNew(actor, record)
+    \/ (phase = "Active") /\ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : RevokeAlready(actor, record)
+    \/ (phase = "Active") /\ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues : \E represented_subject \in OptionGrantPrincipalValues : \E leaf \in GrantRecordValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : ResolveUse(arg_namespace, arg_generation, arg_incarnation, executor, represented_subject, leaf, chain, now_ms)
 
 configured_identity_is_present == (IF (phase = "Unconfigured") THEN TRUE ELSE ((root # None) /\ (namespace # None) /\ (generation > 0) /\ (incarnation # None)))
 unconfigured_state_is_empty == (IF (phase # "Unconfigured") THEN TRUE ELSE ((root = None) /\ (namespace = None) /\ (generation = 0) /\ (incarnation = None) /\ (revision = 0) /\ (Cardinality(DOMAIN records) = 0) /\ (Cardinality(revoked) = 0)))

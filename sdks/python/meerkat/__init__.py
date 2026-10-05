@@ -22,7 +22,7 @@ Quick start::
 
 # Core client and session
 from .client import MeerkatClient
-from .live import LiveChannel
+from .live import LiveChannel, LiveNotification, parse_live_notification
 from .mob import (
     MemberDeliveryReceipt,
     MemberRespawnReceipt,
@@ -409,6 +409,7 @@ from .events import (
     BackgroundJobCompleted,
     BackgroundJobTerminalStatus,
     BoundaryAppliedToolConfigChangeStatus,
+    LiveChannelClosed,
     BudgetWarning,
     CompactionCompleted,
     CompactionFailed,
@@ -467,6 +468,8 @@ __all__ = [
     # Client & session
     "MeerkatClient",
     "LiveChannel",
+    "LiveNotification",
+    "parse_live_notification",
     "DeferredSession",
     "Session",
     "Mob",
@@ -867,6 +870,7 @@ __all__ = [
     "StreamTruncated",
     "BackgroundJobCompleted",
     "BackgroundJobTerminalStatus",
+    "LiveChannelClosed",
     "TranscriptRewriteCommitted",
     "BoundaryAppliedToolConfigChangeStatus",
     "DeferredCatalogDeltaToolConfigChangeStatus",

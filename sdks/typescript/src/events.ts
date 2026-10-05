@@ -689,6 +689,29 @@ export interface BackgroundJobCompletedEvent {
   readonly detail: string;
 }
 
+/** Why a live channel closed (`LiveChannelClosedEvent.reason`). */
+export type LiveChannelCloseReason =
+  | "client_requested"
+  | "client_disconnected"
+  | "provider_closed"
+  | "error"
+  | "media_fault"
+  | "replaced"
+  | "open_abandoned";
+
+/**
+ * One of the session's live channels closed (every committed close).
+ * `reopenRecommended` is true only for a `media_fault` whose session may still
+ * reopen the channel with its retained context.
+ */
+export interface LiveChannelClosedEvent {
+  readonly type: "live_channel_closed";
+  readonly sessionId: string;
+  readonly channelId: string;
+  readonly reason: LiveChannelCloseReason;
+  readonly reopenRecommended: boolean;
+}
+
 export interface TranscriptRewriteCommittedEvent {
   readonly type: "transcript_rewrite_committed";
   readonly sessionId: string;
@@ -747,6 +770,7 @@ export type AgentEvent =
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
   | BackgroundJobCompletedEvent
+  | LiveChannelClosedEvent
   | TranscriptRewriteCommittedEvent
   | MalformedEvent
   | UnknownEvent;
@@ -1834,6 +1858,31 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           ["completed", "failed", "aborted", "cancelled", "retired", "terminated"] as const,
         ),
         detail: requireStringField(raw, "detail"),
+      };
+    }
+    case "live_channel_closed": {
+      const reopen = raw.reopen_recommended;
+      if (reopen !== undefined && typeof reopen !== "boolean") {
+        throw new Error("reopen_recommended must be boolean");
+      }
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        channelId: requireStringField(raw, "channel_id"),
+        reason: requireOneOf(
+          requireStringField(raw, "reason"),
+          "reason",
+          [
+            "client_requested",
+            "client_disconnected",
+            "provider_closed",
+            "error",
+            "media_fault",
+            "replaced",
+            "open_abandoned",
+          ] as const,
+        ),
+        reopenRecommended: reopen === true,
       };
     }
     case "transcript_rewrite_committed": {

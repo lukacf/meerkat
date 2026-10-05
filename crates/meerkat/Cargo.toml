@@ -249,6 +249,9 @@ test-realtime-fixtures = [
     "meerkat-openai/test-realtime-fixtures",
     "meerkat-live/test-support",
 ]
+# OAuth-protected MCP fixture server for the MCP OAuth canaries
+# (`meerkat::test_fixtures::mcp_oauth`). Test-support only.
+test-mcp-oauth-fixtures = []
 
 [package.metadata.cargo-machete]
 ignored = ["which"]  # dev-dependency used in e2e tests

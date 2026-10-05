@@ -431,6 +431,11 @@ pub enum BridgeCommand {
     /// `hard_cancel_member` fact (same immediate-interrupt authority class);
     /// a peer that predates the command rejects it at decode.
     StopMemberRun(BridgeStopMemberRunPayload),
+    /// Hold the member's run starts for a mob Stop (#1500). A peer without
+    /// [`BridgeCapabilities::run_start_hold`] rejects it at decode.
+    HoldRunStarts(BridgeRunStartHoldPayload),
+    /// Release a run-start hold (mob Resume).
+    ReleaseRunStarts(BridgeRunStartReleasePayload),
     RetireMember(BridgeRetirePayload),
     DestroyMember(BridgeSupervisorPayload),
     WireMember(BridgePeerWiringPayload),
@@ -482,6 +487,8 @@ impl BridgeCommand {
             Self::HardCancelMember(payload) => payload.protocol_version,
             Self::CancelTrackedMemberInput(payload) => payload.protocol_version,
             Self::StopMemberRun(payload) => payload.protocol_version,
+            Self::HoldRunStarts(payload) => payload.protocol_version,
+            Self::ReleaseRunStarts(payload) => payload.protocol_version,
             Self::DeliverMemberInput(payload) => payload.protocol_version,
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
             Self::DeclareMemberOutboundTaint(payload) => payload.protocol_version,
@@ -1838,6 +1845,8 @@ pub enum BridgeReply {
     Delivery(BridgeDeliveryResponse),
     TrackedInputCancelled(BridgeTrackedInputCancelResponse),
     MemberRunStopped(BridgeMemberRunStopResponse),
+    /// Reply to [`BridgeCommand::HoldRunStarts`].
+    RunStartsHeld(BridgeRunStartHoldResponse),
     Retire(BridgeRetireResponse),
     Destroy(BridgeDestroyResponse),
     /// Observation of a previously submitted supervisor-rotation operation.
@@ -3126,6 +3135,61 @@ pub struct BridgeInterruptPayload {
     pub expected_member: Option<BridgeMemberIncarnation>,
 }
 
+/// Hold a member's run starts for a mob Stop (#1500): until a matching
+/// [`BridgeCommand::ReleaseRunStarts`], the member starts no new run, so input
+/// admitted before the stop stays queued. Optionally cancels exactly the run
+/// the hold found current. Gated on [`BridgeCapabilities::run_start_hold`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRunStartHoldPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_member: Option<BridgeMemberIncarnation>,
+    /// Cancel, at its next boundary, exactly the run the hold found current.
+    #[serde(default)]
+    pub cancel_current_run: bool,
+}
+
+/// Release a hold taken by [`BridgeCommand::HoldRunStarts`] (mob Resume).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRunStartReleasePayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_member: Option<BridgeMemberIncarnation>,
+}
+
+/// What a [`BridgeCommand::HoldRunStarts`] did to the member's run.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "run", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum BridgeHeldRun {
+    /// The member had no run.
+    NoRun,
+    /// The current run was cancelled at its next boundary.
+    CancelledAtBoundary { run_id: meerkat_core::RunId },
+    /// The current run ended on its own between the hold and the cancel.
+    RunEndedBeforeCancel { run_id: meerkat_core::RunId },
+    /// The current run continues; no cancel was requested.
+    LeftRunning { run_id: meerkat_core::RunId },
+}
+
+/// Response to [`BridgeCommand::HoldRunStarts`]: the member's run starts are
+/// held, and this is what happened to its run.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRunStartHoldResponse {
+    pub run: BridgeHeldRun,
+}
+
 /// One-time bootstrap proof exchanged between a mob supervisor and a
 /// member runtime on initial bind.
 ///
@@ -3238,6 +3302,11 @@ pub struct BridgeCapabilities {
     /// earlier members of the same version do not implement it.
     #[serde(default, skip_serializing_if = "bool_is_false")]
     pub rotation_observe_hold: bool,
+    /// Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and
+    /// [`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the
+    /// protocol version, like `rotation_observe_hold`.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub run_start_hold: bool,
     #[serde(default)]
     pub retire_member: bool,
     #[serde(default)]
@@ -3289,6 +3358,7 @@ impl Default for BridgeCapabilities {
             hard_cancel_member: false,
             tracked_input_cancel: false,
             rotation_observe_hold: false,
+            run_start_hold: false,
             retire_member: false,
             destroy_member: false,
             wire_member: false,

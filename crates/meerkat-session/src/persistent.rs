@@ -1478,33 +1478,21 @@ fn transcript_rewrite_audit_receipt_for_commits(
                 "transcript rewrite receipt session has no sealed graph".to_string(),
             ))
         })?;
-    let suffix = history
-        .prove_commit_suffix_starting_with(first)
+    // Receipts carry commits and rewrite prefixes only, so this proof also
+    // covers occurrences whose bodies the graph has retired.
+    let receipt = history
+        .audit_receipt_starting_with(first)
         .map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
-                "transcript rewrite receipt suffix is invalid: {error}"
+                "failed to seal transcript rewrite receipt: {error}"
             )))
         })?;
-    let proved = suffix.commits();
-    if proved.len() != commits.len()
-        || !proved
-            .zip(commits)
-            .all(|(proved, supplied)| proved == supplied)
-    {
+    if receipt.commits() != commits {
         return Err(SessionError::Agent(AgentError::InternalError(
             "transcript rewrite receipt commits are not the exact sealed graph suffix".to_string(),
         )));
     }
-    meerkat_core::TranscriptRewriteAuditReceiptBatch::new(
-        suffix.start_prefix().clone(),
-        commits.to_vec(),
-        suffix.end_prefix().clone(),
-    )
-    .map_err(|error| {
-        SessionError::Agent(AgentError::InternalError(format!(
-            "failed to seal transcript rewrite receipt: {error}"
-        )))
-    })
+    Ok(receipt)
 }
 
 async fn append_prepared_transcript_rewrite_receipt(
@@ -2452,6 +2440,15 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     incremental: Option<Arc<dyn IncrementalSessionStore>>,
     runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
+    /// The runtime machine that hosts this service's session runtimes.
+    ///
+    /// The surface composition that builds the service binds the machine it
+    /// returns and installs its hosts on (`with_canonical_runtime_adapter`),
+    /// so every consumer that asks the service for its runtime reaches that
+    /// one machine. A service constructed directly, outside a composition,
+    /// gets a machine of its own on first use, which lives and dies with this
+    /// instance.
+    runtime_adapter: std::sync::Mutex<Option<Arc<MeerkatMachine>>>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
     /// Gates for active keep-alive checkpointers, keyed by session ID.
@@ -2521,6 +2518,17 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// Wakes projections parked on a held turn boundary when a channel is
     /// released so they can return `Busy` without waiting for the turn.
     live_projection_release_changed: tokio::sync::Notify,
+    /// Wakes waiters when a live transcript held ahead of the store can stop
+    /// being refused: a runtime turn's boundary commit was acknowledged, a
+    /// full persist landed, or the live actor was synchronized from or
+    /// discarded for durable authority. See
+    /// [`PersistentSessionService::live_authority_advanced`].
+    live_authority_advanced: tokio::sync::Notify,
+    /// Sessions whose live transcript is held ahead of the store by a runtime
+    /// turn that ended with an error: no boundary commit is coming for that
+    /// image until the next turn resyncs it. Cleared whenever live authority
+    /// advances for the session or a new runtime turn starts.
+    live_uncommitted_terminal_sessions: std::sync::Mutex<HashSet<SessionId>>,
     /// Typed faults recorded by detached event-projection tasks that halted on
     /// a durable append failure. Replay reads fail closed on these instead of
     /// serving an event stream with a silent sequence hole.
@@ -2779,6 +2787,85 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
     }
 }
 
+/// A realtime-open snapshot that never waits behind a running turn (see
+/// [`PersistentSessionService::export_realtime_open_session_snapshot_without_waiting_for_turn`]).
+#[derive(Debug)]
+pub enum RealtimeOpenSnapshot {
+    /// No turn was in flight: the live-authoritative snapshot, taken exactly
+    /// as the ordinary open takes it, under the session's turn boundary.
+    Settled {
+        session: Session,
+        canonical_user_image_decoded_bytes: usize,
+    },
+    /// A turn held the session's turn boundary: the RuntimeStore-committed
+    /// boundary. Rows the turn commits later have higher canonical sequence
+    /// numbers than this snapshot covers.
+    CommittedBoundary {
+        session: Session,
+        canonical_user_image_decoded_bytes: usize,
+    },
+}
+
+/// A realtime-refresh snapshot that never waits behind a running turn (see
+/// [`PersistentSessionService::export_realtime_refresh_session_snapshot_without_waiting_for_turn`]).
+#[derive(Debug)]
+pub enum RealtimeRefreshSnapshot {
+    /// No turn was in flight: the snapshot the ordinary refresh takes, under
+    /// the session's turn boundary, including its durable resync.
+    Settled(Session),
+    /// A turn held the session's turn boundary: the RuntimeStore-committed
+    /// boundary, read without synchronizing the live actor. The durable resync
+    /// the ordinary refresh performs is owed at the turn boundary
+    /// ([`PersistentSessionService::defer_live_resync_to_turn_boundary`]).
+    CommittedBoundary(Session),
+}
+
+/// The durable resync a live refresh owes a session whose turn was in flight
+/// when the refresh read its committed boundary. Released by
+/// [`PersistentSessionService::release_live_resync_at_turn_boundary`].
+#[derive(Debug)]
+#[must_use = "a deferred live resync is released at the turn boundary"]
+pub struct PendingLiveResync {
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+}
+
+impl PendingLiveResync {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_core::LiveChannelId {
+        &self.channel_id
+    }
+}
+
+/// How a [`PendingLiveResync`] was released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveResyncRelease {
+    /// The turn boundary was reached and the live actor was reconciled with
+    /// the durable authority there, exactly as the ordinary refresh does.
+    Synchronized,
+    /// The refreshing channel closed before the turn boundary; the resync is
+    /// dropped (the next projection reconciles at its own boundary).
+    ChannelClosed,
+    /// The session was archived or is gone by the turn boundary.
+    SessionGone,
+}
+
+/// How a live-authority check observes the live actor's transcript authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveAuthorityObservation {
+    /// A command to the session task, ordered after the caller's earlier
+    /// commands. Waits for a running turn to end.
+    Ordered,
+    /// The authority the task last published between commands and turns.
+    /// Never waits on the task; observation-only readers use it.
+    Published,
+}
+
 enum LiveSessionAuthority {
     NoLive,
     LiveAuthoritative {
@@ -2788,6 +2875,44 @@ enum LiveSessionAuthority {
         session: Box<Session>,
         reason: LiveSessionAuthorityReason,
     },
+}
+
+/// Where a live-session staleness judgement runs relative to the session's
+/// turn-finalization boundary.
+///
+/// A live actor holding transcript rows the store has not committed
+/// (`LiveUncommittedTranscript`) is either a run whose boundary commit is
+/// pending or a run that ended without committing. Holding the boundary, no
+/// commit can be pending, so the uncommitted image is stale. Outside it, the
+/// image is stale only when the run is recorded as having ended without a
+/// commit ([`PersistentSessionService::live_transcript_awaits_no_boundary_commit`]);
+/// otherwise its commit may still land and its actor and checkpoint receipt
+/// are kept (see
+/// [`PersistentSessionService::uncommitted_live_transcript_is_stale`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveStalenessPosition {
+    /// The caller holds the turn-finalization boundary (or runs inside the
+    /// runtime loop's turn, which holds it).
+    TurnBoundaryHeld,
+    /// The caller does not hold it: a run may be between its apply and its
+    /// boundary commit.
+    OutsideTurnBoundary,
+}
+
+/// What [`PersistentSessionService::live_session_export`] observed.
+///
+/// A live session that durable authority outranks has no live export; that
+/// is a typed answer distinct from "no live session", so a staleness reader
+/// can apply the authority reason (for example a turn whose rows the store
+/// has not committed yet) instead of reading it as an absent actor.
+#[derive(Debug)]
+pub enum LiveSessionExport {
+    /// The live actor's transcript is authoritative.
+    Live(Box<Session>),
+    /// No live actor exists for the session.
+    NoLive,
+    /// Durable authority outranks the live actor, for `reason`.
+    DurableAuthoritative { reason: LiveSessionAuthorityReason },
 }
 
 /// Typed diagnostic cause for synchronizing a live session from durable truth.
@@ -3633,7 +3758,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -4886,9 +5013,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
+        self.live_session_authority_with(id, LiveAuthorityObservation::Ordered)
+            .await
+    }
+
+    async fn live_session_authority_with(
+        &self,
+        id: &SessionId,
+        observation: LiveAuthorityObservation,
+    ) -> Result<LiveSessionAuthority, SessionError> {
         let mut retry = OptimisticReadRetry::new(id, "live session authority");
         loop {
-            let live_authority = match self.inner.observe_session_transcript_authority(id).await {
+            let observed = match observation {
+                LiveAuthorityObservation::Ordered => {
+                    self.inner.observe_session_transcript_authority(id).await
+                }
+                LiveAuthorityObservation::Published => {
+                    self.inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                }
+            };
+            let live_authority = match observed {
                 Ok(authority) => authority,
                 Err(SessionError::NotFound { .. }) => {
                     return Ok(LiveSessionAuthority::NoLive);
@@ -5146,13 +5292,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
-        let mut result = self.live_session_authority(id).await;
+        let mut result = self
+            .live_session_authority_with(id, LiveAuthorityObservation::Published)
+            .await;
         for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
             if !Self::is_transcript_revision_conflict(&result) {
                 break;
             }
             let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-            result = self.live_session_authority(id).await;
+            result = self
+                .live_session_authority_with(id, LiveAuthorityObservation::Published)
+                .await;
         }
         result
     }
@@ -5234,12 +5384,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn discard_stale_live_session_if_needed(
         &self,
         id: &SessionId,
+        position: LiveStalenessPosition,
     ) -> Result<bool, SessionError> {
         let LiveSessionAuthority::DurableAuthoritative { session, reason } =
             self.live_session_authority(id).await?
         else {
             return Ok(false);
         };
+        match reason {
+            // A run may be between its apply and its boundary commit: its
+            // actor and checkpoint receipt are what that commit promotes.
+            LiveSessionAuthorityReason::LiveUncommittedTranscript
+                if !self.uncommitted_live_transcript_is_stale(id, position) =>
+            {
+                return Ok(false);
+            }
+            LiveSessionAuthorityReason::LiveUncommittedTranscript
+            | LiveSessionAuthorityReason::StoredArchived
+            | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged => {}
+        }
 
         if self
             .synchronize_runtime_backed_live_from_durable_authority(id, session.as_ref(), reason)
@@ -5314,6 +5477,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             reason = reason.trace_label(),
             "synchronized live session snapshot from durable realtime authority"
         );
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -5361,7 +5525,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<bool, SessionError> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _recovery_guard = recovery_gate.lock().await;
-        self.discard_stale_live_session_if_needed(id).await
+        self.discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await
     }
 
     pub async fn synchronize_live_session_from_durable_authority_if_needed(
@@ -5423,19 +5588,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         )))
     }
 
+    /// The live session's transcript, or [`SessionError::NotFound`] when
+    /// there is no live session or durable authority outranks it (see
+    /// [`Self::live_session_export`] for the typed distinction).
     pub async fn export_live_session(&self, id: &SessionId) -> Result<Session, SessionError> {
+        match self.live_session_export(id).await? {
+            LiveSessionExport::Live(session) => Ok(*session),
+            LiveSessionExport::NoLive | LiveSessionExport::DurableAuthoritative { .. } => {
+                Err(SessionError::NotFound { id: id.clone() })
+            }
+        }
+    }
+
+    /// Export the live session's transcript when the live actor is
+    /// authoritative, or say typed why there is no live export.
+    pub async fn live_session_export(
+        &self,
+        id: &SessionId,
+    ) -> Result<LiveSessionExport, SessionError> {
         loop {
             match self.live_session_authority(id).await? {
-                LiveSessionAuthority::NoLive
-                | LiveSessionAuthority::DurableAuthoritative { .. } => {
-                    return Err(SessionError::NotFound { id: id.clone() });
+                LiveSessionAuthority::NoLive => return Ok(LiveSessionExport::NoLive),
+                LiveSessionAuthority::DurableAuthoritative { reason, .. } => {
+                    return Ok(LiveSessionExport::DurableAuthoritative { reason });
                 }
                 LiveSessionAuthority::LiveAuthoritative { snapshot } => {
                     if let Some(session) = self
                         .export_session_with_labels_if_transcript_authority(id, snapshot)
                         .await?
                     {
-                        return Ok(session);
+                        return Ok(LiveSessionExport::Live(Box::new(session)));
                     }
                 }
             }
@@ -5575,7 +5757,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(error) => return Err(error),
         }
 
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         Ok(SessionMutationGuard {
             _turn_finalization_guard: Some(turn_finalization_guard),
             _recovery_guard: Some(recovery_guard),
@@ -5711,7 +5895,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(error) => return Err(error),
         }
 
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         Ok(SessionMutationGuard {
             _turn_finalization_guard: Some(turn_finalization_guard),
             _recovery_guard: Some(recovery_guard),
@@ -6339,6 +6525,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             metadata.peer_meta = None;
             metadata.mob_member_binding = target_binding;
             metadata.keep_alive = false;
+            // The branch's launch policy is what it inherited: the source's
+            // effective policy (which includes any restriction the source's
+            // configuration declared) or the requested replacement. Copying
+            // the source's launch part instead would let a resumed branch
+            // shed the source's declared restriction.
+            metadata.tooling.spawn_tool_access_policy = Some(
+                meerkat_core::ops::SpawnToolAccessPolicy::from_launch(effective_policy.clone()),
+            );
             metadata.tooling.tool_access_policy = effective_policy;
             forked.set_session_metadata(metadata).map_err(|error| {
                 SessionError::Agent(AgentError::InternalError(format!(
@@ -6644,7 +6838,71 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // constructing provider seed history: deferring recovery until the
         // next ACK could commit an older image that the newly opened provider
         // session never saw, splitting canonical and provider ordering.
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        self.export_realtime_open_session_snapshot_under_guard(id, max_image_bytes, &mutation_guard)
+            .await
+    }
+
+    /// Export the realtime-open snapshot for a channel whose provider receives
+    /// committed rows after its seed (the live-context mirror), never waiting
+    /// behind a running turn.
+    ///
+    /// When no turn holds the session's turn boundary this is exactly
+    /// [`Self::export_realtime_open_session_snapshot_with_image_usage`], under
+    /// the same guard. When a turn holds it, the snapshot is the
+    /// RuntimeStore-committed boundary (no guard, no actor command, no
+    /// synchronization), its images hydrated the same way; the turn's rows
+    /// reach the channel through the mirror once its boundary commits. A
+    /// pending realtime image anchor cannot be reconciled without the
+    /// boundary, so that case is refused with [`SessionError::Busy`].
+    pub async fn export_realtime_open_session_snapshot_without_waiting_for_turn(
+        &self,
+        id: &SessionId,
+    ) -> Result<RealtimeOpenSnapshot, SessionError> {
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        if let Ok(turn_finalization_guard) = Arc::clone(&gate).try_lock_owned() {
+            let mutation_guard = self
+                .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+                .await?;
+            let (session, canonical_user_image_decoded_bytes) = self
+                .export_realtime_open_session_snapshot_under_guard(
+                    id,
+                    MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+                    &mutation_guard,
+                )
+                .await?;
+            return Ok(RealtimeOpenSnapshot::Settled {
+                session,
+                canonical_user_image_decoded_bytes,
+            });
+        }
+        let (mut session, _authority) = self.load_live_context_committed_source(id).await?;
+        if session.pending_realtime_user_content_blob().is_some() {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        let canonical_user_image_decoded_bytes = session
+            .hydrate_realtime_user_images_with_usage(
+                self.blob_store.as_ref(),
+                MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+            )
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to hydrate realtime history images before provider projection: {err}"
+                )))
+            })?;
+        Ok(RealtimeOpenSnapshot::CommittedBoundary {
+            session,
+            canonical_user_image_decoded_bytes,
+        })
+    }
+
+    async fn export_realtime_open_session_snapshot_under_guard(
+        &self,
+        id: &SessionId,
+        max_image_bytes: usize,
+        _mutation_guard: &SessionMutationGuard,
+    ) -> Result<(Session, usize), SessionError> {
         let mut session = self.export_realtime_session_authority_snapshot(id).await?;
         if session.pending_realtime_user_content_blob().is_some() {
             let outcome = self
@@ -6666,6 +6924,72 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
         Ok((session, canonical_user_image_decoded_bytes))
+    }
+
+    /// Export the in-place realtime refresh snapshot without waiting behind a
+    /// running turn.
+    ///
+    /// When no turn holds the session's turn boundary this is exactly
+    /// [`Self::export_realtime_refresh_session_snapshot`], under the same guard.
+    /// When a turn holds it, the snapshot is the RuntimeStore-committed
+    /// boundary (no guard, no actor command, no synchronization); the caller
+    /// owes the durable resync at the turn boundary
+    /// ([`Self::defer_live_resync_to_turn_boundary`]).
+    pub async fn export_realtime_refresh_session_snapshot_without_waiting_for_turn(
+        &self,
+        id: &SessionId,
+    ) -> Result<RealtimeRefreshSnapshot, SessionError> {
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        if let Ok(turn_finalization_guard) = Arc::clone(&gate).try_lock_owned() {
+            let _mutation_guard = self
+                .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+                .await?;
+            return Ok(RealtimeRefreshSnapshot::Settled(
+                self.export_realtime_session_authority_snapshot(id).await?,
+            ));
+        }
+        let (session, _authority) = self.load_live_context_committed_source(id).await?;
+        Ok(RealtimeRefreshSnapshot::CommittedBoundary(session))
+    }
+
+    /// Record the durable resync a refresh owes `id` at its turn boundary,
+    /// on behalf of the refreshing live channel.
+    pub fn defer_live_resync_to_turn_boundary(
+        &self,
+        id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> PendingLiveResync {
+        PendingLiveResync {
+            session_id: id.clone(),
+            channel_id: channel_id.clone(),
+        }
+    }
+
+    /// Release a deferred refresh resync at the session's turn boundary.
+    ///
+    /// Waits for the turn boundary exactly as the channel's other projections
+    /// do, then reconciles the live actor with the durable authority there
+    /// (the resync the ordinary refresh performs before reading). An explicit
+    /// close of the refreshing channel releases the wait at once with
+    /// [`LiveResyncRelease::ChannelClosed`]
+    /// ([`Self::release_live_projection_turn_boundary_waiters`]).
+    pub async fn release_live_resync_at_turn_boundary(
+        &self,
+        pending: PendingLiveResync,
+    ) -> Result<LiveResyncRelease, SessionError> {
+        let PendingLiveResync {
+            session_id,
+            channel_id,
+        } = pending;
+        match self
+            .realtime_transcript_mutation_guard_for_channel(&session_id, &channel_id)
+            .await
+        {
+            Ok(_mutation_guard) => Ok(LiveResyncRelease::Synchronized),
+            Err(SessionError::Busy { .. }) => Ok(LiveResyncRelease::ChannelClosed),
+            Err(SessionError::NotFound { .. }) => Ok(LiveResyncRelease::SessionGone),
+            Err(error) => Err(error),
+        }
     }
 
     /// Export the authoritative session for an in-place realtime refresh.
@@ -7019,6 +7343,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.live_visible_tool_defs(id).await
     }
 
+    /// The live session's visible tool definitions as its session task last
+    /// published them; never waits behind a running turn.
+    pub async fn published_live_visible_tool_defs(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolDef>, SessionError> {
+        self.inner.published_live_visible_tool_defs(id).await
+    }
+
     pub async fn external_tool_surface_snapshot(
         &self,
         id: &SessionId,
@@ -7175,6 +7508,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if discarded {
             self.checkpointer_gates.lock().await.remove(id);
             self.live_checkpointers.lock().await.remove(id);
+            self.note_live_authority_advanced(id);
         }
         Ok(discarded)
     }
@@ -7185,6 +7519,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let result = self.inner.discard_live_session(id).await;
         self.checkpointer_gates.lock().await.remove(id);
         self.live_checkpointers.lock().await.remove(id);
+        self.note_live_authority_advanced(id);
         result
     }
 
@@ -7200,7 +7535,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<usize, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -7227,7 +7564,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if !self.inner.has_live_session(id).await? {
             let mut session = self
                 .load_persisted_session_for_control(id, "append_system_notice")
@@ -7283,7 +7622,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         state: Option<meerkat_core::SessionToolVisibilityState>,
     ) -> Result<(), SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -7313,7 +7654,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         record: meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord,
     ) -> Result<(), SessionError> {
         let recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -7941,6 +8284,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence))
     }
 
+    /// Enqueue `AgentEvent::LiveChannelClosed` for the session event stream
+    /// (an ephemeral observation; nothing is persisted). Never waits on the
+    /// session actor; see
+    /// [`crate::EphemeralSessionService::enqueue_live_channel_closed`].
+    pub async fn enqueue_live_channel_closed(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    ) -> Result<(), crate::LiveChannelClosedNotPublished> {
+        self.inner
+            .enqueue_live_channel_closed(id, channel_id, reason, reopen_recommended)
+            .await
+    }
+
     pub async fn commit_live_user_transcript_final(
         &self,
         id: &SessionId,
@@ -8542,6 +8901,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         let incremental = store.as_incremental();
+        if let Some(incremental) = incremental.as_ref()
+            && incremental.transcript_row_retention()
+                == meerkat_core::TranscriptRowRetention::KeepsAll
+        {
+            tracing::warn!(
+                "incremental session store keeps every transcript rewrite row (no row retention); \
+                 session graphs stay bounded in memory, but this store's disk use and cold-load \
+                 replay grow with session history"
+            );
+        }
         Self {
             inner: Arc::new(EphemeralSessionService::new(
                 builder,
@@ -8550,6 +8919,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             incremental,
             runtime_store,
             blob_store,
+            runtime_adapter: std::sync::Mutex::new(None),
             event_store: None,
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
@@ -8561,6 +8931,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             turn_finalization_gates: Mutex::new(HashMap::new()),
             live_projection_released_channels: std::sync::Mutex::new(HashMap::new()),
             live_projection_release_changed: tokio::sync::Notify::new(),
+            live_authority_advanced: tokio::sync::Notify::new(),
+            live_uncommitted_terminal_sessions: std::sync::Mutex::new(HashSet::new()),
             event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
             event_projection_gates: Arc::new(Mutex::new(HashMap::new())),
             event_projection_drains: Arc::new(Mutex::new(HashMap::new())),
@@ -8585,6 +8957,85 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Decoded sessions typically take a small multiple of their serialized
     /// size in memory. Zero disables retention: every consumer then decodes
     /// the committed document itself.
+    /// Bind the runtime machine the surface composition built for this
+    /// service: the machine it returns and installs its hosts (LLM
+    /// reconfigure, interrupted-tool evidence) on. [`Self::canonical_runtime_adapter`]
+    /// then answers with exactly that machine.
+    #[must_use]
+    pub fn with_canonical_runtime_adapter(self, adapter: Arc<MeerkatMachine>) -> Self {
+        // A fresh service has no machine yet; binding replaces nothing.
+        let mut owner = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.is_none() {
+            *owner = Some(adapter);
+        }
+        drop(owner);
+        self
+    }
+
+    /// The runtime machine hosting this service's session runtimes: the one
+    /// the surface composition bound, or, for a service constructed directly,
+    /// a machine of its own created on first use and owned by this instance.
+    pub fn canonical_runtime_adapter(
+        &self,
+    ) -> Result<Arc<MeerkatMachine>, meerkat_runtime::RuntimeDriverError> {
+        self.acquire_canonical_runtime_adapter(None)
+    }
+
+    /// Acquire this service's one runtime owner. Failed initialization leaves
+    /// the service unbound; an explicit owner must share its physical store.
+    pub fn acquire_canonical_runtime_adapter(
+        &self,
+        explicit: Option<Arc<MeerkatMachine>>,
+    ) -> Result<Arc<MeerkatMachine>, meerkat_runtime::RuntimeDriverError> {
+        use meerkat_runtime::traits::ControllerReadinessFailure;
+        if explicit
+            .as_ref()
+            .is_some_and(|adapter| !adapter.shares_runtime_store_authority(&self.runtime_store))
+        {
+            return Err(
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: ControllerReadinessFailure::UnsupportedScope,
+                },
+            );
+        }
+        let mut owner = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = owner.as_ref() {
+            if !existing.shares_runtime_store_authority(&self.runtime_store) {
+                return Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: ControllerReadinessFailure::UnsupportedScope,
+                    },
+                );
+            }
+            if explicit
+                .as_ref()
+                .is_some_and(|adapter| !existing.shares_runtime_execution_owner_with(adapter))
+            {
+                return Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: ControllerReadinessFailure::AuthorityChanged,
+                    },
+                );
+            }
+            return Ok(Arc::clone(existing));
+        }
+        let adapter = match explicit {
+            Some(adapter) => adapter,
+            None => Arc::new(MeerkatMachine::persistent(
+                Arc::clone(&self.runtime_store),
+                Arc::clone(&self.blob_store),
+            )?),
+        };
+        *owner = Some(Arc::clone(&adapter));
+        Ok(adapter)
+    }
+
     #[must_use]
     pub fn with_whole_blob_body_cache_bytes(mut self, bytes: usize) -> Self {
         self.whole_blob_body_budget_bytes = bytes;
@@ -8685,7 +9136,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -9405,7 +9858,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let turn_guard = recovery_gate.lock().await;
         let _ = self
-            .discard_stale_live_session_if_needed(id)
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
             .await
             .map_err(|error| (error, admission.take()))?;
         let _ = self
@@ -10287,7 +10740,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<(), SessionError> {
         let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         self.checkpoint_committed_runtime_session_snapshot_with_recovery_gate(id, session_snapshot)
-            .await
+            .await?;
+        self.note_live_authority_advanced(id);
+        Ok(())
     }
 
     /// Acknowledge one exact store-issued session boundary while the runtime
@@ -10769,7 +11224,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         lease: &LiveSessionActorTurnBoundaryLease,
     ) -> Result<bool, SessionError> {
-        self.inner.discard_live_session_actor(lease.witness()).await
+        let discarded = self
+            .inner
+            .discard_live_session_actor(lease.witness())
+            .await?;
+        if discarded {
+            self.note_live_authority_advanced(lease.witness().session_id());
+        }
+        Ok(discarded)
     }
 
     /// Runtime callback variant for the generated executor contract whose
@@ -10780,7 +11242,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         witness: &LiveSessionActorWitness,
     ) -> Result<bool, SessionError> {
-        self.inner.discard_live_session_actor(witness).await
+        let discarded = self.inner.discard_live_session_actor(witness).await?;
+        if discarded {
+            self.note_live_authority_advanced(witness.session_id());
+        }
+        Ok(discarded)
     }
 
     async fn live_persist_mutation_guard(
@@ -10790,7 +11256,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let recovery_guard = recovery_gate.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
@@ -10834,6 +11302,66 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .or_default()
             .insert(channel_id.clone());
         self.live_projection_release_changed.notify_waiters();
+    }
+
+    /// Completes at the next point where a live mutation refused with
+    /// [`SessionError::Busy`] because the live transcript is ahead of the
+    /// store can succeed: a runtime turn's boundary commit was acknowledged,
+    /// a full persist landed, or the live actor was synchronized from or
+    /// discarded for durable authority.
+    ///
+    /// `notify_waiters` keeps no permit. Create and `enable` the future
+    /// before the attempt that may be refused, then await it after the
+    /// refusal, so an advance landing in between is not lost. A wakeup is a
+    /// reason to retry, not a promise the retry succeeds.
+    pub fn live_authority_advanced(&self) -> tokio::sync::futures::Notified<'_> {
+        self.live_authority_advanced.notified()
+    }
+
+    /// Whether the live transcript held ahead of the store belongs to a
+    /// runtime turn that ended with an error. No boundary commit is coming for
+    /// that image until the next runtime turn resyncs it, so a caller refused
+    /// with [`SessionError::Busy`] for a live transcript ahead of the store
+    /// should not wait for one. Becomes `true` together with a
+    /// [`Self::live_authority_advanced`] wakeup.
+    #[must_use]
+    pub fn live_transcript_awaits_no_boundary_commit(&self, id: &SessionId) -> bool {
+        self.live_uncommitted_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(id)
+    }
+
+    /// Whether a live transcript held ahead of the store is stale to a
+    /// caller at `position`. Holding the turn-finalization boundary no
+    /// boundary commit can be pending, so it is. Outside it, it is stale
+    /// only when the run that holds it ended without a commit; a run between
+    /// its apply and its boundary commit keeps its actor and the checkpoint
+    /// receipt that commit promotes.
+    #[must_use]
+    pub fn uncommitted_live_transcript_is_stale(
+        &self,
+        id: &SessionId,
+        position: LiveStalenessPosition,
+    ) -> bool {
+        match position {
+            LiveStalenessPosition::TurnBoundaryHeld => true,
+            LiveStalenessPosition::OutsideTurnBoundary => {
+                self.live_transcript_awaits_no_boundary_commit(id)
+            }
+        }
+    }
+
+    fn note_live_authority_advanced(&self, id: &SessionId) {
+        self.clear_live_uncommitted_terminal(id);
+        self.live_authority_advanced.notify_waiters();
+    }
+
+    fn clear_live_uncommitted_terminal(&self, id: &SessionId) {
+        self.live_uncommitted_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
     }
 
     /// Undo [`Self::release_live_projection_turn_boundary_waiters`] for one
@@ -11373,6 +11901,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })? = Some(authority);
         }
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -11470,6 +11999,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .map_err(SessionError::Agent)?;
             }
         }
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -11489,6 +12019,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 committed_boundary.authority_token.clone(),
             )
             .await?;
+        self.note_live_authority_advanced(id);
         Ok(())
     }
 
@@ -11647,6 +12178,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner
             .discard_uncommitted_boundary_deliveries(id, run_id)
             .await;
+        // No boundary commit is coming for this image: tell waiters refused on
+        // a live transcript ahead of the store, so they stop waiting for one.
+        self.live_uncommitted_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone());
+        self.live_authority_advanced.notify_waiters();
     }
 
     async fn apply_runtime_turn_with_recoverable_reserved_admission_inner(
@@ -11668,9 +12206,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
         let _ = self
-            .discard_stale_live_session_if_needed(id)
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
             .await
             .map_err(|error| (error, None))?;
+        // A new runtime turn owns the live image from here; its boundary
+        // commit may be coming again.
+        self.clear_live_uncommitted_terminal(id);
         let execution = self
             .inner
             .start_runtime_turn_execution_with_admission_recovering_not_found(id, req, admission)
@@ -11780,7 +12321,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Self::bind_runtime_turn_identity(&mut req, &run_id)?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
+        // A new runtime turn owns the live image from here; its boundary
+        // commit may be coming again.
+        self.clear_live_uncommitted_terminal(id);
         let execution = match admission {
             Some(admission) => self
                 .inner
@@ -12960,7 +13506,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 continue;
             }
 
-            let _ = self.discard_stale_live_session_if_needed(id).await?;
+            let _ = self
+                .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+                .await?;
             let stored_only_publication_handle: Option<Arc<dyn CoreExecutorPublicationHandle>> =
                 if self.inner.has_live_session(id).await? {
                     None
@@ -13591,7 +14139,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                             hook().await;
                         }
                     }
-                    match self.inner.observe_session_transcript_authority(id).await {
+                    match self
+                        .inner
+                        .observe_published_session_transcript_authority(id)
+                        .await
+                    {
                         Ok(current) if current == snapshot => {
                             retry.finish();
                             return Ok(view);
@@ -13859,6 +14411,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
             match fallback {
                 Some(messages) => messages,
                 None => {
+                    if let Some(history) = history.as_ref()
+                        && history.is_retired_revision(&revision)
+                    {
+                        return Err(history
+                            .retired_revision_refusal(&revision)
+                            .into_session_error());
+                    }
                     return Err(SessionError::Agent(
                         meerkat_core::error::AgentError::ConfigError(format!(
                             "transcript revision {revision} not found for session {id}",
@@ -14695,7 +15254,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<bool, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+            .await?;
         let Some(state) = self.inner.deferred_turn_state(id).await else {
             return Ok(false);
         };
@@ -15280,6 +15841,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "failed to digest persisted transcript for checkpoint seed: {err}"
                     )))
                 })?;
+                self.note_live_authority_advanced(id);
                 Ok((message_count, revision))
             }
             RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
@@ -20698,6 +21260,8 @@ mod tests {
         entered_notify: Arc<tokio::sync::Notify>,
         release_notify: Arc<tokio::sync::Semaphore>,
         pending_context: Option<String>,
+        /// `Some` when agents accept durable snapshot sync; counts the syncs.
+        durable_syncs: Option<Arc<AtomicUsize>>,
     }
 
     impl BlockingRunBuilder {
@@ -20707,7 +21271,22 @@ mod tests {
                 entered_notify: Arc::new(tokio::sync::Notify::new()),
                 release_notify: Arc::new(tokio::sync::Semaphore::new(0)),
                 pending_context: None,
+                durable_syncs: None,
             }
+        }
+
+        /// Agents that apply durable snapshot syncs, counting them.
+        fn with_durable_sync() -> Self {
+            Self {
+                durable_syncs: Some(Arc::new(AtomicUsize::new(0))),
+                ..Self::new()
+            }
+        }
+
+        fn durable_syncs(&self) -> usize {
+            self.durable_syncs
+                .as_ref()
+                .map_or(0, |syncs| syncs.load(Ordering::Acquire))
         }
 
         async fn wait_for_entered_runs(&self, expected: usize) {
@@ -20735,6 +21314,7 @@ mod tests {
         entered_notify: Arc<tokio::sync::Notify>,
         release_notify: Arc<tokio::sync::Semaphore>,
         pending_context: Option<String>,
+        durable_syncs: Option<Arc<AtomicUsize>>,
     }
 
     #[async_trait::async_trait]
@@ -20767,6 +21347,7 @@ mod tests {
                 entered_notify: Arc::clone(&self.entered_notify),
                 release_notify: Arc::clone(&self.release_notify),
                 pending_context: self.pending_context.clone(),
+                durable_syncs: self.durable_syncs.clone(),
             })
         }
     }
@@ -20789,6 +21370,18 @@ mod tests {
                 .expect("blocking run release semaphore should stay open")
                 .forget();
             self.inner.run_with_events(prompt, event_tx).await
+        }
+
+        fn sync_session_from_durable_snapshot(
+            &mut self,
+            session: Session,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let Some(syncs) = self.durable_syncs.as_ref() else {
+                return Err(meerkat_core::error::AgentError::DurableSnapshotSyncUnsupported);
+            };
+            self.inner.sync_session_from_durable_snapshot(session)?;
+            syncs.fetch_add(1, Ordering::AcqRel);
+            Ok(())
         }
 
         fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -26017,10 +26610,199 @@ mod tests {
         );
     }
 
+    /// Builds a resumed live session and holds a runtime turn on it: the turn
+    /// owns the turn boundary until `release_notify` gets a permit.
+    async fn live_session_with_held_turn() -> (
+        BlockingRunBuilder,
+        Arc<PersistentSessionService<BlockingRunBuilder>>,
+        SessionId,
+        tokio::task::JoinHandle<Result<CoreApplyOutput, SessionError>>,
+    ) {
+        let builder = BlockingRunBuilder::with_durable_sync();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let seed = service
+            .save_normalized_session(recoverable_store_row())
+            .await
+            .unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let admission = service.reserve_runtime_turn_admission(&id).await.unwrap();
+        let turn_service = Arc::clone(&service);
+        let turn_id = id.clone();
+        let active_turn = tokio::spawn(async move {
+            let _boundary = turn_service
+                .acquire_runtime_turn_finalization_guard(&turn_id)
+                .await;
+            turn_service
+                .apply_runtime_turn_with_reserved_admission(
+                    &turn_id,
+                    RunId::new(),
+                    runtime_content_turn_request("held turn"),
+                    RunApplyBoundary::RunStart,
+                    vec![InputId::new()],
+                    admission,
+                )
+                .await
+        });
+        builder.wait_for_entered_runs(1).await;
+        (builder, service, id, active_turn)
+    }
+
+    /// With no turn in flight the non-waiting refresh snapshot is the ordinary
+    /// refresh snapshot.
+    #[tokio::test]
+    async fn idle_non_waiting_refresh_snapshot_is_the_ordinary_snapshot() {
+        let service = Arc::new(PersistentSessionService::new(
+            BlockingRunBuilder::new(),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let seed = service
+            .save_normalized_session(recoverable_store_row())
+            .await
+            .unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let ordinary = service
+            .export_realtime_refresh_session_snapshot(&id)
+            .await
+            .unwrap();
+        let RealtimeRefreshSnapshot::Settled(settled) = service
+            .export_realtime_refresh_session_snapshot_without_waiting_for_turn(&id)
+            .await
+            .unwrap()
+        else {
+            panic!("an idle session refreshes from the settled snapshot");
+        };
+        // Each live export stamps its own `updated_at`; everything else is equal.
+        let shape = |session: &Session| {
+            let mut value = serde_json::to_value(session).unwrap();
+            value.as_object_mut().unwrap().remove("updated_at");
+            value
+        };
+        assert_eq!(shape(&settled), shape(&ordinary));
+    }
+
+    /// A refresh on a member mid-turn reads the committed boundary at once and
+    /// owes the durable resync; the resync is released by the turn boundary,
+    /// not before it.
+    #[tokio::test]
+    async fn deferred_refresh_resync_runs_when_the_turn_finishes() {
+        let (builder, service, id, active_turn) = live_session_with_held_turn().await;
+        let committed = service
+            .export_live_context_summary_snapshot(&id)
+            .await
+            .unwrap()
+            .0;
+        let RealtimeRefreshSnapshot::CommittedBoundary(boundary) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.export_realtime_refresh_session_snapshot_without_waiting_for_turn(&id),
+        )
+        .await
+        .expect("the refresh snapshot must not wait for the active turn")
+        .unwrap() else {
+            panic!("a refresh mid-turn reads the committed boundary");
+        };
+        assert_eq!(
+            serde_json::to_value(&boundary).unwrap(),
+            serde_json::to_value(&committed).unwrap()
+        );
+
+        let channel = meerkat_core::LiveChannelId::new("refreshing-channel");
+        let pending = service.defer_live_resync_to_turn_boundary(&id, &channel);
+        assert_eq!(pending.session_id(), &id);
+        let release_service = Arc::clone(&service);
+        let mut release = tokio::spawn(async move {
+            release_service
+                .release_live_resync_at_turn_boundary(pending)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut release)
+                .await
+                .is_err(),
+            "the resync waits for the turn boundary"
+        );
+        assert!(!active_turn.is_finished());
+        assert_eq!(builder.durable_syncs(), 0, "nothing resynced mid-turn");
+
+        builder.release_notify.add_permits(1);
+        active_turn.await.unwrap().unwrap();
+        let released = tokio::time::timeout(std::time::Duration::from_secs(5), release)
+            .await
+            .expect("the turn boundary releases the deferred resync")
+            .unwrap()
+            .unwrap();
+        assert_eq!(released, LiveResyncRelease::Synchronized);
+        assert_eq!(
+            builder.durable_syncs(),
+            1,
+            "the released resync reconciled the live actor at the boundary"
+        );
+        service
+            .export_realtime_refresh_session_snapshot(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            builder.durable_syncs(),
+            1,
+            "the deferred resync settled what the ordinary refresh would have; nothing is left"
+        );
+    }
+
+    /// Closing the refreshing channel before the turn boundary releases the
+    /// deferred resync at once, typed, without waiting out the turn.
+    #[tokio::test]
+    async fn deferred_refresh_resync_is_released_by_a_close_before_the_boundary() {
+        let (builder, service, id, active_turn) = live_session_with_held_turn().await;
+        let channel = meerkat_core::LiveChannelId::new("closing-refresh-channel");
+        let pending = service.defer_live_resync_to_turn_boundary(&id, &channel);
+        let release_service = Arc::clone(&service);
+        let mut release = tokio::spawn(async move {
+            release_service
+                .release_live_resync_at_turn_boundary(pending)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut release)
+                .await
+                .is_err(),
+            "the resync waits for the turn boundary"
+        );
+
+        service.release_live_projection_turn_boundary_waiters(&id, &channel);
+        let released = tokio::time::timeout(std::time::Duration::from_secs(1), release)
+            .await
+            .expect("the close releases the deferred resync without the turn ending")
+            .unwrap()
+            .unwrap();
+        assert_eq!(released, LiveResyncRelease::ChannelClosed);
+        assert!(!active_turn.is_finished(), "the turn is still running");
+        assert_eq!(
+            builder.durable_syncs(),
+            0,
+            "a closed channel's resync never runs"
+        );
+        service.restore_live_projection_turn_boundary_wait(&id, &channel);
+
+        builder.release_notify.add_permits(1);
+        active_turn.await.unwrap().unwrap();
+    }
+
     /// A member-status observation of a session mid-turn reads the watches
-    /// the actor publishes. The authority-arbitrating `read` asks the session
-    /// task, which serves no command during a turn, so it waits for the
-    /// whole turn; the status view must not.
+    /// the actor publishes, and so does the authority-arbitrating `read`: it
+    /// compares against the transcript authority the session task published
+    /// before the turn, never asking the busy task. The ordered observation
+    /// (a command to the task, for export and commit callers that need it
+    /// ordered after their own commands) still waits for the turn.
     #[tokio::test]
     async fn live_session_view_observation_does_not_wait_for_active_turn() {
         let builder = BlockingRunBuilder::new();
@@ -26063,14 +26845,22 @@ mod tests {
                 .await
         });
         builder.wait_for_entered_runs(1).await;
+        let busy_read = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            SessionService::read(service.as_ref(), &id),
+        )
+        .await
+        .expect("the authority-arbitrating read must not wait for the active turn")
+        .unwrap();
+        assert_eq!(busy_read.state.session_id, id);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(100),
-                SessionService::read(service.as_ref(), &id),
+                service.inner.observe_session_transcript_authority(&id),
             )
             .await
             .is_err(),
-            "the authority-arbitrating read queues behind the running turn"
+            "the ordered transcript-authority observation queues behind the running turn"
         );
         let busy_view = tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -29514,6 +30304,220 @@ mod tests {
                 .expect("live-session status should succeed"),
             "read() must not discard the live handle that owns mechanical capabilities"
         );
+    }
+
+    /// A runtime-backed session whose live actor holds a runtime turn the
+    /// store has not committed: the live transcript is ahead of the store.
+    async fn session_with_live_transcript_ahead_of_store()
+    -> (PersistentSessionService<DummyBuilder>, SessionId) {
+        let (service, id, _runtime_store, _output) =
+            session_with_live_transcript_ahead_of_store_and_output().await;
+        (service, id)
+    }
+
+    async fn session_with_live_transcript_ahead_of_store_and_output() -> (
+        PersistentSessionService<DummyBuilder>,
+        SessionId,
+        Arc<InMemoryRuntimeStore>,
+        CoreApplyOutput,
+    ) {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let output = service
+            .apply_runtime_turn(
+                &created.session_id,
+                RunId::new(),
+                runtime_content_turn_request("turn whose commit has not landed"),
+                RunApplyBoundary::Immediate,
+                vec![InputId::new()],
+            )
+            .await
+            .expect("runtime apply builds output without committing authority");
+        (service, created.session_id, runtime_store, output)
+    }
+
+    #[tokio::test]
+    async fn close_settlement_refused_ahead_of_the_store_retries_when_the_turn_commit_lands() {
+        let (service, id, runtime_store, output) =
+            session_with_live_transcript_ahead_of_store_and_output().await;
+        let channel = meerkat_core::LiveChannelId::new("settle-after-commit");
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+        assert!(matches!(
+            service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &id,
+                    channel.clone(),
+                    std::time::Duration::from_secs(5),
+                )
+                .await,
+            Err(SessionError::Busy { .. })
+        ));
+        assert!(
+            !service.live_transcript_awaits_no_boundary_commit(&id),
+            "a turn whose commit is pending still has a boundary commit coming"
+        );
+        assert!(futures::poll!(advanced.as_mut()).is_pending());
+
+        machine_commit_runtime_output(&service, runtime_store.as_ref(), &id, &output)
+            .await
+            .expect("commit and acknowledge the runtime turn's boundary");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "the acknowledged boundary commit advances live authority"
+        );
+        service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("the retry after the commit lands settles");
+    }
+
+    #[tokio::test]
+    async fn an_errored_runtime_turn_marks_that_no_boundary_commit_is_coming() {
+        let (service, id) = session_with_live_transcript_ahead_of_store().await;
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+        assert!(!service.live_transcript_awaits_no_boundary_commit(&id));
+
+        service
+            .apply_runtime_turn(
+                &id,
+                RunId::new(),
+                start_turn_request(""),
+                RunApplyBoundary::RunStart,
+                vec![InputId::new()],
+            )
+            .await
+            .expect_err("a runtime turn without an execution kind ends with an error");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "the errored turn wakes waiters"
+        );
+        assert!(
+            service.live_transcript_awaits_no_boundary_commit(&id),
+            "no boundary commit is coming for the errored turn's live image"
+        );
+        assert!(matches!(
+            service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &id,
+                    meerkat_core::LiveChannelId::new("settle-after-error"),
+                    std::time::Duration::from_secs(5),
+                )
+                .await,
+            Err(SessionError::Busy { .. })
+        ));
+
+        service
+            .discard_live_session(&id)
+            .await
+            .expect("discard the stale live actor");
+        assert!(
+            !service.live_transcript_awaits_no_boundary_commit(&id),
+            "discarding the live image clears the marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_settlement_refused_ahead_of_the_store_retries_when_the_live_actor_is_discarded()
+    {
+        let (service, id) = session_with_live_transcript_ahead_of_store().await;
+        let channel = meerkat_core::LiveChannelId::new("settle-after-discard");
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+
+        let refused = service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel.clone(),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(SessionError::Busy { .. })),
+            "a live transcript ahead of the store refuses close settlement: {refused:?}"
+        );
+        assert!(
+            futures::poll!(advanced.as_mut()).is_pending(),
+            "nothing advanced live authority yet"
+        );
+
+        service
+            .discard_live_session(&id)
+            .await
+            .expect("discard the live actor");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "discarding the live actor advances live authority"
+        );
+        // With the actor gone there is no live playback row left to settle:
+        // the retry is no longer refused, and the deferred settlement resolves
+        // its deferral on this outcome.
+        let retried = service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel,
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            !matches!(retried, Err(SessionError::Busy { .. })),
+            "the retry after the advance is not refused: {retried:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_settlement_refused_ahead_of_the_store_retries_when_the_live_session_persists() {
+        let (service, id) = session_with_live_transcript_ahead_of_store().await;
+        let channel = meerkat_core::LiveChannelId::new("settle-after-persist");
+        let advanced = service.live_authority_advanced();
+        tokio::pin!(advanced);
+        advanced.as_mut().enable();
+        assert!(matches!(
+            service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &id,
+                    channel.clone(),
+                    std::time::Duration::from_secs(5),
+                )
+                .await,
+            Err(SessionError::Busy { .. })
+        ));
+
+        service
+            .persist_live_session_now(&id)
+            .await
+            .expect("persist the live session");
+        assert!(
+            futures::poll!(advanced.as_mut()).is_ready(),
+            "a full persist advances live authority"
+        );
+        service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &id,
+                channel,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("the retry after the persist settles");
     }
 
     #[tokio::test]
@@ -38259,7 +39263,7 @@ mod tests {
             .expect("projection snapshot should save");
 
         let discarded = service
-            .discard_stale_live_session_if_needed(&id)
+            .discard_stale_live_session_if_needed(&id, LiveStalenessPosition::TurnBoundaryHeld)
             .await
             .expect("discard check should succeed");
 

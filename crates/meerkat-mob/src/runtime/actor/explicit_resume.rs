@@ -65,17 +65,20 @@ impl MobActor {
                 )
                 .await;
             }
-            Ok(Some(targets)) => self.spawn_resume_readiness_fanout(
-                targets,
-                Some(progress.clone()),
-                PendingResumeLifecycle {
-                    ticket: ResumeStepTicket::default(),
-                    phase: ResumeLifecyclePhase::PostCommitReadiness { post_commit_error },
-                    admission,
-                    progress,
-                    reply_tx,
-                },
-            ),
+            Ok(Some(targets)) => {
+                self.spawn_resume_readiness_fanout(
+                    targets,
+                    Some(progress.clone()),
+                    PendingResumeLifecycle {
+                        ticket: ResumeStepTicket::default(),
+                        phase: ResumeLifecyclePhase::PostCommitReadiness { post_commit_error },
+                        admission,
+                        progress,
+                        reply_tx,
+                    },
+                )
+                .await;
+            }
         }
     }
 
@@ -312,12 +315,15 @@ impl MobActor {
                 "resume recipe lost its launch mode".to_string(),
             ));
         };
+        let bundle_tools =
+            super::super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         Ok(Box::new(DeferredResumeProvision {
             definition: Arc::clone(&self.definition),
             profile_name: entry.role.clone(),
             agent_identity: entry.agent_identity.clone(),
             profile,
             external_tools,
+            bundle_tools,
             compaction_curator_override: work
                 .rebuild
                 .restore_spec

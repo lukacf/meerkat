@@ -476,6 +476,49 @@ impl MeerkatMachine {
         contribution_id: &str,
         contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
     ) -> Result<crate::live_execution::LiveOwnerContextDelivery, RuntimeDriverError> {
+        self.deliver_live_owner_request_context_inner(session_id, None, contribution_id, contexts)
+            .await
+    }
+
+    /// The run currently active on `session_id`, if any: the run an owner
+    /// context delivered now would reach.
+    pub async fn live_owner_current_run_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat_core::lifecycle::RunId> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            Arc::clone(&sessions.get(session_id)?.driver)
+        };
+        driver.lock().await.current_run_id()
+    }
+
+    /// [`Self::deliver_live_owner_request_context`] bound to one exact run:
+    /// `NotDelivered` unless `run_id` is still the session's active run, so a
+    /// context authorized for one run never reaches a later one.
+    pub async fn deliver_live_owner_request_context_into_run(
+        &self,
+        session_id: &SessionId,
+        run_id: &meerkat_core::lifecycle::RunId,
+        contribution_id: &str,
+        contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+    ) -> Result<crate::live_execution::LiveOwnerContextDelivery, RuntimeDriverError> {
+        self.deliver_live_owner_request_context_inner(
+            session_id,
+            Some(run_id),
+            contribution_id,
+            contexts,
+        )
+        .await
+    }
+
+    async fn deliver_live_owner_request_context_inner(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: Option<&meerkat_core::lifecycle::RunId>,
+        contribution_id: &str,
+        contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+    ) -> Result<crate::live_execution::LiveOwnerContextDelivery, RuntimeDriverError> {
         use crate::live_execution::LiveOwnerContextDelivery;
         let (gate, driver, boundary_handle, attachment_id) = {
             let sessions = self.sessions.read().await;
@@ -497,6 +540,9 @@ impl MeerkatMachine {
         let Some(run_id) = driver.lock().await.current_run_id() else {
             return Ok(LiveOwnerContextDelivery::NotDelivered);
         };
+        if expected_run_id.is_some_and(|expected| expected != &run_id) {
+            return Ok(LiveOwnerContextDelivery::NotDelivered);
+        }
         // The boundary callback may re-enter MeerkatMachine: prepare without M.
         let prepared = boundary_handle
             .prepare_turn_boundary_delivery(

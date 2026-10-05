@@ -68,13 +68,27 @@ pub struct ShellTool {
     foreground_process_group_test_config: Option<ForegroundProcessGroupTestConfig>,
 }
 
+/// The failure bound on a foreground call's one-time setup (shell path
+/// resolution, working directory, placement and the custodied spawn) on top
+/// of the command's own timeout. The command's timeout starts when its
+/// process is spawned, so setup never consumes a model-chosen timeout; this
+/// bound only stops a setup that hangs.
+pub const SHELL_SETUP_FAILURE_BOUND: Duration = Duration::from_secs(30);
+
 impl ShellTool {
+    /// Resolve the shell path when the tool is built (a PATH lookup), so the
+    /// first call does not pay for it. A shell that cannot be found here is
+    /// resolved, and reported, on first use as before.
+    fn pre_resolved_shell_path(config: &ShellConfig) -> Option<PathBuf> {
+        config.resolve_shell_path_auto().ok()
+    }
+
     /// Create a new ShellTool with the given configuration
     pub fn new(config: ShellConfig) -> Self {
         let job_manager = Arc::new(super::job_manager::JobManager::new(config.clone()));
         Self {
+            resolved_shell_path: Arc::new(Mutex::new(Self::pre_resolved_shell_path(&config))),
             config,
-            resolved_shell_path: Arc::new(Mutex::new(None)),
             job_manager,
             foreground_containment_tasks: Arc::new(Mutex::new(Vec::new())),
             #[cfg(all(test, unix))]
@@ -88,8 +102,8 @@ impl ShellTool {
         job_manager: Arc<super::job_manager::JobManager>,
     ) -> Self {
         Self {
+            resolved_shell_path: Arc::new(Mutex::new(Self::pre_resolved_shell_path(&config))),
             config,
-            resolved_shell_path: Arc::new(Mutex::new(None)),
             job_manager,
             foreground_containment_tasks: Arc::new(Mutex::new(Vec::new())),
             #[cfg(all(test, unix))]
@@ -399,6 +413,7 @@ impl ShellTool {
             .map_err(BuiltinToolError::invalid_args)?;
 
         info!(
+            tool_call_id = tool_call_id.unwrap_or_default(),
             background = input.background,
             timeout_secs,
             has_working_dir = input.working_dir.is_some(),
@@ -470,6 +485,17 @@ impl ShellTool {
                 warn!(%error, "Command execution failed");
                 BuiltinToolError::from(error)
             })?;
+        // Completion metadata only (never the command or its output): with
+        // the start line it attributes a slow tool round to its call.
+        tracing::debug!(
+            tool_call_id = tool_call_id.unwrap_or_default(),
+            exit_code = ?output.exit_code,
+            timed_out = output.timed_out,
+            duration_ms = (output.duration_secs * 1000.0) as u64,
+            stdout_bytes = output.stdout.len(),
+            stderr_bytes = output.stderr.len(),
+            "Shell command finished"
+        );
         let text = output.render_for_model();
         let value = serde_json::to_value(output)
             .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
@@ -633,9 +659,12 @@ impl BuiltinTool for ShellTool {
         let resolved_context = if input.background {
             resolution_context.clone()
         } else {
+            // The command's timeout runs from its spawn (see
+            // `execute_command_for_call`); the dispatch deadline adds the
+            // setup failure bound so setup never eats a short timeout.
             resolution_context.with_deadline(meerkat_core::ToolDeadlineContributor::finite(
                 meerkat_core::ToolDeadlineOwner::ToolInternal,
-                Duration::from_secs(timeout_secs),
+                Duration::from_secs(timeout_secs).saturating_add(SHELL_SETUP_FAILURE_BOUND),
             ))?
         };
         let mode = if input.background {
@@ -868,14 +897,67 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            plan.deadlines().effective_timeout(),
-            Some(Duration::from_secs(7))
-        );
+        let declared = Duration::from_secs(7) + SHELL_SETUP_FAILURE_BOUND;
+        assert_eq!(plan.deadlines().effective_timeout(), Some(declared));
         assert!(plan.deadlines().contributors().iter().any(|contributor| {
             contributor.owner() == meerkat_core::ToolDeadlineOwner::ToolInternal
-                && contributor.timeout() == Some(Duration::from_secs(7))
+                && contributor.timeout() == Some(declared)
         }));
+    }
+
+    /// One-time setup never consumes a model-chosen timeout: the shell path
+    /// is resolved when the tool is built (here through the nu-to-bash
+    /// fallback), and a 1 s call's dispatch deadline is its timeout plus the
+    /// setup failure bound, while the command itself still gets 1 s from
+    /// its spawn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_one_second_timeout_is_not_consumed_by_setup() {
+        let config = ShellConfig {
+            enabled: true,
+            shell: "nu".to_string(),
+            ..ShellConfig::default()
+        };
+        let tool = ShellTool::new(config);
+        assert!(
+            tool.resolved_shell_path.lock().await.is_some(),
+            "the shell path is resolved when the tool is built"
+        );
+        let args = serde_json::value::RawValue::from_string(
+            r#"{"command":"echo ok","timeout_secs":1}"#.to_string(),
+        )
+        .unwrap();
+        let plan = tool
+            .resolve_execution_plan(
+                meerkat_core::ToolCallView {
+                    id: "one-second",
+                    name: "shell",
+                    args: &args,
+                },
+                &meerkat_core::ToolExecutionResolutionContext::new(
+                    meerkat_core::ToolDeadlineChain::new(vec![
+                        meerkat_core::ToolDeadlineContributor::finite(
+                            meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                            Duration::from_secs(600),
+                        ),
+                    ])
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            plan.deadlines().effective_timeout(),
+            Some(Duration::from_secs(1) + SHELL_SETUP_FAILURE_BOUND)
+        );
+        let output = tool.execute_command("echo ok", None, 1).await.unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(!output.timed_out);
+        // The command's own 1 s still binds it from its spawn.
+        let slow = tool.execute_command("sleep 3", None, 1).await.unwrap();
+        assert!(
+            slow.timed_out,
+            "the command is still killed at its own timeout"
+        );
     }
 
     #[cfg(unix)]
@@ -1963,6 +2045,45 @@ mod tests {
             max_output_chars,
             ..Default::default()
         })
+    }
+
+    /// A tool's child never reads the host's stdin: in a stdio JSON-RPC host
+    /// (`rkat-rpc`) stdin is the protocol transport, and a command that reads
+    /// it consumed protocol frames. With the host's stdin a pipe holding a
+    /// frame, a command that reads stdin gets EOF at once and the frame is
+    /// still there afterwards.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_command_never_reads_the_host_stdin() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        const FRAME: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1}\n";
+
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(FRAME).unwrap();
+        // Swap the process's stdin for the socket holding the frame, keeping
+        // the original to restore. nextest runs each test in its own process.
+        let saved = nix::unistd::dup(0).unwrap();
+        nix::unistd::dup2(reader.as_raw_fd(), 0).unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let tool = sh_tool_with_cap(temp_dir.path(), 1_000);
+        let output = tool
+            .execute_command("head -c 1; echo exit=$?", None, 10)
+            .await;
+
+        nix::unistd::dup2(saved, 0).unwrap();
+        nix::unistd::close(saved).unwrap();
+        let output = output.unwrap();
+        assert!(!output.timed_out, "reading stdin must not block");
+        assert_eq!(
+            output.stdout, "exit=0\n",
+            "the command reads EOF from stdin, never the host's frame"
+        );
+        drop(writer);
+        let mut left = Vec::new();
+        reader.read_to_end(&mut left).unwrap();
+        assert_eq!(left, FRAME, "the host's stdin frame was not consumed");
     }
 
     /// The number after `prefix` in `text`.

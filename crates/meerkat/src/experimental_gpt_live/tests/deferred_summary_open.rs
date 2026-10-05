@@ -441,6 +441,19 @@ async fn build_environment() -> DeferredSummaryEnvironment {
 async fn build_environment_with_pre_open_bound(
     pre_open_bound: Duration,
 ) -> DeferredSummaryEnvironment {
+    build_environment_with(pre_open_bound, true).await
+}
+
+/// The same environment with no summary policy on the member host: strict
+/// opens seed the canonical history verbatim.
+async fn build_environment_without_summary_policy() -> DeferredSummaryEnvironment {
+    build_environment_with(TEST_PRE_OPEN_BOUND, false).await
+}
+
+async fn build_environment_with(
+    pre_open_bound: Duration,
+    install_summary_policy: bool,
+) -> DeferredSummaryEnvironment {
     use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -626,7 +639,11 @@ async fn build_environment_with_pre_open_bound(
     .expect("bounded host summary policy")
     .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent)
     .with_pre_open_bound(pre_open_bound);
-    let member_host = member_host.with_context_summary_policy(summary_policy.clone());
+    let member_host = if install_summary_policy {
+        member_host.with_context_summary_policy(summary_policy.clone())
+    } else {
+        member_host
+    };
     let member_host = Arc::new(member_host);
 
     let realm = meerkat_core::RealmId::parse("active-readiness").expect("realm");
@@ -1441,6 +1458,234 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
     );
     drop(commands);
     assert_eq!(env.producer.observed().len(), 1);
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            opened.channel_id(),
+            opened.pending_receipt(),
+        )
+        .await
+        .expect("close active channel");
+}
+
+/// With no turn in flight, the mirrored-channel open projection is the
+/// ordinary open projection: same seed, cursor, tools, identity, system
+/// messages, content identities and tombstones, image usage and rewrite
+/// generation. Idle seed shapes do not change.
+#[tokio::test]
+async fn idle_mirrored_open_projection_is_the_ordinary_projection() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_without_summary_policy().await;
+    let fields = |config: &meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig| {
+        (
+            format!("{:?}", config.turning_mode),
+            format!("{:?}", config.llm_identity),
+            serde_json::to_string(&config.visible_tools).expect("tools"),
+            serde_json::to_string(config.seed_messages()).expect("seed"),
+            config.canonical_message_cursor(),
+            config.canonical_system_messages_ref().to_vec(),
+            format!("{:?}", config.user_content_identities),
+            format!("{:?}", config.user_content_tombstones),
+            config.canonical_user_image_decoded_bytes,
+            config.transcript_rewrite_generation,
+        )
+    };
+    let ordinary = {
+        let projection = env
+            .member_host
+            .orchestrator()
+            .realtime_session_open_projection(
+                &env.session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                None,
+            )
+            .await
+            .expect("ordinary open projection");
+        fields(&projection.open_config)
+    };
+    let mirrored = {
+        let projection = env
+            .member_host
+            .orchestrator()
+            .realtime_session_open_projection_for_mirrored_channel(
+                &env.session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                None,
+            )
+            .await
+            .expect("mirrored open projection");
+        fields(&projection.open_config)
+    };
+    assert_eq!(mirrored, ordinary);
+    assert!(ordinary.0.contains("ProviderManaged"));
+    assert_eq!(ordinary.4, env.seeded_rows as u64);
+}
+
+/// A strict open with no summary policy on a member whose turn is in flight
+/// returns without waiting for that turn: it seeds the committed boundary
+/// (the turn's prompt is not in the seed), and once the turn commits, its
+/// prompt and reply reach the channel through the live-context mirror exactly
+/// once each.
+#[tokio::test]
+async fn canonical_open_with_a_turn_mid_flight_seeds_the_committed_boundary_and_mirrors_the_turn_once()
+ {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_without_summary_policy().await;
+    let turn = env.start_held_turn().await;
+
+    // The turn stays held until the open has returned: an open that waited
+    // for it could never complete.
+    let (opened, _elapsed, _materializations) =
+        tokio::time::timeout(Duration::from_secs(60), env.open())
+            .await
+            .expect("the open never waits on the parked turn");
+    assert!(!turn.is_finished(), "the turn is still in flight");
+    let seed = env
+        .authority
+        .latest_initial_seed
+        .lock()
+        .await
+        .clone()
+        .and_then(|seed| seed.upgrade())
+        .expect("seed custody");
+    let seeded = match &seed.lock().await.as_ref().expect("initial seed").context {
+        GptLiveSeedContext::Canonical(messages) => messages.clone(),
+        other => panic!("a policy-free open seeds canonically, got {}", other.kind()),
+    };
+    let seeded_text = serde_json::to_string(&seeded).expect("serialize seed");
+    assert!(
+        !seeded_text.contains(HELD_TURN_PROMPT),
+        "the in-flight turn is not part of the committed seed"
+    );
+
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&opened))
+        .await
+        .expect("media activation never waits on the parked turn");
+    env.held_client.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), turn)
+        .await
+        .expect("held turn completes once released")
+        .expect("turn task")
+        .expect("turn commits");
+    env.runtime.notify_committed_live_context(&env.session_id);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("mirror drain completes")
+    .expect("ordered mirror drain");
+
+    let commands = sideband.context_commands.lock().await;
+    let mirrored = |needle: &str| {
+        commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    LiveSidebandProviderCommand::AppendSessionContext { text, .. }
+                        if text.contains(needle)
+                )
+            })
+            .count()
+    };
+    assert_eq!(
+        mirrored("Mid-flight typed fact"),
+        1,
+        "the turn's prompt reaches the channel exactly once"
+    );
+    assert_eq!(
+        mirrored("Recorded: the launch code"),
+        1,
+        "the turn's reply reaches the channel exactly once"
+    );
+    drop(commands);
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            opened.channel_id(),
+            opened.pending_receipt(),
+        )
+        .await
+        .expect("close active channel");
+}
+
+/// `live/refresh` and the per-channel refresh projection config propagation
+/// uses, on a channel whose member is mid-turn, never wait for the turn: the config part is
+/// built from the committed boundary and the published tools, and the durable
+/// resync is left to the turn boundary.
+#[tokio::test]
+async fn refresh_with_a_turn_mid_flight_does_not_wait_for_the_turn() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_without_summary_policy().await;
+    let (opened, _elapsed, _materializations) = env.open().await;
+    let _sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&opened))
+        .await
+        .expect("media activation");
+    let turn = env.start_held_turn().await;
+
+    // The scripted adapter of this environment never leaves `Opening`, so the
+    // host may refuse to queue the refresh. What this pins is that the refresh
+    // projection is built (no `RefreshConfig`) and handed to the host while the
+    // turn is still held.
+    let orchestrator = env.member_host.orchestrator();
+    let refreshed = tokio::time::timeout(
+        Duration::from_secs(20),
+        orchestrator.refresh_live_channel(
+            &env.live_adapter_host,
+            opened.channel_id(),
+            Some(&env.session_id),
+        ),
+    )
+    .await
+    .expect("live/refresh never waits on the parked turn");
+    assert!(
+        !matches!(
+            refreshed,
+            Err(crate::session_runtime::errors::LiveChannelVerbError::RefreshConfig(_))
+        ),
+        "the refresh projection is built mid-turn: {refreshed:?}"
+    );
+    // Config propagation builds each channel's refresh with this projection.
+    let config = tokio::time::timeout(
+        Duration::from_secs(20),
+        orchestrator.live_refresh_config_for_channel(
+            &env.session_id,
+            opened.channel_id(),
+            meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+        ),
+    )
+    .await
+    .expect("the propagated refresh projection never waits on the parked turn")
+    .expect("refresh projection");
+    let published = env
+        .service
+        .published_live_visible_tool_defs(&env.session_id)
+        .await
+        .expect("published tools");
+    assert_eq!(
+        serde_json::to_value(&config.visible_tools).expect("tools"),
+        serde_json::to_value(&published).expect("tools"),
+        "a mid-turn refresh carries the published tool definitions"
+    );
+    let (committed, _identity) = env
+        .service
+        .export_live_context_summary_snapshot(&env.session_id)
+        .await
+        .expect("committed boundary");
+    assert_eq!(
+        config.canonical_message_cursor(),
+        committed.messages().len() as u64,
+        "a mid-turn refresh reads the committed boundary, not the in-flight turn"
+    );
+    assert!(!turn.is_finished(), "the turn is still in flight");
+
+    env.held_client.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), turn)
+        .await
+        .expect("held turn completes once released")
+        .expect("turn task")
+        .expect("turn commits");
     env.member_host
         .close_experimental_live_pending_channel(
             env.authority.as_ref(),

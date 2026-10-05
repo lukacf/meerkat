@@ -666,6 +666,7 @@ pub fn resolve_effective_turn_config(
         // carry it forward verbatim so a restricted session cannot escape its
         // gate by being recovered.
         tool_access_policy: metadata.tooling.tool_access_policy.clone(),
+        declared_tool_restriction: None,
         // Process-local dispatch admission is generated operation authority,
         // not durable session metadata. Generic recovery cannot reconstruct
         // it and therefore leaves it absent; an owning live-operation runtime
@@ -763,6 +764,7 @@ mod tests {
                     image_generation: ToolCategoryOverride::Inherit,
                     web_search: ToolCategoryOverride::Inherit,
                     tool_access_policy: None,
+                    spawn_tool_access_policy: None,
                     application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
                 },

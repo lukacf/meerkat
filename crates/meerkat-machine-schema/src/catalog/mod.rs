@@ -1,5 +1,6 @@
 mod compositions;
 mod coverage;
+mod coverage_validation;
 pub mod dsl;
 
 use crate::{CompositionSchema, MachineSchema};
@@ -14,9 +15,14 @@ pub use compositions::{
 };
 pub use coverage::{
     CompositionCoverageManifest, CoverageAnchor, CoverageClaims, CoverageSchemaTarget,
-    MachineCoverageManifest, ScenarioCoverage, SemanticCoverageEntry, SymbolRef,
-    canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
-    scheduler_rule_coverage_name,
+    MachineCoverageManifest, NonPortableComponentKind, ScenarioCoverage, SemanticCoverageEntry,
+    SymbolRef, SymbolRefError, canonical_composition_coverage_manifests,
+    canonical_machine_coverage_manifests, scheduler_rule_coverage_name,
+};
+pub use coverage_validation::{
+    CoverageValidationError, CoverageValidationMode, validate_composition_anchor_target,
+    validate_composition_coverage, validate_coverage_catalog, validate_machine_anchor_target,
+    validate_machine_coverage, validate_semantic_entries,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +58,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_session_document_machine(),
         dsl::dsl_session_turn_admission_machine(),
         dsl::dsl_workgraph_lifecycle_machine(),
+        dsl::dsl_work_item_admission_machine(),
         dsl::dsl_work_attention_lifecycle_machine(),
         dsl::dsl_work_execution_lifecycle_machine(),
         dsl::dsl_forked_participant_lifecycle_machine(),
@@ -134,6 +141,11 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "WorkGraphLifecycleMachine",
             dsl::WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE,
             dsl::WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "WorkItemAdmissionMachine",
+            dsl::WORK_ITEM_ADMISSION_PRODUCTION_RUST_CRATE,
+            dsl::WORK_ITEM_ADMISSION_PRODUCTION_RUST_MODULE,
         ),
         MachineProductionOwnerRelation::new(
             "WorkAttentionLifecycleMachine",

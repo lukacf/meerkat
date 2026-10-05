@@ -159,8 +159,31 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
         build.contains("name = \"machine_verify_all_tlc_test\""),
         "xtask BUILD must declare machine_verify_all_tlc_test"
     );
+    // The lane is split so each part fits a CI job limit: the machine-verify
+    // sweep and two hand-written audit shards, run in parallel; together they
+    // are exactly `make machine-verify` (`--part all`).
+    for (target, part) in [
+        ("machine_verify_audits_a_tlc_test", "audits-a"),
+        ("machine_verify_audits_b_tlc_test", "audits-b"),
+    ] {
+        assert!(
+            build.contains(&format!("name = \"{target}\""))
+                && build.contains(&format!(
+                    "args = [\"$(rootpath :xtask_bin)\", \"--part\", \"{part}\"]"
+                )),
+            "xtask BUILD must declare {target} running --part {part}"
+        );
+        assert!(
+            lane.contains(&format!("//crates/xtask:{target}")),
+            "machine-authority-rbe must run {target}; block:\n{lane}"
+        );
+        assert!(
+            wrapper.contains(&format!("run_part {part}")),
+            "the TLC lane wrapper must gate audits on --part {part}"
+        );
+    }
     assert!(
-        build.contains("args = [\"$(rootpath :xtask_bin)\"]")
+        build.contains("args = [\"$(rootpath :xtask_bin)\", \"--part\", \"machine-verify\"]")
             && build.contains("\":xtask_bin\"")
             && build.contains("\"//:workspace_runfiles\"")
             && build.contains(

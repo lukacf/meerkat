@@ -23,8 +23,8 @@ use meerkat_auth_core::connector_oauth::{
 };
 use meerkat_auth_core::oauth_flow::{OAuthFlowAuthority, OAuthFlowRegistrySnapshot};
 use meerkat_auth_core::{
-    BrowserOpener, McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCeremonyContext,
-    McpOAuthError, McpServerIdentity,
+    MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthAccountStrategy,
+    McpOAuthAuthority, McpOAuthCallback, McpOAuthCeremonyContext, McpOAuthError, McpServerIdentity,
 };
 use meerkat_core::handles::GeneratedAuthLeaseHandle;
 use meerkat_runtime::handles::{RuntimeAuthLeaseHandle, RuntimeOAuthFlowHandle};
@@ -199,10 +199,9 @@ struct AccountBrowser {
     opened: AtomicUsize,
 }
 
-#[async_trait]
-impl BrowserOpener for AccountBrowser {
-    async fn open(&self, authorization_url: &str) -> Result<(), McpOAuthError> {
-        let failed = || McpOAuthError::Browser("local fixture browser refused".into());
+impl AccountBrowser {
+    async fn open(&self, authorization_url: &str) -> Result<(), &'static str> {
+        let failed = || "local fixture browser refused";
         let mut authorization_url = Url::parse(authorization_url).map_err(|_| failed())?;
         if authorization_url.origin().ascii_serialization() != self.base
             || authorization_url.path() != "/authorize"
@@ -252,15 +251,53 @@ impl BrowserOpener for AccountBrowser {
     }
 }
 
-fn native_authority(
-    owners: &AuthOwners,
-    browser: Arc<AccountBrowser>,
-    strategy: Arc<AccountStrategy>,
-) -> McpOAuthAuthority {
+/// Host role for the split seam: the fixture host owns the loopback listener
+/// and the automated browser; the native authority only admits and completes.
+async fn host_login(
+    authority: &McpOAuthAuthority,
+    browser: &AccountBrowser,
+    target: &McpServerIdentity,
+) -> Result<String, McpOAuthError> {
+    let host_failed = |reason: String| McpOAuthError::TokenExchangeFailed {
+        server_name: target.server_name().to_owned(),
+        reason,
+    };
+    let binding = meerkat_auth_core::auth_oauth::bind_loopback_callback(MCP_OAUTH_CALLBACK_PATH)
+        .await
+        .map_err(|error| host_failed(error.to_string()))?;
+    let start = authority
+        .login_start(target, &binding.redirect_url, None)
+        .await?;
+    let callback = binding.expect_state(start.state.clone());
+    if let Err(reason) = browser.open(&start.authorize_url).await {
+        let _ = callback.cancel().await;
+        let _ = authority.login_cancel(target, &start);
+        return Err(host_failed(reason.to_owned()));
+    }
+    let outcome = match callback.wait(MCP_INTERACTIVE_LOGIN_TIMEOUT).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = authority.login_cancel(target, &start);
+            return Err(host_failed(error.to_string()));
+        }
+    };
+    authority
+        .login_complete(
+            target,
+            McpOAuthCallback {
+                redirect_uri: start.redirect_uri.clone(),
+                state: outcome.state,
+                code: outcome.code,
+            },
+        )
+        .await?;
+    authority.require_stored_bearer_token(target).await
+}
+
+fn native_authority(owners: &AuthOwners, strategy: Arc<AccountStrategy>) -> McpOAuthAuthority {
     private(
         McpOAuthAuthority::with_http(
             owners.persistence.clone(),
-            browser,
             provider::http(),
             owners.lease.clone(),
         )
@@ -344,11 +381,11 @@ async fn same_server_account_replacement_never_returns_other_account() {
             http: provider::http(),
             opened: AtomicUsize::new(0),
         });
-        let a = native_authority(&owners, browser_a.clone(), strategy_a.clone());
-        let b = native_authority(&owners, browser_b.clone(), strategy_b.clone());
+        let a = native_authority(&owners, strategy_a.clone());
+        let b = native_authority(&owners, strategy_b.clone());
 
         drop(private(
-            a.interactive_login(&target_a, None).await,
+            host_login(&a, &browser_a, &target_a).await,
             "real account A native login failed",
         ));
         owners.require_no_pending_attempts();
@@ -362,7 +399,7 @@ async fn same_server_account_replacement_never_returns_other_account() {
         // lifecycle owner, flow owner and coordinator, with explicit native
         // account selection. Only native login writes these credentials.
         drop(private(
-            b.interactive_login(&target_b, None).await,
+            host_login(&b, &browser_b, &target_b).await,
             "real account B replacement login failed",
         ));
         owners.require_no_pending_attempts();
@@ -390,7 +427,7 @@ async fn same_server_account_replacement_never_returns_other_account() {
         // This verifies persisted selection use without any fixture credential
         // writes or carrying the old process-local lease into the new owner.
         let reopened_owners = AuthOwners::open(directory.path());
-        let reopened_a = native_authority(&reopened_owners, browser_a.clone(), strategy_a.clone());
+        let reopened_a = native_authority(&reopened_owners, strategy_a.clone());
         let reopened = reopened_a.stored_bearer_token(&target_a).await;
         let reopened_refused = matches!(&reopened, Err(_) | Ok(None));
         let reopened_returned_account = match reopened {

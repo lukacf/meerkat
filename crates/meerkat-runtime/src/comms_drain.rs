@@ -32,18 +32,18 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BRIDGE_TURN_OUTCOME_ACK_MAX, BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
     BridgeDeliveryResponse, BridgeDestroyResponse, BridgeDirectMemberFence, BridgeEventCursor,
-    BridgeHardCancelPayload, BridgeLiveControlledResponse, BridgeLiveOpenedResponse,
+    BridgeHardCancelPayload, BridgeHeldRun, BridgeLiveControlledResponse, BridgeLiveOpenedResponse,
     BridgeMemberEventsPage, BridgeMemberHistoryPage, BridgeMemberIncarnation,
     BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
     BridgeOutboundTaintTarget, BridgeOutcomeTracking, BridgePeerConnectivity, BridgePeerIdentity,
     BridgePeerSpec, BridgeProtocolVersion, BridgeRejectionCause, BridgeReply, BridgeRetireOutcome,
-    BridgeRetireResponse, BridgeSupervisorPayload, BridgeSupervisorRotationObservation,
-    BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
-    BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
-    BridgeSupervisorRotationState, BridgeSupervisorRotationTargetReceipt,
-    BridgeTrackedInputCancelPayload, BridgeTrackedInputCancelResponse, SUPERVISOR_BRIDGE_INTENT,
-    SupervisorRotationOperationId, WireEventRow, canonicalize_bridge_address,
-    decode_bridge_command,
+    BridgeRetireResponse, BridgeRunStartHoldResponse, BridgeSupervisorPayload,
+    BridgeSupervisorRotationObservation, BridgeSupervisorRotationOperationReceipt,
+    BridgeSupervisorRotationPendingPhase, BridgeSupervisorRotationRejectionCause,
+    BridgeSupervisorRotationRejectionReceipt, BridgeSupervisorRotationState,
+    BridgeSupervisorRotationTargetReceipt, BridgeTrackedInputCancelPayload,
+    BridgeTrackedInputCancelResponse, SUPERVISOR_BRIDGE_INTENT, SupervisorRotationOperationId,
+    WireEventRow, canonicalize_bridge_address, decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -602,8 +602,7 @@ pub fn spawn_comms_drain(
                         }
                     }
                     PeerInputClass::SilentRequest
-                    | PeerInputClass::PeerLifecycleKickoffFailed
-                    | PeerInputClass::PeerLifecycleKickoffCancelled
+                    | PeerInputClass::PeerLifecycleKickoff
                     | PeerInputClass::ActionableMessage
                     | PeerInputClass::ActionableRequest
                     | PeerInputClass::PlainEvent => {
@@ -1333,6 +1332,8 @@ fn bridge_capabilities(
         // Rotation observation is a V4 command; this member holds it until
         // the operation is terminal when asked.
         rotation_observe_hold: origin_protocol.supports_multi_host(),
+        // Mob Stop holds this member's run starts until Resume (#1500).
+        run_start_hold: origin_protocol.supports_multi_host(),
         retire_member: true,
         destroy_member: true,
         wire_member: true,
@@ -5039,6 +5040,151 @@ async fn try_handle_supervisor_bridge_command(
             })
             .await
         }
+        BridgeCommand::HoldRunStarts(payload) => {
+            crate::stack_relief::box_in_own_frame(|| async move {
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "hold run starts failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                if let Err((cause, reason)) = require_optional_registered_member_incarnation(
+                    adapter,
+                    session_id,
+                    payload.expected_member.as_ref(),
+                    "hold run starts",
+                ) {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                // The bridge carries a mob Stop's hold (#1500).
+                let held = match adapter
+                    .hold_run_starts(session_id, crate::RunStartHoldReason::MobStop)
+                    .await
+                {
+                    Ok(held) => held,
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("hold run starts failed: {error}"),
+                            None,
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+                let run = match held.current_run {
+                    None => BridgeHeldRun::NoRun,
+                    Some(run_id) if !payload.cancel_current_run => {
+                        BridgeHeldRun::LeftRunning { run_id }
+                    }
+                    Some(run_id) => match adapter
+                        .cancel_after_boundary_run_if_current(session_id, &run_id)
+                        .await
+                    {
+                        Ok(true) => BridgeHeldRun::CancelledAtBoundary { run_id },
+                        Ok(false)
+                        | Err(
+                            crate::traits::RuntimeDriverError::StaleAuthority { .. }
+                            | crate::traits::RuntimeDriverError::NotReady { .. },
+                        ) => BridgeHeldRun::RunEndedBeforeCancel { run_id },
+                        Err(error) => {
+                            send_bridge_failure(
+                                comms_runtime,
+                                candidate,
+                                BridgeRejectionCause::Internal,
+                                format!("cancelling the held member's run failed: {error}"),
+                                None,
+                            )
+                            .await;
+                            return true;
+                        }
+                    },
+                };
+                send_bridge_response(
+                    comms_runtime,
+                    candidate,
+                    meerkat_core::interaction::ResponseStatus::Completed,
+                    BridgeReply::RunStartsHeld(BridgeRunStartHoldResponse { run }),
+                    None,
+                )
+                .await;
+                true
+            })
+            .await
+        }
+        BridgeCommand::ReleaseRunStarts(payload) => {
+            crate::stack_relief::box_in_own_frame(|| async move {
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "release run starts failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                if let Err((cause, reason)) = require_optional_registered_member_incarnation(
+                    adapter,
+                    session_id,
+                    payload.expected_member.as_ref(),
+                    "release run starts",
+                ) {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                match adapter
+                    .release_run_starts(session_id, crate::RunStartHoldReason::MobStop)
+                    .await
+                {
+                    Ok(()) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::Ack(BridgeAck { ok: true }),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("release run starts failed: {error}"),
+                            None,
+                        )
+                        .await;
+                    }
+                }
+                true
+            })
+            .await
+        }
         BridgeCommand::RetireMember(payload) => {
             // Each arm builds in its own boxed frame: inline, every arm's temporaries
             // and child futures share one poll frame at opt-level 0 (#1462).
@@ -8210,6 +8356,7 @@ mod tests {
                     "comms-drain-test-projection-trust",
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test_projection_trust_register",
         )
@@ -8333,6 +8480,7 @@ mod tests {
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
                     runtime_epoch_id: None,
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
                 "running_test_peer_comms_handle_register",
             )
@@ -9555,6 +9703,89 @@ mod tests {
                 "rejected {class:?} must use the typed abandonment path"
             );
         }
+    }
+
+    /// #1608: a member-kickoff lifecycle notice is admitted as visible runtime
+    /// work but never opens an inbound peer request: nobody can answer it, so
+    /// recording one would leave a request outstanding forever.
+    #[tokio::test]
+    async fn kickoff_lifecycle_notice_is_admitted_without_an_inbound_request() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+
+        let id = InteractionId(Uuid::new_v4());
+        let kind = meerkat_core::comms::PeerLifecycleKind::KickoffStarted;
+        let candidate = PeerInputCandidate {
+            interaction: InboxInteraction {
+                objective_id: None,
+                sender_taint: None,
+                id,
+                from_route: None,
+                from: "worker-1".to_string(),
+                content: InteractionContent::Request {
+                    intent: kind.as_str().to_string(),
+                    params: json!({ "peer": "worker-1" }),
+                    blocks: None,
+                },
+                rendered_text: String::new(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+            },
+            ingress: PeerIngressFact::peer(
+                id,
+                PeerInputClass::PeerLifecycleKickoff,
+                meerkat_core::PeerIngressKind::Request,
+                Some(meerkat_core::PeerIngressAuthDecision::Required),
+                PeerIngressIdentity::new(
+                    PeerId::new(),
+                    "worker-1",
+                    PeerIngressConvention::Lifecycle {
+                        kind,
+                        peer: "worker-1".to_string(),
+                    },
+                ),
+            ),
+            lifecycle_peer: Some("worker-1".to_string()),
+            response_terminality: None,
+        };
+
+        let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+        let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> =
+            peer_handle.clone();
+        let runtime = Arc::new(OneShotPeerRequestRuntime::with_complete_authority(
+            candidate,
+            peer_authority,
+        ));
+        let drain = spawn_authorized_test_comms_drain(
+            adapter.clone(),
+            session_id.clone(),
+            runtime.clone(),
+            Duration::from_millis(10),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("drain should exit after one candidate")
+            .expect("drain task should not panic");
+
+        assert_eq!(
+            peer_handle.request_received_count(),
+            0,
+            "a kickoff notice must not record PeerRequestReceived"
+        );
+        assert!(runtime.abandonment_reasons().is_empty());
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("registered session snapshot");
+        assert_eq!(
+            snapshot.ledger.input_count, 1,
+            "the kickoff notice must still be admitted as visible runtime work"
+        );
     }
 
     #[tokio::test]

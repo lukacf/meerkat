@@ -159,6 +159,38 @@ pub fn build_runtime_backed_service_with_capacities_and_default_reconfigure_host
     (service, adapter)
 }
 
+/// Runtime-backed sessions get interactive MCP auth by default: once the
+/// runtime's AuthMachine flow owner exists, the factory's MCP credential
+/// source becomes the native authority bound to it and to the factory's
+/// provider-auth persistence. A host-supplied resolver wins; a factory
+/// without persistence gets none.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub(crate) fn install_default_mcp_auth_resolver(
+    builder: FactoryAgentBuilder,
+    runtime_adapter: &Arc<MeerkatMachine>,
+) -> FactoryAgentBuilder {
+    if builder.factory().has_mcp_auth_resolver() {
+        return builder;
+    }
+    let persistence = match builder.factory().resolution_provider_auth_persistence() {
+        Ok(persistence) => persistence,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "provider-auth persistence unavailable; no default MCP OAuth resolver"
+            );
+            None
+        }
+    };
+    match crate::default_mcp_auth_resolver(
+        persistence,
+        runtime_adapter.provider_auth_runtime_authority(),
+    ) {
+        Some(resolver) => builder.with_mcp_auth_resolver(resolver),
+        None => builder,
+    }
+}
+
 #[cfg(feature = "session-store")]
 pub fn build_runtime_backed_service_with_capacities(
     mut builder: FactoryAgentBuilder,
@@ -186,12 +218,15 @@ pub fn build_runtime_backed_service_with_capacities(
     #[cfg(not(target_arch = "wasm32"))]
     let detached_job_store = persistence.job_store();
     #[cfg(not(target_arch = "wasm32"))]
-    let runtime_delivery_inbox =
-        meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+    let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     let event_projection = persistence.event_projection();
     let (store, runtime_store, blob_store) = persistence.into_parts();
     builder = builder.with_image_generation_machine(runtime_adapter.clone());
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    {
+        builder = install_default_mcp_auth_resolver(builder, &runtime_adapter);
+    }
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
         &store,
     ))));
@@ -210,6 +245,9 @@ pub fn build_runtime_backed_service_with_capacities(
             runtime_delivery_inbox,
         ));
     }
+    // The service carries the machine this composition returns, so a
+    // consumer asking the service for its runtime (a mob) reaches the same
+    // machine the host drives and installs its reconfigure host on.
     let mut service = PersistentSessionService::new_with_capacities(
         builder,
         active_session_capacity,
@@ -217,7 +255,8 @@ pub fn build_runtime_backed_service_with_capacities(
         store,
         runtime_store,
         blob_store,
-    );
+    )
+    .with_canonical_runtime_adapter(Arc::clone(&runtime_adapter));
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     if let Some((event_store, projector)) = event_projection {
         service = service.with_event_projection(event_store, projector);
@@ -4594,5 +4633,91 @@ mod tests {
         ) -> Result<(), RuntimeDriverError> {
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, feature = "mcp", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod default_mcp_auth_tests {
+    use super::*;
+    use meerkat_core::Config;
+
+    struct HostResolver;
+
+    #[async_trait::async_trait]
+    impl meerkat_mcp::McpAuthResolver for HostResolver {
+        async fn stored_bearer_token(
+            &self,
+            _target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+        ) -> Result<Option<String>, meerkat_providers::mcp_oauth::McpOAuthError> {
+            Ok(None)
+        }
+
+        async fn interactive_login(
+            &self,
+            target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+            _www_authenticate: Option<&str>,
+        ) -> Result<String, meerkat_providers::mcp_oauth::McpOAuthError> {
+            Err(
+                meerkat_providers::mcp_oauth::McpOAuthError::HumanAuthorizationRequired {
+                    server_name: target.server_name().to_owned(),
+                },
+            )
+        }
+    }
+
+    fn persistence() -> meerkat_providers::auth_store::ProviderAuthPersistence {
+        meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        )
+    }
+
+    #[test]
+    fn runtime_backed_builds_install_the_default_mcp_auth_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"))
+            .with_provider_auth_persistence(persistence());
+        let builder = install_default_mcp_auth_resolver(
+            FactoryAgentBuilder::new(factory, Config::default()),
+            &runtime,
+        );
+        assert!(
+            builder.factory().has_mcp_auth_resolver(),
+            "a runtime-backed host with provider-auth persistence gets interactive MCP auth"
+        );
+    }
+
+    #[test]
+    fn a_host_supplied_mcp_auth_resolver_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        let host: Arc<dyn meerkat_mcp::McpAuthResolver> = Arc::new(HostResolver);
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"))
+            .with_provider_auth_persistence(persistence())
+            .mcp_auth_resolver(Arc::clone(&host));
+        let builder = install_default_mcp_auth_resolver(
+            FactoryAgentBuilder::new(factory, Config::default()),
+            &runtime,
+        );
+        let installed = builder
+            .factory()
+            .mcp_auth_resolver_for_test()
+            .expect("resolver kept");
+        assert!(Arc::ptr_eq(installed, &host));
+    }
+
+    #[test]
+    fn no_provider_auth_persistence_means_no_default_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence();
+        let builder = install_default_mcp_auth_resolver(
+            FactoryAgentBuilder::new(factory, Config::default()),
+            &runtime,
+        );
+        assert!(!builder.factory().has_mcp_auth_resolver());
     }
 }

@@ -238,10 +238,68 @@ Environment variables in config use `${VAR_NAME}` syntax.
 
 <Note>
 For OAuth-protected streamable HTTP servers, keep config simple. Add the URL
-with `rkat mcp add`, then run `rkat mcp login <name>` for an explicit browser
-login, or `rkat run "..." --mcp-auth interactive` to allow first-use browser
-auth during an interactive TTY run. Normal runs default to `--mcp-auth stored`.
+with `rkat mcp add`, set `oauth_account` to the account the login must prove,
+then run `rkat mcp login <name>` for an explicit browser login, or
+`rkat run "..." --mcp-auth interactive` to allow first-use browser auth during
+an interactive TTY run. Normal runs default to `--mcp-auth stored`.
 </Note>
+
+### Host-driven OAuth
+
+MCP OAuth is a host ceremony. Agents never open a browser or see any of its
+data: when a server has no usable credential, its connection fails with the
+typed `AuthorizationRequired` status (`McpError::AuthorizationRequired`,
+`McpRouter::servers_awaiting_authorization`), and the host decides when to
+ask its user.
+
+- **Account selection.** Interactive login requires `oauth_account` on the
+  server entry. The default account strategy is OpenID Connect UserInfo: it
+  requests `openid`, calls the issuer's `userinfo_endpoint` with the new
+  access token and requires `sub` to equal `oauth_account`. Hosts whose
+  servers prove the account another way supply their own
+  `McpOAuthAccountStrategy`.
+- **Embedding hosts** use `HostAuthService::mcp_login_start` and
+  `mcp_login_complete` (and `mcp_login_cancel` on timeout). Start admits the
+  attempt through the runtime OAuth flow owner (PKCE and one-time state) and
+  returns the authorize URL; complete takes the loopback callback, verifies
+  it against the admitted attempt, exchanges the code and persists the
+  credential. `AgentFactory::mcp_auth_resolver` (or
+  `AgentBuildConfig::mcp_auth_resolver`) connects agents to those
+  credentials. Runtime-backed RPC, REST and MCP-server hosts install this
+  resolver by default, including for live `mcp/add` servers.
+- **One attempt per server.** A start while an attempt is pending for the
+  same server returns that attempt (`disposition: joined`) instead of a
+  second one. `HostAuthService::mcp_begin_loopback_login` binds the loopback
+  callback for you; its pending login has a typed `cancel` that retires the
+  callback binding and the attempt. Opening the browser is advisory: a
+  failed launch never retries or cancels the attempt, which ends only by
+  completion, cancel or expiry.
+- **RPC and REST hosts** use `auth/login/start`, `auth/login/complete`,
+  `auth/login/cancel` and (RPC) `auth/status/get` with an MCP target instead
+  of a provider binding:
+
+  ```json
+  {"mcp": {"server_name": "remote-oauth", "server_url": "https://mcp.example.com/api", "oauth_account": "subject-id"},
+   "redirect_uri": "http://127.0.0.1:53682/mcp/oauth/callback"}
+  ```
+
+  `redirect_uri` must be an http loopback URL. Completion sends only the
+  callback's `code` and `state` (and the same `redirect_uri`): issuer, client
+  and resource come from the admitted attempt, and nothing network-facing
+  happens until `state` is proven. Cancel takes `{mcp, state}`. A joined start
+  returns the pending attempt's URL and state, because wire callers are
+  host-privileged by contract. The server must be
+  configured (project or user `mcp.toml` of the host): `server_url` must equal
+  its configured URL and `oauth_account`, if given, its configured account.
+  Anything else is refused before any network request.
+
+<Warning>
+The authorize URL and `state`, and the callback's `code` and `state`, let
+whoever holds them complete the attempt. A host must open the URL only in a
+browser context that no agent-drivable tool can observe or control, bind the
+loopback callback itself, and never put these values in a tool result,
+transcript, agent event, elicitation result or log.
+</Warning>
 
 ## Meerkat as an MCP server
 
@@ -991,7 +1049,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 8, "patch": 50},
+  "contract_version": {"major": 0, "minor": 8, "patch": 51},
   "capabilities": [
     {
       "id": "sessions",
@@ -1058,7 +1116,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 8, "patch": 50},
+  "contract_version": {"major": 0, "minor": 8, "patch": 51},
   "providers": [
     {
       "provider": "anthropic",

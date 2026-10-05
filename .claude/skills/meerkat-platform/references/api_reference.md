@@ -914,7 +914,7 @@ the full canonical key; selecting an unrelated source does not rewrite it.
 ## Comms, hooks, skills, multi-agent
 
 - Inproc comms is namespace-scoped; realm namespace isolates peer discovery/sends.
-- **Peer lifecycle typing**: mob lifecycle routing is typed at ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle notices; `mob.kickoff_failed` and `mob.kickoff_cancelled` are visible lifecycle notices. Do not depend on mob defaults in `silent_comms_intents` for canonical behavior.
+- **Peer lifecycle typing**: mob lifecycle routing is typed at ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle notices; the six `mob.kickoff_*` kinds (pending, starting, started, callback_pending, failed, cancelled) are visible lifecycle notices that open no inbound request and need no reply. Do not depend on mob defaults in `silent_comms_intents` for canonical behavior.
 - **Comms choice**: agents use `send_message` for ordinary collaboration, `send_request` for structured ask/reply, and `send_response` for replies. Public peer reservation streams were removed.
 - Hooks and skills resolve from runtime root. Workspace-default CLI realms preserve project ergonomics.
 - **Skill introspection**: `SkillRuntime::list_all_with_provenance()` returns active + shadowed skills. `load_from_source(key, None)` loads the canonical key; the factory composite accepts registered source UUID text for explicit source selection.

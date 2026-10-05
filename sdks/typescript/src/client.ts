@@ -98,6 +98,8 @@ import {
   type LivePlaybackCompleteResult,
   type LiveRefreshResult,
   type LiveSendInputParams,
+  type LiveMediaHealthParams,
+  type LiveMediaHealthResult,
   type LiveStatusResult,
   type LiveTruncateParams,
   type LiveWebrtcAnswerParams,
@@ -154,6 +156,10 @@ import {
   type ToolsRegisterResult,
   SkillListResponse,
 } from "./generated/types.js";
+import {
+  parseLiveNotification,
+  type LiveNotificationListener,
+} from "./live_webrtc.js";
 import type {
   ApprovalDecideParams as RpcApprovalDecideParams,
   ApprovalGetParams as RpcApprovalGetParams,
@@ -203,6 +209,7 @@ import type {
   LiveStatusResult as RpcLiveStatusResult,
   BridgeLiveControlOutcome as RpcBridgeLiveControlOutcome,
   BridgeLiveControlVerb as RpcBridgeLiveControlVerb,
+  LoginCancelParams as RpcLoginCancelParams,
   LoginCompleteParams as RpcLoginCompleteParams,
   LoginStartParams as RpcLoginStartParams,
   MobBindHostParams as RpcMobBindHostParams,
@@ -336,7 +343,10 @@ import type {
   WireAuthProfileDetail as RpcWireAuthProfileDetail,
   WireAuthProfilesList as RpcWireAuthProfilesList,
   WireAuthStatusDetail as RpcWireAuthStatusDetail,
+  WireAuthStatusResultMcpAuthStatus as RpcWireAuthStatusResultMcpAuthStatus,
+  WireMcpAuthTarget as RpcWireMcpAuthTarget,
   WireDeviceStart as RpcWireDeviceStart,
+  WireLoginCancelled as RpcWireLoginCancelled,
   WireLoginReady as RpcWireLoginReady,
   WireLoginStart as RpcWireLoginStart,
   WireRealmConnectionSet as RpcWireRealmConnectionSet,
@@ -927,6 +937,7 @@ export class MeerkatClient {
     { resolve: (value: Record<string, unknown>) => void; reject: (reason: unknown) => void }
   >();
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
+  private liveNotificationListeners = new Set<LiveNotificationListener>();
   private streamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
   // Per-request_id stream subscriptions for createSessionStreaming calls whose
   // session_id is not yet bound. Keyed by the JSON-RPC request id so concurrent
@@ -1131,7 +1142,7 @@ export class MeerkatClient {
     });
 
     this.rl = createInterface({ input: this.process.stdout! });
-    this.rl.on("line", (line: string) => this.handleLine(line));
+    this.rl.on("line", (line: string) => this.handleLine(line, child));
 
     // Handshake — `initialize` returns the generated `ServerCapabilities`
     // contract; fields are validated below.
@@ -1192,6 +1203,10 @@ export class MeerkatClient {
     }
     const process = this.process;
     this.process = null;
+    // Retire this connection's work before yielding. A reconnect can admit
+    // new work while the original child is still being reaped.
+    this.rejectPendingRequests(new MeerkatError("CLIENT_CLOSED", "Client closed"));
+    this.closeQueues();
     if (process) {
       process.stdin?.end();
       const closed = once(process, "close").catch(() => []);
@@ -1206,8 +1221,6 @@ export class MeerkatClient {
       process.stdout?.destroy();
       process.stderr?.destroy();
     }
-    this.rejectPendingRequests(new MeerkatError("CLIENT_CLOSED", "Client closed"));
-    this.closeQueues();
   }
 
   private rejectPendingRequests(reason: unknown): void {
@@ -4259,6 +4272,48 @@ export class MeerkatClient {
     return MeerkatClient.parseLiveStatusResult(result, "Invalid live/status response");
   }
 
+  /**
+   * Receive the server's channel-scoped `live/*` notifications
+   * (`live/assistant_output_available`, `live/media_health_requested`,
+   * `live/assistant_playback_hint`). Returns an unsubscribe function.
+   * Notifications that arrive with no listener are dropped; a method this
+   * SDK build does not know is ignored. A throwing listener does not stop
+   * the others or the transport.
+   */
+  onLiveNotification(listener: LiveNotificationListener): () => void {
+    this.liveNotificationListeners.add(listener);
+    return () => {
+      this.liveNotificationListeners.delete(listener);
+    };
+  }
+
+  private dispatchLiveNotification(method: string, params: unknown): void {
+    const notification = parseLiveNotification(method, params);
+    if (notification === undefined) {
+      return;
+    }
+    for (const listener of [...this.liveNotificationListeners]) {
+      try {
+        listener(notification);
+      } catch {
+        // A listener fault is the listener's own; the transport goes on.
+      }
+    }
+  }
+
+  /**
+   * Answer a `live/media_health_requested` notification with raw
+   * decoded-audio counters (channel media start to now). The runtime judges
+   * them; on `media_fault` it has already closed the channel, and
+   * `reopen_recommended` says whether to reopen with the retained context.
+   */
+  async liveMediaHealth(
+    params: LiveMediaHealthParams,
+  ): Promise<LiveMediaHealthResult> {
+    const result = await this.request("live/media_health", params);
+    return result as unknown as LiveMediaHealthResult;
+  }
+
   async liveClose(params: LiveChannelParams): Promise<LiveCloseResult> {
     const result = await this.request("live/close", params);
     return MeerkatClient.parseLiveCloseResult(result);
@@ -4476,12 +4531,49 @@ export class MeerkatClient {
     return this.request("auth/profile/delete", params);
   }
 
+  /**
+   * Begin an OAuth login for a provider binding or an MCP server
+   * (`{ mcp: { server_name, server_url, oauth_account? }, redirect_uri }`,
+   * where `redirect_uri` is an http loopback URL; `disposition` is `joined`
+   * when an attempt was already pending).
+   * The authorize URL and state are host-channel data: open the URL only in
+   * a browser no agent tool can observe, and never pass these values to an
+   * agent, tool result, transcript or log.
+   */
   async authLoginStart(params: RpcLoginStartParams): Promise<RpcWireLoginStart> {
     return this.request("auth/login/start", params);
   }
 
+  /**
+   * Finish an OAuth login. For an MCP target (`{ mcp, code, state,
+   * redirect_uri }`) issuer, client and resource come from the admitted
+   * attempt named by `state`.
+   */
   async authLoginComplete(params: RpcLoginCompleteParams): Promise<RpcWireLoginReady> {
     return this.request("auth/login/complete", params);
+  }
+
+  /**
+   * Retire a pending MCP OAuth attempt by its `state`.
+   */
+  async authLoginCancel(params: RpcLoginCancelParams): Promise<RpcWireLoginCancelled> {
+    return this.request("auth/login/cancel", params);
+  }
+
+  /**
+   * Authorization status of an MCP server target via `auth/status/get`.
+   */
+  async authMcpStatus(
+    mcp: RpcWireMcpAuthTarget,
+  ): Promise<RpcWireAuthStatusResultMcpAuthStatus> {
+    const result = await this.request("auth/status/get", { mcp });
+    if (!("phase" in result) || !("mcp" in result)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "auth/status/get returned a binding status for an MCP target",
+      );
+    }
+    return result as RpcWireAuthStatusResultMcpAuthStatus;
   }
 
   async authLoginDeviceStart(
@@ -4530,7 +4622,8 @@ export class MeerkatClient {
 
   // -- Transport ----------------------------------------------------------
 
-  private handleLine(line: string): void {
+  private handleLine(line: string, child = this.process): void {
+    if (this.process !== child) return;
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(line);
@@ -4550,7 +4643,7 @@ export class MeerkatClient {
 
     // Server→client callback request (has both id and method).
     if ("id" in data && "method" in data) {
-      this.handleCallbackRequest(data);
+      this.handleCallbackRequest(data, child);
       return;
     }
 
@@ -4590,6 +4683,12 @@ export class MeerkatClient {
     } else if ("method" in data) {
       const method = String(data.method ?? "");
       const params = (data.params ?? {}) as Record<string, unknown>;
+      if (method.startsWith("live/")) {
+        // Channel-scoped live notifications carry no session_id: they go to
+        // onLiveNotification listeners, never into a session event queue.
+        this.dispatchLiveNotification(method, params);
+        return;
+      }
       if (method === "session/stream_event" || method === "mob/stream_event") {
         const streamId = String(params.stream_id ?? "");
         const queue = this.streamQueues.get(streamId);
@@ -7886,7 +7985,7 @@ export class MeerkatClient {
     return raw as unknown as McpLiveOpResponse;
   }
 
-  private handleCallbackRequest(data: Record<string, unknown>): void {
+  private handleCallbackRequest(data: Record<string, unknown>, child: ChildProcess | null): void {
     const requestId = data.id;
     const method = String(data.method ?? "");
     const params = (data.params ?? {}) as Record<string, unknown>;
@@ -7900,16 +7999,16 @@ export class MeerkatClient {
         handler
           .handler(args)
           .then((content) => {
-            this.writeCallbackResponse(requestId, { content, is_error: false });
+            this.writeCallbackResponse(child, requestId, { content, is_error: false });
           })
           .catch((err: unknown) => {
-            this.writeCallbackResponse(requestId, {
+            this.writeCallbackResponse(child, requestId, {
               content: `Tool error: ${err}`,
               is_error: true,
             });
           });
       } else {
-        this.writeCallbackResponse(requestId, {
+        this.writeCallbackResponse(child, requestId, {
           content: `Unknown tool: ${toolName}`,
           is_error: true,
         });
@@ -7921,16 +8020,19 @@ export class MeerkatClient {
         id: requestId,
         error: { code: -32601, message: `Method not supported: ${method}` },
       };
-      this.process?.stdin?.write(JSON.stringify(response) + "\n");
+      if (this.process === child) child?.stdin?.write(JSON.stringify(response) + "\n");
     }
   }
 
   private writeCallbackResponse(
+    child: ChildProcess | null,
     requestId: unknown,
     result: { content: string | ContentBlock[]; is_error: boolean },
   ): void {
     const response = { jsonrpc: "2.0", id: requestId, result };
-    this.process?.stdin?.write(JSON.stringify(response) + "\n");
+    // Callback ids are scoped to the originating process. A late completion
+    // must never answer a replacement process that reuses the same id.
+    if (this.process === child) child?.stdin?.write(JSON.stringify(response) + "\n");
   }
 
   private static buildCreateParams(
@@ -8020,24 +8122,43 @@ export class MeerkatClient {
     return MeerkatClient.commandPath(commandOrPath);
   }
 
-  private static platformTarget(): PlatformTarget {
-    const architecture = os.arch();
-    if (process.platform === "darwin") {
+  private static platformTarget(
+    platform: NodeJS.Platform = process.platform,
+    architecture: string = os.arch(),
+  ): PlatformTarget {
+    if (platform === "darwin") {
       if (architecture === "arm64") {
         return { target: "aarch64-apple-darwin", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
       }
+      if (architecture === "x64") {
+        return { target: "x86_64-apple-darwin", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
+      }
       throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported macOS architecture '${architecture}'.`);
     }
-    if (process.platform === "linux") {
+    if (platform === "linux") {
       if (architecture === "x64") return { target: "x86_64-unknown-linux-gnu", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
       if (architecture === "arm64") return { target: "aarch64-unknown-linux-gnu", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
       throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported Linux architecture '${architecture}'.`);
     }
-    if (process.platform === "win32") {
+    if (platform === "win32") {
       if (architecture === "x64") return { target: "x86_64-pc-windows-msvc", archiveExt: "zip", binaryName: "rkat-rpc.exe" };
       throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported Windows architecture '${architecture}'.`);
     }
-    throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported platform '${process.platform}'.`);
+    throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported platform '${platform}'.`);
+  }
+
+  /**
+   * The release asset name and download URL for one target. Release assets
+   * are `rkat-rpc-<version>-<target>.<ext>` (no `v`) under the `v<version>`
+   * tag.
+   */
+  private static releaseAsset(
+    version: string,
+    target: string,
+    archiveExt: PlatformTarget["archiveExt"],
+  ): { asset: string; url: string } {
+    const asset = `${MEERKAT_RELEASE_BINARY}-${version}-${target}.${archiveExt}`;
+    return { asset, url: `https://github.com/${MEERKAT_REPO}/releases/download/v${version}/${asset}` };
   }
 
   private static async runCommand(command: string, args: string[]): Promise<void> {
@@ -8068,8 +8189,7 @@ export class MeerkatClient {
   private static async ensureDownloadedBinary(): Promise<string> {
     const { target, archiveExt, binaryName } = MeerkatClient.platformTarget();
     const version = CONTRACT_VERSION;
-    const asset = `${MEERKAT_RELEASE_BINARY}-v${version}-${target}.${archiveExt}`;
-    const url = `https://github.com/${MEERKAT_REPO}/releases/download/v${version}/${asset}`;
+    const { asset, url } = MeerkatClient.releaseAsset(version, target, archiveExt);
     const baseDir = path.join(MEERKAT_BINARY_CACHE_ROOT, `v${version}`, target);
     mkdirSync(baseDir, { recursive: true });
     const cached = path.join(baseDir, binaryName);

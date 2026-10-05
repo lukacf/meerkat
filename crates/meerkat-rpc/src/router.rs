@@ -1483,6 +1483,10 @@ impl MethodRouter {
         let live_host = Arc::new(live_host);
         #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
         if let Some(authority) = self.experimental_live_open_authority.as_ref() {
+            authority.bind_post_close_work_source(Arc::clone(
+                &self.experimental_live_delegation_coordinator,
+            )
+                as Arc<dyn meerkat::experimental_gpt_live::LivePostCloseWorkSource>);
             let context_host = meerkat::surface::ExperimentalGptLiveContextMirrorHost::new(
                 Arc::clone(&self.runtime_adapter),
                 Arc::clone(&live_host),
@@ -2875,6 +2879,10 @@ impl MethodRouter {
                 routed_arm(|| handlers::auth::handle_auth_login_complete(id, params, &self.runtime))
                     .await
             }
+            "auth/login/cancel" => {
+                routed_arm(|| handlers::auth::handle_auth_login_cancel(id, params, &self.runtime))
+                    .await
+            }
             "auth/login/device_start" => {
                 routed_arm(|| {
                     handlers::auth::handle_auth_login_device_start(id, params, &self.runtime)
@@ -3027,6 +3035,19 @@ impl MethodRouter {
                         params,
                         &self.live_adapter_host,
                         &self.runtime,
+                    )
+                })
+                .await
+            }
+            #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+            "live/media_health" if self.live_webrtc_answer_transport.is_some() => {
+                routed_arm(|| {
+                    handlers::live::handle_live_media_health(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        &self.runtime,
+                        self.experimental_live_open_authority.as_deref(),
                     )
                 })
                 .await
@@ -5240,6 +5261,7 @@ mod tests {
                     session.to_string(),
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test::register_session",
         )
@@ -5278,6 +5300,7 @@ mod tests {
                     session_id.clone(),
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test::register_session",
         )
@@ -6115,6 +6138,33 @@ mod tests {
             .ensure_runtime_executor(&session_id)
             .await
             .expect("the production spawn path must attach a runtime loop");
+        // Wait until that loop is parked with no run in flight: its startup
+        // recovery and any queued work are done, so nothing will take the
+        // session gate after the durability fault below. A loop that takes
+        // the gate of a degraded session detaches its own attachment, which
+        // would leave the abort below with no task to kill.
+        let mut parked = router.runtime_adapter.runtime_loop_parked();
+        loop {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                parked.wait_for(|sessions| sessions.contains(&session_id)),
+            )
+            .await
+            .expect("the spawned runtime loop parks")
+            .expect("runtime-loop park watch");
+            if router
+                .runtime_adapter
+                .current_run(&session_id)
+                .await
+                .is_none()
+            {
+                break;
+            }
+            router
+                .runtime_adapter
+                .wait_current_run_settled(&session_id)
+                .await;
+        }
 
         let live = health_now().await;
         assert_eq!(
@@ -14052,7 +14102,12 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     #[cfg(feature = "openai-live")]
     struct RuntimeCommitMirrorProbe {
         runtime: Arc<SessionRuntime>,
-        appends: tokio::sync::Mutex<Vec<String>>,
+        appends: tokio::sync::Mutex<
+            Vec<(
+                meerkat_runtime::live_execution::LiveContextAppendKind,
+                String,
+            )>,
+        >,
     }
 
     #[cfg(feature = "openai-live")]
@@ -14086,7 +14141,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             ),
             String,
         > {
-            self.appends.lock().await.push(context);
+            self.appends.lock().await.push((authority.kind(), context));
             Ok((
                 authority,
                 meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
@@ -14152,7 +14207,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .as_array()
             .expect("messages")
             .len() as u64;
-        router
+        let binding = router
             .runtime_adapter
             .__test_open_live_context_channel(&session, seed_cursor)
             .await
@@ -14175,17 +14230,83 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         .await
         .expect("post-commit projection is bounded")
         .expect("owned projection and delivery");
-        let appends = probe.appends.lock().await;
+        // turn/start is a host-typed turn (#1614): its rows are text chat,
+        // replayed on the quiet lane, and quiet history waits for the
+        // conversation to start instead of landing in silence.
         assert!(
-            appends
-                .iter()
-                .any(|context| context.contains("typed-runtime-loop-nonce")),
+            probe.appends.lock().await.is_empty(),
+            "typed text must wait for the conversation to start"
+        );
+        let (queued, _, _) = router
+            .runtime_adapter
+            .__test_live_context_outbox_custody(&session, binding.channel_id())
+            .await
+            .expect("outbox custody");
+        assert!(
+            !queued.is_empty(),
+            "the committed turn is queued behind the conversation start"
+        );
+
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            binding.channel_id().clone(),
+            session.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(binding.generation()),
+            meerkat_live::LiveRuntimeBindingFence::new(binding.fence_token()),
+        );
+        let user_turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            binding.channel_id(),
+            "first-user-turn".into(),
+            "provider-first-user-turn".into(),
+        )
+        .expect("user turn");
+        router
+            .runtime_adapter
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: user_turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the first user turn starts the conversation");
+        router
+            .runtime_adapter
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn: user_turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "first spoken input".into(),
+                },
+            ))
+            .await
+            .expect("the first user turn finishes");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.runtime_adapter.drain_live_context_outbox(&session),
+        )
+        .await
+        .expect("released projection is bounded")
+        .expect("owned projection and delivery");
+        let appends = probe.appends.lock().await;
+        let nonce: Vec<_> = appends
+            .iter()
+            .filter(|(_, context)| context.contains("typed-runtime-loop-nonce"))
+            .collect();
+        assert!(
+            !nonce.is_empty(),
             "actual turn/start must notify canonical context through its CoreExecutor ACK path"
+        );
+        assert!(
+            nonce.iter().all(|(kind, _)| *kind
+                == meerkat_runtime::live_execution::LiveContextAppendKind::TextChatReplay),
+            "typed text rides the quiet text-chat lane: {nonce:?}"
         );
         assert!(
             appends
                 .iter()
-                .all(|context| !context.contains("warm the persistent source")),
+                .all(|(_, context)| !context.contains("warm the persistent source")),
             "the acknowledged seed must not be replayed"
         );
     }

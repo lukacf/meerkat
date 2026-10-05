@@ -1501,6 +1501,7 @@ async fn build_agent_with_resume_preserves_messages() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -1581,6 +1582,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             image_generation: ToolCategoryOverride::Inherit,
             web_search: ToolCategoryOverride::Inherit,
             tool_access_policy: None,
+            spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
         },
@@ -1708,6 +1710,7 @@ async fn build_agent_workgraph_enabled_without_dispatcher_fails_closed() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -1805,6 +1808,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -1926,6 +1930,7 @@ async fn explicit_resume_prompts_append_without_rewriting_prior_systems() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -2026,6 +2031,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -2096,6 +2102,7 @@ async fn build_agent_with_resume_carries_explicit_comms_override_and_rehydrates(
                     image_generation: ToolCategoryOverride::Inherit,
                     web_search: ToolCategoryOverride::Inherit,
                     tool_access_policy: None,
+                    spawn_tool_access_policy: None,
                     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: None,
                 },
@@ -2189,6 +2196,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -2276,6 +2284,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -2617,6 +2626,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("nonexistent-legacy-skill")
@@ -2778,6 +2788,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -2839,6 +2850,7 @@ async fn resume_with_disable_mob_stays_disabled() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -2899,6 +2911,7 @@ async fn resume_with_metadata_mob_enable_becomes_inherit() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -3002,6 +3015,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -3065,6 +3079,7 @@ async fn resumed_enable_mob_metadata_does_not_mount_mob_surface() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -3131,6 +3146,7 @@ async fn recovered_create_request_mob_metadata_enable_does_not_mint_operator_cap
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -3292,6 +3308,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -3381,6 +3398,7 @@ async fn resumed_explicit_mob_authority_is_not_erased_by_metadata() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -3467,6 +3485,7 @@ async fn resumed_persisted_mob_authority_is_not_forwarded_as_behavior_authority(
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
             },
@@ -4382,5 +4401,876 @@ async fn resumed_session_restores_persisted_tool_access_policy_gate() {
     assert!(
         dispatched.lock().unwrap().is_empty(),
         "denied call must never reach the inner dispatcher after resume"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Declared tool restriction (mob profile read_only / deny)
+// ---------------------------------------------------------------------------
+
+fn declared_restriction(
+    deny: &[&str],
+    read_only: bool,
+) -> meerkat_core::ops::DeclaredToolRestriction {
+    meerkat_core::ops::DeclaredToolRestriction {
+        declared_by: "profile 'worker'".to_string(),
+        enabled_families: vec!["builtins".to_string(), "comms".to_string()],
+        read_only,
+        deny: deny.iter().copied().collect(),
+        vocabulary: std::collections::BTreeMap::new(),
+        deferred_mcp_servers: std::collections::BTreeSet::new(),
+    }
+}
+
+fn recorded_launch(
+    policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+) -> meerkat_core::ops::SpawnToolAccessPolicy {
+    meerkat_core::ops::SpawnToolAccessPolicy::from_launch(policy)
+}
+
+fn deny_list_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
+    meerkat_core::ops::ToolAccessPolicy::DenyList(names.iter().copied().collect())
+}
+
+fn declared_probe_config(
+    names: &[&str],
+    dispatched: &Arc<Mutex<Vec<String>>>,
+    launch: Option<meerkat_core::ops::ToolAccessPolicy>,
+    declared: Option<meerkat_core::ops::DeclaredToolRestriction>,
+    resume: Option<Session>,
+) -> AgentBuildConfig {
+    AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        tool_dispatcher_override: Some(Arc::new(PolicyProbeDispatcher::new(
+            names,
+            Arc::clone(dispatched),
+        ))),
+        tool_access_policy: launch,
+        declared_tool_restriction: declared,
+        resume_session: resume,
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    }
+}
+
+/// Dispatch one call through the agent's outermost gate and report whether
+/// the gate admitted it (denials are ordinary `access_denied` results).
+async fn gate_admits(agent: &mut meerkat::DynAgent, tool: &str) -> bool {
+    let outcome = agent
+        .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+            format!("call-{tool}"),
+            tool.to_string(),
+            json!({}),
+        ))
+        .await
+        .expect("a gate decision is a tool result, not a dispatch fault");
+    if outcome.result.is_error {
+        assert!(
+            outcome
+                .result
+                .text_content()
+                .contains("\"error\":\"access_denied\""),
+            "a rejected call must be a gate denial, got: {}",
+            outcome.result.text_content()
+        );
+    }
+    !outcome.result.is_error
+}
+
+fn persisted_tooling(agent: &meerkat::DynAgent) -> SessionTooling {
+    agent
+        .session()
+        .session_metadata()
+        .expect("session metadata must be set")
+        .tooling
+}
+
+/// The declared deny list gates dispatch on top of the launch policy; the
+/// effective policy and the launch part are persisted separately.
+#[tokio::test]
+async fn declared_deny_gates_dispatch_and_persists_launch_part_separately() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let launch = allow_list_policy(&["alpha", "beta"]);
+    let declared = declared_restriction(&["beta"], false);
+
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha", "beta", "gamma"],
+                &dispatched,
+                Some(launch.clone()),
+                Some(declared.clone()),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("declared deny build must succeed");
+
+    let tooling = persisted_tooling(&agent);
+    assert_eq!(
+        tooling.tool_access_policy,
+        declared
+            .conjoin_with_launch_policy(Some(launch.clone()))
+            .expect("declaration composes"),
+        "the effective policy (launch AND declaration) is what children inherit"
+    );
+    assert_eq!(
+        tooling.spawn_tool_access_policy,
+        Some(recorded_launch(Some(launch)))
+    );
+
+    assert!(gate_admits(&mut agent, "alpha").await);
+    assert!(!gate_admits(&mut agent, "beta").await, "declared deny");
+    assert!(!gate_admits(&mut agent, "gamma").await, "launch allow list");
+    assert_eq!(*dispatched.lock().unwrap(), vec!["alpha".to_string()]);
+}
+
+/// Adding and removing a deny entry both take effect on resume, the resumed
+/// session re-persists the recomputed effective policy, and a child that
+/// inherits from the resumed parent's persisted policy (the field the spawn
+/// seams read) gets the updated restriction.
+#[tokio::test]
+async fn declared_deny_changes_take_effect_on_resume_and_reach_new_children() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let names = ["alpha", "beta"];
+
+    let agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &names,
+                &dispatched,
+                None,
+                Some(declared_restriction(&["beta"], false)),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("initial build");
+    assert_eq!(
+        persisted_tooling(&agent).tool_access_policy,
+        Some(deny_list_policy(&["beta"]))
+    );
+    assert_eq!(
+        persisted_tooling(&agent).spawn_tool_access_policy,
+        Some(recorded_launch(None))
+    );
+    let persisted = agent.session().clone();
+    drop(agent);
+
+    // Remove: the profile no longer denies anything.
+    let mut resumed = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(&names, &dispatched, None, None, Some(persisted)),
+            &Config::default(),
+        )
+        .await
+        .expect("resume without the deny entry");
+    assert!(
+        gate_admits(&mut resumed, "beta").await,
+        "removed deny entry"
+    );
+    assert_eq!(persisted_tooling(&resumed).tool_access_policy, None);
+    let persisted = resumed.session().clone();
+    drop(resumed);
+
+    // Add: the profile now denies alpha.
+    let mut resumed = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &names,
+                &dispatched,
+                None,
+                Some(declared_restriction(&["alpha"], false)),
+                Some(persisted),
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("resume with a new deny entry");
+    assert!(
+        !gate_admits(&mut resumed, "alpha").await,
+        "added deny entry"
+    );
+    assert!(gate_admits(&mut resumed, "beta").await);
+    let parent_effective = persisted_tooling(&resumed).tool_access_policy;
+    assert_eq!(parent_effective, Some(deny_list_policy(&["alpha"])));
+    assert_eq!(
+        persisted_tooling(&resumed).spawn_tool_access_policy,
+        Some(recorded_launch(None))
+    );
+
+    // A new child resolves `Inherit` to the parent's persisted effective
+    // policy, so it carries the updated restriction.
+    let mut child = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(&names, &dispatched, parent_effective, None, None),
+            &Config::default(),
+        )
+        .await
+        .expect("child build");
+    assert!(
+        !gate_admits(&mut child, "alpha").await,
+        "inherited updated deny"
+    );
+    assert!(
+        gate_admits(&mut child, "beta").await,
+        "removed deny not inherited"
+    );
+}
+
+/// A launch narrowing (the spawn-site policy) survives resume independently
+/// of the declaration, which is recomputed.
+#[tokio::test]
+async fn launch_narrowing_survives_resume_when_declaration_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let names = ["alpha", "beta", "gamma"];
+    let launch = deny_list_policy(&["gamma"]);
+
+    let agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &names,
+                &dispatched,
+                Some(launch.clone()),
+                Some(declared_restriction(&["beta"], false)),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("initial build");
+    let persisted = agent.session().clone();
+    drop(agent);
+
+    let mut resumed = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(&names, &dispatched, None, None, Some(persisted)),
+            &Config::default(),
+        )
+        .await
+        .expect("resume without the declaration");
+    assert!(
+        !gate_admits(&mut resumed, "gamma").await,
+        "launch narrowing kept"
+    );
+    assert!(
+        gate_admits(&mut resumed, "beta").await,
+        "declaration recomputed"
+    );
+    assert!(gate_admits(&mut resumed, "alpha").await);
+    let tooling = persisted_tooling(&resumed);
+    assert_eq!(
+        tooling.spawn_tool_access_policy,
+        Some(recorded_launch(Some(launch.clone())))
+    );
+    assert_eq!(tooling.tool_access_policy, Some(launch));
+}
+
+/// `read_only` toggled on and off between resumes takes effect each time.
+#[tokio::test]
+async fn declared_read_only_toggle_takes_effect_on_resume() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let names = ["alpha"];
+
+    // The probe declares no mutation class, so read-only denies it.
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &names,
+                &dispatched,
+                None,
+                Some(declared_restriction(&[], true)),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("read-only build");
+    assert!(!gate_admits(&mut agent, "alpha").await, "read-only on");
+    let persisted = agent.session().clone();
+    drop(agent);
+
+    let mut resumed = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(&names, &dispatched, None, None, Some(persisted)),
+            &Config::default(),
+        )
+        .await
+        .expect("resume with read-only off");
+    assert!(gate_admits(&mut resumed, "alpha").await, "read-only off");
+    let persisted = resumed.session().clone();
+    drop(resumed);
+
+    let mut resumed = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &names,
+                &dispatched,
+                None,
+                Some(declared_restriction(&[], true)),
+                Some(persisted),
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("resume with read-only on again");
+    assert!(
+        !gate_admits(&mut resumed, "alpha").await,
+        "read-only on again"
+    );
+}
+
+/// Metadata persisted before the launch part was recorded separately has only
+/// the effective policy. It loads, is treated as the launch policy (it may
+/// still contain the older declaration: contained, possibly narrower), and the
+/// current declaration is conjoined on top.
+#[tokio::test]
+async fn legacy_metadata_without_launch_part_loads_as_launch_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let names = ["alpha", "beta", "gamma"];
+
+    let agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(&names, &dispatched, None, None, None),
+            &Config::default(),
+        )
+        .await
+        .expect("initial build");
+    let mut legacy = agent.session().clone();
+    drop(agent);
+    let mut metadata = legacy.session_metadata().expect("metadata");
+    // Legacy shape: effective only (launch gamma + an older declared beta).
+    metadata.tooling.tool_access_policy = Some(deny_list_policy(&["beta", "gamma"]));
+    metadata.tooling.spawn_tool_access_policy = None;
+    legacy
+        .set_session_metadata(metadata)
+        .expect("legacy metadata encodes");
+    let legacy_json = serde_json::to_value(legacy.session_metadata().expect("metadata").tooling)
+        .expect("tooling encodes");
+    assert!(
+        legacy_json.get("spawn_tool_access_policy").is_none(),
+        "an absent launch part encodes as the legacy shape"
+    );
+
+    let mut resumed = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &names,
+                &dispatched,
+                None,
+                Some(declared_restriction(&["alpha"], false)),
+                Some(legacy),
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("legacy metadata resumes");
+    assert!(
+        !gate_admits(&mut resumed, "alpha").await,
+        "current declaration"
+    );
+    assert!(
+        !gate_admits(&mut resumed, "beta").await,
+        "legacy effective kept"
+    );
+    assert!(
+        !gate_admits(&mut resumed, "gamma").await,
+        "legacy effective kept"
+    );
+    assert_eq!(
+        persisted_tooling(&resumed).spawn_tool_access_policy,
+        Some(recorded_launch(Some(deny_list_policy(&["beta", "gamma"])))),
+        "the legacy effective policy becomes the recorded launch part"
+    );
+}
+
+/// A deny name no statically composed tool provides is a typed error naming
+/// the declaring profile, the tool, and the families the profile enabled.
+/// Validation reads the composed surface, so a tool a family adds later is
+/// deniable without any catalog update while a stale name keeps failing.
+#[tokio::test]
+async fn declared_deny_validates_against_the_composed_tool_surface() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let declared = declared_restriction(&["gamma"], false);
+
+    let err = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha", "beta"],
+                &dispatched,
+                None,
+                Some(declared.clone()),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .err()
+        .expect("an unknown deny name must fail the build");
+    match &err {
+        BuildAgentError::DeclaredToolUnknown(unknown) => {
+            assert!(
+                unknown
+                    .vocabulary
+                    .iter()
+                    .any(|source| source == "shell tools"),
+                "the built-in family vocabularies are named: {:?}",
+                unknown.vocabulary
+            );
+            assert_eq!(unknown.declared_by, "profile 'worker'");
+            assert_eq!(unknown.tool, "gamma");
+            assert_eq!(unknown.enabled_families, declared.enabled_families);
+        }
+        other => panic!("expected DeclaredToolUnknown, got: {other:?}"),
+    }
+    let message = err.to_string();
+    for needle in ["profile 'worker'", "'gamma'", "builtins, comms"] {
+        assert!(message.contains(needle), "{needle} missing from: {message}");
+    }
+
+    // The family now provides gamma: the same declaration builds and gates it.
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha", "beta", "gamma"],
+                &dispatched,
+                None,
+                Some(declared),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("a composed tool is deniable");
+    assert!(!gate_admits(&mut agent, "gamma").await);
+    assert!(gate_admits(&mut agent, "alpha").await);
+}
+
+/// Real builtin family: a builtin is deniable by name and a near-miss is not.
+#[tokio::test]
+async fn declared_deny_resolves_real_builtin_family_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let build = |deny: &'static str| AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        declared_tool_restriction: Some(declared_restriction(&[deny], false)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let mut agent = temp_factory(&temp)
+        .builtins(true)
+        .build_agent(build("task_create"), &Config::default())
+        .await
+        .expect("a builtin is deniable");
+    assert!(!gate_admits(&mut agent, "task_create").await);
+
+    let err = temp_factory(&temp)
+        .builtins(true)
+        .build_agent(build("task_creat"), &Config::default())
+        .await
+        .err()
+        .expect("a near-miss builtin name must fail");
+    assert!(
+        matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "task_creat"),
+        "got: {err:?}"
+    );
+}
+
+fn vocabulary_restriction(
+    deny: &[&str],
+    vocabulary: &[(meerkat_core::ToolVocabularySource, &[&str])],
+) -> meerkat_core::ops::DeclaredToolRestriction {
+    let mut restriction = declared_restriction(deny, false);
+    restriction.vocabulary = vocabulary
+        .iter()
+        .map(|(source, names)| (source.clone(), names.iter().copied().collect()))
+        .collect();
+    restriction
+}
+
+/// A known tool the build does not mount is an inert deny entry: a built-in
+/// family that is off and an agent mob tool no factory mounted both build.
+#[tokio::test]
+async fn declared_deny_of_a_known_unmounted_tool_is_inert() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha"],
+                &dispatched,
+                None,
+                Some(vocabulary_restriction(
+                    &["shell", "mob_create"],
+                    &[(
+                        meerkat_core::ToolVocabularySource::AgentMob,
+                        &["mob_create"],
+                    )],
+                )),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("known but unmounted deny entries build");
+    assert!(gate_admits(&mut agent, "alpha").await);
+}
+
+/// A declared MCP server's exposed tool is deniable: the build accepts the
+/// name, the tool stays listed, and calling it is an `access_denied` result
+/// that never reaches the server.
+#[tokio::test]
+async fn declared_deny_refuses_a_mounted_declared_mcp_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["lookup", "echo"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(vocabulary_restriction(
+                    &["lookup"],
+                    &[(
+                        meerkat_core::ToolVocabularySource::McpServer("lookup-server".into()),
+                        &["lookup"],
+                    )],
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a declared MCP tool name is deniable");
+    let visible: Vec<String> = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(visible.iter().any(|name| name == "lookup"), "{visible:?}");
+    assert!(!gate_admits(&mut agent, "lookup").await);
+    assert!(gate_admits(&mut agent, "echo").await);
+    assert_eq!(*dispatched.lock().unwrap(), ["echo"]);
+}
+
+/// Every provider-owned family is vocabulary whatever the build composes:
+/// with comms and the builtin utilities off, denying `send_message` and
+/// `apply_patch` is inert, not `DeclaredToolUnknown`.
+#[tokio::test]
+async fn declared_deny_of_unmounted_comms_and_utility_tools_is_inert() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha"],
+                &dispatched,
+                None,
+                Some(declared_restriction(
+                    &["send_message", "apply_patch", "memory_search"],
+                    false,
+                )),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("known but unmounted family tools are inert deny entries");
+    assert!(gate_admits(&mut agent, "alpha").await);
+}
+
+#[derive(Clone, Default)]
+struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// A declared MCP server without a tool list may provide any name once it
+/// connects, so a deny name in no vocabulary is deferred to the gate: the
+/// build logs the deferral, the tool stays listed, and a call is refused.
+#[tokio::test]
+async fn declared_deny_defers_unknown_names_while_a_declared_mcp_server_maps_no_tools() {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut restriction = declared_restriction(&["raw_lookup"], false);
+    restriction
+        .deferred_mcp_servers
+        .insert("lookup-server".to_string());
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["raw_lookup", "echo"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(restriction),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a deny name is deferred while a declared server maps no tools");
+    let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains(
+            "deny name raw_lookup deferred to runtime (server lookup-server declares no tool list)"
+        ),
+        "{log}"
+    );
+    assert!(!gate_admits(&mut agent, "raw_lookup").await);
+    assert!(gate_admits(&mut agent, "echo").await);
+    assert_eq!(*dispatched.lock().unwrap(), ["echo"]);
+}
+
+/// External tools outside every vocabulary (a host's undeclared MCP or
+/// provider tools) stay unknown: denying one by name is a typed error.
+#[tokio::test]
+async fn declared_deny_rejects_external_tool_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let err = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["mcp_lookup"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(declared_restriction(&["mcp_lookup"], false)),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .err()
+        .expect("an external tool name must fail");
+    assert!(
+        matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "mcp_lookup"),
+        "got: {err:?}"
+    );
+}
+
+fn bundle_restriction(
+    deny: &[&str],
+    bundle: &str,
+    bundle_tools: &[&str],
+) -> meerkat_core::ops::DeclaredToolRestriction {
+    let mut restriction = declared_restriction(deny, false);
+    restriction.vocabulary.insert(
+        meerkat_core::ToolVocabularySource::Bundle(bundle.to_string()),
+        bundle_tools.iter().copied().collect(),
+    );
+    restriction
+}
+
+/// A tool of the profile's own resolved bundle that the build composed is
+/// deniable by name, and the gate refuses it.
+#[tokio::test]
+async fn declared_deny_may_name_a_composed_bundle_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["bundle_write", "bundle_read"],
+                    Arc::clone(&dispatched),
+                ))),
+                declared_tool_restriction: Some(bundle_restriction(
+                    &["bundle_write"],
+                    "probe",
+                    &["bundle_write", "bundle_read"],
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a composed bundle tool is deniable");
+    assert!(!gate_admits(&mut agent, "bundle_write").await);
+    assert!(gate_admits(&mut agent, "bundle_read").await);
+}
+
+/// A bundle tool in the restriction's vocabulary that the build did not
+/// mount (for example a bundle whose registration changed) is an inert deny
+/// entry, while a name in no vocabulary fails the build and the error names
+/// the bundle vocabulary it checked.
+#[tokio::test]
+async fn declared_deny_of_an_unmounted_bundle_tool_is_inert_and_unknown_names_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let build = |deny: &'static [&'static str]| AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+            &["bundle_read"],
+            Arc::clone(&dispatched),
+        ))),
+        declared_tool_restriction: Some(bundle_restriction(
+            deny,
+            "probe",
+            &["bundle_ghost", "bundle_read"],
+        )),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let mut agent = temp_factory(&temp)
+        .build_agent(build(&["bundle_ghost"]), &Config::default())
+        .await
+        .expect("a known bundle tool the build did not mount is inert");
+    assert!(gate_admits(&mut agent, "bundle_read").await);
+
+    let err = temp_factory(&temp)
+        .build_agent(build(&["bundle_typo"]), &Config::default())
+        .await
+        .err()
+        .expect("a name in no vocabulary must fail");
+    match &err {
+        BuildAgentError::DeclaredToolUnknown(unknown) => {
+            assert_eq!(unknown.tool, "bundle_typo");
+            assert!(
+                unknown
+                    .vocabulary
+                    .iter()
+                    .any(|source| source == "tool bundle 'probe'"),
+                "{:?}",
+                unknown.vocabulary
+            );
+        }
+        other => panic!("expected DeclaredToolUnknown, got: {other:?}"),
+    }
+    let message = err.to_string();
+    for needle in ["'bundle_typo'", "tool bundle 'probe'", "builtins, comms"] {
+        assert!(message.contains(needle), "{needle} missing from: {message}");
+    }
+}
+
+/// One visible tool plus one deferred catalog entry from `source`.
+struct DeferredCatalogProbe {
+    visible: PolicyProbeDispatcher,
+    deferred: Arc<ToolDef>,
+    source: meerkat_core::types::ToolSourceKind,
+}
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for DeferredCatalogProbe {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.visible.tools()
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.visible
+            .tools()
+            .iter()
+            .map(|tool| meerkat_core::ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .chain(std::iter::once(
+                meerkat_core::ToolCatalogEntry::session_deferred(
+                    Arc::clone(&self.deferred),
+                    true,
+                    meerkat_core::types::ToolProvenance {
+                        kind: self.source.clone(),
+                        source_id: "probe".into(),
+                    },
+                ),
+            ))
+            .collect()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.visible.dispatch(call).await
+    }
+}
+
+fn deferred_probe(source: meerkat_core::types::ToolSourceKind) -> Arc<DeferredCatalogProbe> {
+    Arc::new(DeferredCatalogProbe {
+        visible: PolicyProbeDispatcher::new(&["bundle_read"], Arc::new(Mutex::new(Vec::new()))),
+        deferred: Arc::new(ToolDef::new(
+            "bundle_deferred",
+            "deferred catalog tool",
+            json!({"type": "object"}),
+        )),
+        source,
+    })
+}
+
+/// A bundle's deferred catalog tool is composed like a visible one and is
+/// deniable the same way.
+#[tokio::test]
+async fn declared_deny_may_name_a_deferred_bundle_catalog_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(deferred_probe(
+                    meerkat_core::types::ToolSourceKind::RustBundle,
+                )),
+                declared_tool_restriction: Some(bundle_restriction(
+                    &["bundle_deferred"],
+                    "probe",
+                    &["bundle_read", "bundle_deferred"],
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("a deferred bundle catalog tool is deniable");
+}
+
+/// A deferred external catalog tool that is not one of the profile's bundle
+/// tools (for example a deferred MCP tool) stays undeniable.
+#[tokio::test]
+async fn declared_deny_rejects_a_deferred_non_bundle_external_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let err = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                external_tools: Some(deferred_probe(meerkat_core::types::ToolSourceKind::Mcp)),
+                declared_tool_restriction: Some(declared_restriction(&["bundle_deferred"], false)),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .err()
+        .expect("a deferred external tool outside the bundles must fail");
+    assert!(
+        matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "bundle_deferred"),
+        "got: {err:?}"
     );
 }

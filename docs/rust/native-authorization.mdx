@@ -325,6 +325,11 @@ governed construction requires exclusive custody directly, without dropping and
 reacquiring a claim. Ordinary custom backends without custody support remain
 usable; governed construction rejects them with `UnsupportedScope`.
 
+For an existing Rust integration, `persistent(store, blob_store)` and
+`persistent_without_blobs(store)` now return `Result<Self, RuntimeDriverError>`.
+Handle the result before wrapping the machine in `Arc`, for example
+`Arc::new(MeerkatMachine::persistent(store, blob_store)?)`.
+
 Reuse the bundle's machine when composing another surface. Built-in mob session
 services accept it through `acquire_runtime_adapter(Some(machine.clone()))?`. A clone of
 the same underlying machine owner is valid. A different live owner is refused
@@ -333,6 +338,20 @@ store. A store mismatch is `UnsupportedScope`; custody contention is `Busy`.
 `Ok(None)` remains an explicit optional-runtime outcome for custom services,
 not a substitute for a failed persistent acquisition. Builders and archive paths
 propagate acquisition errors before performing their operation.
+
+With the `runtime-adapter` feature, replace the old `MobSessionService::runtime_adapter()`
+getter with `acquire_runtime_adapter(None)?`, or pass the intended shared machine
+as `Some(machine.clone())`. The method returns
+`Result<Option<Arc<MeerkatMachine>>, RuntimeDriverError>`. A wrapper must forward
+that candidate and result to its underlying service instead of creating another
+machine. Both built-in services' `canonical_runtime_adapter()` methods now
+return `Result<Arc<MeerkatMachine>, RuntimeDriverError>`.
+`PersistentSessionService::with_canonical_runtime_adapter` remains an infallible
+builder binding; acquisition still rejects a retained owner for a foreign store.
+Direct acquisition uses `RuntimeDriverError::ControllerReadinessUnavailable
+{ reason }`; mob composition preserves the reason in
+`MobError::SessionError(SessionError::RuntimeUnavailable { reason })`.
+These failures describe runtime readiness, not permission denial.
 
 Exported auth lifecycle and OAuth capabilities retain the acquired backend
 custody, including generated/raw lifecycle clones and nested credential or device

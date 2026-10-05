@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Re-capture one gpt-live replay fixture from a real provider run.
+#
+#   OPENAI_API_KEY=... scripts/gpt-live-recapture-replay-fixture S104
+#
+# Builds the live e2e binary, runs the scenario once against gpt-live-1, and
+# when the run's journal ends `passed`, scrubs its provider-stream.jsonl into
+# tests/integration/fixtures/gpt_live_replay/<scenario>.provider-stream.jsonl
+# (scripts/gpt-live-scrub-provider-stream, which refuses to write anything
+# that still matches a forbidden pattern). A failed, timed-out or
+# provider-degraded run writes nothing: only green streams become fixtures.
+# See tests/integration/fixtures/gpt_live_replay/README.md.
+set -euo pipefail
+
+scenario="${1:-}"
+case "$scenario" in
+  S104) test_name=e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice ;;
+  S106) test_name=e2e_scenario_106_gpt_live_public_long_haul ;;
+  *)
+    echo "usage: OPENAI_API_KEY=... $0 S104|S106" >&2
+    exit 2
+    ;;
+esac
+if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "OPENAI_API_KEY must be set in the environment" >&2
+  exit 2
+fi
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+label="$(tr '[:upper:]' '[:lower:]' <<<"$scenario")"
+artifacts="$root/target/e2e-live-audio-artifacts/$label"
+fixture="$root/tests/integration/fixtures/gpt_live_replay/$label.provider-stream.jsonl"
+
+binary="$(
+  cd "$root" &&
+    cargo test -p meerkat-integration-tests --features openai-live-e2e \
+      --test gpt_live_public_e2e --no-run --message-format=json 2>/dev/null |
+    python3 -c '
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("reason") == "compiler-artifact" and message.get("executable") \
+            and message["target"]["name"] == "gpt_live_public_e2e":
+        print(message["executable"])
+'
+)"
+if [[ -z "$binary" ]]; then
+  echo "could not build the gpt_live_public_e2e test binary" >&2
+  exit 1
+fi
+
+if [[ ! -d "$root/tests/live_smoke/browser/node_modules" ]]; then
+  npm --prefix "$root/tests/live_smoke/browser" ci --no-audit --no-fund
+fi
+
+marker="$(mktemp)"
+trap 'rm -f "$marker"' EXIT
+status=0
+(
+  cd "$root/tests/live_smoke/browser" &&
+    MEERKAT_WORKSPACE_ROOT="$root" RUST_MIN_STACK=67108864 \
+      "$binary" "$test_name" --exact --ignored --nocapture
+) || status=$?
+
+# The journal this run wrote: the newest one created after the marker.
+journal_dir="$(
+  find "$artifacts" -mindepth 1 -maxdepth 1 -type d -newer "$marker" -printf '%T@ %p\n' 2>/dev/null |
+    sort -n | tail -1 | cut -d' ' -f2-
+)"
+if [[ -z "$journal_dir" ]]; then
+  echo "no journal written under $artifacts" >&2
+  exit 1
+fi
+outcome="$(
+  python3 - "$journal_dir/journal.jsonl" <<'PY'
+import json, sys
+def find(value):
+    if isinstance(value, dict):
+        if value.get("kind") == "outcome":
+            return value.get("outcome")
+        for item in value.values():
+            found = find(item)
+            if found:
+                return found
+    return None
+lines = [line for line in open(sys.argv[1]) if line.strip()]
+print(find(json.loads(lines[-1])) or "none")
+PY
+)"
+if [[ "$status" -ne 0 || "$outcome" != "passed" ]]; then
+  echo "run was not green (exit $status, journal outcome $outcome): no fixture written" >&2
+  echo "journal: $journal_dir" >&2
+  exit 1
+fi
+if [[ ! -s "$journal_dir/provider-stream.jsonl" ]]; then
+  echo "green run left no complete provider-stream.jsonl in $journal_dir" >&2
+  exit 1
+fi
+
+"$root/scripts/gpt-live-scrub-provider-stream" scrub "$journal_dir/provider-stream.jsonl" "$fixture"
+"$root/scripts/gpt-live-scrub-provider-stream" check "$fixture"
+echo "re-captured $scenario from $journal_dir"

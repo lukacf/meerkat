@@ -19,12 +19,12 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_semantic_model,
 };
 use meerkat_machine_schema::{
-    CompositionCoverageManifest, CompositionSchema, CompositionWitness, CoverageClaims,
-    CoverageSchemaTarget, MachineCoverageManifest, MachineProductionOwnerRelation, MachineSchema,
-    SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
-    canonical_composition_schemas, canonical_machine_coverage_manifests,
-    canonical_machine_production_owner_relations, canonical_machine_schemas,
-    scheduler_rule_coverage_name,
+    CompositionCoverageManifest, CompositionSchema, CompositionWitness, CoverageValidationMode,
+    MachineCoverageManifest, MachineProductionOwnerRelation, MachineSchema, TriggerKind,
+    canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
+    canonical_machine_schemas, validate_composition_anchor_target, validate_coverage_catalog,
+    validate_machine_anchor_target,
 };
 use quote::ToTokens;
 use serde::Serialize;
@@ -590,6 +590,7 @@ fn run_tlc_lane(
         let skip_full_sweep = skip_tlc_compositions.contains(&composition.slug);
         let mut aggregated_coverage = TlcCoverageSummary::default();
         let mut main_ok = true;
+        let mut main_distinct_states = None;
         if skip_full_sweep {
             println!(
                 "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation; its witnesses still run",
@@ -603,6 +604,7 @@ fn run_tlc_lane(
                 );
             };
             print!("{}", result.output);
+            main_distinct_states = parse_tlc_distinct_states(&result.output);
             match result.coverage {
                 Ok(coverage) => aggregated_coverage = coverage.unwrap_or_default(),
                 Err(err) => {
@@ -616,6 +618,7 @@ fn run_tlc_lane(
         let mut witness_covered_routes = BTreeSet::new();
         let mut witness_covered_scheduler_rules = BTreeSet::new();
         let mut witness_failures = Vec::new();
+        let mut completed_witnesses = 0;
         for witness in &composition.schema.witnesses {
             let Some((_, result)) = results.next() else {
                 bail!(
@@ -627,6 +630,7 @@ fn run_tlc_lane(
             print!("{}", result.output);
             match result.coverage {
                 Ok(coverage) => {
+                    completed_witnesses += 1;
                     merge_tlc_coverage(&mut aggregated_coverage, coverage.as_ref());
                     witness_covered_routes.extend(
                         witness
@@ -655,6 +659,30 @@ fn run_tlc_lane(
                     .collect::<Vec<_>>()
                     .join("\n")
             ));
+        }
+        if main_ok
+            && witness_failures.is_empty()
+            && let Err(err) = ensure_composition_positive_coverage(
+                composition.schema.name.as_str(),
+                main_distinct_states,
+                completed_witnesses,
+            )
+        {
+            failures.push(format!("{err:#}"));
+        }
+        // Every declared route must fire in every profile. The Deep zero-hit
+        // audit below covers routes for a full main sweep, so this check runs
+        // wherever that audit does not: the Ci profile, or a skipped sweep.
+        if main_ok
+            && witness_failures.is_empty()
+            && (matches!(profile, VerifyProfile::Ci) || skip_full_sweep)
+            && let Err(err) = ensure_composition_routes_fired(
+                &composition.schema,
+                &aggregated_coverage,
+                &witness_covered_routes,
+            )
+        {
+            failures.push(format!("{err:#}"));
         }
         // The zero-hit audit needs the main sweep's coverage and every witness.
         if matches!(profile, VerifyProfile::Deep)
@@ -3188,33 +3216,17 @@ pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) ->
             }
             // Machine coverage manifests own no routes; every anchor must
             // target a canonical machine.
-            match &anchor.target {
-                CoverageSchemaTarget::Machine(machine_id) => {
-                    if !canonical_machine_names.contains(machine_id.as_str()) {
-                        mismatches.push(format!(
-                            "machine coverage anchor `{}` for {} targets unknown machine `{}`",
-                            anchor.id, machine.schema.machine, machine_id
-                        ));
-                    }
-                }
-                CoverageSchemaTarget::Route(route_id) => {
-                    mismatches.push(format!(
-                        "machine coverage anchor `{}` for {} targets route `{}` but a machine coverage manifest declares no routes",
-                        anchor.id, machine.schema.machine, route_id
-                    ));
-                }
+            if let Err(error) = validate_machine_anchor_target(
+                machine.schema.machine.as_str(),
+                anchor,
+                &canonical_machine_names.iter().map(String::as_str).collect(),
+            ) {
+                mismatches.push(error.to_string());
             }
         }
     }
 
     for composition in &selection.compositions {
-        let route_names = composition
-            .schema
-            .routes
-            .iter()
-            .map(|route| route.name.as_str().to_owned())
-            .collect::<BTreeSet<_>>();
-
         for anchor in &composition.coverage.code_anchors {
             let path = root.join(anchor.symbol.as_str());
             if !path.exists() {
@@ -3224,23 +3236,12 @@ pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) ->
                     composition.schema.name
                 ));
             }
-            match &anchor.target {
-                CoverageSchemaTarget::Route(route_id) => {
-                    if !route_names.contains(route_id.as_str()) {
-                        mismatches.push(format!(
-                            "composition coverage anchor `{}` for {} targets undeclared route `{}`",
-                            anchor.id, composition.schema.name, route_id
-                        ));
-                    }
-                }
-                CoverageSchemaTarget::Machine(machine_id) => {
-                    if !canonical_machine_names.contains(machine_id.as_str()) {
-                        mismatches.push(format!(
-                            "composition coverage anchor `{}` for {} targets unknown machine `{}`",
-                            anchor.id, composition.schema.name, machine_id
-                        ));
-                    }
-                }
+            if let Err(error) = validate_composition_anchor_target(
+                &composition.schema,
+                anchor,
+                &canonical_machine_names.iter().map(String::as_str).collect(),
+            ) {
+                mismatches.push(error.to_string());
             }
         }
     }
@@ -3711,82 +3712,16 @@ impl CanonicalRegistry {
     }
 
     fn validate_coverages(&self) -> Result<()> {
-        let machine_names = self
-            .machines
-            .iter()
-            .map(|schema| schema.machine.as_str())
-            .collect::<BTreeSet<_>>();
-
-        for schema in &self.machines {
-            let manifest = self
-                .machine_coverages
-                .iter()
-                .find(|item| item.machine == schema.machine)
-                .ok_or_else(|| {
-                    anyhow!("missing machine coverage manifest for {}", schema.machine)
-                })?;
-            if manifest.code_anchors.is_empty() {
-                bail!(
-                    "machine coverage manifest {} has no code anchors",
-                    manifest.machine
-                );
-            }
-            if manifest.scenarios.is_empty() {
-                bail!(
-                    "machine coverage manifest {} has no scenarios",
-                    manifest.machine
-                );
-            }
-            validate_machine_semantic_coverage(schema, manifest)?;
-        }
-
-        for manifest in &self.machine_coverages {
-            if !machine_names.contains(manifest.machine.as_str()) {
-                bail!(
-                    "machine coverage manifest {} does not match a canonical machine",
-                    manifest.machine
-                );
-            }
-        }
-
-        let composition_names = self
-            .compositions
-            .iter()
-            .map(|schema| schema.name.as_str())
-            .collect::<BTreeSet<_>>();
-
-        for schema in &self.compositions {
-            let manifest = self
-                .composition_coverages
-                .iter()
-                .find(|item| item.composition == schema.name)
-                .ok_or_else(|| {
-                    anyhow!("missing composition coverage manifest for {}", schema.name)
-                })?;
-            if manifest.code_anchors.is_empty() {
-                bail!(
-                    "composition coverage manifest {} has no code anchors",
-                    manifest.composition
-                );
-            }
-            if manifest.scenarios.is_empty() {
-                bail!(
-                    "composition coverage manifest {} has no scenarios",
-                    manifest.composition
-                );
-            }
-            validate_composition_semantic_coverage(schema, manifest)?;
-        }
-
-        for manifest in &self.composition_coverages {
-            if !composition_names.contains(manifest.composition.as_str()) {
-                bail!(
-                    "composition coverage manifest {} does not match a canonical composition",
-                    manifest.composition
-                );
-            }
-        }
-
+        // The shared library validator owns semantic coverage; the in-repo
+        // catalog validates in RequireEntries mode (every element has an
+        // entry; honestly unclaimed entries stay permitted).
+        validate_coverage_catalog(
+            &self.machines,
+            &self.compositions,
+            &self.machine_coverages,
+            &self.composition_coverages,
+            CoverageValidationMode::RequireEntries,
+        )?;
         Ok(())
     }
 
@@ -3859,344 +3794,6 @@ impl CanonicalRegistry {
             compositions,
         })
     }
-}
-
-fn validate_machine_semantic_coverage(
-    schema: &MachineSchema,
-    manifest: &MachineCoverageManifest,
-) -> Result<()> {
-    let anchor_ids = manifest
-        .code_anchors
-        .iter()
-        .map(|anchor| anchor.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let scenario_ids = manifest
-        .scenarios
-        .iter()
-        .map(|scenario| scenario.id.as_str())
-        .collect::<BTreeSet<_>>();
-
-    // Typed claim resolution (fail-closed): every anchor/scenario claim must
-    // name a real schema element of the matching kind. A machine coverage
-    // manifest declares no routes or scheduler rules, so claims of those
-    // kinds are structurally mismatched.
-    let owner = format!("machine {}", schema.machine);
-    let transition_names = schema
-        .transitions
-        .iter()
-        .map(|transition| transition.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let effect_names = schema
-        .effects
-        .variants
-        .iter()
-        .map(|variant| variant.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let invariant_names = schema
-        .invariants
-        .iter()
-        .map(|invariant| invariant.name.as_str())
-        .collect::<BTreeSet<_>>();
-    for (claimant_kind, claimant_id, claims) in manifest
-        .code_anchors
-        .iter()
-        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
-        .chain(
-            manifest
-                .scenarios
-                .iter()
-                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
-        )
-    {
-        validate_claims_against(
-            &owner,
-            claimant_kind,
-            claimant_id,
-            claims,
-            Some(&transition_names),
-            Some(&effect_names),
-            &invariant_names,
-            None,
-            None,
-        )?;
-    }
-
-    validate_semantic_entries(
-        &format!("machine {}", schema.machine),
-        "transition",
-        &schema
-            .transitions
-            .iter()
-            .map(|transition| transition.name.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        &manifest.transition_coverage,
-        &anchor_ids,
-        &scenario_ids,
-    )?;
-    validate_semantic_entries(
-        &format!("machine {}", schema.machine),
-        "effect",
-        &schema
-            .effects
-            .variants
-            .iter()
-            .map(|variant| variant.name.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        &manifest.effect_coverage,
-        &anchor_ids,
-        &scenario_ids,
-    )?;
-    validate_semantic_entries(
-        &format!("machine {}", schema.machine),
-        "invariant",
-        &schema
-            .invariants
-            .iter()
-            .map(|invariant| invariant.name.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        &manifest.invariant_coverage,
-        &anchor_ids,
-        &scenario_ids,
-    )?;
-
-    Ok(())
-}
-
-fn validate_composition_semantic_coverage(
-    schema: &CompositionSchema,
-    manifest: &CompositionCoverageManifest,
-) -> Result<()> {
-    let anchor_ids = manifest
-        .code_anchors
-        .iter()
-        .map(|anchor| anchor.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let scenario_ids = manifest
-        .scenarios
-        .iter()
-        .map(|scenario| scenario.id.as_str())
-        .collect::<BTreeSet<_>>();
-
-    // Typed claim resolution (fail-closed): every anchor/scenario claim must
-    // name a real schema element of the matching kind. A composition
-    // coverage manifest declares no machine transitions or effects, so
-    // claims of those kinds are structurally mismatched.
-    let owner = format!("composition {}", schema.name);
-    let route_names = schema
-        .routes
-        .iter()
-        .map(|route| route.name.as_str())
-        .collect::<BTreeSet<_>>();
-    let scheduler_rule_names = schema
-        .scheduler_rules
-        .iter()
-        .map(scheduler_rule_coverage_name)
-        .collect::<Vec<_>>();
-    let scheduler_rule_names = scheduler_rule_names
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let invariant_names = schema
-        .invariants
-        .iter()
-        .map(|invariant| invariant.name.as_str())
-        .collect::<BTreeSet<_>>();
-    for (claimant_kind, claimant_id, claims) in manifest
-        .code_anchors
-        .iter()
-        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
-        .chain(
-            manifest
-                .scenarios
-                .iter()
-                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
-        )
-    {
-        validate_claims_against(
-            &owner,
-            claimant_kind,
-            claimant_id,
-            claims,
-            None,
-            None,
-            &invariant_names,
-            Some(&route_names),
-            Some(&scheduler_rule_names),
-        )?;
-    }
-
-    validate_semantic_entries(
-        &format!("composition {}", schema.name),
-        "route",
-        &schema
-            .routes
-            .iter()
-            .map(|route| route.name.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        &manifest.route_coverage,
-        &anchor_ids,
-        &scenario_ids,
-    )?;
-    validate_semantic_entries(
-        &format!("composition {}", schema.name),
-        "scheduler rule",
-        &schema
-            .scheduler_rules
-            .iter()
-            .map(scheduler_rule_coverage_name)
-            .collect::<Vec<_>>(),
-        &manifest.scheduler_rule_coverage,
-        &anchor_ids,
-        &scenario_ids,
-    )?;
-    validate_semantic_entries(
-        &format!("composition {}", schema.name),
-        "invariant",
-        &schema
-            .invariants
-            .iter()
-            .map(|invariant| invariant.name.clone())
-            .collect::<Vec<_>>(),
-        &manifest.invariant_coverage,
-        &anchor_ids,
-        &scenario_ids,
-    )?;
-
-    Ok(())
-}
-
-fn validate_semantic_entries(
-    owner: &str,
-    item_kind: &str,
-    expected_names: &[String],
-    entries: &[SemanticCoverageEntry],
-    anchor_ids: &BTreeSet<&str>,
-    scenario_ids: &BTreeSet<&str>,
-) -> Result<()> {
-    let expected = expected_names
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let seen = entries
-        .iter()
-        .map(|entry| entry.name.as_str())
-        .collect::<BTreeSet<_>>();
-
-    for name in &expected {
-        if !seen.contains(name) {
-            bail!("{owner} missing semantic coverage entry for {item_kind} `{name}`");
-        }
-    }
-
-    for entry in entries {
-        if !expected.contains(entry.name.as_str()) {
-            bail!(
-                "{owner} semantic coverage entry `{}` does not match a declared {item_kind}",
-                entry.name
-            );
-        }
-        // Empty anchor/scenario id lists are permitted: under the
-        // full-containment matching rule an element nothing fully describes
-        // is honestly UNCLAIMED rather than mis-attributed to whichever
-        // anchor coincidentally shares a token. Wrong claims (unknown ids,
-        // tautological everything-maps-to-everything) remain rejected below.
-        if anchor_ids.len() > 1
-            && scenario_ids.len() > 1
-            && entry.anchor_ids.len() == anchor_ids.len()
-            && entry.scenario_ids.len() == scenario_ids.len()
-        {
-            bail!(
-                "{owner} semantic coverage entry `{}` maps to every code anchor and every scenario; coverage must be semantic, not tautological",
-                entry.name
-            );
-        }
-
-        for anchor_id in &entry.anchor_ids {
-            if !anchor_ids.contains(anchor_id.as_str()) {
-                bail!(
-                    "{owner} semantic coverage entry `{}` references unknown code anchor `{anchor_id}`",
-                    entry.name
-                );
-            }
-        }
-
-        for scenario_id in &entry.scenario_ids {
-            if !scenario_ids.contains(scenario_id.as_str()) {
-                bail!(
-                    "{owner} semantic coverage entry `{}` references unknown scenario `{scenario_id}`",
-                    entry.name
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Resolve one claimant's typed claims against the owning schema's element
-/// name sets. `None` for a kind means the manifest type structurally owns no
-/// elements of that kind, so any claim of it is a mismatch.
-#[allow(clippy::too_many_arguments)]
-fn validate_claims_against(
-    owner: &str,
-    claimant_kind: &str,
-    claimant_id: &str,
-    claims: &CoverageClaims,
-    transitions: Option<&BTreeSet<&str>>,
-    effects: Option<&BTreeSet<&str>>,
-    invariants: &BTreeSet<&str>,
-    routes: Option<&BTreeSet<&str>>,
-    scheduler_rules: Option<&BTreeSet<&str>>,
-) -> Result<()> {
-    type KindRow<'a> = (&'a str, Vec<&'a str>, Option<&'a BTreeSet<&'a str>>);
-    let kinds: [KindRow<'_>; 5] = [
-        (
-            "transition",
-            claims.transitions.iter().map(|id| id.as_str()).collect(),
-            transitions,
-        ),
-        (
-            "effect",
-            claims.effects.iter().map(|id| id.as_str()).collect(),
-            effects,
-        ),
-        (
-            "invariant",
-            claims.invariants.iter().map(String::as_str).collect(),
-            Some(invariants),
-        ),
-        (
-            "route",
-            claims.routes.iter().map(|id| id.as_str()).collect(),
-            routes,
-        ),
-        (
-            "scheduler rule",
-            claims.scheduler_rules.iter().map(String::as_str).collect(),
-            scheduler_rules,
-        ),
-    ];
-    for (kind, claimed, declared) in kinds {
-        match declared {
-            None => {
-                if let Some(first) = claimed.first() {
-                    bail!(
-                        "{owner} {claimant_kind} `{claimant_id}` claims {kind} `{first}` but this manifest type declares no {kind}s"
-                    );
-                }
-            }
-            Some(declared) => {
-                for name in claimed {
-                    if !declared.contains(name) {
-                        bail!(
-                            "{owner} {claimant_kind} `{claimant_id}` claims nonexistent {kind} `{name}`"
-                        );
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 pub struct Selection {
@@ -5090,13 +4687,14 @@ pub fn ensure_machine_transition_coverage(
     );
 }
 
-pub fn ensure_composition_coverage(
+/// Declared composition routes that never fired: no TLC coverage hit in
+/// `coverage` and not declared by a witness whose completion TLC proved.
+pub fn zero_hit_composition_routes(
     schema: &CompositionSchema,
     coverage: &TlcCoverageSummary,
     witness_covered_routes: &BTreeSet<String>,
-    witness_covered_scheduler_rules: &BTreeSet<String>,
-) -> Result<()> {
-    let zero_hit_routes = schema
+) -> Vec<String> {
+    schema
         .routes
         .iter()
         .filter_map(|route| {
@@ -5109,7 +4707,81 @@ pub fn ensure_composition_coverage(
             (evaluations == 0 && !witness_covered_routes.contains(route.name.as_str()))
                 .then(|| route.name.as_str().to_owned())
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// Every declared composition route must fire: a TLC coverage hit, or a
+/// witness whose completion TLC proved declares it. Fails closed, naming every
+/// route that never fired.
+pub fn ensure_composition_routes_fired(
+    schema: &CompositionSchema,
+    coverage: &TlcCoverageSummary,
+    witness_covered_routes: &BTreeSet<String>,
+) -> Result<()> {
+    let never_fired = zero_hit_composition_routes(schema, coverage, witness_covered_routes);
+    if never_fired.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "composition {} has {} of {} declared route(s) that no TLC coverage hit or \
+         completed witness exercised:\n{}",
+        schema.name,
+        never_fired.len(),
+        schema.routes.len(),
+        never_fired
+            .iter()
+            .map(|route| format!("- {route}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+/// A composition must have positive TLC coverage from some source: a
+/// scripted witness whose completion TLC proved, or a main sweep that explores
+/// past its initial state. Compositions move only on queued inputs, so a main
+/// sweep that stays at its initial state and no completing witness means TLC
+/// checked nothing in the composition. `main_distinct_states` is `None` when
+/// the main sweep was skipped or reported no state count.
+pub fn ensure_composition_positive_coverage(
+    composition: &str,
+    main_distinct_states: Option<u64>,
+    completed_witnesses: usize,
+) -> Result<()> {
+    if completed_witnesses > 0 || main_distinct_states.is_some_and(|states| states > 1) {
+        return Ok(());
+    }
+    let main = match main_distinct_states {
+        Some(states) => format!("its main sweep reaches only {states} distinct state(s)"),
+        None => "its main sweep is skipped".to_owned(),
+    };
+    bail!(
+        "composition {composition} has no positive TLC coverage: {main} and it has no \
+         completing witness, so TLC checks nothing in it; add a scripted witness that \
+         drives its machines"
+    )
+}
+
+/// The final `N distinct states found` count of a TLC run, if it reported one.
+pub fn parse_tlc_distinct_states(output: &str) -> Option<u64> {
+    output.lines().rev().find_map(|line| {
+        let (count, _) = line.split_once(" distinct states found")?;
+        count
+            .rsplit(", ")
+            .next()?
+            .trim()
+            .replace(',', "")
+            .parse()
+            .ok()
+    })
+}
+
+pub fn ensure_composition_coverage(
+    schema: &CompositionSchema,
+    coverage: &TlcCoverageSummary,
+    witness_covered_routes: &BTreeSet<String>,
+    witness_covered_scheduler_rules: &BTreeSet<String>,
+) -> Result<()> {
+    let zero_hit_routes = zero_hit_composition_routes(schema, coverage, witness_covered_routes);
 
     if !zero_hit_routes.is_empty() {
         bail!(

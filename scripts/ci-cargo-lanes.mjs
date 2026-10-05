@@ -102,6 +102,10 @@ export const FEATURE_UNIT_SUITES = [
   { package: "meerkat-mob-mcp", id: "openai-live", features: ["experimental-gpt-live-gate0-harness"] },
   { package: "meerkat-rpc", id: "openai-live", features: ["experimental-gpt-live"] },
   { package: "xtask", id: "machine-authority", features: ["machine-authority"] },
+  // The generated-kernel tests (runtime.rs) are behind `test-oracle`: their
+  // hand-built MeerkatMachine inputs broke silently when RegisterSession
+  // gained initial_run_start_holds, because no lane enabled the feature.
+  { package: "meerkat-machine-kernels", id: "test-oracle", features: ["test-oracle"] },
 ];
 
 // Integration-test suites. Every unit lane runs `--lib --bins`, so a crate's
@@ -140,6 +144,55 @@ export const INTEGRATION_SUITES = [
     triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime", "meerkat-mob", "meerkat-machine-codegen"],
   },
   { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/"] },
+  // kernel_typed_round_trip drives the generated kernels with hand-built
+  // inputs, so any machine DSL change can break it; it needs `test-oracle`.
+  { package: "meerkat-machine-kernels", features: ["test-oracle"], triggers: MACHINE_AUTHORITY_PACKAGES },
+  // The facade's store and cold-restart suites, with the Bazel target's
+  // features. No other lane ran them before a release tag: the Bazel graph
+  // runs only nightly (on main) and at the tag, so a compaction plus
+  // cold-restart store corruption reached a green release/0.8.51 (#1673).
+  {
+    package: "meerkat",
+    name: "meerkat-store-restart",
+    features: [
+      "anthropic", "atif", "comms", "copilot", "gemini", "integration-real-tests", "jsonl-store", "live",
+      "live-webrtc", "mcp", "memory-store", "memory-store-session", "openai", "openai-live", "openai-realtime",
+      "schedule", "session-compaction", "session-store", "skills", "test-mcp-oauth-fixtures",
+      "test-realtime-fixtures", "workgraph",
+    ],
+    tests: [
+      "cold_restart_resume_after_compaction",
+      "cold_restart_resume",
+      "persistence_contract",
+      "storage_provider_seam",
+      "brain_swap_surface_parity",
+    ],
+    triggers: ["meerkat", "meerkat-core", "meerkat-store", "meerkat-session", "meerkat-runtime", "meerkat-sqlite"],
+  },
+  // Deterministic replays of recorded Turbo S gpt-live-1 provider streams
+  // (tests/integration/fixtures/gpt_live_replay): the S104/S106 voice
+  // contracts without a provider or a key. `tests` names the one target, so
+  // the lane does not build every integration binary. Triggered by the
+  // packages on the public Live path, its fixtures and its harness.
+  {
+    package: "meerkat-integration-tests",
+    name: "gpt-live-replay",
+    features: ["gpt-live-replay"],
+    tests: ["gpt_live_replay"],
+    triggers: [
+      "meerkat",
+      "meerkat-core",
+      "meerkat-openai",
+      "meerkat-live",
+      "meerkat-runtime",
+      "meerkat-session",
+      "meerkat-mob",
+      "meerkat-mob-mcp",
+      "meerkat-rpc",
+      "meerkat-integration-tests",
+    ],
+    paths: ["tests/integration/fixtures/gpt_live_replay/"],
+  },
   // The ordinary native governed loops and cost correctness controls live in
   // tests/*.rs; unit rows only select lib/bin tests. Keep real/perf opt-ins.
   {
@@ -770,6 +823,12 @@ function plan(args) {
         throw new Error(`integration suite ${suite.package} names unknown feature ${feature}`);
       }
     }
+    for (const test of suite.tests ?? []) {
+      const known = byName
+        .get(suite.package)
+        .targets.some((target) => target.kind.includes("test") && target.name === test);
+      if (!known) throw new Error(`integration suite ${suite.package} names unknown test target ${test}`);
+    }
   }
   const changedPaths = changed ?? [];
   result.integration_suites = INTEGRATION_SUITES.filter(
@@ -777,9 +836,10 @@ function plan(args) {
       (result.rust_changed && suite.triggers.some((name) => result.packages.includes(name))) ||
       (suite.paths ?? []).some((prefix) => changedPaths.some((path) => path.startsWith(prefix))),
   ).map((suite) => ({
-    name: shortName(suite.package),
+    name: suite.name ?? shortName(suite.package),
     packages: [suite.package],
     package_flags: `-p ${suite.package}${suite.features?.length ? ` --features ${suite.features.join(",")}` : ""}`,
+    ...(suite.tests?.length ? { test_flags: suite.tests.map((test) => `--test ${test}`).join(" ") } : {}),
   }));
 
   result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
@@ -862,6 +922,7 @@ function matrixOf(shards, { placeholder = true } = {}) {
   const include = shards.map((shard) => ({
     name: shard.name,
     packages: shard.package_flags,
+    ...(shard.test_flags ? { tests: shard.test_flags } : {}),
     ...(shard.rust_min_stack ? { rust_min_stack: String(shard.rust_min_stack) } : {}),
   }));
   if (include.length === 0 && placeholder) include.push({ name: "none", packages: "" });

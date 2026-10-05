@@ -18,7 +18,7 @@ use crate::generated::{
 };
 use crate::{McpAuthResolver, McpConnection, McpError};
 use async_trait::async_trait;
-use meerkat_auth_core::McpAuthMode;
+use meerkat_auth_core::{McpAuthMode, McpServerIdentity};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 use meerkat_core::McpServerConfig;
@@ -1051,6 +1051,9 @@ pub struct McpRouter {
     pending_snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
     /// Queued canonical lifecycle deltas for async completions.
     completed_updates: VecDeque<CompletedLifecycleUpdate>,
+    /// Host-channel status: servers whose latest connection attempt ended in
+    /// [`McpError::AuthorizationRequired`]. Never projected to the agent.
+    awaiting_authorization: BTreeMap<String, McpServerIdentity>,
     /// Optional session-scoped MCP server lifecycle handle
     /// (Phase 5G / T5g). When bound, every handshake event mirrors into
     /// the session's MeerkatMachine DSL `mcp_server_states`. Standalone
@@ -1065,6 +1068,60 @@ pub struct McpRouter {
     mcp_auth_mode: McpAuthMode,
     mcp_auth_resolver: Option<Arc<dyn McpAuthResolver>>,
     client_service_factory: Option<Arc<dyn crate::McpClientServiceFactory>>,
+    /// Bumped whenever the router makes progress a waiter could be blocked
+    /// on: a tool call finishing (a draining server's in-flight count drops)
+    /// or a connect attempt delivering its result. [`McpProgressWait`]
+    /// subscribes before reading state, so no progress is missed.
+    progress: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Connect attempts spawned, and those that have delivered their result
+    /// to the pending channel (counted by the attempt before it signals
+    /// `progress`).
+    connect_attempts_spawned: u64,
+    connect_results_delivered: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// A typed wait for MCP router progress, taken under the router lock and
+/// awaited without it: it resolves when a tool call finishes or a connect
+/// result arrives after it was taken, at its deadline (the earliest removal
+/// timeout of a draining server), or at once when progress is already
+/// possible.
+#[derive(Debug)]
+pub(crate) struct McpProgressWait {
+    progress: Option<tokio::sync::watch::Receiver<u64>>,
+    deadline: Option<Instant>,
+}
+
+impl McpProgressWait {
+    fn ready() -> Self {
+        Self {
+            progress: None,
+            deadline: None,
+        }
+    }
+
+    /// Wait for progress, the wait's own deadline, or `limit`, whichever
+    /// comes first.
+    pub(crate) async fn wait(self, limit: Option<tokio::time::Instant>) {
+        let Some(mut progress) = self.progress else {
+            return;
+        };
+        let deadline = match (self.deadline.map(tokio::time::Instant::from_std), limit) {
+            (Some(own), Some(limit)) => Some(own.min(limit)),
+            (own, limit) => own.or(limit),
+        };
+        let changed = progress.changed();
+        match deadline {
+            Some(deadline) => {
+                tokio::select! {
+                    _ = changed => {}
+                    () = tokio::time::sleep_until(deadline) => {}
+                }
+            }
+            None => {
+                let _ = changed.await;
+            }
+        }
+    }
 }
 
 impl McpRouter {
@@ -1083,10 +1140,14 @@ impl McpRouter {
             closing: tokio::task::JoinSet::new(),
             pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
+            awaiting_authorization: BTreeMap::new(),
             mcp_lifecycle_handle: Arc::new(StdRwLock::new(None)),
             mcp_auth_mode: McpAuthMode::Stored,
             mcp_auth_resolver: None,
             client_service_factory: None,
+            progress: Arc::new(tokio::sync::watch::Sender::new(0)),
+            connect_attempts_spawned: 0,
+            connect_results_delivered: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1329,6 +1390,8 @@ impl McpRouter {
             return Err(error.into());
         }
         self.staged_payloads.remove(&server_name);
+        // An accepted removal withdraws any pending human-authorization ask.
+        self.awaiting_authorization.remove(&server_name);
         Ok(())
     }
 
@@ -1554,6 +1617,7 @@ impl McpRouter {
                             .with_detail(Some(error.to_string())),
                         });
                     }
+                    self.awaiting_authorization.remove(&surface_id.0);
                     delta.removed_servers.push(surface_id.0.clone());
                 }
                 ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
@@ -1581,6 +1645,9 @@ impl McpRouter {
             custody
         });
         let tx = self.pending_tx.clone();
+        let progress = Arc::clone(&self.progress);
+        let delivered = Arc::clone(&self.connect_results_delivered);
+        self.connect_attempts_spawned = self.connect_attempts_spawned.wrapping_add(1);
         let auth_mode = self.mcp_auth_mode;
         let auth_resolver = self.mcp_auth_resolver.clone();
         let client_factory = self.client_service_factory.clone();
@@ -1595,7 +1662,10 @@ impl McpRouter {
                 stdio_custody,
             )
             .await;
-            if let Err(error) = tx.send(PendingResult { obligation, result }).await {
+            let sent = tx.send(PendingResult { obligation, result }).await;
+            delivered.fetch_add(1, Ordering::AcqRel);
+            progress.send_modify(|seen| *seen = seen.wrapping_add(1));
+            if let Err(error) = sent {
                 // The router is gone; this task is the result's last owner.
                 let server_name = error.0.obligation.surface_id.clone();
                 McpRouter::close_result_connection_if_present(server_name, error.0.result).await;
@@ -1649,6 +1719,15 @@ impl McpRouter {
         // carries the process; the attempt's custody entry is done.
         self.pending_child_custody
             .remove(&(server_name.clone(), obligation.pending_task_sequence));
+        match &result {
+            Err(McpError::AuthorizationRequired { target }) => {
+                self.awaiting_authorization
+                    .insert(server_name.clone(), (**target).clone());
+            }
+            _ => {
+                self.awaiting_authorization.remove(&server_name);
+            }
+        }
 
         match result {
             Ok((conn, tools)) => {
@@ -1820,6 +1899,17 @@ impl McpRouter {
                 snapshot_alignment
             }
         }
+    }
+
+    /// Host-channel status: the MCP targets whose latest connection attempt is
+    /// waiting for a human to authorize them through the host's browser
+    /// channel (see `McpOAuthAuthority::login_start`). This is a host query,
+    /// not an agent event: it carries only the typed target, never an
+    /// authorize URL, state or code. A later successful attempt or removal
+    /// clears the entry. It reflects background results already drained by
+    /// the normal lifecycle polling; it drains nothing itself.
+    pub fn servers_awaiting_authorization(&self) -> Vec<McpServerIdentity> {
+        self.awaiting_authorization.values().cloned().collect()
     }
 
     /// Drain pending results and return queued canonical lifecycle actions.
@@ -2019,6 +2109,8 @@ impl McpRouter {
             if degraded {
                 delta.degraded_removals.push(server_name);
             }
+            self.progress
+                .send_modify(|seen| *seen = seen.wrapping_add(1));
         }
         Ok(())
     }
@@ -2326,6 +2418,50 @@ impl McpRouter {
         !self.surface_owner.removing_surfaces().is_empty()
     }
 
+    /// What the removal drain waits on next: `None` when no server is
+    /// draining; otherwise a wait that resolves at once if a draining server
+    /// can finalize now (no call in flight, or its removal timeout passed),
+    /// else on the next finished call or the earliest removal timeout.
+    pub(crate) fn removal_progress_wait(&self) -> Option<McpProgressWait> {
+        let removing = self.surface_owner.removing_surfaces();
+        if removing.is_empty() {
+            return None;
+        }
+        let progress = self.progress.subscribe();
+        let now = Instant::now();
+        let mut deadline: Option<Instant> = None;
+        for sid in &removing {
+            if self.surface_owner.inflight_call_count(sid) == 0 {
+                return Some(McpProgressWait::ready());
+            }
+            if let Some(timing) = self.surface_owner.removal_timing(sid) {
+                if now >= timing.timeout_at {
+                    return Some(McpProgressWait::ready());
+                }
+                deadline = Some(deadline.map_or(timing.timeout_at, |d| d.min(timing.timeout_at)));
+            }
+        }
+        Some(McpProgressWait {
+            progress: Some(progress),
+            deadline,
+        })
+    }
+
+    /// Whether a spawned connect attempt has not yet delivered its result.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn connect_results_outstanding(&self) -> bool {
+        self.connect_results_delivered.load(Ordering::Acquire) != self.connect_attempts_spawned
+    }
+
+    /// A wait for the next connect result (or finished call); taken before
+    /// reading pending state, so a result delivered after the read is seen.
+    pub(crate) fn progress_wait(&self) -> McpProgressWait {
+        McpProgressWait {
+            progress: Some(self.progress.subscribe()),
+            deadline: None,
+        }
+    }
+
     /// List all visible tools from active servers.
     pub fn list_tools(&self) -> &[Arc<ToolDef>] {
         self.projection.visible_tools.as_ref()
@@ -2400,12 +2536,15 @@ impl McpRouter {
         // Fail closed (matching CallStarted): a rejected CallFinished is
         // authoritative divergence, not a benign no-op. Surface the tool
         // result only when the surface owner accepts the finish.
-        if let Err(error) = self
+        let finished = self
             .surface_owner
             .apply(ExternalToolSurfaceInput::CallFinished {
                 surface_id: sid.clone(),
-            })
-        {
+            });
+        // A draining server may now have no call in flight.
+        self.progress
+            .send_modify(|seen| *seen = seen.wrapping_add(1));
+        if let Err(error) = finished {
             return Err(McpError::ServerUnavailable {
                 server: server_name.clone(),
                 state: format!("Surface owner rejected CallFinished: {error}"),
@@ -2477,31 +2616,55 @@ impl McpRouter {
         let _ = self.publish_projection_snapshot();
     }
 
+    /// Test hook: set a server's in-flight call count, through the surface
+    /// owner like real calls. Fails closed when the server is not installed
+    /// or the owner rejects a call transition (the session machine accepts
+    /// calls only while attached or running), instead of leaving the shell
+    /// and the owner disagreeing about the count.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_inflight_calls_for_testing(&mut self, server_name: &str, count: usize) {
+    pub fn set_inflight_calls_for_testing(
+        &mut self,
+        server_name: &str,
+        count: usize,
+    ) -> Result<(), McpError> {
         let sid = SurfaceId::from(server_name);
-        if let Some(entry) = self.servers.get_mut(server_name) {
-            let current = entry.active_calls.load(Ordering::Acquire);
-            entry.active_calls.store(count, Ordering::Release);
-            // Sync owner inflight count to match the shell's test override.
-            if count > current {
-                for _ in current..count {
-                    let _ = self
-                        .surface_owner
-                        .apply(ExternalToolSurfaceInput::CallStarted {
-                            surface_id: sid.clone(),
-                        });
+        let entry = self
+            .servers
+            .get_mut(server_name)
+            .ok_or_else(|| McpError::ServerNotFound(server_name.to_string()))?;
+        let current = entry.active_calls.load(Ordering::Acquire);
+        let input = |started: bool| {
+            if started {
+                ExternalToolSurfaceInput::CallStarted {
+                    surface_id: sid.clone(),
                 }
             } else {
-                for _ in count..current {
-                    let _ = self
-                        .surface_owner
-                        .apply(ExternalToolSurfaceInput::CallFinished {
-                            surface_id: sid.clone(),
-                        });
+                ExternalToolSurfaceInput::CallFinished {
+                    surface_id: sid.clone(),
                 }
             }
+        };
+        let (started, steps) = if count > current {
+            (true, count - current)
+        } else {
+            (false, current - count)
+        };
+        for _ in 0..steps {
+            self.surface_owner.apply(input(started)).map_err(|error| {
+                McpError::ServerUnavailable {
+                    server: server_name.to_string(),
+                    state: format!("surface owner rejected the test call transition: {error}"),
+                }
+            })?;
+            if started {
+                entry.active_calls.fetch_add(1, Ordering::AcqRel);
+            } else {
+                entry.active_calls.fetch_sub(1, Ordering::AcqRel);
+            }
         }
+        self.progress
+            .send_modify(|seen| *seen = seen.wrapping_add(1));
+        Ok(())
     }
 }
 
@@ -4011,7 +4174,9 @@ mod tests {
             .await
             .expect("add_server");
 
-        router.set_inflight_calls_for_testing("test-server", 1);
+        router
+            .set_inflight_calls_for_testing("test-server", 1)
+            .expect("set inflight calls");
         router.stage_remove("test-server").expect("stage remove");
         let result = router.apply_staged().await.expect("apply remove");
 
@@ -4033,7 +4198,9 @@ mod tests {
             "removing surfaces should be absent from the published routing snapshot, got {err:?}"
         );
 
-        router.set_inflight_calls_for_testing("test-server", 0);
+        router
+            .set_inflight_calls_for_testing("test-server", 0)
+            .expect("set inflight calls");
         let result = router
             .apply_staged()
             .await
@@ -4053,7 +4220,9 @@ mod tests {
             .await
             .expect("add_server");
 
-        router.set_inflight_calls_for_testing("test-server", 1);
+        router
+            .set_inflight_calls_for_testing("test-server", 1)
+            .expect("set inflight calls");
         router.stage_remove("test-server").expect("stage remove");
         let result = router.apply_staged().await.expect("apply remove start");
         assert!(result.delta.removed_servers.is_empty());
@@ -4068,6 +4237,46 @@ mod tests {
                 && action.operation == ToolConfigChangeOperation::Remove
                 && action.phase == McpLifecyclePhase::Forced
         }));
+    }
+
+    #[tokio::test]
+    async fn awaiting_authorization_is_host_status_not_an_agent_notice_payload() {
+        use crate::connection::tests::{FakeMcpAuthResolver, spawn_http_mcp_server};
+
+        let (url, _state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("guarded", url, HashMap::new());
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        let resolver =
+            Arc::new(FakeMcpAuthResolver::new(None, "unused").with_human_authorization_required());
+        let mut router =
+            generated_handle_owner_router().with_mcp_auth(McpAuthMode::Interactive, Some(resolver));
+        router.stage_add(config).expect("stage add");
+        router.apply_staged().await.expect("apply staged add");
+
+        let deadline = Instant::now() + async_connect_test_timeout();
+        let mut failed_detail = None;
+        while failed_detail.is_none() {
+            let ext = router.take_external_updates();
+            failed_detail = ext
+                .notices
+                .into_iter()
+                .find(|n| n.target == "guarded" && n.phase == McpLifecyclePhase::Failed)
+                .map(|n| format!("{n:?}"));
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for background MCP connect"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(router.servers_awaiting_authorization(), vec![target]);
+        let detail = failed_detail.unwrap_or_default();
+        for secret in ["authorize", "state=", "code=", "code_challenge"] {
+            assert!(!detail.contains(secret), "{secret:?} leaked: {detail}");
+        }
+
+        router.stage_remove("guarded").expect("stage remove");
+        router.apply_staged().await.expect("apply staged remove");
+        assert!(router.servers_awaiting_authorization().is_empty());
     }
 
     #[tokio::test]

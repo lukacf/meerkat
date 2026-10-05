@@ -50,8 +50,9 @@ pub struct TranscriptMessageIdentity {
     pub turn_input: Option<TranscriptTurnInput>,
 }
 
-/// Non-conversational authorship of a turn's input (see
-/// [`TranscriptMessageIdentity::turn_input`]).
+/// Authorship of a turn's input that readers act on (see
+/// [`TranscriptMessageIdentity::turn_input`]). Absent for every other turn
+/// (spoken, peer-driven, or a batch whose inputs disagree).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +61,11 @@ pub enum TranscriptTurnInput {
     /// Runtime-authored injected execution context, such as a voice job's
     /// result merged into its source member after the voice channel closed.
     RuntimeAuthored,
+    /// Text a host submitted as a turn (`turn/start`, a session's initial
+    /// prompt): the text chat. Its user row and its reply are shown in the
+    /// chat, so a live voice channel takes them as context, never as speech
+    /// to voice.
+    TypedText,
 }
 
 /// Session-scoped identity of one committed assistant message occurrence.
@@ -1830,7 +1836,7 @@ impl Message {
             // host-attached injected context carry typed exclusion reasons.
             Message::User(u) => match u.transcript_role {
                 TranscriptUserRole::Conversational => {
-                    MemoryIndexableContent::Indexable(u.text_content())
+                    MemoryIndexableContent::from_text(u.text_content())
                 }
                 TranscriptUserRole::CompactionSummary => {
                     MemoryIndexableContent::Excluded(MemoryIndexExclusion::CompactionSummary)
@@ -1847,7 +1853,9 @@ impl Message {
                     }
                     result.push_str(text);
                 }
-                MemoryIndexableContent::Indexable(result)
+                // An assistant turn with no text blocks (tool calls or
+                // reasoning only) has nothing to index.
+                MemoryIndexableContent::from_text(result)
             }
             Message::System(_) => {
                 MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemPrompt)
@@ -1885,6 +1893,28 @@ pub enum MemoryIndexableContent {
 }
 
 impl MemoryIndexableContent {
+    /// Classify projected text: empty or whitespace-only text is
+    /// [`MemoryIndexExclusion::EmptyText`], never an indexable entry.
+    pub fn from_text(text: String) -> Self {
+        if text.trim().is_empty() {
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::EmptyText)
+        } else {
+            MemoryIndexableContent::Indexable(text)
+        }
+    }
+
+    /// Re-apply the [`Self::from_text`] rule to a decision built directly
+    /// from the variant: `Indexable` with empty or whitespace-only text
+    /// becomes `Excluded(EmptyText)`. Memory stores call this at their
+    /// indexing seam so no producer can index text that cannot match.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        match self {
+            MemoryIndexableContent::Indexable(text) => Self::from_text(text),
+            excluded @ MemoryIndexableContent::Excluded(_) => excluded,
+        }
+    }
+
     /// Whether this message contributes content to the index.
     pub fn is_indexable(&self) -> bool {
         matches!(self, MemoryIndexableContent::Indexable(_))
@@ -1922,6 +1952,10 @@ pub enum MemoryIndexExclusion {
     /// Host-attached injected context — ambient material delivered alongside
     /// (not inside) the user's message; not user-authored conversation.
     InjectedContext,
+    /// The message projects to empty or whitespace-only text (for example an
+    /// assistant turn with only tool calls or reasoning): there is nothing
+    /// to match, and an empty embedding would match every query.
+    EmptyText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2156,6 +2190,10 @@ pub enum CommsNoticeKind {
     ResponseProgress,
     /// Terminal response, completed or failed (wire tag `response_terminal`).
     ResponseTerminal,
+    /// One-way peer lifecycle notice such as a member-kickoff status (wire
+    /// tag `lifecycle`). The notice's `intent` names the lifecycle kind
+    /// (`mob.kickoff_*`); it never carries a request id.
+    Lifecycle,
     /// Forward-compatible escape hatch for an unrecognized wire kind. Projects
     /// as a plain peer message but is matched explicitly, never silently.
     Other(String),
@@ -2170,6 +2208,7 @@ impl CommsNoticeKind {
             Self::Request => "request",
             Self::ResponseProgress => "response_progress",
             Self::ResponseTerminal => "response_terminal",
+            Self::Lifecycle => "lifecycle",
             Self::Other(raw) => raw.as_str(),
         }
     }
@@ -2183,6 +2222,7 @@ impl CommsNoticeKind {
             "request" => Self::Request,
             "response_progress" => Self::ResponseProgress,
             "response_terminal" => Self::ResponseTerminal,
+            "lifecycle" => Self::Lifecycle,
             other => Self::Other(other.to_string()),
         }
     }
@@ -2690,6 +2730,22 @@ impl SystemNoticeBlock {
                         }
                         vec![text]
                     }
+                    CommsNoticeKind::Lifecycle => {
+                        let notice = crate::interaction::format_peer_lifecycle_projection(
+                            peer_id,
+                            peer.as_ref().and_then(|peer| peer.display_name.as_deref()),
+                            intent.as_deref().unwrap_or("lifecycle"),
+                            payload.as_ref().unwrap_or(&Value::Null),
+                        );
+                        // The admitted content is normally this same rendered
+                        // notice; only distinct content is appended.
+                        let distinct_body = !body.trim().is_empty() && body.trim() != notice.trim();
+                        let mut lines = vec![notice];
+                        if distinct_body {
+                            lines.push(body);
+                        }
+                        lines
+                    }
                     CommsNoticeKind::Message | CommsNoticeKind::Other(_) => {
                         vec![crate::interaction::format_peer_message_projection(
                             peer_label, &body,
@@ -2698,7 +2754,9 @@ impl SystemNoticeBlock {
                 };
                 let appends_extras = !matches!(
                     kind,
-                    CommsNoticeKind::Request | CommsNoticeKind::ResponseTerminal
+                    CommsNoticeKind::Request
+                        | CommsNoticeKind::ResponseTerminal
+                        | CommsNoticeKind::Lifecycle
                 );
                 if appends_extras {
                     if let Some(request_id) = request_id {

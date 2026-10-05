@@ -709,6 +709,24 @@ class BackgroundJobCompleted(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class LiveChannelClosed(Event):
+    """One of the session's live channels closed (every committed close).
+
+    `reason` names why: `client_requested`, `client_disconnected`,
+    `provider_closed`, `error`, `media_fault` (the first assistant output had a
+    transcript but no audible audio), `replaced` (a recovery reopened the
+    session on a fresh channel) or `open_abandoned`.
+    `reopen_recommended` is true only for a media fault whose session may
+    still reopen with its retained context.
+    """
+
+    session_id: str
+    channel_id: str
+    reason: str
+    reopen_recommended: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptRewriteCommitted(Event):
     """A same-session transcript rewrite was durably committed."""
 
@@ -761,6 +779,16 @@ _STOP_REASONS = frozenset({
 })
 
 _TOOL_CONFIG_OPERATIONS = frozenset({"add", "remove", "reload"})
+_LIVE_CHANNEL_CLOSE_REASONS = frozenset({
+    "client_requested",
+    "client_disconnected",
+    "provider_closed",
+    "error",
+    "media_fault",
+    "replaced",
+    "open_abandoned",
+})
+
 _BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({
     "completed",
     "failed",
@@ -801,6 +829,7 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "stream_truncated": StreamTruncated,
     "tool_config_changed": ToolConfigChanged,
     "background_job_completed": BackgroundJobCompleted,
+    "live_channel_closed": LiveChannelClosed,
     "transcript_rewrite_committed": TranscriptRewriteCommitted,
 }
 
@@ -1512,6 +1541,14 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         if terminal_status not in _BACKGROUND_JOB_TERMINAL_STATUSES:
             raise ValueError("terminal_status must be a background job terminal status")
         _require_str(raw, "detail")
+        return
+    if event_type == "live_channel_closed":
+        _require_str(raw, "session_id")
+        _require_str(raw, "channel_id")
+        if raw.get("reason") not in _LIVE_CHANNEL_CLOSE_REASONS:
+            raise ValueError("reason must be a live channel close reason")
+        if not isinstance(raw.get("reopen_recommended", False), bool):
+            raise ValueError("reopen_recommended must be boolean")
         return
     if event_type == "transcript_rewrite_committed":
         _require_str(raw, "session_id")

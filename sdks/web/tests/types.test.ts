@@ -507,6 +507,11 @@ function handleEvent(event: AgentEvent): string {
     case 'boundary_appends_discarded':
       // Exact attempt IDs are retired only after durable requeue succeeds.
       return `${event.type}:${event.session_id}:${event.run_id}:${event.input_ids.join(',')}`;
+    case 'live_channel_closed':
+      // A committed close of the session's live channel. `reason` is the
+      // typed close cause; `reopen_recommended` is true only for a media
+      // fault while the session's one reopen is still available.
+      return `${event.type}:${event.session_id}:${event.channel_id}:${event.reason}:${event.reopen_recommended}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -534,6 +539,26 @@ const backgroundJobStringOnly: AgentEvent = {
 
 handleEvent(backgroundJobWithoutLegacyStatus);
 void backgroundJobStringOnly;
+
+const liveChannelMediaFault: AgentEvent = {
+  type: 'live_channel_closed',
+  session_id: '019f0c3e-0000-7000-8000-000000000001',
+  channel_id: 'live_ch_1',
+  reason: 'media_fault',
+  reopen_recommended: true,
+};
+
+const liveChannelUntypedReason: AgentEvent = {
+  type: 'live_channel_closed',
+  session_id: '019f0c3e-0000-7000-8000-000000000001',
+  channel_id: 'live_ch_1',
+  // @ts-expect-error the close reason is the typed LiveChannelCloseReason set, never free text.
+  reason: 'timeout',
+  reopen_recommended: false,
+};
+
+handleEvent(liveChannelMediaFault);
+void liveChannelUntypedReason;
 
 const typedSkillsResolved: AgentEvent = {
   type: 'skills_resolved',

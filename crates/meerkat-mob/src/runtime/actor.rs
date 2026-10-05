@@ -25,6 +25,8 @@ pub(super) mod resume_topology;
 #[cfg(feature = "runtime-adapter")]
 mod resume_topology_control;
 mod retirement_io;
+mod shutdown_teardown;
+pub(in crate::runtime) use shutdown_teardown::ShutdownUnregisterOutcome;
 pub(super) mod spawn_activation;
 mod spawn_admission_io;
 pub(super) mod spawn_preparation;
@@ -177,12 +179,19 @@ pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 
 const ROLLBACK_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const ROLLBACK_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
-/// Hang guard for a deferred Stop or Shutdown awaiting the end of its
-/// interrupted members' turns. Correctness never depends on it: each member's
-/// end of turn is a typed signal, and the guard only turns a turn that never
-/// ends into a typed `LifecycleOperationProgressStalled` naming the member.
+/// Member lifecycle hang guard: the failure bound for a lifecycle step whose
+/// typed signal never arrives. Correctness never depends on it, and it is
+/// never a completion signal.
+///
+/// - A deferred Stop or Shutdown awaits the end of its interrupted members'
+///   turns as typed signals; the guard only turns a turn that never ends into
+///   a typed `LifecycleOperationProgressStalled` naming the member.
+/// - A durably started member retirement's stages each settle on their own
+///   typed signal; the guard only bounds a stage whose signal never arrives,
+///   which then settles the retirement as `Stuck` (owned, re-drivable).
+///
 /// It matches the patience the handle-level lifecycle retry used to grant.
-const AUTONOMOUS_STOP_IDLE_HANG_GUARD: Duration = Duration::from_secs(600);
+const MEMBER_LIFECYCLE_HANG_GUARD: Duration = Duration::from_secs(600);
 /// A status projection is observational and must never hold the single mob
 /// actor behind a slow or wedged session-runtime read. Unknown progress is a
 /// truthful result; delaying lifecycle commands is not.
@@ -1904,7 +1913,15 @@ pub(super) struct AutonomousStopInterruptIncarnation {
 
 pub(super) struct AutonomousStopInterruptTask {
     incarnation: AutonomousStopInterruptIncarnation,
-    result_rx: oneshot::Receiver<Result<Option<super::MemberSessionActivity>, MobError>>,
+    result_rx: oneshot::Receiver<
+        Result<
+            (
+                Option<super::MemberSessionActivity>,
+                super::stop_report::MemberStopOutcome,
+            ),
+            MobError,
+        >,
+    >,
 }
 
 /// One member whose exact stop interrupt succeeded, with the member
@@ -1915,6 +1932,8 @@ pub(super) struct AutonomousStopInterruptTask {
 pub(super) struct AutonomousStopInterrupted {
     incarnation: AutonomousStopInterruptIncarnation,
     activity: Option<super::MemberSessionActivity>,
+    /// What the stop did to the member's run and run starts (#1500).
+    outcome: super::stop_report::MemberStopOutcome,
 }
 
 /// One member's outcome after its stop awaited the end of its turn.
@@ -1922,6 +1941,10 @@ pub(super) struct AutonomousMemberStopOutcome {
     identity: AgentIdentity,
     target: AutonomousStopInterrupted,
     result: Result<(), MobError>,
+    /// A Shutdown's dispatched cancel, resolved from the run's recorded
+    /// terminal once the run settled (`None` when there was nothing to
+    /// resolve or the run recorded no terminal in time).
+    resolved_run: Option<super::stop_report::MemberStopRun>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1930,20 +1953,60 @@ enum PendingAutonomousStopKind {
     Shutdown,
 }
 
-/// A Stop or Shutdown whose members were interrupted and whose reply waits,
-/// off the actor loop, for every interrupted turn to end. Modelled on the
-/// explicit-resume deferral (`pending_resume_lifecycle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingAutonomousStopPhase {
+    /// Exact interrupts are still in flight; each settles with an
+    /// `AutonomousStopInterruptSettled` re-entry that re-drives the stop.
+    Interrupting,
+    /// Every member is interrupted; one task awaits their end of turn.
+    AwaitingEndOfTurn,
+}
+
+/// A Stop or Shutdown whose reply waits, off the actor loop, for its members'
+/// exact interrupts to settle and then for every interrupted turn to end.
+/// Modelled on the explicit-resume deferral (`pending_resume_lifecycle`).
 pub(super) struct PendingAutonomousStop {
     ticket: u64,
     kind: PendingAutonomousStopKind,
+    phase: PendingAutonomousStopPhase,
+    /// The hang guard over both phases (`MEMBER_LIFECYCLE_HANG_GUARD`, or a
+    /// Shutdown's own deadline).
+    deadline: Instant,
     /// The result of the lifecycle steps before the member stops. Shutdown
     /// keeps stopping members after an earlier non-fatal failure and reports
     /// that failure first, exactly as the inline path did.
     prior: Result<(), MobError>,
-    reply_tx: oneshot::Sender<Result<(), MobError>>,
+    reply_tx: LifecycleReplyTx,
     /// Same-kind commands that arrived while this one was pending; they
     /// receive its result.
-    joined: Vec<oneshot::Sender<Result<(), MobError>>>,
+    joined: Vec<LifecycleReplyTx>,
+}
+
+/// A completed Shutdown's reply, held until the actor has processed the
+/// actor completions it retained while joining its work.
+pub(super) struct PendingShutdownExit {
+    reply_tx: LifecycleReplyTx,
+    joined: Vec<LifecycleReplyTx>,
+}
+
+/// Reply channel of a parked Stop or Shutdown. A Stop answers with its
+/// per-member report (#1500); a Shutdown with unit.
+pub(super) enum LifecycleReplyTx {
+    Unit(oneshot::Sender<Result<(), MobError>>),
+    Stop(oneshot::Sender<Result<super::stop_report::MobStopReport, MobError>>),
+}
+
+impl LifecycleReplyTx {
+    fn send(self, result: Result<(), MobError>, report: &super::stop_report::MobStopReport) {
+        match self {
+            Self::Unit(reply_tx) => {
+                let _ = reply_tx.send(result);
+            }
+            Self::Stop(reply_tx) => {
+                let _ = reply_tx.send(result.map(|()| report.clone()));
+            }
+        }
+    }
 }
 
 /// A joined lifecycle waiter receives the primary's result. `MobError` is
@@ -1971,17 +2034,21 @@ fn replicate_lifecycle_error_for_joined_waiter(error: &MobError) -> MobError {
 }
 
 fn send_lifecycle_result(
-    reply_tx: oneshot::Sender<Result<(), MobError>>,
-    joined: Vec<oneshot::Sender<Result<(), MobError>>>,
+    reply_tx: LifecycleReplyTx,
+    joined: Vec<LifecycleReplyTx>,
     result: Result<(), MobError>,
+    report: &super::stop_report::MobStopReport,
 ) {
     for waiter in joined {
-        let _ = waiter.send(match &result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(replicate_lifecycle_error_for_joined_waiter(error)),
-        });
+        waiter.send(
+            match &result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(replicate_lifecycle_error_for_joined_waiter(error)),
+            },
+            report,
+        );
     }
-    let _ = reply_tx.send(result);
+    reply_tx.send(result, report);
 }
 
 /// Bound one member's stop by the hang guard. A member still winding down
@@ -1992,12 +2059,82 @@ pub(super) async fn member_stop_within_hang_guard(
     remaining: Duration,
     stop: impl std::future::Future<Output = Result<(), MobError>>,
 ) -> Result<(), MobError> {
+    let stage = AutonomousMemberStopStage::default();
+    member_stop_within_hang_guard_at(identity, remaining, &stage, stop).await
+}
+
+/// The step an autonomous member's stop is waiting on, reported when the
+/// hang guard passes.
+pub(super) struct AutonomousMemberStopStage(std::sync::Mutex<&'static str>);
+
+impl Default for AutonomousMemberStopStage {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(AUTONOMOUS_MEMBER_STOP_IDLE_STAGE))
+    }
+}
+
+impl AutonomousMemberStopStage {
+    fn enter(&self, stage: &'static str) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stage;
+    }
+
+    fn current(&self) -> &'static str {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// What a Shutdown reports for a run its immediate cancel was dispatched to,
+/// from the run's recorded turn terminal: the cancel, or the run's own end.
+/// `None` (no terminal recorded for that run) leaves it reported as
+/// dispatched.
+#[cfg(feature = "runtime-adapter")]
+fn shutdown_cancel_outcome(
+    terminal: Option<meerkat_core::turn_execution_authority::TurnTerminalOutcome>,
+    run_id: &meerkat_core::lifecycle::RunId,
+) -> Option<super::stop_report::MemberStopRun> {
+    use super::stop_report::MemberStopRun;
+    use meerkat_core::turn_execution_authority::TurnTerminalOutcome;
+    let run_id = run_id.clone();
+    match terminal? {
+        TurnTerminalOutcome::Cancelled => Some(MemberStopRun::CancelledByShutdown { run_id }),
+        TurnTerminalOutcome::Completed
+        | TurnTerminalOutcome::Failed
+        | TurnTerminalOutcome::BudgetExhausted
+        | TurnTerminalOutcome::TimeBudgetExceeded
+        | TurnTerminalOutcome::StructuredOutputValidationFailed => {
+            Some(MemberStopRun::RunEndedBeforeCancel { run_id })
+        }
+        // No terminal was classified for the run: its outcome stays unknown.
+        TurnTerminalOutcome::None => None,
+    }
+}
+
+/// The member's session still reports its interrupted turn active.
+const AUTONOMOUS_MEMBER_STOP_IDLE_STAGE: &str = "autonomous_member_stop_idle";
+/// The session reports its turn over; the runtime has not yet recorded the
+/// interrupted run's end.
+const AUTONOMOUS_MEMBER_STOP_RUN_SETTLEMENT_STAGE: &str = "runtime_run_settlement";
+
+/// [`member_stop_within_hang_guard`], reporting the stage `stage` names when
+/// the guard passes.
+async fn member_stop_within_hang_guard_at(
+    identity: &AgentIdentity,
+    remaining: Duration,
+    stage: &AutonomousMemberStopStage,
+    stop: impl std::future::Future<Output = Result<(), MobError>>,
+) -> Result<(), MobError> {
     match tokio::time::timeout(remaining, stop).await {
         Ok(result) => result,
         Err(_elapsed) => Err(MobError::LifecycleOperationProgressStalled {
             intent: format!("stopped member {identity} is still winding down its interrupted turn"),
             member_id: Some(identity.clone()),
-            stage: "autonomous_member_stop_idle",
+            stage: stage.current(),
         }),
     }
 }
@@ -5286,6 +5423,9 @@ struct DeferredResumeProvision {
     agent_identity: AgentIdentity,
     profile: crate::profile::Profile,
     external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Tool names of the bundles the profile resolved when `external_tools`
+    /// was composed, for the declared tool restriction.
+    bundle_tools: std::collections::BTreeMap<String, meerkat_core::ToolNameSet>,
     compaction_curator_override: Option<Arc<dyn meerkat_core::CompactionCurator>>,
     context: Option<serde_json::Value>,
     labels: Option<std::collections::BTreeMap<String, String>>,
@@ -5386,6 +5526,7 @@ impl DeferredResumeProvision {
             agent_identity,
             profile,
             external_tools,
+            bundle_tools,
             compaction_curator_override,
             context,
             labels,
@@ -5444,6 +5585,7 @@ impl DeferredResumeProvision {
             resumed_session: stored_session,
         })
         .await?;
+        super::tools::attach_declared_bundle_tools(&mut config, bundle_tools);
         config.tool_dispatch_admission = tool_dispatch_admission;
         config.keep_alive = keep_alive;
         config.override_web_search = web_search_override;
@@ -5783,6 +5925,9 @@ struct AuthorizedMobSpawnCompleted {
     generated_plan: generated_mob_command_capabilities::CommandPlanKind,
     generated_effect: generated_mob_command_capabilities::CommandPlanKind,
     agent_identity: AgentIdentity,
+    /// The completion landed in a Stopped mob, so MobMachine holds the
+    /// members' run starts again, the new member included (#1500).
+    hold_member_run_starts: bool,
 }
 
 impl AuthorizedMobSpawnStart {
@@ -6934,6 +7079,9 @@ pub(super) struct PendingResumeRollback {
     progress: super::state::LifecycleProgressSignal,
     deadline: Instant,
     in_flight: bool,
+    /// Parked on exact stop interrupts still in flight; the next
+    /// `AutonomousStopInterruptSettled` re-drives the rollback.
+    awaiting_interrupts: bool,
 }
 
 pub(super) struct ResumeRollbackMemberOutcome {
@@ -7087,6 +7235,10 @@ pub(super) struct MobActor {
     /// retries re-interrupt already-quiesced peers. Cold replay may safely
     /// repeat the exact fenced interrupt.
     pub(super) autonomous_stop_interrupted: BTreeMap<AgentIdentity, AutonomousStopInterrupted>,
+    /// Per-member outcomes of the current Stop (#1500), reported on its reply.
+    pub(super) stop_member_outcomes: BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>,
+    #[cfg(test)]
+    pub(super) resume_readiness_fault: Option<super::state::ResumeReadinessFaultForTest>,
     /// Rotating admission cursor for the bounded off-actor interrupt window.
     pub(super) autonomous_stop_interrupt_cursor: usize,
     /// The Stop or Shutdown awaiting its interrupted members' end of turn.
@@ -7095,6 +7247,12 @@ pub(super) struct MobActor {
     /// Lifecycle controls that arrived while a stop was pending and run once
     /// it resolves (the `pending_resume_controls` precedent).
     pub(super) pending_autonomous_stop_controls: VecDeque<RoutedMobCommand>,
+    /// Actor completions a Shutdown step received while it joined actor-owned
+    /// work (see `serve_refusals_while`); processed first, in arrival order.
+    pub(super) retained_actor_completions: VecDeque<RoutedMobCommand>,
+    /// A completed Shutdown waiting for its retained completions before it
+    /// replies and the actor exits.
+    pub(super) shutdown_exit: Option<PendingShutdownExit>,
     pub(super) next_spawn_ticket: u64,
     /// Monotonically increasing fence token counter.
     /// Each spawn/respawn/reset issues a strictly newer token.
@@ -7172,6 +7330,19 @@ pub(super) struct MobActor {
     >,
     pub(super) next_member_effect_ticket: u64,
     pub(super) retirements: BTreeMap<AgentIdentity, retirement_io::RetirementContinuation>,
+    /// Retirements that durably started and then stopped at a stage. Each
+    /// stays owned here until a typed re-drive (explicit or on resume) or a
+    /// Shutdown report accounts for it; it is never dropped.
+    pub(super) stuck_retirements: BTreeMap<AgentIdentity, retirement_io::StuckRetirement>,
+    /// Per-member outcomes of the Shutdown in progress.
+    pub(super) shutdown_report: super::MobShutdownReport,
+    /// Caller-owned bound of the Shutdown in progress (`ShutdownOptions`).
+    pub(super) shutdown_deadline: Option<Instant>,
+    /// A Shutdown parked while its runtime teardown runs off the actor loop.
+    pub(super) pending_shutdown_teardown: Option<shutdown_teardown::PendingShutdownTeardown>,
+    /// Stuck retirements a resume handed back for re-drive, started one at a
+    /// time from the actor loop.
+    pub(super) pending_stuck_redrives: VecDeque<AgentIdentity>,
     pub(super) next_retirement_ticket: u64,
     pub(super) retirement_batch: Option<retirement_io::RetirementBatch>,
     pub(super) wiring_io_tasks: tokio::task::JoinSet<wiring_io::WiringIoCompletion>,
@@ -7260,6 +7431,8 @@ pub(super) struct MobActor {
     pub(super) spawn_cleanup_waiters: Vec<(AgentIdentity, oneshot::Sender<()>)>,
     /// Handle-readable gauge of parked deliveries per member.
     pub(super) member_admission_backlog: Arc<super::handle::MemberAdmissionBacklogGauge>,
+    /// Per-member retirement settlements; the actor is the sole writer.
+    pub(super) lifecycle_observations: Arc<super::MemberLifecycleObservations>,
     /// Warns when one inline loop step exceeds its budget (#1102).
     pub(super) inline_step_watchdog: ActorInlineStepWatchdog,
     /// Explicit Resume whose per-member readiness fan-out is running detached;
@@ -7489,6 +7662,10 @@ pub(super) enum MemberLiveMutationTarget {
 }
 
 pub(super) enum MemberLiveMutationCompletion {
+    /// Test-only task that awaited this actor's reply (see
+    /// `MobCommand::SpawnLiveMutationAwaitingActorForTest`); it owns no effect.
+    #[cfg(test)]
+    AwaitedActorForTest,
     Open {
         agent_identity: AgentIdentity,
         target: MemberLiveMutationTarget,
@@ -8025,921 +8202,14 @@ impl MobActor {
         }
     }
 
-    async fn apply_private_trusted_peer_add(
-        &self,
-        comms: &(dyn CoreCommsRuntime + '_),
-        peer: TrustedPeerDescriptor,
-        authority: CommsTrustMutationAuthority,
-    ) -> Result<(), SendError> {
-        self.bind_generated_mob_trust_owner_for_authority(comms, &authority)
-            .await?;
-        match comms
-            .apply_trust_mutation(CommsTrustMutation::AddPrivateTrustedPeer { peer, authority })
-            .await?
-        {
-            CommsTrustMutationResult::Added { .. } => Ok(()),
-            result => Err(Self::unexpected_trust_mutation_result(
-                "add private trusted peer",
-                result,
-            )),
-        }
-    }
-
-    async fn apply_private_trusted_peer_remove(
-        &self,
-        comms: &(dyn CoreCommsRuntime + '_),
-        peer_id: String,
-        authority: CommsTrustMutationAuthority,
-    ) -> Result<bool, SendError> {
-        self.bind_generated_mob_trust_owner_for_authority(comms, &authority)
-            .await?;
-        match comms
-            .apply_trust_mutation(CommsTrustMutation::RemovePrivateTrustedPeer {
-                peer_id,
-                authority,
-            })
-            .await?
-        {
-            CommsTrustMutationResult::Removed { removed } => Ok(removed),
-            result => Err(Self::unexpected_trust_mutation_result(
-                "remove private trusted peer",
-                result,
-            )),
-        }
-    }
-
-    fn supervisor_spec_for_authority(
-        mob_id: &crate::MobId,
-        authority: &crate::store::SupervisorAuthorityRecord,
-    ) -> Result<TrustedPeerDescriptor, MobError> {
-        let participant_name = format!("{mob_id}/__mob_supervisor__");
-        let public_key = authority.keypair().public_key();
-        TrustedPeerDescriptor::unsigned_with_pubkey(
-            participant_name.clone(),
-            authority.public_peer_id.clone(),
-            *public_key.as_bytes(),
-            format!("inproc://{participant_name}"),
-        )
-        .map_err(|error| MobError::WiringError(format!("invalid supervisor spec: {error}")))
-    }
-
-    async fn install_supervisor_private_trust_for_session(
-        &self,
-        session_id: &SessionId,
-        comms: &Arc<dyn CoreCommsRuntime>,
-        previous_private_trust_removal_key: Option<&str>,
-    ) -> Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError> {
-        let authority = self.supervisor_bridge.authority().await;
-        let spec = Self::supervisor_spec_for_authority(&self.definition.id, &authority)?;
-        Box::pin(self.install_supervisor_private_trust_for_session_authority(
-            session_id,
-            comms,
-            &authority,
-            spec,
-            None,
-            previous_private_trust_removal_key,
-        ))
-        .await
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    async fn realize_supervisor_private_trust_revoke(
-        &self,
-        request: SupervisorPrivateTrustRevokeRequest<'_>,
-    ) -> Result<bool, MobError> {
-        let SupervisorPrivateTrustRevokeRequest {
-            adapter,
-            session_id,
-            comms,
-            peer_id,
-            epoch,
-            removal_key,
-            allow_absent_pending,
-        } = request;
-        let revoke_transition = match adapter
-            .stage_supervisor_revoke(session_id, peer_id.clone(), epoch)
-            .await
-        {
-            Ok(transition) => transition,
-            Err(_) if allow_absent_pending => return Ok(false),
-            Err(error) => {
-                return Err(MobError::WiringError(format!(
-                    "previous supervisor private trust revoke rejected for session '{session_id}': {error}"
-                )));
-            }
-        };
-        let revoke_freshness = adapter
-            .supervisor_trust_revoke_freshness_authority(session_id)
-            .await
-            .map_err(|error| {
-                MobError::WiringError(format!(
-                    "previous supervisor private trust revoke freshness unavailable for session '{session_id}': {error}"
-                ))
-            })?;
-        let revoke_obligation =
-            meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(
-                &revoke_transition,
-                revoke_freshness,
-            )
-            .into_iter()
-            .find(|obligation| obligation.peer_id() == &peer_id && obligation.epoch() == epoch)
-            .ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "previous supervisor private trust revoke for session '{session_id}' produced no generated revoke obligation"
-                ))
-            })?;
-        if let Err(error) = self
-            .apply_private_trusted_peer_remove(
-                comms,
-                removal_key,
-                Self::supervisor_revoke_authority(&revoke_obligation)
-                    .map_err(MobError::WiringError)?,
-            )
-            .await
-        {
-            let feedback = adapter
-                .stage_supervisor_trust_revoke_failed(
-                    session_id,
-                    revoke_obligation.peer_id().clone(),
-                    revoke_obligation.epoch(),
-                    error.to_string(),
-                )
-                .await;
-            let mut reason = format!(
-                "previous supervisor private trust removal failed for session '{session_id}': {error}"
-            );
-            if let Err(feedback_error) = feedback {
-                reason.push_str(&format!("; revoke feedback failed: {feedback_error}"));
-            }
-            return Err(MobError::WiringError(reason));
-        }
-        adapter
-            .stage_supervisor_trust_revoked(
-                session_id,
-                revoke_obligation.peer_id().clone(),
-                revoke_obligation.epoch(),
-            )
-            .await
-            .map_err(|error| {
-                MobError::WiringError(format!(
-                    "previous supervisor private trust revoke feedback rejected for session '{session_id}': {error}"
-                ))
-            })?;
-        Ok(true)
-    }
-
-    async fn install_supervisor_private_trust_for_session_authority(
-        &self,
-        session_id: &SessionId,
-        comms: &Arc<dyn CoreCommsRuntime>,
-        authority: &crate::store::SupervisorAuthorityRecord,
-        spec: TrustedPeerDescriptor,
-        previous_authority: Option<&crate::store::SupervisorAuthorityRecord>,
-        previous_private_trust_removal_key: Option<&str>,
-    ) -> Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError> {
-        #[cfg(feature = "runtime-adapter")]
-        let Some(adapter) = self.runtime_adapter.as_ref() else {
-            return Err(MobError::Internal(format!(
-                "cannot publish supervisor private trust for session '{session_id}': runtime adapter unavailable"
-            ))
-            .into());
-        };
-        #[cfg(not(feature = "runtime-adapter"))]
-        let _ = session_id;
-        #[cfg(not(feature = "runtime-adapter"))]
-        {
-            return Err(MobError::Internal(
-                "cannot publish supervisor private trust without runtime adapter".to_string(),
-            )
-            .into());
-        }
-
-        #[cfg(feature = "runtime-adapter")]
-        {
-            use meerkat_runtime::protocol_supervisor_trust_publish;
-
-            adapter
-                .stage_local_endpoint_for_comms_runtime(session_id, comms.as_ref())
-                .await
-                .map_err(|error| {
-                    MobError::WiringError(format!(
-                        "supervisor private trust local endpoint rejected for session '{session_id}': {error}"
-                    ))
-                })?;
-
-            let next_name = spec.name.as_str().to_owned();
-            let next_peer_id = spec.peer_id.as_str().to_owned();
-            let next_address = spec.address.to_string();
-            let next_signing_public_key =
-                meerkat_runtime::comms_drain::encode_supervisor_signing_public_key(spec.pubkey);
-            let next_epoch = authority.epoch;
-            let previous = adapter.supervisor_binding(session_id).await;
-            let already_bound = matches!(
-                &previous,
-                meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
-                    name,
-                    peer_id,
-                    address,
-                    signing_public_key,
-                    epoch,
-                } if name == &next_name
-                    && peer_id == &next_peer_id
-                    && address == &next_address
-                    && signing_public_key == &next_signing_public_key
-                    && *epoch == next_epoch
-            );
-
-            let previous_peer_is_different = matches!(
-                &previous,
-                meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { peer_id, .. }
-                    if peer_id != &next_peer_id
-            );
-            if matches!(
-                &previous,
-                meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound
-            ) && let Some(previous_authority) = previous_authority
-            {
-                // A prior activation attempt may have staged the old binding's
-                // durable revoke but failed the router removal. The generated
-                // machine intentionally remains Unbound+RevokePending, so a
-                // blind BindSupervisor retry is rejected. Rematerialize and
-                // discharge that exact old peer/epoch obligation first. If the
-                // binding is simply fresh-Unbound there is no pending revoke;
-                // the guarded retry is absent and normal bind proceeds.
-                let _ = self
-                    .realize_supervisor_private_trust_revoke(SupervisorPrivateTrustRevokeRequest {
-                        adapter: adapter.as_ref(),
-                        session_id,
-                        comms: comms.as_ref(),
-                        peer_id: previous_authority.public_peer_id.clone(),
-                        epoch: previous_authority.epoch,
-                        removal_key: previous_private_trust_removal_key
-                            .map(str::to_string)
-                            .unwrap_or_else(|| previous_authority.public_peer_id.clone()),
-                        allow_absent_pending: true,
-                    })
-                    .await?;
-            }
-            if previous_peer_is_different {
-                let meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
-                    peer_id: previous_peer_id,
-                    epoch: previous_epoch,
-                    ..
-                } = &previous
-                else {
-                    return Err(MobError::Internal(
-                        "supervisor replacement classifier selected an unbound predecessor"
-                            .to_string(),
-                    )
-                    .into());
-                };
-                let previous_peer_id = previous_peer_id.clone();
-                let previous_epoch = *previous_epoch;
-                let previous_removal_key = previous_private_trust_removal_key
-                    .map(str::to_string)
-                    .unwrap_or_else(|| previous_peer_id.clone());
-                self.realize_supervisor_private_trust_revoke(SupervisorPrivateTrustRevokeRequest {
-                    adapter: adapter.as_ref(),
-                    session_id,
-                    comms: comms.as_ref(),
-                    peer_id: previous_peer_id,
-                    epoch: previous_epoch,
-                    removal_key: previous_removal_key,
-                    allow_absent_pending: false,
-                })
-                .await?;
-            }
-
-            let stage_transition = if already_bound {
-                adapter
-                    .stage_supervisor_trust_publish_request(
-                        session_id,
-                        next_name.clone(),
-                        next_peer_id.clone(),
-                        next_address.clone(),
-                        next_signing_public_key.clone(),
-                        next_epoch,
-                    )
-                    .await
-                    .map_err(|error| {
-                        MobError::WiringError(format!(
-                            "supervisor private trust publish request rejected for session '{session_id}': {error}"
-                    ))
-                })?
-            } else if previous_peer_is_different {
-                Self::stage_supervisor_bind_for_private_trust(
-                    adapter,
-                    session_id,
-                    next_name.clone(),
-                    next_peer_id.clone(),
-                    next_address.clone(),
-                    next_signing_public_key.clone(),
-                    next_epoch,
-                )
-                .await
-                .map_err(|error| {
-                    MobError::WiringError(format!(
-                        "supervisor private trust bind rejected for session '{session_id}': {error}"
-                    ))
-                })?
-            } else {
-                match &previous {
-                    meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
-                        Self::stage_supervisor_bind_for_private_trust(
-                            adapter,
-                            session_id,
-                            next_name.clone(),
-                            next_peer_id.clone(),
-                            next_address.clone(),
-                            next_signing_public_key.clone(),
-                            next_epoch,
-                        )
-                        .await
-                        .map_err(|error| {
-                            MobError::WiringError(format!(
-                                "supervisor private trust bind rejected for session '{session_id}': {error}"
-                            ))
-                        })?
-                    }
-                    meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { .. } => {
-                        adapter
-                            .stage_supervisor_authorize(
-                                session_id,
-                                next_name.clone(),
-                                next_peer_id.clone(),
-                                next_address.clone(),
-                                next_signing_public_key.clone(),
-                                next_epoch,
-                            )
-                            .await
-                            .map_err(|error| {
-                                MobError::WiringError(format!(
-                                    "supervisor private trust rotation rejected for session '{session_id}': {error}"
-                                ))
-                            })?
-                    }
-                    _ => {
-                        return Err(MobError::WiringError(format!(
-                            "supervisor private trust publication for session '{session_id}' saw an unknown supervisor binding variant"
-                        ))
-                        .into());
-                    }
-                }
-            };
-            let publish_freshness = adapter
-                .supervisor_trust_publish_freshness_authority(session_id)
-                .await
-                .map_err(|error| {
-                    MobError::WiringError(format!(
-                        "supervisor private trust publish freshness unavailable for session '{session_id}': {error}"
-                    ))
-                })?;
-            let obligations = protocol_supervisor_trust_publish::extract_obligations_with_freshness(
-                &stage_transition,
-                publish_freshness,
-            );
-            let publish_obligation = match obligations.as_slice() {
-                [obligation] => obligation.clone(),
-                [] => {
-                    return Err(MobError::WiringError(format!(
-                        "supervisor private trust publication for session '{session_id}' produced no generated publish obligation"
-                    ))
-                    .into());
-                }
-                _ => {
-                    return Err(MobError::WiringError(format!(
-                        "supervisor private trust publication for session '{session_id}' produced multiple generated publish obligations"
-                    ))
-                    .into());
-                }
-            };
-            if publish_obligation.name() != &next_name
-                || publish_obligation.peer_id() != &next_peer_id
-                || publish_obligation.address() != &next_address
-                || publish_obligation.signing_public_key().as_deref()
-                    != Some(next_signing_public_key.as_str())
-                || publish_obligation.epoch() != next_epoch
-            {
-                return Err(MobError::WiringError(format!(
-                    "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding"
-                ))
-                .into());
-            }
-            let publish_spec =
-                meerkat_runtime::comms_drain::trusted_peer_descriptor_from_supervisor_publish_obligation(
-                    &publish_obligation,
-                )
-                .map_err(|error| {
-                    MobError::WiringError(format!(
-                        "supervisor private trust publication for session '{session_id}' generated invalid trust descriptor: {error}"
-                    ))
-                })?;
-            let publish_peer_id = publish_obligation.peer_id().clone();
-            let publish_epoch = publish_obligation.epoch();
-            let publish_removal_key = Self::trusted_peer_removal_key(&publish_spec);
-            let publish_cleanup_authority =
-                Self::supervisor_publish_cleanup_authority(&publish_obligation)
-                    .map_err(MobError::WiringError)?;
-            let rollback_binding = previous.clone();
-
-            if let Err(error) = self
-                .apply_private_trusted_peer_add(
-                    comms.as_ref(),
-                    publish_spec.clone(),
-                    Self::supervisor_publish_authority(&publish_obligation)
-                        .map_err(MobError::WiringError)?,
-                )
-                .await
-            {
-                let _ = adapter
-                    .stage_supervisor_trust_publish_failed(
-                        session_id,
-                        publish_peer_id.clone(),
-                        publish_epoch,
-                        error.to_string(),
-                    )
-                    .await;
-                let new_trust_cleanup_failed = if !already_bound {
-                    self.cleanup_supervisor_private_trust_publish_attempt(
-                        session_id,
-                        comms,
-                        publish_cleanup_authority.clone(),
-                        publish_removal_key.clone(),
-                        "failed to clean up supervisor private trust after publish add failure",
-                    )
-                    .await
-                    .is_err()
-                } else {
-                    false
-                };
-                let rollback = if already_bound {
-                    Ok(())
-                } else {
-                    self.rollback_supervisor_private_trust_binding(
-                        adapter,
-                        session_id,
-                        comms,
-                        &rollback_binding,
-                        &publish_peer_id,
-                        publish_epoch,
-                    )
-                    .await
-                };
-                let mut reason = format!(
-                    "supervisor private trust publication failed for session '{session_id}': {error}"
-                );
-                if let Err(rollback_error) = rollback {
-                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
-                }
-                let error = MobError::WiringError(reason);
-                return Err(if new_trust_cleanup_failed {
-                    SupervisorPrivateTrustInstallError::with_failed_new_trust_cleanup(error)
-                } else {
-                    SupervisorPrivateTrustInstallError::without_cleanup_failure(error)
-                });
-            }
-
-            if let Err(error) = Self::stage_supervisor_trust_published_for_private_trust(
-                adapter,
-                session_id,
-                publish_peer_id.clone(),
-                publish_epoch,
-            )
-            .await
-            {
-                let new_trust_cleanup_failed = if !already_bound {
-                    self.cleanup_supervisor_private_trust_publish_attempt(
-                        session_id,
-                        comms,
-                        publish_cleanup_authority,
-                        publish_removal_key.clone(),
-                        "failed to clean up supervisor private trust after rejected publish ack",
-                    )
-                    .await
-                    .is_err()
-                } else {
-                    false
-                };
-                let rollback = if already_bound {
-                    Ok(())
-                } else {
-                    self.rollback_supervisor_private_trust_binding(
-                        adapter,
-                        session_id,
-                        comms,
-                        &rollback_binding,
-                        &publish_peer_id,
-                        publish_epoch,
-                    )
-                    .await
-                };
-                let mut reason = format!(
-                    "supervisor private trust publication ack rejected for session '{session_id}': {error}"
-                );
-                if let Err(rollback_error) = rollback {
-                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
-                }
-                let error = MobError::WiringError(reason);
-                return Err(if new_trust_cleanup_failed {
-                    SupervisorPrivateTrustInstallError::with_failed_new_trust_cleanup(error)
-                } else {
-                    SupervisorPrivateTrustInstallError::without_cleanup_failure(error)
-                });
-            }
-
-            Ok(SupervisorPrivateTrustInstall {
-                peer_id: next_peer_id,
-                epoch: next_epoch,
-                removal_key: publish_removal_key,
-            })
-        }
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    async fn stage_supervisor_trust_published_for_private_trust(
-        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
-        session_id: &SessionId,
-        peer_id: String,
-        epoch: u64,
-    ) -> Result<(), meerkat_runtime::meerkat_machine::SupervisorBindingStageError> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let adapter = Arc::clone(adapter);
-            let session_id = session_id.clone();
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let result = adapter
-                    .stage_supervisor_trust_published(&session_id, peer_id, epoch)
-                    .await;
-                let _ = reply_tx.send(result);
-            });
-            reply_rx.await.map_err(|_| {
-                meerkat_runtime::meerkat_machine::SupervisorBindingStageError::SessionRegistryBusy
-            })?
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            adapter
-                .stage_supervisor_trust_published(session_id, peer_id, epoch)
-                .await
-        }
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    async fn stage_supervisor_bind_for_private_trust(
-        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
-        session_id: &SessionId,
-        name: String,
-        peer_id: String,
-        address: String,
-        signing_public_key: String,
-        epoch: u64,
-    ) -> Result<
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineTransition,
-        meerkat_runtime::meerkat_machine::SupervisorBindingStageError,
-    > {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let adapter = Arc::clone(adapter);
-            let session_id = session_id.clone();
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let result = adapter
-                    .stage_supervisor_bind(
-                        &session_id,
-                        name,
-                        peer_id,
-                        address,
-                        signing_public_key,
-                        epoch,
-                    )
-                    .await;
-                let _ = reply_tx.send(result);
-            });
-            reply_rx.await.map_err(|_| {
-                meerkat_runtime::meerkat_machine::SupervisorBindingStageError::SessionRegistryBusy
-            })?
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            adapter
-                .stage_supervisor_bind(
-                    session_id,
-                    name,
-                    peer_id,
-                    address,
-                    signing_public_key,
-                    epoch,
-                )
-                .await
-        }
-    }
-
-    /// Remove the just-attempted ("new") supervisor private trust after a failed
-    /// publish. Returns the typed cleanup result so callers can record whether
-    /// the compensation itself failed — the activation rollback keys on that
-    /// structured verdict rather than parsing the formatted error message.
-    async fn cleanup_supervisor_private_trust_publish_attempt(
-        &self,
-        session_id: &SessionId,
-        comms: &Arc<dyn CoreCommsRuntime>,
-        authority: CommsTrustMutationAuthority,
-        removal_key: String,
-        context: &'static str,
-    ) -> Result<(), MobError> {
-        if let Err(error) = self
-            .apply_private_trusted_peer_remove(comms.as_ref(), removal_key, authority)
-            .await
-        {
-            tracing::warn!(
-                %session_id,
-                %error,
-                context,
-                "failed to clean up supervisor private trust publish attempt"
-            );
-            return Err(MobError::from(error));
-        }
-        Ok(())
-    }
-
-    async fn cleanup_supervisor_private_trust_for_session(
-        &self,
-        session_id: &SessionId,
-        comms: &Arc<dyn CoreCommsRuntime>,
-        install: &SupervisorPrivateTrustInstall,
-    ) {
-        #[cfg(feature = "runtime-adapter")]
-        if let Some(adapter) = self.runtime_adapter.as_ref() {
-            if let Err(error) = adapter
-                .stage_local_endpoint_for_comms_runtime(session_id, comms.as_ref())
-                .await
-            {
-                tracing::warn!(
-                    %session_id,
-                    peer_id = %install.peer_id,
-                    epoch = install.epoch,
-                    %error,
-                    "failed to stage local endpoint for supervisor private trust cleanup"
-                );
-                return;
-            }
-            let transition = match adapter
-                .stage_supervisor_revoke(session_id, install.peer_id.clone(), install.epoch)
-                .await
-            {
-                Ok(transition) => transition,
-                Err(error) => {
-                    tracing::warn!(
-                        %session_id,
-                        peer_id = %install.peer_id,
-                        epoch = install.epoch,
-                        %error,
-                        "failed to stage supervisor private trust cleanup"
-                    );
-                    return;
-                }
-            };
-            let revoke_freshness = match adapter
-                .supervisor_trust_revoke_freshness_authority(session_id)
-                .await
-            {
-                Ok(authority) => authority,
-                Err(error) => {
-                    tracing::warn!(
-                        %session_id,
-                        peer_id = %install.peer_id,
-                        epoch = install.epoch,
-                        %error,
-                        "failed to build generated supervisor private trust cleanup freshness"
-                    );
-                    return;
-                }
-            };
-            let obligations =
-                meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(&transition, revoke_freshness);
-            let Some(obligation) = obligations.into_iter().find(|obligation| {
-                obligation.peer_id() == &install.peer_id && obligation.epoch() == install.epoch
-            }) else {
-                let reason =
-                    "generated supervisor private trust cleanup effect was absent".to_string();
-                let _ = adapter
-                    .stage_supervisor_trust_revoke_failed(
-                        session_id,
-                        install.peer_id.clone(),
-                        install.epoch,
-                        reason.clone(),
-                    )
-                    .await;
-                tracing::warn!(
-                    %session_id,
-                    peer_id = %install.peer_id,
-                    epoch = install.epoch,
-                    reason,
-                    "failed to stage supervisor private trust cleanup"
-                );
-                return;
-            };
-            if let Err(error) = self.apply_private_trusted_peer_remove(
-                comms.as_ref(),
-                install.removal_key.clone(),
-                match Self::supervisor_revoke_authority(&obligation) {
-                    Ok(authority) => authority,
-                    Err(error) => {
-                        let _ = adapter
-                            .stage_supervisor_trust_revoke_failed(
-                                session_id,
-                                obligation.peer_id().clone(),
-                                obligation.epoch(),
-                                error.clone(),
-                            )
-                            .await;
-                        tracing::warn!(
-                            %session_id,
-                            peer_id = %install.peer_id,
-                            epoch = install.epoch,
-                            %error,
-                            "failed to build generated supervisor private trust cleanup authority"
-                        );
-                        return;
-                    }
-                },
-            )
-            .await
-            {
-                let _ = adapter
-                    .stage_supervisor_trust_revoke_failed(
-                        session_id,
-                        obligation.peer_id().clone(),
-                        obligation.epoch(),
-                        error.to_string(),
-                    )
-                    .await;
-                tracing::warn!(
-                    %session_id,
-                    peer_id = %install.peer_id,
-                    epoch = install.epoch,
-                    %error,
-                    "failed to clean up supervisor private trust"
-                );
-                return;
-            }
-            if let Err(error) = adapter
-                .stage_supervisor_trust_revoked(
-                    session_id,
-                    obligation.peer_id().clone(),
-                    obligation.epoch(),
-                )
-                .await
-            {
-                tracing::warn!(
-                    %session_id,
-                    peer_id = %install.peer_id,
-                    epoch = install.epoch,
-                    %error,
-                    "failed to acknowledge supervisor private trust cleanup"
-                );
-            }
-            return;
-        }
-
-        let _ = comms;
-        tracing::warn!(
-            %session_id,
-            peer_id = %install.peer_id,
-            epoch = install.epoch,
-            "skipping supervisor private trust cleanup because generated runtime adapter authority is unavailable"
-        );
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    async fn rollback_supervisor_private_trust_binding(
-        &self,
-        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
-        session_id: &SessionId,
-        comms: &Arc<dyn CoreCommsRuntime>,
-        previous: &meerkat_runtime::meerkat_machine::SupervisorBinding,
-        current_peer_id: &str,
-        current_epoch: u64,
-    ) -> Result<(), MobError> {
-        adapter
-            .stage_local_endpoint_for_comms_runtime(session_id, comms.as_ref())
-            .await
-            .map_err(|error| MobError::WiringError(error.to_string()))?;
-        match previous {
-            meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
-                let transition = adapter
-                    .stage_supervisor_revoke(session_id, current_peer_id.to_string(), current_epoch)
-                    .await
-                    .map_err(|error| MobError::WiringError(error.to_string()))?;
-                let revoke_freshness = adapter
-                    .supervisor_trust_revoke_freshness_authority(session_id)
-                    .await
-                    .map_err(|error| MobError::WiringError(error.to_string()))?;
-                if let Some(obligation) =
-                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(
-                        &transition,
-                        revoke_freshness,
-                    )
-                    .into_iter()
-                    .find(|obligation| {
-                        obligation.peer_id().as_str() == current_peer_id
-                            && obligation.epoch() == current_epoch
-                    })
-                {
-                    adapter
-                        .stage_supervisor_trust_revoked(
-                            session_id,
-                            obligation.peer_id().clone(),
-                            obligation.epoch(),
-                        )
-                        .await
-                        .map_err(|error| MobError::WiringError(error.to_string()))?;
-                }
-                Ok(())
-            }
-            meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
-                name,
-                peer_id,
-                address,
-                signing_public_key,
-                epoch,
-            } => {
-                let current = adapter.supervisor_binding(session_id).await;
-                let transition = match current {
-                    meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => adapter
-                        .stage_supervisor_bind(
-                            session_id,
-                            name.clone(),
-                            peer_id.clone(),
-                            address.clone(),
-                            signing_public_key.clone(),
-                            *epoch,
-                        )
-                        .await,
-                    meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { .. } => adapter
-                        .stage_supervisor_authorize(
-                            session_id,
-                            name.clone(),
-                            peer_id.clone(),
-                            address.clone(),
-                            signing_public_key.clone(),
-                            *epoch,
-                        )
-                        .await,
-                    other => {
-                        return Err(MobError::WiringError(format!(
-                            "supervisor private trust rollback for session '{session_id}' saw unsupported current binding {other:?}"
-                        )));
-                    }
-                }
-                .map_err(|error| MobError::WiringError(error.to_string()))?;
-                let publish_freshness = adapter
-                    .supervisor_trust_publish_freshness_authority(session_id)
-                    .await
-                    .map_err(|error| MobError::WiringError(error.to_string()))?;
-                let obligation =
-                    meerkat_runtime::protocol_supervisor_trust_publish::extract_obligations_with_freshness(
-                        &transition,
-                        publish_freshness,
-                    )
-                    .into_iter()
-                    .find(|obligation| {
-                        obligation.peer_id() == peer_id
-                            && obligation.epoch() == *epoch
-                            && obligation.signing_public_key().as_deref()
-                                == Some(signing_public_key.as_str())
-                    })
-                    .ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "supervisor private trust rollback for session '{session_id}' produced no generated publish obligation"
-                        ))
-                    })?;
-                let trusted_peer =
-                    meerkat_runtime::comms_drain::trusted_peer_descriptor_from_supervisor_publish_obligation(
-                        &obligation,
-                    )
-                    .map_err(MobError::WiringError)?;
-                self.apply_private_trusted_peer_add(
-                    comms.as_ref(),
-                    trusted_peer,
-                    Self::supervisor_publish_authority(&obligation)
-                        .map_err(MobError::WiringError)?,
-                )
-                .await
-                .map_err(|error| MobError::WiringError(error.to_string()))?;
-                adapter
-                    .stage_supervisor_trust_published(
-                        session_id,
-                        obligation.peer_id().clone(),
-                        obligation.epoch(),
-                    )
-                    .await
-                    .map_err(|error| MobError::WiringError(error.to_string()))?;
-                Ok(())
-            }
-            _ => Err(MobError::WiringError(
-                "unknown supervisor binding variant during rollback".to_string(),
-            )),
+    /// The detached supervisor private-trust installer for this mob.
+    pub(super) fn supervisor_trust_installer(&self) -> SupervisorTrustInstaller {
+        SupervisorTrustInstaller {
+            definition: Arc::clone(&self.definition),
+            supervisor_bridge: Arc::clone(&self.supervisor_bridge),
+            #[cfg(feature = "runtime-adapter")]
+            runtime_adapter: self.runtime_adapter.clone(),
+            owner_token: self.dsl_authority.generated_authority_owner_token(),
         }
     }
 
@@ -8979,7 +8249,10 @@ impl MobActor {
         &self,
         authority: &crate::store::SupervisorAuthorityRecord,
     ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
-        let spec = Self::supervisor_spec_for_authority(&self.definition.id, authority)?;
+        let spec = SupervisorTrustInstaller::supervisor_spec_for_authority(
+            &self.definition.id,
+            authority,
+        )?;
         Ok(super::bridge_protocol::BridgeSupervisorPayload {
             supervisor: spec.into(),
             epoch: authority.epoch,
@@ -11522,8 +10795,54 @@ impl MobActor {
     /// lifecycle barrier instead — `begin_placed_completion_lifecycle_quiesce`
     /// (Stop/Complete/Reset/Destroy/RetireAll) and the `Shutdown` arm, where
     /// `drain_wiring_io_for_lifecycle` already runs.
+    #[inline(never)]
+    fn log_shutdown_admitted(&self) {
+        tracing::info!(
+            mob_id = %self.definition.id,
+            in_flight_retirements = self.retirements.len(),
+            stuck_retirements = self.stuck_retirements.len(),
+            member_effect_tasks = self.member_effect_tasks.len(),
+            "mob shutdown admitted"
+        );
+    }
+
+    #[inline(never)]
+    fn log_shutdown_step(&self, step: &'static str, started: Instant) {
+        tracing::info!(
+            mob_id = %self.definition.id,
+            step,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "mob shutdown step completed"
+        );
+    }
+
+    /// A Shutdown that defers behind in-flight retirements interrupts them
+    /// cooperatively, so they settle (as stuck, if durably started) instead of
+    /// holding the Shutdown behind a stage that may never get its signal.
+    #[inline(never)]
+    fn interrupt_owned_retirements_for_deferred_shutdown(&self, command: &MobCommand) {
+        if matches!(command, MobCommand::Shutdown { .. }) && !self.retirements.is_empty() {
+            self.interrupt_owned_retirements();
+        }
+    }
+
     fn resume_member_control_is_pending(&self, command: &MobCommand) -> bool {
         if self.submit_work_pump_control_is_pending(command) {
+            return true;
+        }
+        // A Shutdown parked on its off-actor runtime teardown still owns the
+        // mob's lifecycle: other lifecycle verbs wait for it (a Shutdown joins
+        // it in its dispatch arm instead).
+        let waits_on_shutdown_teardown = matches!(
+            command,
+            MobCommand::Stop { .. }
+                | MobCommand::Complete { .. }
+                | MobCommand::Reset { .. }
+                | MobCommand::Destroy { .. }
+                | MobCommand::RetireAll { .. }
+                | MobCommand::ResumeLifecycle { .. }
+        );
+        if self.pending_shutdown_teardown.is_some() && waits_on_shutdown_teardown {
             return true;
         }
         if matches!(
@@ -11577,6 +10896,12 @@ impl MobActor {
         })
     }
 
+    /// The member run-start posture (#1500): Held iff MobMachine's
+    /// `member_run_starts_held`. Every member bind delivers it.
+    fn member_run_start_posture(&self) -> super::supervisor_bridge::MemberRunStartPosture {
+        super::supervisor_bridge::MemberRunStartPosture::of(self.dsl_authority.state())
+    }
+
     /// HARD INVARIANT: every applied machine input must publish through this
     /// function — both the direct apply seam
     /// ([`Self::apply_dsl_input_collect_transition`]) and every
@@ -11598,6 +10923,10 @@ impl MobActor {
     /// (for example a projected backend-peer binding) still wakes watchers,
     /// because list projections combine both.
     fn publish_machine_state_projection(&self) {
+        // The single post-apply seam (#1500): every member bind delivers the
+        // run-start posture of the state just published.
+        self.supervisor_bridge
+            .set_member_run_start_posture(self.member_run_start_posture());
         let state = self.dsl_authority.state();
         self.dsl_topology_epoch
             .store(state.topology_epoch, std::sync::atomic::Ordering::Release);
@@ -11895,6 +11224,33 @@ impl MobActor {
                 self.dsl_authority.state(),
             )?,
         )
+    }
+
+    /// The run-start hold obligations (#1500) are machine-owned: the actor
+    /// holds members for a Stop, and releases them on Resume, only as the
+    /// generated transition says. `hold` selects which effect must (and the
+    /// other must not) be present; `None` requires neither.
+    pub(super) fn require_member_run_start_effect(
+        transition: &mob_dsl::MobMachineTransition,
+        hold: Option<bool>,
+        context: &str,
+    ) -> Result<(), MobError> {
+        let holds = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::HoldMemberRunStarts));
+        let releases = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::ReleaseMemberRunStarts));
+        let expected = (hold == Some(true), hold == Some(false));
+        if (holds, releases) == expected {
+            Ok(())
+        } else {
+            Err(MobError::Internal(format!(
+                "MobMachine {context} produced run-start hold effects (hold: {holds}, release: {releases}) other than expected {expected:?}"
+            )))
+        }
     }
 
     fn require_lifecycle_journal_effect(
@@ -14034,7 +13390,77 @@ impl MobActor {
                 expected.agent_identity, host_binding_generation
             )));
         }
+        self.deliver_run_start_posture_to_placed_member(
+            &domain_identity,
+            &promoted_expected_member,
+        )
+        .await;
         Ok(())
+    }
+
+    /// Release a host's run-start hold on a member (#1500). A member whose
+    /// runtime has not registered yet is released too: its registration then
+    /// applies no hold for `reason`. A member that does not hold `reason`, or
+    /// whose runtime this process does not host, is an Ok no-op.
+    async fn release_member_run_start_hold(
+        &self,
+        agent_identity: &AgentIdentity,
+        reason: super::stop_report::HostRunStartHoldReason,
+    ) -> Result<(), MobError> {
+        let member_ref = self
+            .roster
+            .read()
+            .await
+            .get(agent_identity)
+            .map(|entry| entry.member_ref.clone())
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        self.provisioner
+            .release_member_run_starts(&member_ref, None, reason.runtime())
+            .await
+    }
+
+    /// Deliver the mob's run-start posture to a placed member whose carrier
+    /// was just re-activated (#1500). No Stop or Resume could reach it while
+    /// the carrier was dormant, and a re-materialized runtime starts unheld.
+    /// Both commands are idempotent on the host; a failure is logged, and the
+    /// next Stop or Resume reaches the member again.
+    async fn deliver_run_start_posture_to_placed_member(
+        &self,
+        identity: &AgentIdentity,
+        expected_member: &super::bridge_protocol::BridgeMemberIncarnation,
+    ) {
+        let Some(member_ref) = self
+            .roster
+            .read()
+            .await
+            .get(identity)
+            .map(|entry| entry.member_ref.clone())
+        else {
+            return;
+        };
+        let delivered = match self.supervisor_bridge.member_run_start_posture() {
+            super::supervisor_bridge::MemberRunStartPosture::Held => self
+                .provisioner
+                .stop_member_runtime(&member_ref, Some(expected_member), false)
+                .await
+                .map(|_| ()),
+            super::supervisor_bridge::MemberRunStartPosture::Released => {
+                self.provisioner
+                    .release_member_run_starts(
+                        &member_ref,
+                        Some(expected_member),
+                        meerkat_runtime::RunStartHoldReason::MobStop,
+                    )
+                    .await
+            }
+        };
+        if let Err(error) = delivered {
+            tracing::warn!(
+                agent_identity = %identity,
+                error = %error,
+                "delivering the run-start posture to a re-activated placed member failed"
+            );
+        }
     }
 
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -14394,6 +13820,7 @@ impl MobActor {
             flow_target_provisioner: Arc::clone(&self.flow_target_provisioner),
             explicit_resume_operations: Arc::clone(&self.explicit_resume_operations),
             member_admission_backlog: Arc::clone(&self.member_admission_backlog),
+            lifecycle_observations: Arc::clone(&self.lifecycle_observations),
             per_spawn_external_tools: Arc::clone(&self.per_spawn_external_tools),
         }
     }
@@ -14927,6 +14354,7 @@ impl MobActor {
                 Err(MobError::LifecycleOperationPending {
                     intent: "stop's wait for its members' end of turn was torn down".to_string(),
                 }),
+                &self.current_stop_report(),
             );
         }
         self.actor_io_tasks.abort_all();
@@ -15488,12 +14916,20 @@ impl MobActor {
             .map_or((None, None), |slot| (Some(slot.spawn), slot.task))
     }
 
+    /// Close a pending spawn slot. The returned flag is MobMachine's
+    /// `HoldMemberRunStarts` for a completion into a Stopped mob, which the
+    /// caller realizes (#1500).
     fn complete_pending_spawn_slot(
         &mut self,
         spawn_ticket: u64,
         context: &'static str,
-    ) -> (Option<PendingSpawn>, Option<tokio::task::JoinHandle<()>>) {
+    ) -> (
+        Option<PendingSpawn>,
+        Option<tokio::task::JoinHandle<()>>,
+        bool,
+    ) {
         let (pending, task) = self.take_pending_spawn_slot(spawn_ticket);
+        let mut hold_member_run_starts = false;
         if pending.is_some() || task.is_some() {
             if let Some(pending) = pending.as_ref() {
                 if let Ok(completed) = self.complete_orchestrator_spawn(
@@ -15502,6 +14938,7 @@ impl MobActor {
                     context,
                 ) {
                     debug_assert_eq!(completed.agent_identity, pending.agent_identity);
+                    hold_member_run_starts = completed.hold_member_run_starts;
                 }
             }
         }
@@ -15513,7 +14950,7 @@ impl MobActor {
                 "pending spawn alignment violated after completion"
             );
         }
-        (pending, task)
+        (pending, task, hold_member_run_starts)
     }
 
     fn stage_orchestrator_spawn(
@@ -16301,11 +15738,16 @@ impl MobActor {
             }
             return Err(error);
         }
+        let hold_member_run_starts = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::HoldMemberRunStarts));
         let completed = AuthorizedMobSpawnCompleted {
             generated_plan:
                 generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart,
             generated_effect: generated_mob_command_capabilities::CommandPlanKind::SpawnEffect,
             agent_identity: agent_identity.clone(),
+            hold_member_run_starts,
         };
         debug_assert_eq!(
             completed.generated_effect,
@@ -16438,135 +15880,100 @@ impl MobActor {
         }
     }
 
-    async fn teardown_session_runtime_bindings_from_machine(&mut self) -> Result<(), MobError> {
-        #[cfg(feature = "runtime-adapter")]
-        if let Some(adapter) = self.runtime_adapter.clone() {
-            let state = self.dsl_authority.state();
-            let mut session_ids = state
-                .member_session_bindings
-                .iter()
-                .filter(|(identity, _)| !state.member_placement.contains_key(*identity))
-                .map(|(_, session_id)| session_id)
-                .map(|session_id| {
-                    SessionId::parse(&session_id.0).map_err(|error| {
-                        MobError::Internal(format!(
-                            "shutdown found invalid machine-owned session binding '{}': {error}",
-                            session_id.0
-                        ))
-                    })
-                })
-                .collect::<Result<HashSet<_>, MobError>>()?;
-            session_ids.extend(self.shutdown_runtime_unregister_observers.keys().cloned());
-            let mut failures = Vec::new();
-            let mut unregister_pending = false;
-            for session_id in session_ids {
-                if let Some(observer) = self.shutdown_runtime_unregister_observers.get(&session_id)
-                {
-                    let result = match observer.try_result() {
-                        Ok(Some(result)) => result,
-                        Ok(None) => {
-                            unregister_pending = true;
-                            continue;
-                        }
-                        Err(error) => {
-                            failures.push(format!(
-                                "failed to observe runtime unregister for session {session_id} during mob teardown: {error}"
-                            ));
-                            self.shutdown_runtime_unregister_observers
-                                .remove(&session_id);
-                            continue;
-                        }
-                    };
-                    let registration = observer.registration().clone();
-                    match result {
-                        Err(error) => {
-                            self.shutdown_runtime_unregister_observers
-                                .remove(&session_id);
-                            failures.push(format!(
-                                "failed to unregister runtime session {session_id} during mob teardown: {error}"
-                            ));
-                        }
-                        Ok(()) => match adapter
-                            .current_session_registration_witness(&session_id)
-                            .await
-                        {
-                            None => {}
-                            Some(current) if current == registration => failures.push(format!(
-                                "runtime unregister coordinator for session {session_id} published success while its exact registration remained current"
-                            )),
-                            Some(_) => failures.push(format!(
-                                "runtime session {session_id} was replaced during exact mob shutdown teardown"
-                            )),
-                        },
-                    }
-                    continue;
-                }
-                let Some(registration) = adapter
-                    .current_session_registration_witness(&session_id)
-                    .await
-                else {
-                    continue;
-                };
-                // Exact-current unregister runs the two-phase drain internally
-                // (0.7.2 D1). Capturing the opaque registration witness before
-                // admission prevents a same-SessionId replacement from being
-                // reached by this Shutdown attempt or its retained observer.
-                match adapter
-                    .observe_unregister_session_registration_if_current(&registration)
-                    .await
-                {
-                    Ok(meerkat_runtime::RuntimeSessionUnregisterAdmission::Completed) => {
-                        match adapter
-                            .current_session_registration_witness(&session_id)
-                            .await
-                        {
-                            None => {}
-                            Some(current) if current == registration => failures.push(format!(
-                                "runtime unregister coordinator for session {session_id} completed while its exact registration remained current"
-                            )),
-                            Some(_) => failures.push(format!(
-                                "runtime session {session_id} was replaced during exact mob shutdown teardown"
-                            )),
-                        }
-                    }
-                    Ok(meerkat_runtime::RuntimeSessionUnregisterAdmission::NotCurrent) => {
-                        if adapter
-                            .current_session_registration_witness(&session_id)
-                            .await
-                            .is_some()
-                        {
-                            failures.push(format!(
-                                "runtime session {session_id} changed before exact mob shutdown teardown admission"
-                            ));
-                        }
-                    }
-                    Ok(meerkat_runtime::RuntimeSessionUnregisterAdmission::Pending(observer)) => {
-                        // The runtime coordinator is independently owned and
-                        // exact-registration fenced. Retain only its read-only
-                        // result observer, so later actor commands never wait,
-                        // restart cleanup, or acquire authority over a
-                        // same-SessionId replacement.
-                        self.shutdown_runtime_unregister_observers
-                            .insert(session_id.clone(), observer);
-                        unregister_pending = true;
-                    }
-                    Err(error) => {
-                        failures.push(format!(
-                            "failed to unregister runtime session {session_id} during mob teardown: {error}"
-                        ));
-                    }
-                }
-            }
-            if !failures.is_empty() {
-                return Err(MobError::Internal(failures.join("; ")));
-            }
-            if unregister_pending {
-                return Err(MobError::LifecycleOperationPending {
-                    intent: "shutdown_runtime_unregister".to_string(),
-                });
-            }
+    /// The bound for one Shutdown wait: the caller's remaining deadline, or
+    /// the member lifecycle hang guard without one.
+    fn shutdown_wait_budget(&self) -> Duration {
+        match self.shutdown_deadline {
+            Some(deadline) => deadline
+                .saturating_duration_since(Instant::now())
+                .min(MEMBER_LIFECYCLE_HANG_GUARD),
+            None => MEMBER_LIFECYCLE_HANG_GUARD,
         }
-        Ok(())
+    }
+
+    /// Record and log one member's Shutdown outcome as it settles, so a
+    /// process killed mid-Shutdown still leaves a per-member record.
+    pub(super) fn record_shutdown_outcome(
+        &mut self,
+        member: AgentIdentity,
+        outcome: super::MemberShutdownOutcome,
+    ) {
+        if outcome.is_clean() {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                agent_identity = %member,
+                ?outcome,
+                "shutdown member outcome"
+            );
+        } else {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %member,
+                ?outcome,
+                "shutdown member outcome"
+            );
+        }
+        self.shutdown_report.record(member, outcome);
+    }
+
+    pub(super) fn record_shutdown_unregistered(&mut self, member: Option<&AgentIdentity>) {
+        if let Some(member) = member {
+            self.record_shutdown_outcome(
+                member.clone(),
+                super::MemberShutdownOutcome::Unregistered,
+            );
+        }
+    }
+
+    pub(super) fn record_shutdown_unregister_pending(
+        &mut self,
+        member: Option<&AgentIdentity>,
+        stage: &'static str,
+    ) {
+        if let Some(member) = member {
+            self.record_shutdown_outcome(
+                member.clone(),
+                super::MemberShutdownOutcome::UnregisterPending {
+                    stage: stage.to_string(),
+                },
+            );
+        }
+    }
+
+    /// Finish the Shutdown report: account for every owned stuck retirement
+    /// (including those this Shutdown interrupted), publish it for
+    /// `shutdown_with_report`, and log it.
+    fn finish_shutdown_report(&mut self) {
+        let stuck = self
+            .stuck_retirements
+            .iter()
+            .map(|(identity, stuck)| (identity.clone(), stuck.stage, Arc::clone(&stuck.cause)))
+            .collect::<Vec<_>>();
+        for (identity, stage, cause) in stuck {
+            let outcome = if matches!(cause.as_ref(), MobError::RetirementInterrupted { .. }) {
+                super::MemberShutdownOutcome::RetirementInterrupted { stage }
+            } else {
+                super::MemberShutdownOutcome::RetirementStuck { stage, cause }
+            };
+            // A retirement outcome is the more specific account of a member
+            // whose session was also unregistered.
+            self.shutdown_report.members.remove(&identity);
+            self.record_shutdown_outcome(identity, outcome);
+        }
+        let report = std::mem::take(&mut self.shutdown_report);
+        self.shutdown_deadline = None;
+        let outstanding = report
+            .members
+            .values()
+            .filter(|outcome| !outcome.is_clean())
+            .count();
+        tracing::info!(
+            mob_id = %self.definition.id,
+            members = report.members.len(),
+            outstanding,
+            "mob shutdown report complete"
+        );
+        self.lifecycle_observations.store_shutdown_report(report);
     }
 
     async fn ensure_autonomous_dispatch_capability_for_provisioner(
@@ -17800,6 +17207,18 @@ impl MobActor {
         Ok(())
     }
 
+    /// A placed member whose host carrier is dormant (its host is unbound or
+    /// was revoked): no host command reaches it, and MobMachine re-activates
+    /// a placed carrier only while Running, so nothing reaches it before
+    /// Resume (#1500).
+    fn placed_member_carrier_dormant(&self, identity: &AgentIdentity) -> bool {
+        let state = self.dsl_authority.state();
+        super::member_runtime_is_host_owned(state, identity)
+            && !state.placed_carrier_binding_active_for_identity(
+                &mob_dsl::AgentIdentity::from_domain(identity),
+            )
+    }
+
     fn autonomous_stop_interrupt_incarnation(
         &self,
         entry: &RosterEntry,
@@ -17825,6 +17244,8 @@ impl DetachedMemberReadinessContext {
         &self,
         agent_identity: &AgentIdentity,
         target: &AutonomousStopInterrupted,
+        stage: &AutonomousMemberStopStage,
+        resolved_run: &std::sync::Mutex<Option<super::stop_report::MemberStopRun>>,
     ) -> Result<(), MobError> {
         let member_ref = &target.incarnation.member_ref;
         let expected_member = target.incarnation.expected_member.as_ref();
@@ -17869,6 +17290,33 @@ impl DetachedMemberReadinessContext {
                 .bridge_session_id()
                 .map(stop_idle_wait_probe::enter);
             activity.wait_inactive().await;
+            // The session reports its turn over before the runtime records
+            // the interrupted run's end. The stop is over only once the
+            // runtime has, so a later unregister (Shutdown) or resume never
+            // meets the stopped run as still current. The member's run-start
+            // hold, set before the interrupt, keeps a queued input from
+            // starting another run meanwhile.
+            #[cfg(feature = "runtime-adapter")]
+            if let (Some(adapter), Some(session_id)) =
+                (&self.runtime_adapter, member_ref.bridge_session_id())
+            {
+                stage.enter(AUTONOMOUS_MEMBER_STOP_RUN_SETTLEMENT_STAGE);
+                adapter.wait_current_run_settled(session_id).await;
+                // A Shutdown's dispatched cancel is reported from the run's
+                // recorded terminal: the executor may have finished the run on
+                // its own before the cancel reached it.
+                if let super::stop_report::MemberStopRun::CancelDispatched { run_id } =
+                    &target.outcome.run
+                {
+                    let resolved = shutdown_cancel_outcome(
+                        adapter.run_turn_terminal(session_id, run_id).await,
+                        run_id,
+                    );
+                    *resolved_run
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = resolved;
+                }
+            }
         }
         Ok(())
     }
@@ -17885,16 +17333,22 @@ impl DetachedMemberReadinessContext {
     ) -> Vec<AutonomousMemberStopOutcome> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         futures::future::join_all(targets.into_iter().map(|(identity, target)| async move {
-            let result = member_stop_within_hang_guard(
+            let stage = AutonomousMemberStopStage::default();
+            let resolved_run = std::sync::Mutex::new(None);
+            let result = member_stop_within_hang_guard_at(
                 &identity,
                 remaining,
-                self.finish_autonomous_member_stop(&identity, &target),
+                &stage,
+                self.finish_autonomous_member_stop(&identity, &target, &stage, &resolved_run),
             )
             .await;
             AutonomousMemberStopOutcome {
                 identity,
                 target,
                 result,
+                resolved_run: resolved_run
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             }
         }))
         .await
@@ -17953,6 +17407,7 @@ impl MobActor {
     fn drive_autonomous_stop_interrupts(
         &mut self,
         entries: &[RosterEntry],
+        kind: PendingAutonomousStopKind,
     ) -> Result<(), MobError> {
         let mut incarnations = BTreeMap::new();
         for entry in entries {
@@ -17991,13 +17446,30 @@ impl MobActor {
             };
             let result = task.result_rx.try_recv();
             match result {
-                Ok(Ok(activity)) => {
+                Ok(Ok((activity, outcome))) => {
                     if let Some(task) = self.autonomous_stop_interrupts.remove(&agent_identity) {
+                        // A Stop reports outcomes in its Stop report; a
+                        // Shutdown reports its members' runs in its own.
+                        match kind {
+                            PendingAutonomousStopKind::Stop => {
+                                self.stop_member_outcomes
+                                    .insert(agent_identity.clone(), outcome.clone());
+                            }
+                            PendingAutonomousStopKind::Shutdown => {
+                                self.shutdown_report
+                                    .runs
+                                    .insert(agent_identity.clone(), outcome.run.clone());
+                                self.shutdown_report
+                                    .run_starts
+                                    .insert(agent_identity.clone(), outcome.starts.clone());
+                            }
+                        }
                         self.autonomous_stop_interrupted.insert(
                             agent_identity,
                             AutonomousStopInterrupted {
                                 incarnation: task.incarnation,
                                 activity,
+                                outcome,
                             },
                         );
                     }
@@ -18063,6 +17535,7 @@ impl MobActor {
             let member_ref = incarnation.member_ref.clone();
             let expected_member = incarnation.expected_member.clone();
             let (result_tx, result_rx) = oneshot::channel();
+            let command_tx = self.command_tx.clone();
             self.actor_io_tasks.spawn(async move {
                 // Subscribe to the local session's turn activity BEFORE the
                 // interrupt, pinning the exact session actor whose turn the
@@ -18073,16 +17546,34 @@ impl MobActor {
                 } else {
                     Ok(None)
                 };
-                let result = match activity {
-                    Ok(activity) => converge_autonomous_stop_interrupt_result(
+                // Hold the member's run starts and cancel exactly the run the
+                // hold found current (#1500); the outcome says which. A Stop
+                // cancels it at its next boundary, a Shutdown immediately.
+                let stopped = match kind {
+                    PendingAutonomousStopKind::Stop => {
                         provisioner
-                            .interrupt_member(&member_ref, expected_member.as_ref())
-                            .await,
-                    )
-                    .map(|()| activity),
+                            .stop_member_runtime(&member_ref, expected_member.as_ref(), true)
+                            .await
+                    }
+                    PendingAutonomousStopKind::Shutdown => {
+                        provisioner
+                            .stop_member_runtime_now(&member_ref, expected_member.as_ref())
+                            .await
+                    }
+                };
+                let result = match activity {
+                    Ok(activity) => converge_autonomous_stop_member_result(stopped)
+                        .map(|outcome| (activity, outcome)),
                     Err(error) => Err(error),
                 };
                 let _ = result_tx.send(result);
+                // Wake a stop or rollback parked on this interrupt. A closed
+                // channel means the actor is gone and nothing waits.
+                let _ = command_tx
+                    .send(RoutedMobCommand::internal(
+                        MobCommand::AutonomousStopInterruptSettled,
+                    ))
+                    .await;
             });
             self.autonomous_stop_interrupts.insert(
                 agent_identity.clone(),
@@ -18303,8 +17794,82 @@ impl MobActor {
         ))
     }
 
+    /// The current Stop's per-member report (#1500).
+    fn current_stop_report(&self) -> super::stop_report::MobStopReport {
+        super::stop_report::MobStopReport {
+            members: self.stop_member_outcomes.clone(),
+        }
+    }
+
+    /// Hold roster members' run starts (#1500), returning each member's
+    /// outcome. Shared by Stop, which holds every member and records the
+    /// outcomes in its report, and Shutdown (OB3), which holds only the
+    /// members whose runtime this mob hosts (`local_only`): a remote member's
+    /// host is not contacted during Shutdown, which never probes a placed
+    /// member it has no live channel to.
+    async fn hold_all_member_run_starts(
+        &mut self,
+        local_only: bool,
+    ) -> Result<BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>, MobError> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        let mut outcomes = BTreeMap::new();
+        for entry in &entries {
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                outcomes.insert(
+                    entry.agent_identity.clone(),
+                    super::stop_report::MemberStopOutcome {
+                        run: super::stop_report::MemberStopRun::NoRun,
+                        starts: super::stop_report::MemberRunStarts::NotBound,
+                    },
+                );
+                continue;
+            }
+            let incarnation = self.autonomous_stop_interrupt_incarnation(entry)?;
+            if local_only
+                && (incarnation.expected_member.is_some()
+                    || incarnation.member_ref.bridge_session_id().is_none())
+            {
+                self.shutdown_report.run_starts.insert(
+                    entry.agent_identity.clone(),
+                    super::stop_report::MemberRunStarts::DelegatedToHost,
+                );
+                continue;
+            }
+            let outcome = converge_autonomous_stop_member_result(
+                self.provisioner
+                    .stop_member_runtime(
+                        &incarnation.member_ref,
+                        incarnation.expected_member.as_ref(),
+                        false,
+                    )
+                    .await,
+            )?;
+            outcomes.insert(entry.agent_identity.clone(), outcome);
+        }
+        Ok(outcomes)
+    }
+
+    /// Hold every member's run starts for a Stop (#1500), before any stop
+    /// interrupt: from here no member starts a new run from input admitted
+    /// before the stop. Each autonomous member is held again with its exact
+    /// cancel by its interrupt task, whose outcome then replaces this one.
+    async fn hold_all_member_run_starts_for_stop(&mut self) -> Result<(), MobError> {
+        let mut outcomes = self.hold_all_member_run_starts(false).await?;
+        // A retried Stop keeps the outcomes of interrupts that already
+        // completed for the same incarnation.
+        for (identity, completed) in &self.autonomous_stop_interrupted {
+            outcomes.insert(identity.clone(), completed.outcome.clone());
+        }
+        self.stop_member_outcomes = outcomes;
+        Ok(())
+    }
+
     async fn prepare_all_autonomous_member_stops(
         &mut self,
+        kind: PendingAutonomousStopKind,
     ) -> Result<Vec<(AgentIdentity, AutonomousStopInterrupted)>, MobError> {
         let entries = {
             let roster = self.roster.read().await;
@@ -18382,7 +17947,7 @@ impl MobActor {
 
         // Phase 2 launches all exact interrupts together and returns without
         // waiting for their bridge I/O. A later retry observes completion.
-        self.drive_autonomous_stop_interrupts(&entries)?;
+        self.drive_autonomous_stop_interrupts(&entries, kind)?;
 
         entries
             .into_iter()
@@ -18399,6 +17964,16 @@ impl MobActor {
                     })
             })
             .collect()
+    }
+
+    /// Whether a Shutdown has started and is parked (on its members' stops
+    /// or on its runtime teardown) rather than finished.
+    fn shutdown_in_progress(&self) -> bool {
+        self.pending_shutdown_teardown.is_some()
+            || self
+                .pending_autonomous_stop
+                .as_ref()
+                .is_some_and(|pending| pending.kind == PendingAutonomousStopKind::Shutdown)
     }
 
     fn is_lifecycle_control(cmd: &MobCommand) -> bool {
@@ -18431,12 +18006,13 @@ impl MobActor {
         };
         match cmd {
             MobCommand::Stop { reply_tx } if pending.kind == PendingAutonomousStopKind::Stop => {
-                pending.joined.push(reply_tx);
+                pending.joined.push(LifecycleReplyTx::Stop(reply_tx));
             }
-            MobCommand::Shutdown { reply_tx }
+            // A joining Shutdown adopts the pending Shutdown's deadline.
+            MobCommand::Shutdown { reply_tx, .. }
                 if pending.kind == PendingAutonomousStopKind::Shutdown =>
             {
-                pending.joined.push(reply_tx);
+                pending.joined.push(LifecycleReplyTx::Unit(reply_tx));
             }
             cmd => {
                 if self.pending_autonomous_stop_controls.len()
@@ -18453,30 +18029,56 @@ impl MobActor {
         }
     }
 
-    /// Park a Stop or Shutdown whose members were interrupted: one actor-owned
-    /// task awaits every interrupted member's end of turn concurrently, off
-    /// the actor loop, and re-enters with `AutonomousMemberStopsResolved`.
-    /// The actor keeps serving commands meanwhile.
-    fn defer_autonomous_member_stops(
+    /// Park a Stop or Shutdown. The actor keeps serving commands meanwhile.
+    /// With `targets`, every member is already interrupted and their end of
+    /// turn is awaited at once; without, exact interrupts are still in flight
+    /// and their `AutonomousStopInterruptSettled` re-entries re-drive it.
+    fn park_autonomous_stop(
         &mut self,
         kind: PendingAutonomousStopKind,
         prior: Result<(), MobError>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-        targets: Vec<(AgentIdentity, AutonomousStopInterrupted)>,
+        reply_tx: LifecycleReplyTx,
+        targets: Option<Vec<(AgentIdentity, AutonomousStopInterrupted)>>,
     ) {
-        let ticket = self.next_autonomous_stop_ticket;
-        self.next_autonomous_stop_ticket = ticket.wrapping_add(1);
         self.pending_autonomous_stop = Some(PendingAutonomousStop {
-            ticket,
+            ticket: self.next_autonomous_stop_ticket,
             kind,
+            phase: PendingAutonomousStopPhase::Interrupting,
+            // A Shutdown's waits are bounded by its own deadline when the
+            // caller gave one (`ShutdownOptions`), else the hang guard.
+            deadline: Instant::now()
+                + if matches!(kind, PendingAutonomousStopKind::Shutdown) {
+                    self.shutdown_wait_budget()
+                } else {
+                    MEMBER_LIFECYCLE_HANG_GUARD
+                },
             prior,
             reply_tx,
             joined: Vec::new(),
         });
+        if let Some(targets) = targets {
+            self.spawn_autonomous_member_end_of_turn_wait(targets);
+        }
+    }
+
+    /// One actor-owned task awaits every interrupted member's end of turn
+    /// concurrently, off the actor loop, and re-enters with
+    /// `AutonomousMemberStopsResolved`.
+    fn spawn_autonomous_member_end_of_turn_wait(
+        &mut self,
+        targets: Vec<(AgentIdentity, AutonomousStopInterrupted)>,
+    ) {
+        let ticket = self.next_autonomous_stop_ticket;
+        self.next_autonomous_stop_ticket = ticket.wrapping_add(1);
+        let Some(pending) = self.pending_autonomous_stop.as_mut() else {
+            return;
+        };
+        pending.ticket = ticket;
+        pending.phase = PendingAutonomousStopPhase::AwaitingEndOfTurn;
+        let deadline = pending.deadline;
         let context = self.detached_member_readiness_context();
         let command_tx = self.command_tx.clone();
         let mob_id = self.definition.id.clone();
-        let deadline = Instant::now() + AUTONOMOUS_STOP_IDLE_HANG_GUARD;
         self.actor_io_tasks.spawn(async move {
             let outcomes = context
                 .finish_autonomous_member_stops_until(targets, deadline)
@@ -18493,17 +18095,91 @@ impl MobActor {
         });
     }
 
+    /// A stop or resume rollback parked on exact stop interrupts.
+    fn autonomous_stop_awaits_interrupts(&self) -> bool {
+        self.pending_autonomous_stop
+            .as_ref()
+            .is_some_and(|pending| pending.phase == PendingAutonomousStopPhase::Interrupting)
+            || self
+                .pending_resume_rollback
+                .as_ref()
+                .is_some_and(|pending| pending.awaiting_interrupts)
+    }
+
+    /// Re-entry after one exact stop interrupt settled. A parked stop still
+    /// interrupting re-drives: it observes the settled results, launches any
+    /// interrupt the window now admits, and once every member is interrupted
+    /// moves on to awaiting their end of turn. A resume rollback waiting on
+    /// interrupts re-drives the same way.
+    async fn redrive_after_autonomous_stop_interrupt(
+        &mut self,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
+    ) -> ActorLoopControl {
+        if let Some(attempt) = self
+            .pending_resume_rollback
+            .as_mut()
+            .filter(|pending| pending.awaiting_interrupts)
+            .map(|pending| {
+                pending.awaiting_interrupts = false;
+                pending.attempt.clone()
+            })
+        {
+            Box::pin(self.drive_explicit_resume_rollback(attempt)).await;
+        }
+        let Some((deadline, kind)) = self
+            .pending_autonomous_stop
+            .as_ref()
+            .filter(|pending| pending.phase == PendingAutonomousStopPhase::Interrupting)
+            .map(|pending| (pending.deadline, pending.kind))
+        else {
+            return ActorLoopControl::ProceedBoundary;
+        };
+        if Instant::now() >= deadline {
+            let Some(pending) = self.pending_autonomous_stop.take() else {
+                return ActorLoopControl::ProceedBoundary;
+            };
+            let stalled = Err(MobError::LifecycleOperationProgressStalled {
+                intent: "autonomous stop interrupts did not all settle".to_string(),
+                member_id: None,
+                stage: "autonomous_member_stop_interrupt",
+            });
+            return Box::pin(self.finish_pending_autonomous_stop(pending, stalled, command_rx))
+                .await;
+        }
+        match Box::pin(self.prepare_all_autonomous_member_stops(kind)).await {
+            Err(MobError::AutonomousStopInterruptsPending { .. }) => {
+                ActorLoopControl::ProceedBoundary
+            }
+            Ok(targets) if !targets.is_empty() => {
+                self.spawn_autonomous_member_end_of_turn_wait(targets);
+                ActorLoopControl::ProceedBoundary
+            }
+            result => {
+                let Some(pending) = self.pending_autonomous_stop.take() else {
+                    return ActorLoopControl::ProceedBoundary;
+                };
+                Box::pin(self.finish_pending_autonomous_stop(
+                    pending,
+                    result.map(|_| ()),
+                    command_rx,
+                ))
+                .await
+            }
+        }
+    }
+
     /// Re-entry for a parked Stop or Shutdown once every interrupted member's
     /// turn has ended (or the hang guard reported the ones still active).
     async fn resolve_autonomous_member_stops(
         &mut self,
         ticket: u64,
         outcomes: Vec<AutonomousMemberStopOutcome>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
     ) -> ActorLoopControl {
-        let Some(pending) = self
-            .pending_autonomous_stop
-            .take_if(|pending| pending.ticket == ticket)
-        else {
+        let Some(pending) = self.pending_autonomous_stop.take_if(|pending| {
+            pending.ticket == ticket
+                && pending.phase == PendingAutonomousStopPhase::AwaitingEndOfTurn
+        }) else {
             tracing::warn!(
                 mob_id = %self.definition.id,
                 ticket,
@@ -18512,6 +18188,16 @@ impl MobActor {
             return ActorLoopControl::ProceedBoundary;
         };
         let members = self.settle_autonomous_member_stop_outcomes(outcomes);
+        Box::pin(self.finish_pending_autonomous_stop(pending, members, command_rx)).await
+    }
+
+    /// Run a parked Stop's or Shutdown's tail with its members' result.
+    async fn finish_pending_autonomous_stop(
+        &mut self,
+        pending: PendingAutonomousStop,
+        members: Result<(), MobError>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
+    ) -> ActorLoopControl {
         let PendingAutonomousStop {
             kind,
             prior,
@@ -18524,12 +18210,15 @@ impl MobActor {
             PendingAutonomousStopKind::Stop => {
                 let result = Box::pin(self.complete_stop_after_member_stops(result)).await;
                 if !self.respawn_topology_reply_withheld {
-                    send_lifecycle_result(reply_tx, joined, result);
+                    send_lifecycle_result(reply_tx, joined, result, &self.current_stop_report());
                 }
                 ActorLoopControl::ProceedBoundary
             }
             PendingAutonomousStopKind::Shutdown => {
-                Box::pin(self.complete_shutdown_after_member_stops(result, reply_tx, joined)).await
+                Box::pin(
+                    self.complete_shutdown_after_member_stops(result, reply_tx, joined, command_rx),
+                )
+                .await
             }
         }
     }
@@ -18555,6 +18244,12 @@ impl MobActor {
                     ),
                 });
                 continue;
+            }
+            // Only a Shutdown dispatches the immediate cancel resolved here.
+            if let Some(run) = outcome.resolved_run {
+                self.shutdown_report
+                    .runs
+                    .insert(outcome.identity.clone(), run);
             }
             match outcome.result {
                 Ok(()) => {
@@ -18605,9 +18300,10 @@ impl MobActor {
     /// The Shutdown tail after its members' turns ended.
     async fn complete_shutdown_after_member_stops(
         &mut self,
-        mut result: Result<(), MobError>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-        joined: Vec<oneshot::Sender<Result<(), MobError>>>,
+        result: Result<(), MobError>,
+        reply_tx: LifecycleReplyTx,
+        joined: Vec<LifecycleReplyTx>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
     ) -> ActorLoopControl {
         // Lifecycle notifications are actor-owned mechanical delivery, not
         // teardown retry anchors. A notification can be blocked in the session
@@ -18616,33 +18312,90 @@ impl MobActor {
         // teardown. The full background-work barrier below is idempotent and
         // still owns every other task/listener.
         if result.is_ok() {
+            let step = Instant::now();
             self.abort_and_join_lifecycle_tasks().await;
+            self.log_shutdown_step("lifecycle_tasks_joined", step);
         }
         // The member-stop phase owns the exact executor attachments. Preserve
         // them as retry anchors when an interrupt is still pending; tearing
         // them down here would make the handle-level lifecycle retry target an
         // authority this failed attempt already removed.
-        if result.is_ok()
-            && let Err(error) = self.teardown_session_runtime_bindings_from_machine().await
-        {
-            tracing::warn!(error = %error, "shutdown session binding teardown failed");
-            result = Err(error);
-        }
         if result.is_ok() {
-            self.shutdown_actor_owned_background_work().await;
-            if let Err(error) = self.apply_command_admission(
-                mob_dsl::MobMachineInput::Shutdown,
-                MobState::Stopped,
-                "shutdown_input",
-            ) {
+            // Runtime teardown runs off the actor loop, concurrently per
+            // session and bounded by the Shutdown's budget; the Shutdown
+            // re-enters through `resolve_shutdown_teardown`.
+            match self.park_shutdown_teardown(result, reply_tx, joined) {
+                Ok(()) => return ActorLoopControl::SkipBoundary,
+                Err(tail) => {
+                    let shutdown_teardown::InlineShutdownTail {
+                        prior,
+                        reply_tx,
+                        joined,
+                    } = *tail;
+                    return Box::pin(self.finish_shutdown(prior, reply_tx, joined, command_rx))
+                        .await;
+                }
+            }
+        }
+        Box::pin(self.finish_shutdown(result, reply_tx, joined, command_rx)).await
+    }
+
+    /// The Shutdown tail after runtime teardown: actor-owned background work,
+    /// the generated Shutdown admission, the report, and the reply.
+    async fn finish_shutdown(
+        &mut self,
+        mut result: Result<(), MobError>,
+        reply_tx: LifecycleReplyTx,
+        mut joined: Vec<LifecycleReplyTx>,
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
+    ) -> ActorLoopControl {
+        if result.is_ok() {
+            let mut retained = std::mem::take(&mut self.retained_actor_completions);
+            let tail = Box::pin(self.shutdown_actor_owned_background_work());
+            Self::serve_refusals_while(command_rx, &mut joined, &mut retained, tail).await;
+            self.retained_actor_completions = retained;
+            // The hold was realized before the member interrupts; the
+            // committed transition must still carry it.
+            let applied = self
+                .apply_dsl_input_collect_transition(
+                    mob_dsl::MobMachineInput::Shutdown,
+                    "shutdown_input",
+                )
+                .map_err(|error| {
+                    tracing::debug!(
+                        error = %error,
+                        "MobMachine command admission rejected input"
+                    );
+                    self.invalid_transition_to(MobState::Stopped)
+                })
+                .and_then(|transition| {
+                    Self::require_member_run_start_effect(
+                        &transition,
+                        Some(true),
+                        "finish_shutdown",
+                    )
+                });
+            if let Err(error) = applied {
                 tracing::warn!(error = %error, "shutdown admission apply failed");
                 result = Err(error);
             }
         }
 
         let succeeded = result.is_ok();
+        if succeeded {
+            self.finish_shutdown_report();
+        }
+        if succeeded
+            && !self.durable_uncertainty_fail_stop
+            && !self.retained_actor_completions.is_empty()
+        {
+            // Completions of work this actor owned arrived while it joined that
+            // work: the actor processes them before it replies and exits.
+            self.shutdown_exit = Some(PendingShutdownExit { reply_tx, joined });
+            return ActorLoopControl::SkipBoundary;
+        }
         if !self.respawn_topology_reply_withheld {
-            send_lifecycle_result(reply_tx, joined, result);
+            send_lifecycle_result(reply_tx, joined, result, &self.current_stop_report());
         }
         if !self.durable_uncertainty_fail_stop {
             if succeeded {
@@ -18660,22 +18413,22 @@ impl MobActor {
     /// signals, concurrently, under the rollback deadline as a hang guard.
     async fn stop_all_autonomous_members_for_rollback(&mut self) -> Result<(), MobError> {
         let deadline = Instant::now() + ROLLBACK_AUTONOMOUS_STOP_DEADLINE;
-        // The exact interrupts are timeout-bounded bridge I/O retained by the
-        // actor; their completion is still observed level-triggered here
-        // until that lane is deferred too (#1413). Member idleness is not.
+        // Before the actor serves commands, an exact interrupt settling is
+        // observed as its actor-owned task completing; each completion
+        // re-drives the stop. The deadline is the hang guard.
         let targets = loop {
-            match self.prepare_all_autonomous_member_stops().await {
+            match self
+                .prepare_all_autonomous_member_stops(PendingAutonomousStopKind::Stop)
+                .await
+            {
                 Ok(targets) => break targets,
-                Err(
-                    error @ (MobError::AutonomousStopInterruptsPending { .. }
-                    | MobError::LifecycleOperationPending { .. }),
-                ) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(error);
+                Err(error @ MobError::AutonomousStopInterruptsPending { .. }) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match tokio::time::timeout(remaining, self.actor_io_tasks.join_next()).await {
+                        Ok(Some(joined)) => self.reconcile_actor_io_task_join(joined),
+                        // Nothing in flight can settle it, or the guard passed.
+                        Ok(None) | Err(_) => return Err(error),
                     }
-                    tokio::time::sleep(ROLLBACK_AUTONOMOUS_STOP_POLL_INTERVAL.min(deadline - now))
-                        .await;
                 }
                 Err(error) => return Err(error),
             }
@@ -19577,6 +19330,58 @@ impl MobActor {
         self.apply_dsl_input(input(attempt), context)
     }
 
+    /// Realize MobMachine's `HoldMemberRunStarts` on a member provisioned by
+    /// a spawn that completed into a Stopped mob (#1500).
+    async fn hold_spawned_member_run_starts(&self, member_ref: &MemberRef) {
+        if let Err(error) = self
+            .provisioner
+            .stop_member_runtime(member_ref, None, false)
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                "holding a member spawned into a stopped mob failed"
+            );
+        }
+    }
+
+    /// Hold every member of a Stopped mob again (#1500): after a resume that
+    /// released the holds and then failed, so queued input still waits for a
+    /// resume that succeeds, and after a spawn completed into the Stopped mob.
+    async fn hold_member_run_starts_while_stopped(&mut self) {
+        if self.state() != MobState::Stopped {
+            return;
+        }
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        for entry in &entries {
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                continue;
+            }
+            let held = match self.autonomous_stop_interrupt_incarnation(entry) {
+                Ok(incarnation) => self
+                    .provisioner
+                    .stop_member_runtime(
+                        &incarnation.member_ref,
+                        incarnation.expected_member.as_ref(),
+                        false,
+                    )
+                    .await
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = held {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    error = %error,
+                    "re-holding a member's run starts after a failed resume failed"
+                );
+            }
+        }
+    }
+
     fn finish_explicit_resume_attempt(
         &mut self,
         result: Result<(), MobError>,
@@ -19633,6 +19438,16 @@ impl MobActor {
         }
         // Re-enable checkpointers cancelled during stop.
         self.provisioner.rearm_all_checkpointers().await;
+        // Resume is what releases the run starts its Stop held (#1500). The
+        // member rebuild below needs each member's runtime to make progress,
+        // so the release comes first.
+        if let Err(error) = self.release_all_member_run_starts().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "resume could not release every member's run-start hold"
+            );
+        }
 
         let candidates = match self.explicit_resume_candidates().await {
             Ok(candidates) => candidates,
@@ -19643,6 +19458,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19655,6 +19471,7 @@ impl MobActor {
                     "settle_undispatched_resume_preparation",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19722,6 +19539,7 @@ impl MobActor {
                 self.finish_explicit_resume_attempt(Err(MobError::LifecycleOperationPending {
                     intent: "explicit_resume superseded by lifecycle control".to_string(),
                 }));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19730,6 +19548,7 @@ impl MobActor {
             Err(error) => {
                 self.provisioner.cancel_all_checkpointers().await;
                 let result = self.finish_explicit_resume_attempt(Err(error));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -19740,6 +19559,7 @@ impl MobActor {
             "resume_preparation_resolved_admission",
         ) {
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -19774,7 +19594,8 @@ impl MobActor {
                         progress,
                         reply_tx,
                     },
-                );
+                )
+                .await;
             }
         }
     }
@@ -19789,21 +19610,45 @@ impl MobActor {
             .await;
     }
 
-    fn spawn_resume_readiness_fanout(
+    async fn spawn_resume_readiness_fanout(
         &mut self,
         targets: Vec<MemberReadinessTarget>,
         progress: Option<super::state::LifecycleProgressSignal>,
         mut pending: PendingResumeLifecycle,
     ) {
-        if let Err(error) = self.apply_explicit_resume_input(
+        #[cfg(test)]
+        let fault = self.resume_readiness_fault.take();
+        #[cfg(test)]
+        let begun = if fault == Some(super::state::ResumeReadinessFaultForTest::BeginReadiness) {
+            Err(MobError::Internal(
+                "injected readiness begin failure".to_string(),
+            ))
+        } else {
+            self.apply_explicit_resume_input(
+                |attempt| mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { attempt },
+                "begin_explicit_resume_readiness",
+            )
+        };
+        #[cfg(not(test))]
+        let begun = self.apply_explicit_resume_input(
             |attempt| mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { attempt },
             "begin_explicit_resume_readiness",
-        ) {
+        );
+        if let Err(error) = begun {
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = pending.reply_tx.send(result);
             return;
         }
-        let ticket = match self.next_resume_lifecycle_ticket.next() {
+        let ticket = self.next_resume_lifecycle_ticket.next();
+        #[cfg(test)]
+        let ticket = match fault {
+            Some(super::state::ResumeReadinessFaultForTest::TicketExhausted) => Err(
+                MobError::Internal("injected resume ticket exhaustion".to_string()),
+            ),
+            _ => ticket,
+        };
+        let ticket = match ticket {
             Ok(ticket) => ticket,
             Err(error) => {
                 let settled = self.apply_explicit_resume_input(
@@ -19811,6 +19656,7 @@ impl MobActor {
                     "settle_undispatched_resume_readiness",
                 );
                 let result = settled.and_then(|()| self.finish_explicit_resume_attempt(Err(error)));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = pending.reply_tx.send(result);
                 return;
             }
@@ -19961,6 +19807,7 @@ impl MobActor {
             }
             self.provisioner.cancel_all_checkpointers().await;
             let result = self.finish_explicit_resume_attempt(Err(error));
+            self.hold_member_run_starts_while_stopped().await;
             let _ = reply_tx.send(result);
             return;
         }
@@ -20075,6 +19922,7 @@ impl MobActor {
             Ok(attempt) => attempt,
             Err(error) => {
                 let result = self.finish_explicit_resume_attempt(Err(error));
+                self.hold_member_run_starts_while_stopped().await;
                 let _ = reply_tx.send(result);
                 return;
             }
@@ -21427,6 +21275,13 @@ impl MobActor {
             true,
             "begin_placed_completion_lifecycle_quiesce",
         )?;
+        // Only a Stop holds members (#1500); the Stop handler realizes it
+        // before any member interrupt.
+        Self::require_member_run_start_effect(
+            &prepared.transition,
+            (intent == mob_dsl::PlacedCompletionLifecycleIntentKind::Stop).then_some(true),
+            "begin_placed_completion_lifecycle_quiesce",
+        )?;
         // The actor has already accepted the lifecycle command and processes no
         // later public command until this handler returns. Drain every mutating
         // live effect admitted before it, then prove/close the one active
@@ -21527,6 +21382,8 @@ impl MobActor {
             mob_dsl::MobLifecycleJournalKind::Resumed,
             "resume_input",
         )?;
+        // Resume releases the members its Stop held (#1500), realized below.
+        Self::require_member_run_start_effect(&prepared.transition, Some(false), "resume_input")?;
         // Store-first: a crash after this marker but before machine commit is
         // still Stopped and cannot originate work; retry reuses the latest End
         // marker and commits the prepared Resume.
@@ -21538,7 +21395,61 @@ impl MobActor {
                 "completion quiesce End is durable but Resume commit failed; actor is fail-stopping for cold recovery: {error}"
             )));
         }
+        // The mob runs again: release the run starts its Stop held (#1500),
+        // so input admitted before the stop runs now. The release at resume
+        // begin did the same; this covers members materialized by the resume.
+        // A member that cannot be released yet (a peer-only member not bound
+        // again yet) is logged per member; the committed resume stands.
+        if let Err(error) = self.release_all_member_run_starts().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "resume could not release every member's run-start hold"
+            );
+        }
         Ok(())
+    }
+
+    /// Release every member's run-start hold (#1500). Every member is
+    /// attempted; the first failure is reported, never swallowed, because a
+    /// member left held would keep its queued input waiting.
+    async fn release_all_member_run_starts(&mut self) -> Result<(), MobError> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        let mut first_error = None;
+        for entry in &entries {
+            // A dormant placed carrier is released when it is re-activated.
+            if self.placed_member_carrier_dormant(&entry.agent_identity) {
+                continue;
+            }
+            let incarnation = match self.autonomous_stop_interrupt_incarnation(entry) {
+                Ok(incarnation) => incarnation,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            if let Err(error) = self
+                .provisioner
+                .release_member_run_starts(
+                    &incarnation.member_ref,
+                    incarnation.expected_member.as_ref(),
+                    meerkat_runtime::RunStartHoldReason::MobStop,
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    error = %error,
+                    "releasing a member's run-start hold failed"
+                );
+                first_error.get_or_insert(error);
+            }
+        }
+        self.stop_member_outcomes.clear();
+        first_error.map_or(Ok(()), Err)
     }
 
     async fn commit_stopped_lifecycle_after_cleanup(&mut self) -> Result<(), MobError> {
@@ -22045,11 +21956,76 @@ impl MobActor {
     /// Join barrier for every background task/listener owned directly by the
     /// actor (as opposed to keyed pending-spawn/flow/autonomous tables).
     /// Safe to call repeatedly; all task sets and optional handles are drained.
+    /// Run `work` (a Shutdown step that joins actor-owned tasks) while still
+    /// answering every command that reaches the actor: a Shutdown joins this
+    /// one, a caller request is refused typed as `ActorCommandChannelClosed`
+    /// (the answer it gets a moment later anyway), and an actor completion is
+    /// retained in `retained` for the actor to process after the step. A joined task may have sent this
+    /// actor a command and await its reply; served this way, it can never wait
+    /// on the actor that is joining it (OB3: the actor otherwise wedged in an
+    /// inline Shutdown join until SIGKILL).
+    async fn serve_refusals_while<F>(
+        command_rx: &mut mpsc::Receiver<RoutedMobCommand>,
+        joined: &mut Vec<LifecycleReplyTx>,
+        retained: &mut VecDeque<RoutedMobCommand>,
+        work: F,
+    ) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let mut work = std::pin::pin!(work);
+        let mut channel_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut work => {
+                    // Answer what is already queued too, so a completion sent
+                    // before the step ended is retained, not left behind.
+                    while let Ok(routed) = command_rx.try_recv() {
+                        Self::answer_while_shutting_down(routed, joined, retained);
+                    }
+                    return output;
+                }
+                routed = command_rx.recv(), if channel_open => match routed {
+                    Some(routed) => Self::answer_while_shutting_down(routed, joined, retained),
+                    None => channel_open = false,
+                },
+            }
+        }
+    }
+
+    /// One command reaching the actor while a Shutdown step joins its work:
+    /// a Shutdown joins it, a caller request is refused typed, an actor
+    /// completion is retained for processing (never refused).
+    fn answer_while_shutting_down(
+        routed: RoutedMobCommand,
+        joined: &mut Vec<LifecycleReplyTx>,
+        retained: &mut VecDeque<RoutedMobCommand>,
+    ) {
+        match routed.cmd {
+            MobCommand::Shutdown { reply_tx, .. } => joined.push(LifecycleReplyTx::Unit(reply_tx)),
+            cmd => match cmd.shutdown_answer_class() {
+                super::state::ShutdownAnswerClass::CallerRequest => {
+                    cmd.reject_with_error(MobError::ActorCommandChannelClosed);
+                }
+                super::state::ShutdownAnswerClass::ActorCompletion => {
+                    retained.push_back(RoutedMobCommand {
+                        authority: routed.authority,
+                        cmd,
+                    });
+                }
+            },
+        }
+    }
+
     async fn shutdown_actor_owned_background_work(&mut self) {
         // #1105: settle owned wiring ledgers first. Aborting them before
         // reconciliation would strand real trust rows with no compensation
         // and no typed answer for the caller.
+        let step = Instant::now();
         self.abort_and_join_wiring_io_tasks().await;
+        self.log_shutdown_step("wiring_io_joined", step);
+        let step = Instant::now();
         if let Err(error) = self.abort_and_join_member_effect_tasks().await {
             tracing::error!(
                 mob_id = %self.definition.id,
@@ -22058,6 +22034,7 @@ impl MobActor {
             );
             self.durable_uncertainty_fail_stop = true;
         }
+        self.log_shutdown_step("member_effects_joined", step);
         self.member_live_mutation_tasks.abort_all();
         while let Some(result) = self.member_live_mutation_tasks.join_next().await {
             if let Err(error) = result
@@ -22094,7 +22071,9 @@ impl MobActor {
 
         self.abort_and_join_lifecycle_tasks().await;
 
+        let step = Instant::now();
         self.member_event_pumps.stop_all_and_join().await;
+        self.log_shutdown_step("member_event_pumps_joined", step);
 
         // These listener tasks retain live command/bridge ownership. Stop and
         // join them before the supervisor bridge and before command-channel
@@ -22108,7 +22087,9 @@ impl MobActor {
             acceptor.shutdown().await;
         }
 
+        let step = Instant::now();
         self.supervisor_bridge.shutdown().await;
+        self.log_shutdown_step("supervisor_bridge_shut_down", step);
     }
 
     /// Crash-semantics quiescence for an actor whose durable commit outcome is
@@ -24460,6 +24441,7 @@ impl MobActor {
                         self.start_retirement(
                             identity.clone(), Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
                             None, retirement_io::RetirementReply::IdentityReconcile(completion_authority.clone()),
+                            false,
                         ).await;
                     }
                     Ok(false)
@@ -24898,6 +24880,16 @@ impl MobActor {
                     self.settle_member_turn_admission(&agent_identity, ticket);
                 }
                 #[cfg(test)]
+                MobCommand::BindPeerOnlyMembersForTest { reply_tx } => {
+                    let result = self.adopt_peer_only_direct_members_after_v5_rotation().await;
+                    let _ = reply_tx.send(result);
+                }
+                #[cfg(test)]
+                MobCommand::FailNextResumeReadinessForTest { fault, reply_tx } => {
+                    self.resume_readiness_fault = Some(fault);
+                    let _ = reply_tx.send(());
+                }
+                #[cfg(test)]
                 MobCommand::BeginStopQuiesceForTest { reply_tx } => {
                     let result = self
                         .begin_placed_completion_lifecycle_quiesce(
@@ -25333,6 +25325,7 @@ impl MobActor {
                 MobCommand::Retire {
                     agent_identity,
                     expected_incarnation,
+                    redrive,
                     deadline,
                     admission_tx,
                     reply_tx,
@@ -25343,6 +25336,7 @@ impl MobActor {
                             Ok(()) => self.start_retirement(
                                 agent_identity, deadline, Some(admission_tx),
                                 retirement_io::RetirementReply::Retire(reply_tx),
+                                redrive,
                             ).await,
                             Err(error) => { let _ = reply_tx.send(Err(error)); }
                         }
@@ -26632,6 +26626,51 @@ impl MobActor {
                     let _ = reply_tx.send(burst_result);
                 }
                 #[cfg(test)]
+                MobCommand::HonourCompletionForTest { honoured } => {
+                    honoured.send_replace(true);
+                }
+                #[cfg(test)]
+                MobCommand::SpawnLiveMutationSendingCompletionForTest { honoured, reply_tx } => {
+                    let command_tx = self.command_tx.clone();
+                    let mut admitted = self.lifecycle_observations.shutdown_admitted.subscribe();
+                    self.member_live_mutation_tasks.spawn(async move {
+                        let _ = admitted.wait_for(|admitted| *admitted).await;
+                        let _ = command_tx
+                            .send(RoutedMobCommand::internal(
+                                MobCommand::HonourCompletionForTest { honoured },
+                            ))
+                            .await;
+                        MemberLiveMutationCompletion::AwaitedActorForTest
+                    });
+                    let _ = reply_tx.send(Ok(()));
+                }
+                #[cfg(test)]
+                MobCommand::SpawnLiveMutationAwaitingActorForTest {
+                    observed_tx,
+                    reply_tx,
+                } => {
+                    let command_tx = self.command_tx.clone();
+                    let mut admitted = self.lifecycle_observations.shutdown_admitted.subscribe();
+                    self.member_live_mutation_tasks.spawn(async move {
+                        let _ = admitted.wait_for(|admitted| *admitted).await;
+                        let (phase_tx, phase_rx) = oneshot::channel();
+                        let observed = match command_tx
+                            .send(RoutedMobCommand::internal(MobCommand::QueryPhase {
+                                reply_tx: phase_tx,
+                            }))
+                            .await
+                        {
+                            Ok(()) => phase_rx
+                                .await
+                                .unwrap_or(Err(MobError::ActorReplyChannelClosed)),
+                            Err(_) => Err(MobError::ActorCommandChannelClosed),
+                        };
+                        let _ = observed_tx.send(observed);
+                        MemberLiveMutationCompletion::AwaitedActorForTest
+                    });
+                    let _ = reply_tx.send(Ok(()));
+                }
+                #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
                     entered_tx,
                     release_rx,
@@ -26845,6 +26884,16 @@ impl MobActor {
                 } => {
                     self.project_member_status(agent_identity, reply_tx);
                 }
+                MobCommand::ReleaseMemberRunStarts {
+                    agent_identity,
+                    reason,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .release_member_run_start_hold(&agent_identity, reason)
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ProjectMemberStatusObserved {
                     agent_identity,
                     expected_target,
@@ -26951,11 +27000,6 @@ impl MobActor {
                         reply_tx.send(Ok(self.machine_projection_for_identity(&agent_identity)));
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let stop_intent_preexisting = self
-                        .dsl_authority
-                        .state()
-                        .placed_completion_lifecycle_intent
-                        == Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop);
                     let result = if self.state() == MobState::Destroyed {
                         Err(self.invalid_transition_to(MobState::Stopped))
                     } else if let Err(error) = self
@@ -26982,26 +27026,11 @@ impl MobActor {
                                     {
                                         stop_result = Err(error);
                                     }
-                                    // Lifecycle delivery is a real fault, not
-                                    // best-effort: fold a failure into the stop
-                                    // result rather than swallowing it. Cleanup
-                                    // still proceeds so the mob can stop.
-                                    if stop_result.is_ok()
-                                        && !stop_intent_preexisting
-                                        && let Err(error) = self
-                                            .notify_orchestrator_lifecycle(format!(
-                                                "Mob '{}' is stopping.",
-                                                self.definition.id
-                                            ))
-                                            .await
-                                    {
-                                        tracing::warn!(
-                                            mob_id = %self.definition.id,
-                                            error = %error,
-                                            "stop encountered orchestrator lifecycle delivery error"
-                                        );
-                                        stop_result = Err(error);
-                                    }
+                                    // No "is stopping" notice to the orchestrator
+                                    // (#1500): its run starts are about to be
+                                    // held, so it could only read the notice
+                                    // after Resume, when it is stale. Resume
+                                    // tells it the pause happened instead.
                                     // Cancel checkpointer gates before stopping host loops so
                                     // in-flight saves that complete after the loop stops don't
                                     // race with subsequent external cleanup (e.g. DML deletes).
@@ -27009,22 +27038,44 @@ impl MobActor {
                                         self.provisioner.cancel_all_checkpointers().await;
                                     }
                                 }
+                                // Hold every member's run starts before any
+                                // interrupt (#1500): input admitted before the
+                                // stop runs only after Resume.
+                                if stop_result.is_ok()
+                                    && let Err(error) =
+                                        self.hold_all_member_run_starts_for_stop().await
+                                {
+                                    stop_result = Err(error);
+                                }
                                 if stop_result.is_ok() {
-                                    match Box::pin(self.prepare_all_autonomous_member_stops())
+                                    match Box::pin(self.prepare_all_autonomous_member_stops(
+                                        PendingAutonomousStopKind::Stop,
+                                    ))
                                         .await
                                     {
                                         // No interrupted member to wait for:
                                         // the Stop completes inline.
                                         Ok(targets) if targets.is_empty() => {}
+                                        // Interrupts still in flight or every
+                                        // member interrupted: the Stop parks
+                                        // and completes on those typed signals.
                                         Ok(targets) => {
-                                            // Every member is interrupted; their
-                                            // turns end off the actor loop and the
-                                            // Stop completes on that typed signal.
-                                            self.defer_autonomous_member_stops(
+                                            self.park_autonomous_stop(
                                                 PendingAutonomousStopKind::Stop,
                                                 Ok(()),
-                                                reply_tx,
-                                                targets,
+                                                LifecycleReplyTx::Stop(reply_tx),
+                                                Some(targets),
+                                            );
+                                            return ActorLoopControl::ProceedBoundary;
+                                        }
+                                        Err(MobError::AutonomousStopInterruptsPending {
+                                            ..
+                                        }) => {
+                                            self.park_autonomous_stop(
+                                                PendingAutonomousStopKind::Stop,
+                                                Ok(()),
+                                                LifecycleReplyTx::Stop(reply_tx),
+                                                None,
                                             );
                                             return ActorLoopControl::ProceedBoundary;
                                         }
@@ -27045,7 +27096,7 @@ impl MobActor {
                         }
                     };
                     if !self.respawn_topology_reply_withheld {
-                        let _ = reply_tx.send(result);
+                        let _ = reply_tx.send(result.map(|()| self.current_stop_report()));
                     }
                 }
                 MobCommand::ResumeLifecycle {
@@ -27499,27 +27550,76 @@ impl MobActor {
                     self.crash_stop_reply_tx = Some(reply_tx);
                     ActorLoopControl::BreakActor
                 }
+                MobCommand::AutonomousStopInterruptSettled => {
+                    self.inline_step_watchdog
+                        .set_step("autonomous_stop_interrupt_settled");
+                    return Box::pin(self.redrive_after_autonomous_stop_interrupt(command_rx)).await;
+                }
                 MobCommand::AutonomousMemberStopsResolved { ticket, outcomes } => {
                     self.inline_step_watchdog
                         .set_step("autonomous_member_stops_resolved");
-                    return Box::pin(self.resolve_autonomous_member_stops(ticket, outcomes)).await;
+                    return Box::pin(
+                        self.resolve_autonomous_member_stops(ticket, outcomes, command_rx),
+                    )
+                    .await;
                 }
-                MobCommand::Shutdown { reply_tx } => {
-                    if let Err(error) = self.probe_command_admission(
-                        mob_dsl::MobMachineInput::Shutdown,
-                        MobState::Stopped,
-                        "shutdown_command_admission",
-                    ) {
+                MobCommand::ShutdownTeardownResolved { ticket, outcomes } => {
+                    self.inline_step_watchdog.set_step("shutdown_teardown_resolved");
+                    return Box::pin(self.resolve_shutdown_teardown(ticket, outcomes, command_rx))
+                        .await;
+                }
+                MobCommand::Shutdown { deadline, reply_tx } => {
+                    // A Shutdown arriving while one is parked on its runtime
+                    // teardown receives that Shutdown's result.
+                    if let Some(pending) = self.pending_shutdown_teardown.as_mut() {
+                        pending.joined.push(LifecycleReplyTx::Unit(reply_tx));
+                        return ActorLoopControl::SkipBoundary;
+                    }
+                    self.shutdown_deadline = deadline;
+                    // Probe only: Shutdown commits at its end. The probed
+                    // transition owns the run-start hold obligation (OB3).
+                    let admission = self
+                        .prepare_dsl_input_transition(
+                            mob_dsl::MobMachineInput::Shutdown,
+                            "shutdown_command_admission",
+                        )
+                        .map_err(|_| self.invalid_transition_to(MobState::Stopped))
+                        .and_then(|prepared| {
+                            Self::require_member_run_start_effect(
+                                &prepared.transition,
+                                Some(true),
+                                "shutdown_command_admission",
+                            )
+                        });
+                    if let Err(error) = admission {
                         let _ = reply_tx.send(Err(error));
                         return ActorLoopControl::SkipBoundary;
                     }
-                    self.drain_wiring_io_for_lifecycle().await;
-                    if let Err(error) = self.drain_member_effects_for_lifecycle().await {
-                        let _ = reply_tx.send(Err(error));
-                        return ActorLoopControl::SkipBoundary;
-                    }
-                    if let Err(error) = self.drain_member_live_mutations_for_lifecycle().await {
-                        let _ = reply_tx.send(Err(error));
+                    self.log_shutdown_admitted();
+                    #[cfg(test)]
+                    self.lifecycle_observations
+                        .shutdown_admitted
+                        .send_replace(true);
+                    // The lifecycle drains join actor-owned tasks without
+                    // aborting them; one may await this actor's reply, so the
+                    // actor keeps answering while it drains (OB3).
+                    let mut joined = Vec::new();
+                    let mut retained = std::mem::take(&mut self.retained_actor_completions);
+                    let drained = Self::serve_refusals_while(
+                        command_rx,
+                        &mut joined,
+                        &mut retained,
+                        Box::pin(async {
+                            self.drain_wiring_io_for_lifecycle().await;
+                            self.drain_member_effects_for_lifecycle().await?;
+                            self.drain_member_live_mutations_for_lifecycle().await
+                        }),
+                    )
+                    .await;
+                    self.retained_actor_completions = retained;
+                    let reply_tx = LifecycleReplyTx::Unit(reply_tx);
+                    if let Err(error) = drained {
+                        send_lifecycle_result(reply_tx, joined, Err(error), &self.current_stop_report());
                         return ActorLoopControl::SkipBoundary;
                     }
                     if let Err(error) = self
@@ -27528,7 +27628,7 @@ impl MobActor {
                         )
                         .await
                     {
-                        let _ = reply_tx.send(Err(error));
+                        send_lifecycle_result(reply_tx, joined, Err(error), &self.current_stop_report());
                         return ActorLoopControl::SkipBoundary;
                     }
                     let mut result = self
@@ -27536,7 +27636,7 @@ impl MobActor {
                         .await;
                     if result.is_err() {
                         if !self.respawn_topology_reply_withheld {
-                            let _ = reply_tx.send(result);
+                            send_lifecycle_result(reply_tx, joined, result, &self.current_stop_report());
                         }
                         if !self.durable_uncertainty_fail_stop {
                             return ActorLoopControl::SkipBoundary;
@@ -27554,20 +27654,68 @@ impl MobActor {
                                 result = Err(error);
                             }
                         }
-                        match Box::pin(self.prepare_all_autonomous_member_stops()).await {
+                        // Hold run starts before any interrupt, as the Stop
+                        // does (#1500): an input admitted before the Shutdown,
+                        // such as an autonomous kickoff, can no longer start a
+                        // run after the interrupt that the unregister would
+                        // then cancel. MobMachine's HoldMemberRunStarts is
+                        // mob-wide; this shell realizes it for the members
+                        // this mob hosts only. Remote members keep the
+                        // pre-#1500 Shutdown behaviour (no bridge contact:
+                        // their host owns their run starts and teardown), are
+                        // held through their host only when the member stop
+                        // below reaches them, and are reported as
+                        // `DelegatedToHost` otherwise. A Stopped mob owes no
+                        // remote member a release: a member that binds later
+                        // gets the Held posture its machine state implies.
+                        match self.hold_all_member_run_starts(true).await {
+                            Ok(outcomes) => {
+                                for (identity, outcome) in outcomes {
+                                    self.shutdown_report
+                                        .run_starts
+                                        .insert(identity, outcome.starts);
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(error = %error, "shutdown run-start hold encountered errors");
+                                if result.is_ok() {
+                                    result = Err(error);
+                                }
+                            }
+                        }
+                        match Box::pin(self.prepare_all_autonomous_member_stops(
+                            PendingAutonomousStopKind::Shutdown,
+                        ))
+                        .await
+                        {
                             // No interrupted member to wait for: the Shutdown
                             // tail runs inline.
                             Ok(targets) if targets.is_empty() => {}
+                            // Interrupts still in flight or every member
+                            // interrupted: the Shutdown parks and its tail
+                            // runs on those typed signals.
                             Ok(targets) => {
-                                // Every member is interrupted; their turns end
-                                // off the actor loop and the Shutdown tail runs
-                                // on that typed signal.
-                                self.defer_autonomous_member_stops(
+                                self.park_autonomous_stop(
                                     PendingAutonomousStopKind::Shutdown,
                                     result,
                                     reply_tx,
-                                    targets,
+                                    Some(targets),
                                 );
+                                if let Some(pending) = self.pending_autonomous_stop.as_mut() {
+                                    pending.joined.extend(joined);
+                                }
+                                return ActorLoopControl::SkipBoundary;
+                            }
+                            Err(MobError::AutonomousStopInterruptsPending { .. }) => {
+                                self.park_autonomous_stop(
+                                    PendingAutonomousStopKind::Shutdown,
+                                    result,
+                                    reply_tx,
+                                    None,
+                                );
+                                if let Some(pending) = self.pending_autonomous_stop.as_mut() {
+                                    pending.joined.extend(joined);
+                                }
                                 return ActorLoopControl::SkipBoundary;
                             }
                             Err(error) => {
@@ -27578,9 +27726,7 @@ impl MobActor {
                             }
                         }
                         return Box::pin(self.complete_shutdown_after_member_stops(
-                            result,
-                            reply_tx,
-                            Vec::new(),
+                            result, reply_tx, joined, command_rx,
                         ))
                         .await;
                     }
@@ -27606,6 +27752,9 @@ impl MobActor {
         host_status_poll: &mut tokio::time::Interval,
         identity_reconcile_safety_scan: &mut tokio::time::Interval,
     ) -> ActorLoopWakeSelection {
+        if let Some(command) = self.retained_actor_completions.pop_front() {
+            return ActorLoopWakeSelection::Routed(command);
+        }
         if let Some(command) = self.take_ready_submit_work_pump_command() {
             return ActorLoopWakeSelection::Routed(command);
         }
@@ -27622,6 +27771,9 @@ impl MobActor {
         self.drain_completed_actor_io_tasks();
         self.drain_completed_peer_delivery_tasks();
         if boxed_arm_future(|| self.continue_retirement_batch_after_settlement()).await {
+            return ActorLoopWakeSelection::Continue;
+        }
+        if boxed_arm_future(|| self.start_pending_stuck_retirement_redrive()).await {
             return ActorLoopWakeSelection::Continue;
         }
         boxed_arm_future(|| self.continue_resume_topology_after_prior_owners()).await;
@@ -27886,6 +28038,11 @@ impl MobActor {
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<RoutedMobCommand>) {
         self.inline_step_watchdog
             .start_checker(self.definition.id.clone());
+        // Every actor incarnation, a restored one included, starts from its
+        // durable MobMachine state (#1500): a member that binds before the
+        // next lifecycle transition gets the run-start posture it implies.
+        self.supervisor_bridge
+            .set_member_run_start_posture(self.member_run_start_posture());
         if !boxed_arm_future(|| self.prepare_actor_run()).await {
             self.inline_step_watchdog.stop();
             return;
@@ -27931,6 +28088,33 @@ impl MobActor {
                 command_rx.close();
                 break;
             }
+            // A stop parked on its exact interrupts re-evaluates on every actor
+            // wake: an interrupt settling, or any other transition that can
+            // make a member no longer need interrupting (release, removal).
+            if self.autonomous_stop_awaits_interrupts()
+                && matches!(
+                    boxed_arm_future(
+                        || self.redrive_after_autonomous_stop_interrupt(&mut command_rx)
+                    )
+                    .await,
+                    ActorLoopControl::BreakActor
+                )
+            {
+                break;
+            }
+            if self.retained_actor_completions.is_empty()
+                && let Some(exit) = self.shutdown_exit.take()
+            {
+                if !self.respawn_topology_reply_withheld {
+                    send_lifecycle_result(
+                        exit.reply_tx,
+                        exit.joined,
+                        Ok(()),
+                        &self.current_stop_report(),
+                    );
+                }
+                break;
+            }
             let routed = match boxed_arm_future(|| {
                 self.wait_for_actor_wake(
                     &mut command_rx,
@@ -27966,6 +28150,7 @@ impl MobActor {
                 control
             } else {
                 if self.resume_member_control_is_pending(&cmd) {
+                    self.interrupt_owned_retirements_for_deferred_shutdown(&cmd);
                     let identity = Self::resume_member_control_target(&cmd).cloned();
                     if let Some(identity) = identity {
                         let depth = deferred_commands
@@ -27998,6 +28183,13 @@ impl MobActor {
                 // this loop's frame carries no extra command copies).
                 if self.pending_autonomous_stop.is_some() && Self::is_lifecycle_control(&cmd) {
                     self.park_lifecycle_control_behind_pending_stop(authority, cmd);
+                    continue;
+                }
+                // A Shutdown in progress (parked on its members' stops or on
+                // its runtime teardown) admits no new member and no member
+                // work it would then neither stop nor report (OB3).
+                if self.shutdown_in_progress() && cmd.starts_member_work() {
+                    cmd.reject_with_error(MobError::ActorCommandChannelClosed);
                     continue;
                 }
                 if matches!(
@@ -29767,6 +29959,8 @@ impl MobActor {
         };
         let precomputed_external_tools =
             self.external_tools_for_profile(&profile, per_spawn_external_tools.clone());
+        let precomputed_bundle_tools =
+            super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         let fallback_prompt = self.fallback_spawn_prompt(&profile_name, &agent_identity);
         let preparation_context = spawn_preparation::LocalSpawnPreparationContext::from_actor(self);
         let preparation_identity = agent_identity.clone();
@@ -29968,6 +30162,7 @@ impl MobActor {
                             agent_identity: agent_identity.clone(),
                             profile,
                             external_tools,
+                            bundle_tools: precomputed_bundle_tools.clone(),
                             compaction_curator_override: compaction_curator_override.clone(),
                             context,
                             labels: labels.clone(),
@@ -30058,6 +30253,7 @@ impl MobActor {
                         },
                     )
                     .await?;
+                    super::tools::attach_declared_bundle_tools(&mut config, precomputed_bundle_tools.clone());
                     config.tool_dispatch_admission = tool_dispatch_admission.clone();
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -30155,6 +30351,7 @@ impl MobActor {
                 system_prompt_override,
             })
             .await?;
+            super::tools::attach_declared_bundle_tools(&mut config, precomputed_bundle_tools.clone());
             config.tool_dispatch_admission = tool_dispatch_admission.clone();
             tracing::debug!(
                 mob_id = %preparation_context.definition.id,
@@ -32602,13 +32799,24 @@ impl MobActor {
         }
 
         let mut pending_items = Vec::with_capacity(completions.len());
+        let mut hold_roster_run_starts = false;
         for (spawn_ticket, result) in completions {
             tracing::debug!(
                 spawn_ticket,
                 "MobActor::handle_spawn_provisioned_batch completing pending slot"
             );
-            let (pending, task_handle) =
+            let (pending, task_handle, hold_member_run_starts) =
                 self.complete_pending_spawn_slot(spawn_ticket, "spawn provisioned batch");
+            if hold_member_run_starts {
+                // A completion into a Stopped mob (#1500): hold the new
+                // member's runtime before anything finalizes it, and the
+                // roster after this batch.
+                hold_roster_run_starts = true;
+                if let Ok(receipt) = result.as_ref() {
+                    self.hold_spawned_member_run_starts(&receipt.member_ref)
+                        .await;
+                }
+            }
             let Some(pending) = pending else {
                 tracing::warn!(spawn_ticket, "received spawn completion for unknown ticket");
                 if let Some(handle) = task_handle {
@@ -32972,6 +33180,9 @@ impl MobActor {
             }
         }
 
+        if hold_roster_run_starts {
+            self.hold_member_run_starts_while_stopped().await;
+        }
         if let Err(error) = self.ensure_pending_spawn_alignment("spawn batch completion") {
             tracing::error!(
                 error = %error,
@@ -33131,6 +33342,10 @@ impl MobActor {
             system_prompt_override,
         })
         .await?;
+        super::tools::attach_declared_bundle_tools(
+            &mut config,
+            super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles),
+        );
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         config.override_web_search = tool_category_overrides.web_search;
         config.application_tool_policy = application_tool_policy;
@@ -33489,17 +33704,43 @@ impl MobActor {
             runtime_mode = ?ctx.runtime_mode,
             "MobActor::start_spawn_activation_from_pending start"
         );
-        let admitted =
-            match boxed_arm_future(|| self.finalize_spawn_admit(&ctx, provision, observed)).await {
-                Ok(admitted) => admitted,
-                Err(error) => {
-                    // Admission failed before any activation stage existed: the
-                    // pending provision is already consumed and the spawn-exec
-                    // phase reset. Settle the caller's continuation here.
-                    self.settle_spawn_activation_route(route, Err(error)).await;
-                    return;
+        let mut observed = observed;
+        let mut supervisor_trust = match observed.as_mut() {
+            Ok(observed) => std::mem::take(&mut observed.supervisor_trust),
+            Err(_) => spawn_admission_io::SpawnSupervisorTrust::NotApplicable,
+        };
+        let admitted = match boxed_arm_future(|| {
+            self.finalize_spawn_admit(&ctx, provision, observed, &mut supervisor_trust)
+        })
+        .await
+        {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                // A failure before finalize reached the trust stage leaves the
+                // off-actor install unconsumed; revoke it like a later failure.
+                if let spawn_admission_io::SpawnSupervisorTrust::Installed {
+                    session_id,
+                    comms,
+                    install,
+                } = supervisor_trust
+                {
+                    Box::pin(
+                        self.supervisor_trust_installer()
+                            .cleanup_supervisor_private_trust_for_session(
+                                &session_id,
+                                &comms,
+                                &install,
+                            ),
+                    )
+                    .await;
                 }
-            };
+                // Admission failed before any activation stage existed: the
+                // pending provision is already consumed and the spawn-exec
+                // phase reset. Settle the caller's continuation here.
+                self.settle_spawn_activation_route(route, Err(error)).await;
+                return;
+            }
+        };
         boxed_arm_future(|| self.finalize_spawn_activate(ctx, admitted, route)).await;
     }
 
@@ -33547,6 +33788,7 @@ impl MobActor {
         ctx: &SpawnFinalizeCtx,
         provision: PendingProvision,
         observed: Result<spawn_admission_io::SpawnAdmissionIo, MobError>,
+        supervisor_trust: &mut spawn_admission_io::SpawnSupervisorTrust,
     ) -> Result<SpawnAdmitted, MobError> {
         let observed = match observed {
             Ok(observed) => observed,
@@ -34045,56 +34287,42 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit resolving supervisor comms"
         );
-        let supervisor_private_trust_install = if agent_identity.is_flow_member_namespace() {
-            tracing::debug!(
-                agent_identity = %agent_identity,
-                "MobActor::finalize_spawn_admit skipped supervisor private trust for run-scoped flow member"
-            );
-            None
-        } else if let (Some(session_id), Some(comms)) = (
-            pending_member_ref.bridge_session_id().cloned(),
-            observed.provisioner_comms,
-        ) {
-            tracing::debug!(
-                agent_identity = %agent_identity,
-                session_id = %session_id,
-                "MobActor::finalize_spawn_admit installing supervisor private trust"
-            );
-            match Box::pin(async {
-                self.install_supervisor_private_trust_for_session(&session_id, &comms, None)
-                    .await
-            })
-            .await
-            {
-                Ok(install) => {
-                    tracing::debug!(
-                        agent_identity = %agent_identity,
-                        session_id = %session_id,
-                        "MobActor::finalize_spawn_admit installed supervisor private trust"
-                    );
-                    Some((session_id, comms, install))
-                }
-                Err(error) => {
-                    let error = self.fold_spawn_exec_abort(
-                        &dsl_identity,
-                        agent_identity,
-                        error.into(),
-                        "finalize_spawn_admit_trust",
-                    );
-                    if let Err(rollback_error) = provision.rollback().await {
-                        return Err(MobError::Internal(format!(
-                            "spawn supervisor private trust failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
-                        )));
-                    }
-                    return Err(error);
-                }
+        // The install itself ran off the actor during the endpoint
+        // observation (`spawn_admission_io`); consume its outcome here.
+        let supervisor_private_trust_install = match std::mem::take(supervisor_trust) {
+            spawn_admission_io::SpawnSupervisorTrust::NotApplicable => {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    "MobActor::finalize_spawn_admit skipped supervisor private trust"
+                );
+                None
             }
-        } else {
-            tracing::debug!(
-                agent_identity = %agent_identity,
-                "MobActor::finalize_spawn_admit skipped supervisor private trust"
-            );
-            None
+            spawn_admission_io::SpawnSupervisorTrust::Installed {
+                session_id,
+                comms,
+                install,
+            } => {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    session_id = %session_id,
+                    "MobActor::finalize_spawn_admit installed supervisor private trust"
+                );
+                Some((session_id, comms, install))
+            }
+            spawn_admission_io::SpawnSupervisorTrust::Failed(error) => {
+                let error = self.fold_spawn_exec_abort(
+                    &dsl_identity,
+                    agent_identity,
+                    error.into(),
+                    "finalize_spawn_admit_trust",
+                );
+                if let Err(rollback_error) = provision.rollback().await {
+                    return Err(MobError::Internal(format!(
+                        "spawn supervisor private trust failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
+            }
         };
 
         if let Some(overlay_record) = overlay_record.as_ref() {
@@ -34111,9 +34339,10 @@ impl MobActor {
                     supervisor_private_trust_install.as_ref()
                 {
                     Box::pin(
-                        self.cleanup_supervisor_private_trust_for_session(
-                            session_id, comms, install,
-                        ),
+                        self.supervisor_trust_installer()
+                            .cleanup_supervisor_private_trust_for_session(
+                                session_id, comms, install,
+                            ),
                     )
                     .await;
                 }
@@ -34175,7 +34404,8 @@ impl MobActor {
             }
             if let Some((session_id, comms, install)) = supervisor_private_trust_install.as_ref() {
                 Box::pin(
-                    self.cleanup_supervisor_private_trust_for_session(session_id, comms, install),
+                    self.supervisor_trust_installer()
+                        .cleanup_supervisor_private_trust_for_session(session_id, comms, install),
                 )
                 .await;
             }
@@ -34257,7 +34487,8 @@ impl MobActor {
             }
             if let Some((session_id, comms, install)) = supervisor_private_trust_install.as_ref() {
                 Box::pin(
-                    self.cleanup_supervisor_private_trust_for_session(session_id, comms, install),
+                    self.supervisor_trust_installer()
+                        .cleanup_supervisor_private_trust_for_session(session_id, comms, install),
                 )
                 .await;
             }
@@ -34447,7 +34678,7 @@ impl MobActor {
                     .then(|| self.placed_member_incarnation(&entry))
                     .transpose()?;
                 self.provisioner
-                    .interrupt_member(&member_ref, expected_member.as_ref())
+                    .cancel_member_admitted_work(&member_ref, expected_member.as_ref())
                     .await?;
             } else {
                 tracing::warn!(
@@ -37234,6 +37465,8 @@ impl MobActor {
         mode: MemberLiveReconcileMode,
     ) -> Result<(), MobError> {
         match completion {
+            #[cfg(test)]
+            MemberLiveMutationCompletion::AwaitedActorForTest => Ok(()),
             MemberLiveMutationCompletion::Open {
                 agent_identity,
                 target,
@@ -51466,16 +51699,18 @@ impl MobActor {
                 member_ref.bridge_session_id().cloned(),
                 self.provisioner_comms(&member_ref).await,
             ) {
-                let supervisor_spec =
-                    Self::supervisor_spec_for_authority(&self.definition.id, next).map_err(
-                        |error| SupervisorAuthorityActivationError {
-                            error,
-                            rollback_succeeded: false,
-                            pending_authority_recorded: true,
-                            rollback_error: None,
-                        },
-                    )?;
+                let supervisor_spec = SupervisorTrustInstaller::supervisor_spec_for_authority(
+                    &self.definition.id,
+                    next,
+                )
+                .map_err(|error| SupervisorAuthorityActivationError {
+                    error,
+                    rollback_succeeded: false,
+                    pending_authority_recorded: true,
+                    rollback_error: None,
+                })?;
                 match self
+                    .supervisor_trust_installer()
                     .install_supervisor_private_trust_for_session_authority(
                         &session_id,
                         &comms,
@@ -51679,6 +51914,18 @@ impl MobActor {
             }
             return Err(error);
         }
+        // Reset releases the run starts a Stop held (#1500), realized after
+        // the commit below.
+        if let Err(error) = Self::require_member_run_start_effect(
+            &prepared.transition,
+            Some(false),
+            "reset_to_running",
+        ) {
+            if was_stopped {
+                self.provisioner.cancel_all_checkpointers().await;
+            }
+            return Err(error);
+        }
 
         // --- Event rewrite phase: append the new epoch marker. ---
         // Append-only epoch model: projections clear on MobReset; the original
@@ -51716,6 +51963,15 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_reset completion")?;
         self.ensure_flow_tracker_alignment("handle_reset completion")
             .await?;
+        // The reset mob runs again: release any run-start hold a Stop left
+        // (#1500). The roster was retired above, so this is normally empty.
+        if let Err(error) = self.release_all_member_run_starts().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "reset could not release every member's run-start hold"
+            );
+        }
         Ok(())
     }
 
@@ -52924,7 +53180,7 @@ impl MobActor {
         let machine_member_ref =
             self.machine_member_ref_for_behavior(&entry, "cancel all work interrupt")?;
         self.provisioner
-            .interrupt_member(&machine_member_ref, expected_member.as_ref())
+            .cancel_member_admitted_work(&machine_member_ref, expected_member.as_ref())
             .await
     }
 
@@ -55932,18 +56188,13 @@ impl MobActor {
             ))
         })?;
 
-        let cmd = match intent {
-            "mob.peer_retired" => CommsCommand::PeerLifecycle {
+        let cmd = match Self::peer_lifecycle_notice_kind(intent) {
+            Some(kind) => CommsCommand::PeerLifecycle {
                 to: peer_route,
-                kind: PeerLifecycleKind::PeerRetired,
+                kind,
                 params,
             },
-            "mob.peer_unwired" => CommsCommand::PeerLifecycle {
-                to: peer_route,
-                kind: PeerLifecycleKind::PeerUnwired,
-                params,
-            },
-            _ => CommsCommand::PeerRequest {
+            None => CommsCommand::PeerRequest {
                 objective_id: None,
                 to: peer_route,
                 intent: intent.to_string(),
@@ -55955,6 +56206,26 @@ impl MobActor {
             },
         };
         Ok(cmd)
+    }
+
+    /// The one-way lifecycle kind a peer notice intent is sent as, or `None`
+    /// for intents still sent as peer requests.
+    ///
+    /// Kickoff status notices are lifecycle notices: sent as requests they
+    /// opened an inbound request on every receiver that nobody ever answered
+    /// (#1608).
+    pub(super) fn peer_lifecycle_notice_kind(intent: &str) -> Option<PeerLifecycleKind> {
+        match intent {
+            "mob.peer_retired" => Some(PeerLifecycleKind::PeerRetired),
+            "mob.peer_unwired" => Some(PeerLifecycleKind::PeerUnwired),
+            "mob.kickoff_pending" => Some(PeerLifecycleKind::KickoffPending),
+            "mob.kickoff_starting" => Some(PeerLifecycleKind::KickoffStarting),
+            "mob.kickoff_started" => Some(PeerLifecycleKind::KickoffStarted),
+            "mob.kickoff_callback_pending" => Some(PeerLifecycleKind::KickoffCallbackPending),
+            "mob.kickoff_failed" => Some(PeerLifecycleKind::KickoffFailed),
+            "mob.kickoff_cancelled" => Some(PeerLifecycleKind::KickoffCancelled),
+            _ => None,
+        }
     }
 
     async fn notify_kickoff_event(
@@ -56229,6 +56500,23 @@ fn routed_effect_session_scope(effect: &mob_dsl::MobMachineEffect) -> Option<Ses
 /// disappeared before dispatch, its terminal objective already holds. Keep
 /// this convergence local to shutdown so ordinary force-cancel callers still
 /// observe the typed absence instead of receiving a false global success.
+/// [`converge_autonomous_stop_interrupt_result`] for a member stop that also
+/// reports its typed outcome: a member that vanished had no run to cancel.
+fn converge_autonomous_stop_member_result(
+    result: Result<super::stop_report::MemberStopOutcome, MobError>,
+) -> Result<super::stop_report::MemberStopOutcome, MobError> {
+    match result {
+        Err(MobError::SessionError(
+            meerkat_core::service::SessionError::NotFound { .. }
+            | meerkat_core::service::SessionError::NotRunning { .. },
+        )) => Ok(super::stop_report::MemberStopOutcome {
+            run: super::stop_report::MemberStopRun::NoRun,
+            starts: super::stop_report::MemberRunStarts::Held,
+        }),
+        result => result,
+    }
+}
+
 fn converge_autonomous_stop_interrupt_result(result: Result<(), MobError>) -> Result<(), MobError> {
     match result {
         Err(MobError::SessionError(
@@ -59820,5 +60108,946 @@ mod bridge_rejection_tests {
             body.contains(".is_err()"),
             "the cleanup attempt result must be inspected, not discarded"
         );
+    }
+}
+
+/// Supervisor private-trust installation for one session, detached from the
+/// actor: it owns clones of the material it needs, so the mob actor can run it
+/// as an off-actor effect and keep serving commands while a member's runtime
+/// or comms answers slowly.
+#[derive(Clone)]
+pub(super) struct SupervisorTrustInstaller {
+    definition: Arc<MobDefinition>,
+    supervisor_bridge: Arc<super::MobSupervisorBridge>,
+    #[cfg(feature = "runtime-adapter")]
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    owner_token: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl SupervisorTrustInstaller {
+    async fn apply_private_trusted_peer_add(
+        &self,
+        comms: &(dyn CoreCommsRuntime + '_),
+        peer: TrustedPeerDescriptor,
+        authority: CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        MobActor::bind_generated_mob_trust_owner_for_authority_with_token(
+            comms,
+            &authority,
+            &self.owner_token,
+        )
+        .await?;
+        match comms
+            .apply_trust_mutation(CommsTrustMutation::AddPrivateTrustedPeer { peer, authority })
+            .await?
+        {
+            CommsTrustMutationResult::Added { .. } => Ok(()),
+            result => Err(MobActor::unexpected_trust_mutation_result(
+                "add private trusted peer",
+                result,
+            )),
+        }
+    }
+
+    async fn apply_private_trusted_peer_remove(
+        &self,
+        comms: &(dyn CoreCommsRuntime + '_),
+        peer_id: String,
+        authority: CommsTrustMutationAuthority,
+    ) -> Result<bool, SendError> {
+        MobActor::bind_generated_mob_trust_owner_for_authority_with_token(
+            comms,
+            &authority,
+            &self.owner_token,
+        )
+        .await?;
+        match comms
+            .apply_trust_mutation(CommsTrustMutation::RemovePrivateTrustedPeer {
+                peer_id,
+                authority,
+            })
+            .await?
+        {
+            CommsTrustMutationResult::Removed { removed } => Ok(removed),
+            result => Err(MobActor::unexpected_trust_mutation_result(
+                "remove private trusted peer",
+                result,
+            )),
+        }
+    }
+
+    fn supervisor_spec_for_authority(
+        mob_id: &crate::MobId,
+        authority: &crate::store::SupervisorAuthorityRecord,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        let participant_name = format!("{mob_id}/__mob_supervisor__");
+        let public_key = authority.keypair().public_key();
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            participant_name.clone(),
+            authority.public_peer_id.clone(),
+            *public_key.as_bytes(),
+            format!("inproc://{participant_name}"),
+        )
+        .map_err(|error| MobError::WiringError(format!("invalid supervisor spec: {error}")))
+    }
+
+    async fn install_supervisor_private_trust_for_session(
+        &self,
+        session_id: &SessionId,
+        comms: &Arc<dyn CoreCommsRuntime>,
+        previous_private_trust_removal_key: Option<&str>,
+    ) -> Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError> {
+        let authority = self.supervisor_bridge.authority().await;
+        let spec = Self::supervisor_spec_for_authority(&self.definition.id, &authority)?;
+        Box::pin(self.install_supervisor_private_trust_for_session_authority(
+            session_id,
+            comms,
+            &authority,
+            spec,
+            None,
+            previous_private_trust_removal_key,
+        ))
+        .await
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn realize_supervisor_private_trust_revoke(
+        &self,
+        request: SupervisorPrivateTrustRevokeRequest<'_>,
+    ) -> Result<bool, MobError> {
+        let SupervisorPrivateTrustRevokeRequest {
+            adapter,
+            session_id,
+            comms,
+            peer_id,
+            epoch,
+            removal_key,
+            allow_absent_pending,
+        } = request;
+        let revoke_transition = match adapter
+            .stage_supervisor_revoke(session_id, peer_id.clone(), epoch)
+            .await
+        {
+            Ok(transition) => transition,
+            Err(_) if allow_absent_pending => return Ok(false),
+            Err(error) => {
+                return Err(MobError::WiringError(format!(
+                    "previous supervisor private trust revoke rejected for session '{session_id}': {error}"
+                )));
+            }
+        };
+        let revoke_freshness = adapter
+            .supervisor_trust_revoke_freshness_authority(session_id)
+            .await
+            .map_err(|error| {
+                MobError::WiringError(format!(
+                    "previous supervisor private trust revoke freshness unavailable for session '{session_id}': {error}"
+                ))
+            })?;
+        let revoke_obligation =
+            meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(
+                &revoke_transition,
+                revoke_freshness,
+            )
+            .into_iter()
+            .find(|obligation| obligation.peer_id() == &peer_id && obligation.epoch() == epoch)
+            .ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "previous supervisor private trust revoke for session '{session_id}' produced no generated revoke obligation"
+                ))
+            })?;
+        if let Err(error) = self
+            .apply_private_trusted_peer_remove(
+                comms,
+                removal_key,
+                MobActor::supervisor_revoke_authority(&revoke_obligation)
+                    .map_err(MobError::WiringError)?,
+            )
+            .await
+        {
+            let feedback = adapter
+                .stage_supervisor_trust_revoke_failed(
+                    session_id,
+                    revoke_obligation.peer_id().clone(),
+                    revoke_obligation.epoch(),
+                    error.to_string(),
+                )
+                .await;
+            let mut reason = format!(
+                "previous supervisor private trust removal failed for session '{session_id}': {error}"
+            );
+            if let Err(feedback_error) = feedback {
+                reason.push_str(&format!("; revoke feedback failed: {feedback_error}"));
+            }
+            return Err(MobError::WiringError(reason));
+        }
+        adapter
+            .stage_supervisor_trust_revoked(
+                session_id,
+                revoke_obligation.peer_id().clone(),
+                revoke_obligation.epoch(),
+            )
+            .await
+            .map_err(|error| {
+                MobError::WiringError(format!(
+                    "previous supervisor private trust revoke feedback rejected for session '{session_id}': {error}"
+                ))
+            })?;
+        Ok(true)
+    }
+
+    async fn install_supervisor_private_trust_for_session_authority(
+        &self,
+        session_id: &SessionId,
+        comms: &Arc<dyn CoreCommsRuntime>,
+        authority: &crate::store::SupervisorAuthorityRecord,
+        spec: TrustedPeerDescriptor,
+        previous_authority: Option<&crate::store::SupervisorAuthorityRecord>,
+        previous_private_trust_removal_key: Option<&str>,
+    ) -> Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError> {
+        #[cfg(feature = "runtime-adapter")]
+        let Some(adapter) = self.runtime_adapter.as_ref() else {
+            return Err(MobError::Internal(format!(
+                "cannot publish supervisor private trust for session '{session_id}': runtime adapter unavailable"
+            ))
+            .into());
+        };
+        #[cfg(not(feature = "runtime-adapter"))]
+        let _ = session_id;
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            return Err(MobError::Internal(
+                "cannot publish supervisor private trust without runtime adapter".to_string(),
+            )
+            .into());
+        }
+
+        #[cfg(feature = "runtime-adapter")]
+        {
+            use meerkat_runtime::protocol_supervisor_trust_publish;
+
+            adapter
+                .stage_local_endpoint_for_comms_runtime(session_id, comms.as_ref())
+                .await
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "supervisor private trust local endpoint rejected for session '{session_id}': {error}"
+                    ))
+                })?;
+
+            let next_name = spec.name.as_str().to_owned();
+            let next_peer_id = spec.peer_id.as_str().to_owned();
+            let next_address = spec.address.to_string();
+            let next_signing_public_key =
+                meerkat_runtime::comms_drain::encode_supervisor_signing_public_key(spec.pubkey);
+            let next_epoch = authority.epoch;
+            let previous = adapter.supervisor_binding(session_id).await;
+            let already_bound = matches!(
+                &previous,
+                meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
+                    name,
+                    peer_id,
+                    address,
+                    signing_public_key,
+                    epoch,
+                } if name == &next_name
+                    && peer_id == &next_peer_id
+                    && address == &next_address
+                    && signing_public_key == &next_signing_public_key
+                    && *epoch == next_epoch
+            );
+
+            let previous_peer_is_different = matches!(
+                &previous,
+                meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { peer_id, .. }
+                    if peer_id != &next_peer_id
+            );
+            if matches!(
+                &previous,
+                meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound
+            ) && let Some(previous_authority) = previous_authority
+            {
+                // A prior activation attempt may have staged the old binding's
+                // durable revoke but failed the router removal. The generated
+                // machine intentionally remains Unbound+RevokePending, so a
+                // blind BindSupervisor retry is rejected. Rematerialize and
+                // discharge that exact old peer/epoch obligation first. If the
+                // binding is simply fresh-Unbound there is no pending revoke;
+                // the guarded retry is absent and normal bind proceeds.
+                let _ = self
+                    .realize_supervisor_private_trust_revoke(SupervisorPrivateTrustRevokeRequest {
+                        adapter: adapter.as_ref(),
+                        session_id,
+                        comms: comms.as_ref(),
+                        peer_id: previous_authority.public_peer_id.clone(),
+                        epoch: previous_authority.epoch,
+                        removal_key: previous_private_trust_removal_key
+                            .map(str::to_string)
+                            .unwrap_or_else(|| previous_authority.public_peer_id.clone()),
+                        allow_absent_pending: true,
+                    })
+                    .await?;
+            }
+            if previous_peer_is_different {
+                let meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
+                    peer_id: previous_peer_id,
+                    epoch: previous_epoch,
+                    ..
+                } = &previous
+                else {
+                    return Err(MobError::Internal(
+                        "supervisor replacement classifier selected an unbound predecessor"
+                            .to_string(),
+                    )
+                    .into());
+                };
+                let previous_peer_id = previous_peer_id.clone();
+                let previous_epoch = *previous_epoch;
+                let previous_removal_key = previous_private_trust_removal_key
+                    .map(str::to_string)
+                    .unwrap_or_else(|| previous_peer_id.clone());
+                self.realize_supervisor_private_trust_revoke(SupervisorPrivateTrustRevokeRequest {
+                    adapter: adapter.as_ref(),
+                    session_id,
+                    comms: comms.as_ref(),
+                    peer_id: previous_peer_id,
+                    epoch: previous_epoch,
+                    removal_key: previous_removal_key,
+                    allow_absent_pending: false,
+                })
+                .await?;
+            }
+
+            let stage_transition = if already_bound {
+                adapter
+                    .stage_supervisor_trust_publish_request(
+                        session_id,
+                        next_name.clone(),
+                        next_peer_id.clone(),
+                        next_address.clone(),
+                        next_signing_public_key.clone(),
+                        next_epoch,
+                    )
+                    .await
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "supervisor private trust publish request rejected for session '{session_id}': {error}"
+                    ))
+                })?
+            } else if previous_peer_is_different {
+                Self::stage_supervisor_bind_for_private_trust(
+                    adapter,
+                    session_id,
+                    next_name.clone(),
+                    next_peer_id.clone(),
+                    next_address.clone(),
+                    next_signing_public_key.clone(),
+                    next_epoch,
+                )
+                .await
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "supervisor private trust bind rejected for session '{session_id}': {error}"
+                    ))
+                })?
+            } else {
+                match &previous {
+                    meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
+                        Self::stage_supervisor_bind_for_private_trust(
+                            adapter,
+                            session_id,
+                            next_name.clone(),
+                            next_peer_id.clone(),
+                            next_address.clone(),
+                            next_signing_public_key.clone(),
+                            next_epoch,
+                        )
+                        .await
+                        .map_err(|error| {
+                            MobError::WiringError(format!(
+                                "supervisor private trust bind rejected for session '{session_id}': {error}"
+                            ))
+                        })?
+                    }
+                    meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { .. } => {
+                        adapter
+                            .stage_supervisor_authorize(
+                                session_id,
+                                next_name.clone(),
+                                next_peer_id.clone(),
+                                next_address.clone(),
+                                next_signing_public_key.clone(),
+                                next_epoch,
+                            )
+                            .await
+                            .map_err(|error| {
+                                MobError::WiringError(format!(
+                                    "supervisor private trust rotation rejected for session '{session_id}': {error}"
+                                ))
+                            })?
+                    }
+                    _ => {
+                        return Err(MobError::WiringError(format!(
+                            "supervisor private trust publication for session '{session_id}' saw an unknown supervisor binding variant"
+                        ))
+                        .into());
+                    }
+                }
+            };
+            let publish_freshness = adapter
+                .supervisor_trust_publish_freshness_authority(session_id)
+                .await
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "supervisor private trust publish freshness unavailable for session '{session_id}': {error}"
+                    ))
+                })?;
+            let obligations = protocol_supervisor_trust_publish::extract_obligations_with_freshness(
+                &stage_transition,
+                publish_freshness,
+            );
+            let publish_obligation = match obligations.as_slice() {
+                [obligation] => obligation.clone(),
+                [] => {
+                    return Err(MobError::WiringError(format!(
+                        "supervisor private trust publication for session '{session_id}' produced no generated publish obligation"
+                    ))
+                    .into());
+                }
+                _ => {
+                    return Err(MobError::WiringError(format!(
+                        "supervisor private trust publication for session '{session_id}' produced multiple generated publish obligations"
+                    ))
+                    .into());
+                }
+            };
+            if publish_obligation.name() != &next_name
+                || publish_obligation.peer_id() != &next_peer_id
+                || publish_obligation.address() != &next_address
+                || publish_obligation.signing_public_key().as_deref()
+                    != Some(next_signing_public_key.as_str())
+                || publish_obligation.epoch() != next_epoch
+            {
+                return Err(MobError::WiringError(format!(
+                    "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding"
+                ))
+                .into());
+            }
+            let publish_spec =
+                meerkat_runtime::comms_drain::trusted_peer_descriptor_from_supervisor_publish_obligation(
+                    &publish_obligation,
+                )
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "supervisor private trust publication for session '{session_id}' generated invalid trust descriptor: {error}"
+                    ))
+                })?;
+            let publish_peer_id = publish_obligation.peer_id().clone();
+            let publish_epoch = publish_obligation.epoch();
+            let publish_removal_key = MobActor::trusted_peer_removal_key(&publish_spec);
+            let publish_cleanup_authority =
+                MobActor::supervisor_publish_cleanup_authority(&publish_obligation)
+                    .map_err(MobError::WiringError)?;
+            let rollback_binding = previous.clone();
+
+            if let Err(error) = self
+                .apply_private_trusted_peer_add(
+                    comms.as_ref(),
+                    publish_spec.clone(),
+                    MobActor::supervisor_publish_authority(&publish_obligation)
+                        .map_err(MobError::WiringError)?,
+                )
+                .await
+            {
+                let _ = adapter
+                    .stage_supervisor_trust_publish_failed(
+                        session_id,
+                        publish_peer_id.clone(),
+                        publish_epoch,
+                        error.to_string(),
+                    )
+                    .await;
+                let new_trust_cleanup_failed = if !already_bound {
+                    self.cleanup_supervisor_private_trust_publish_attempt(
+                        session_id,
+                        comms,
+                        publish_cleanup_authority.clone(),
+                        publish_removal_key.clone(),
+                        "failed to clean up supervisor private trust after publish add failure",
+                    )
+                    .await
+                    .is_err()
+                } else {
+                    false
+                };
+                let rollback = if already_bound {
+                    Ok(())
+                } else {
+                    self.rollback_supervisor_private_trust_binding(
+                        adapter,
+                        session_id,
+                        comms,
+                        &rollback_binding,
+                        &publish_peer_id,
+                        publish_epoch,
+                    )
+                    .await
+                };
+                let mut reason = format!(
+                    "supervisor private trust publication failed for session '{session_id}': {error}"
+                );
+                if let Err(rollback_error) = rollback {
+                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
+                }
+                let error = MobError::WiringError(reason);
+                return Err(if new_trust_cleanup_failed {
+                    SupervisorPrivateTrustInstallError::with_failed_new_trust_cleanup(error)
+                } else {
+                    SupervisorPrivateTrustInstallError::without_cleanup_failure(error)
+                });
+            }
+
+            if let Err(error) = Self::stage_supervisor_trust_published_for_private_trust(
+                adapter,
+                session_id,
+                publish_peer_id.clone(),
+                publish_epoch,
+            )
+            .await
+            {
+                let new_trust_cleanup_failed = if !already_bound {
+                    self.cleanup_supervisor_private_trust_publish_attempt(
+                        session_id,
+                        comms,
+                        publish_cleanup_authority,
+                        publish_removal_key.clone(),
+                        "failed to clean up supervisor private trust after rejected publish ack",
+                    )
+                    .await
+                    .is_err()
+                } else {
+                    false
+                };
+                let rollback = if already_bound {
+                    Ok(())
+                } else {
+                    self.rollback_supervisor_private_trust_binding(
+                        adapter,
+                        session_id,
+                        comms,
+                        &rollback_binding,
+                        &publish_peer_id,
+                        publish_epoch,
+                    )
+                    .await
+                };
+                let mut reason = format!(
+                    "supervisor private trust publication ack rejected for session '{session_id}': {error}"
+                );
+                if let Err(rollback_error) = rollback {
+                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
+                }
+                let error = MobError::WiringError(reason);
+                return Err(if new_trust_cleanup_failed {
+                    SupervisorPrivateTrustInstallError::with_failed_new_trust_cleanup(error)
+                } else {
+                    SupervisorPrivateTrustInstallError::without_cleanup_failure(error)
+                });
+            }
+
+            Ok(SupervisorPrivateTrustInstall {
+                peer_id: next_peer_id,
+                epoch: next_epoch,
+                removal_key: publish_removal_key,
+            })
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn stage_supervisor_trust_published_for_private_trust(
+        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: &SessionId,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<(), meerkat_runtime::meerkat_machine::SupervisorBindingStageError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let adapter = Arc::clone(adapter);
+            let session_id = session_id.clone();
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let result = adapter
+                    .stage_supervisor_trust_published(&session_id, peer_id, epoch)
+                    .await;
+                let _ = reply_tx.send(result);
+            });
+            reply_rx.await.map_err(|_| {
+                meerkat_runtime::meerkat_machine::SupervisorBindingStageError::SessionRegistryBusy
+            })?
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            adapter
+                .stage_supervisor_trust_published(session_id, peer_id, epoch)
+                .await
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn stage_supervisor_bind_for_private_trust(
+        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: &SessionId,
+        name: String,
+        peer_id: String,
+        address: String,
+        signing_public_key: String,
+        epoch: u64,
+    ) -> Result<
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineTransition,
+        meerkat_runtime::meerkat_machine::SupervisorBindingStageError,
+    > {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let adapter = Arc::clone(adapter);
+            let session_id = session_id.clone();
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let result = adapter
+                    .stage_supervisor_bind(
+                        &session_id,
+                        name,
+                        peer_id,
+                        address,
+                        signing_public_key,
+                        epoch,
+                    )
+                    .await;
+                let _ = reply_tx.send(result);
+            });
+            reply_rx.await.map_err(|_| {
+                meerkat_runtime::meerkat_machine::SupervisorBindingStageError::SessionRegistryBusy
+            })?
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            adapter
+                .stage_supervisor_bind(
+                    session_id,
+                    name,
+                    peer_id,
+                    address,
+                    signing_public_key,
+                    epoch,
+                )
+                .await
+        }
+    }
+
+    /// Remove the just-attempted ("new") supervisor private trust after a failed
+    /// publish. Returns the typed cleanup result so callers can record whether
+    /// the compensation itself failed — the activation rollback keys on that
+    /// structured verdict rather than parsing the formatted error message.
+    async fn cleanup_supervisor_private_trust_publish_attempt(
+        &self,
+        session_id: &SessionId,
+        comms: &Arc<dyn CoreCommsRuntime>,
+        authority: CommsTrustMutationAuthority,
+        removal_key: String,
+        context: &'static str,
+    ) -> Result<(), MobError> {
+        if let Err(error) = self
+            .apply_private_trusted_peer_remove(comms.as_ref(), removal_key, authority)
+            .await
+        {
+            tracing::warn!(
+                %session_id,
+                %error,
+                context,
+                "failed to clean up supervisor private trust publish attempt"
+            );
+            return Err(MobError::from(error));
+        }
+        Ok(())
+    }
+
+    async fn cleanup_supervisor_private_trust_for_session(
+        &self,
+        session_id: &SessionId,
+        comms: &Arc<dyn CoreCommsRuntime>,
+        install: &SupervisorPrivateTrustInstall,
+    ) {
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(adapter) = self.runtime_adapter.as_ref() {
+            if let Err(error) = adapter
+                .stage_local_endpoint_for_comms_runtime(session_id, comms.as_ref())
+                .await
+            {
+                tracing::warn!(
+                    %session_id,
+                    peer_id = %install.peer_id,
+                    epoch = install.epoch,
+                    %error,
+                    "failed to stage local endpoint for supervisor private trust cleanup"
+                );
+                return;
+            }
+            let transition = match adapter
+                .stage_supervisor_revoke(session_id, install.peer_id.clone(), install.epoch)
+                .await
+            {
+                Ok(transition) => transition,
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        peer_id = %install.peer_id,
+                        epoch = install.epoch,
+                        %error,
+                        "failed to stage supervisor private trust cleanup"
+                    );
+                    return;
+                }
+            };
+            let revoke_freshness = match adapter
+                .supervisor_trust_revoke_freshness_authority(session_id)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        peer_id = %install.peer_id,
+                        epoch = install.epoch,
+                        %error,
+                        "failed to build generated supervisor private trust cleanup freshness"
+                    );
+                    return;
+                }
+            };
+            let obligations =
+                meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(&transition, revoke_freshness);
+            let Some(obligation) = obligations.into_iter().find(|obligation| {
+                obligation.peer_id() == &install.peer_id && obligation.epoch() == install.epoch
+            }) else {
+                let reason =
+                    "generated supervisor private trust cleanup effect was absent".to_string();
+                let _ = adapter
+                    .stage_supervisor_trust_revoke_failed(
+                        session_id,
+                        install.peer_id.clone(),
+                        install.epoch,
+                        reason.clone(),
+                    )
+                    .await;
+                tracing::warn!(
+                    %session_id,
+                    peer_id = %install.peer_id,
+                    epoch = install.epoch,
+                    reason,
+                    "failed to stage supervisor private trust cleanup"
+                );
+                return;
+            };
+            if let Err(error) = self.apply_private_trusted_peer_remove(
+                comms.as_ref(),
+                install.removal_key.clone(),
+                match MobActor::supervisor_revoke_authority(&obligation) {
+                    Ok(authority) => authority,
+                    Err(error) => {
+                        let _ = adapter
+                            .stage_supervisor_trust_revoke_failed(
+                                session_id,
+                                obligation.peer_id().clone(),
+                                obligation.epoch(),
+                                error.clone(),
+                            )
+                            .await;
+                        tracing::warn!(
+                            %session_id,
+                            peer_id = %install.peer_id,
+                            epoch = install.epoch,
+                            %error,
+                            "failed to build generated supervisor private trust cleanup authority"
+                        );
+                        return;
+                    }
+                },
+            )
+            .await
+            {
+                let _ = adapter
+                    .stage_supervisor_trust_revoke_failed(
+                        session_id,
+                        obligation.peer_id().clone(),
+                        obligation.epoch(),
+                        error.to_string(),
+                    )
+                    .await;
+                tracing::warn!(
+                    %session_id,
+                    peer_id = %install.peer_id,
+                    epoch = install.epoch,
+                    %error,
+                    "failed to clean up supervisor private trust"
+                );
+                return;
+            }
+            if let Err(error) = adapter
+                .stage_supervisor_trust_revoked(
+                    session_id,
+                    obligation.peer_id().clone(),
+                    obligation.epoch(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    %session_id,
+                    peer_id = %install.peer_id,
+                    epoch = install.epoch,
+                    %error,
+                    "failed to acknowledge supervisor private trust cleanup"
+                );
+            }
+            return;
+        }
+
+        let _ = comms;
+        tracing::warn!(
+            %session_id,
+            peer_id = %install.peer_id,
+            epoch = install.epoch,
+            "skipping supervisor private trust cleanup because generated runtime adapter authority is unavailable"
+        );
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn rollback_supervisor_private_trust_binding(
+        &self,
+        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: &SessionId,
+        comms: &Arc<dyn CoreCommsRuntime>,
+        previous: &meerkat_runtime::meerkat_machine::SupervisorBinding,
+        current_peer_id: &str,
+        current_epoch: u64,
+    ) -> Result<(), MobError> {
+        adapter
+            .stage_local_endpoint_for_comms_runtime(session_id, comms.as_ref())
+            .await
+            .map_err(|error| MobError::WiringError(error.to_string()))?;
+        match previous {
+            meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
+                let transition = adapter
+                    .stage_supervisor_revoke(session_id, current_peer_id.to_string(), current_epoch)
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                let revoke_freshness = adapter
+                    .supervisor_trust_revoke_freshness_authority(session_id)
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                if let Some(obligation) =
+                    meerkat_runtime::protocol_supervisor_trust_revoke::extract_obligations_with_freshness(
+                        &transition,
+                        revoke_freshness,
+                    )
+                    .into_iter()
+                    .find(|obligation| {
+                        obligation.peer_id().as_str() == current_peer_id
+                            && obligation.epoch() == current_epoch
+                    })
+                {
+                    adapter
+                        .stage_supervisor_trust_revoked(
+                            session_id,
+                            obligation.peer_id().clone(),
+                            obligation.epoch(),
+                        )
+                        .await
+                        .map_err(|error| MobError::WiringError(error.to_string()))?;
+                }
+                Ok(())
+            }
+            meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
+                name,
+                peer_id,
+                address,
+                signing_public_key,
+                epoch,
+            } => {
+                let current = adapter.supervisor_binding(session_id).await;
+                let transition = match current {
+                    meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => adapter
+                        .stage_supervisor_bind(
+                            session_id,
+                            name.clone(),
+                            peer_id.clone(),
+                            address.clone(),
+                            signing_public_key.clone(),
+                            *epoch,
+                        )
+                        .await,
+                    meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { .. } => adapter
+                        .stage_supervisor_authorize(
+                            session_id,
+                            name.clone(),
+                            peer_id.clone(),
+                            address.clone(),
+                            signing_public_key.clone(),
+                            *epoch,
+                        )
+                        .await,
+                    other => {
+                        return Err(MobError::WiringError(format!(
+                            "supervisor private trust rollback for session '{session_id}' saw unsupported current binding {other:?}"
+                        )));
+                    }
+                }
+                .map_err(|error| MobError::WiringError(error.to_string()))?;
+                let publish_freshness = adapter
+                    .supervisor_trust_publish_freshness_authority(session_id)
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                let obligation =
+                    meerkat_runtime::protocol_supervisor_trust_publish::extract_obligations_with_freshness(
+                        &transition,
+                        publish_freshness,
+                    )
+                    .into_iter()
+                    .find(|obligation| {
+                        obligation.peer_id() == peer_id
+                            && obligation.epoch() == *epoch
+                            && obligation.signing_public_key().as_deref()
+                                == Some(signing_public_key.as_str())
+                    })
+                    .ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "supervisor private trust rollback for session '{session_id}' produced no generated publish obligation"
+                        ))
+                    })?;
+                let trusted_peer =
+                    meerkat_runtime::comms_drain::trusted_peer_descriptor_from_supervisor_publish_obligation(
+                        &obligation,
+                    )
+                    .map_err(MobError::WiringError)?;
+                self.apply_private_trusted_peer_add(
+                    comms.as_ref(),
+                    trusted_peer,
+                    MobActor::supervisor_publish_authority(&obligation)
+                        .map_err(MobError::WiringError)?,
+                )
+                .await
+                .map_err(|error| MobError::WiringError(error.to_string()))?;
+                adapter
+                    .stage_supervisor_trust_published(
+                        session_id,
+                        obligation.peer_id().clone(),
+                        obligation.epoch(),
+                    )
+                    .await
+                    .map_err(|error| MobError::WiringError(error.to_string()))?;
+                Ok(())
+            }
+            _ => Err(MobError::WiringError(
+                "unknown supervisor binding variant during rollback".to_string(),
+            )),
+        }
     }
 }

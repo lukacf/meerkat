@@ -320,6 +320,104 @@ Failed in:
         self.assertFalse(structural)
         self.assertEqual(symbols, ("Widget", "Sealed"))
 
+    def test_v0_50_lint_shapes_are_structural(self) -> None:
+        # Message shapes from the cargo-semver-checks v0.50.0 lint templates,
+        # with the location suffix the parser strips.
+        cases = {
+            "enum_unit_variant_changed_kind": (
+                "variant AgentEvent::Idle in crates/meerkat-core/src/event.rs:40",
+                ("AgentEvent", "Idle"),
+            ),
+            "trait_missing": (
+                "trait meerkat_core::SessionStore, previously in file "
+                "crates/meerkat-core/src/session_store.rs:1315",
+                ("SessionStore",),
+            ),
+            "type_method_marked_deprecated": (
+                "method meerkat_rpc::session_runtime::SessionRuntime::set_callback_channel "
+                "in crates/meerkat-rpc/src/session_runtime.rs:6303",
+                ("SessionRuntime", "set_callback_channel"),
+            ),
+            "pub_module_level_const_missing": (
+                "LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS in file "
+                "crates/meerkat/src/session_runtime/live_orchestration.rs:41",
+                ("LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS",),
+            ),
+        }
+        for lint_id, (item, expected) in cases.items():
+            with self.subTest(lint_id=lint_id):
+                symbols, structural = gate.extract_symbols(lint_id, gate.strip_location(item))
+                self.assertTrue(structural)
+                self.assertEqual(symbols, expected)
+
+    def test_unrecognized_shape_fails_closed_naming_the_lint(self) -> None:
+        item = "type Widget is now sealed by trait Sealed"
+        symbols, structural = gate.extract_symbols("some_future_lint", item)
+        parsed = gate.ReportParse(
+            findings=[gate.Finding("some_future_lint", "crate", item, symbols, structural)]
+        )
+        errors = gate.check_recognized(parsed)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("[some_future_lint]", errors[0])
+        # A known lint whose message shape changed fails the same way.
+        changed = "variant shape nobody has seen"
+        symbols, structural = gate.extract_symbols("enum_variant_added", changed)
+        self.assertFalse(structural)
+        parsed = gate.ReportParse(
+            findings=[gate.Finding("enum_variant_added", "crate", changed, symbols, structural)]
+        )
+        self.assertIn("[enum_variant_added]", gate.check_recognized(parsed)[0])
+
+    def test_deprecation_is_declared_under_deprecated_not_breaking(self) -> None:
+        item = "method meerkat_rpc::session_runtime::SessionRuntime::set_callback_channel"
+        symbols, structural = gate.extract_symbols("type_method_marked_deprecated", item)
+        parsed = gate.ReportParse(
+            findings=[
+                gate.Finding("type_method_marked_deprecated", "meerkat-rpc", item, symbols, structural)
+            ]
+        )
+
+        def section(body: str) -> "gate.Section":
+            return gate.Section("## [Unreleased]", None, "", body)
+
+        declared = section(
+            "\n### Breaking\n\n- `Other` changed.\n\n### Deprecated\n\n"
+            "- `SessionRuntime::set_callback_channel`.\n"
+        )
+        self.assertEqual(gate.check_named(parsed, declared), [])
+
+        only_breaking = section(
+            "\n### Breaking\n\n- `SessionRuntime::set_callback_channel` deprecated.\n"
+        )
+        errors = gate.check_named(parsed, only_breaking)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("`### Deprecated`", errors[0])
+
+        undeclared = section(
+            "\n### Breaking\n\n- `Other` changed.\n\n### Deprecated\n\n- `Unrelated`.\n"
+        )
+        errors = gate.check_named(parsed, undeclared)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("`set_callback_channel`", errors[0])
+        self.assertIn("`### Deprecated`", errors[0])
+
+    def test_real_breaks_still_require_breaking(self) -> None:
+        item = "trait meerkat_core::SessionStore"
+        symbols, structural = gate.extract_symbols("trait_missing", item)
+        parsed = gate.ReportParse(
+            findings=[gate.Finding("trait_missing", "meerkat-core", item, symbols, structural)]
+        )
+        under_deprecated = gate.Section(
+            "## [Unreleased]", None, "", "\n### Deprecated\n\n- `SessionStore`.\n"
+        )
+        errors = gate.check_named(parsed, under_deprecated)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("`### Breaking`", errors[0])
+
+    def test_recognized_findings_pass_check_recognized(self) -> None:
+        parsed = gate.parse_report(SQLITE_REPORT)
+        self.assertEqual(gate.check_recognized(parsed), [])
+
     def test_clean_report_has_no_findings_but_is_measured(self) -> None:
         parsed = gate.parse_report(CLEAN_REPORT)
         self.assertEqual(parsed.findings, [])
@@ -362,10 +460,10 @@ Failed in:
             "    Finished [ 0.1s] meerkat-core\n"
         )
 
-    def section(self, declaration: str) -> "gate.Section":
+    def section(self, declaration: str, category: str = "Breaking") -> "gate.Section":
         return gate.Section(
             "## [0.8.51] - 2026-10-02", "0.8.51", " - 2026-10-02",
-            "\n### Breaking\n\n- " + declaration + "\n",
+            f"\n### {category}\n\n- " + declaration + "\n",
         )
 
     def test_lowercase_removed_functions_have_exact_structural_names(self) -> None:
@@ -398,14 +496,14 @@ Failed in:
             "`SessionRuntime::set_callback_channel_v2` changed.",
         ):
             with self.subTest(declaration=declaration):
-                errors = gate.check_named(parsed, self.section(declaration))
+                errors = gate.check_named(parsed, self.section(declaration, "Deprecated"))
                 self.assertEqual(len(errors), 1)
                 self.assertIn("missing: `set_callback_channel`", errors[0])
-        owner_missing = gate.check_named(parsed, self.section("`set_callback_channel` deprecated."))
+        owner_missing = gate.check_named(parsed, self.section("`set_callback_channel` deprecated.", "Deprecated"))
         self.assertEqual(len(owner_missing), 1)
         self.assertIn("missing: `SessionRuntime`", owner_missing[0])
         self.assertEqual(
-            gate.check_named(parsed, self.section("`SessionRuntime::set_callback_channel` deprecated.")),
+            gate.check_named(parsed, self.section("`SessionRuntime::set_callback_channel` deprecated.", "Deprecated")),
             [],
         )
 
@@ -979,7 +1077,7 @@ class CliAcceptanceTests(unittest.TestCase):
     def test_c_correct_changelog_is_green(self) -> None:
         result = self.run_gate(self.head + "## [Unreleased]\n\n" + self.section + self.tail)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("7 public-API break(s) detected, all named", result.stdout)
+        self.assertIn("7 public-API finding(s) detected, every break named", result.stdout)
 
     def test_a_omitted_break_is_red_and_names_the_missing_item(self) -> None:
         text = self.head + "## [Unreleased]\n\n" + self.section.replace("Copy", "Klone") + self.tail

@@ -294,7 +294,51 @@ impl JsonlRpcClient {
         }
         Ok(response["result"].clone())
     }
+
+    /// The whole of a session's `session/history`: pages of
+    /// [`SESSION_HISTORY_PAGE`] rows read by offset until a short page, so a
+    /// check sees every row whatever the history's length. The returned value
+    /// is the first page's result with `messages` holding every row in order.
+    pub async fn session_history(
+        &mut self,
+        session_id: Value,
+        timeout_secs: u64,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mut history = Value::Null;
+        let mut messages = Vec::new();
+        loop {
+            let page = self
+                .call(
+                    "session/history",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "offset": messages.len(),
+                        "limit": SESSION_HISTORY_PAGE,
+                    }),
+                    timeout_secs,
+                )
+                .await?;
+            let rows = page["messages"]
+                .as_array()
+                .ok_or("session/history page carries no messages array")?
+                .clone();
+            let short = rows.len() < SESSION_HISTORY_PAGE;
+            messages.extend(rows);
+            if history.is_null() {
+                history = page;
+            }
+            if short {
+                break;
+            }
+        }
+        history["messages"] = Value::Array(messages);
+        Ok(history)
+    }
 }
+
+/// Rows per `session/history` page read by [`JsonlRpcClient::session_history`]
+/// (the RPC's default page; its maximum is 1000).
+pub const SESSION_HISTORY_PAGE: usize = 100;
 
 /// Provider protocol observed by the browser peer on the `oai-events` data
 /// channel. Selects the harness mode and the safe event classification used
@@ -354,10 +398,95 @@ impl BrowserPeerProtocol {
     }
 }
 
+/// Applies `live/assistant_playback_hint`s to one browser peer's assistant
+/// playback: a fire-and-forget `playback_hint` command the peer answers with
+/// no response line, so it never disturbs the test's request/response
+/// commands.
+#[derive(Clone)]
+pub struct PlaybackHintSender {
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+}
+
+impl PlaybackHintSender {
+    pub async fn send(&self, hint: &str) -> std::io::Result<()> {
+        let line = format!("{}\n", json!({"type": "playback_hint", "hint": hint}));
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await
+    }
+}
+
+/// The browser peer currently answering a channel's playback hints (#1638).
+/// The RPC tee applies each `live/assistant_playback_hint` notification to
+/// it the moment the server writes it, as a client's notification handler
+/// would; a reopen swaps in the new peer.
+#[derive(Clone, Default)]
+pub struct PlaybackHintRelay {
+    peer: Arc<std::sync::Mutex<Option<PlaybackHintSender>>>,
+}
+
+impl PlaybackHintRelay {
+    pub fn attach(&self, peer: &BrowserPeer) {
+        if let Ok(mut slot) = self.peer.lock() {
+            *slot = Some(peer.playback_hint_sender());
+        }
+    }
+
+    /// Apply one hint (`"duck"` or `"restore"`) to the attached peer, if any.
+    pub async fn apply(&self, hint: &str) {
+        let sender = self.peer.lock().ok().and_then(|slot| slot.clone());
+        if let Some(sender) = sender {
+            let _ = sender.send(hint).await;
+        }
+    }
+}
+
+/// A JSONL RPC duplex whose server-to-client lines pass through unchanged,
+/// except that each `live/assistant_playback_hint` notification is also
+/// applied to the relay's browser peer as soon as the server writes it. The
+/// test's client reads notifications only when it calls, so without the tee
+/// a hint would reach the peer long after the barge-in it is for.
+pub fn playback_hint_tee(
+    relay: &PlaybackHintRelay,
+) -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+    let (client_stream, client_mid) = tokio::io::duplex(1024 * 1024);
+    let (server_stream, server_mid) = tokio::io::duplex(1024 * 1024);
+    let (mut client_mid_read, mut client_mid_write) = tokio::io::split(client_mid);
+    let (server_mid_read, mut server_mid_write) = tokio::io::split(server_mid);
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut client_mid_read, &mut server_mid_write).await;
+    });
+    let relay = relay.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(server_mid_read);
+        loop {
+            let mut line = String::new();
+            match lines.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            if line.contains("live/assistant_playback_hint")
+                && let Ok(message) = serde_json::from_str::<Value>(&line)
+                && message["method"] == "live/assistant_playback_hint"
+                && let Some(hint) = message["params"]["hint"].as_str()
+            {
+                relay.apply(hint).await;
+            }
+            if client_mid_write.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+    (client_stream, server_stream)
+}
+
 pub struct BrowserPeer {
     evidence: Option<(evidence::Journal, u32)>,
     child: Child,
-    stdin: ChildStdin,
+    /// Shared with [`PlaybackHintSender`]s: the test's request/response
+    /// commands and fire-and-forget playback hints each write whole lines
+    /// under this lock.
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     stdout: BrowserOutput,
     next_id: u64,
     pub protocol: BrowserPeerProtocol,
@@ -487,7 +616,7 @@ impl BrowserPeer {
         Ok(Self {
             evidence,
             child,
-            stdin,
+            stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
             stdout,
             next_id: 1,
             protocol,
@@ -496,14 +625,24 @@ impl BrowserPeer {
         })
     }
 
+    /// A sender that applies `live/assistant_playback_hint`s to this peer's
+    /// assistant playback while the test keeps driving the peer.
+    pub fn playback_hint_sender(&self) -> PlaybackHintSender {
+        PlaybackHintSender {
+            stdin: Arc::clone(&self.stdin),
+        }
+    }
+
     pub async fn call(&mut self, command: Value) -> Result<Value, Box<dyn std::error::Error>> {
         let id = self.next_id;
         self.next_id += 1;
         let mut command = command;
         command["id"] = json!(id);
-        self.stdin.write_all(command.to_string().as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        {
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all(format!("{command}\n").as_bytes()).await?;
+            stdin.flush().await?;
+        }
         let response: Value = match &mut self.stdout {
             BrowserOutput::Direct(stdout) => {
                 let mut line = String::new();
@@ -595,6 +734,7 @@ impl BrowserPeer {
     /// schedule id; the browser records `scheduled`, `anchor_fired`,
     /// `fixture_start`, and `fixture_end` timeline entries as it happens.
     pub async fn play_at(&mut self, spec: &PlayAt) -> Result<u64, Box<dyn std::error::Error>> {
+        self.provider_step(&play_at_step(&spec.name));
         let mut command = serde_json::to_value(spec)?;
         command["type"] = json!("play_at");
         let result = self.call(command).await?;
@@ -609,6 +749,8 @@ impl BrowserPeer {
         &mut self,
         items: &[PlayAt],
     ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+        let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+        self.provider_step(&queue_step(&names));
         let result = self.call(json!({"type":"queue","items":items})).await?;
         Ok(serde_json::from_value(result["scheduled"].clone())?)
     }
@@ -626,12 +768,40 @@ impl BrowserPeer {
         &mut self,
         mode: DisconnectMode,
     ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mode_name = serde_json::to_value(mode)?;
+        self.provider_step(&format!(
+            "disconnect:{}",
+            mode_name.as_str().unwrap_or("unknown")
+        ));
         self.call(json!({"type":"disconnect","mode":mode})).await
+    }
+
+    /// Mark a browser action in the channel's provider stream before it
+    /// happens: provider frames it causes are recorded after the marker.
+    fn provider_step(&self, step: &str) {
+        if let Some((journal, channel)) = &self.evidence {
+            journal.provider_step(*channel, step);
+        }
     }
 
     pub async fn timeline(&mut self) -> Result<Vec<TimelineEntry>, Box<dyn std::error::Error>> {
         let result = self.call(json!({"type":"timeline"})).await?;
         Ok(serde_json::from_value(result["timeline"].clone())?)
+    }
+
+    /// Record this peer's timeline in its journal (`Record::Timeline`, the
+    /// shape S103/S104 write): the input of the Turbo S lag rule, which pairs
+    /// each `fixture_start` (`detail.speech_ms`) with the next `input_final`
+    /// (`detail.t_ms`). A scenario records it whether its phases passed or
+    /// failed, so a failing run can be classified as provider-degraded or
+    /// valid. A peer without evidence records nothing.
+    pub async fn record_timeline(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some((journal, channel)) = self.evidence.clone() else {
+            return Ok(());
+        };
+        let entries = self.timeline().await?;
+        journal.record(evidence::Record::Timeline { channel, entries })?;
+        Ok(())
     }
 
     /// Close the in-progress assistant response, so its `response_end`
@@ -651,7 +821,18 @@ impl BrowserPeer {
         Ok(serde_json::from_value(result)?)
     }
 
-    /// Soft browser faults (overlap, duplicate readout) observed so far.
+    /// The peer's readout records (one per response) so far. Strict: a
+    /// snapshot without well-formed records is an error, never "no readouts".
+    pub async fn readouts(&mut self) -> Result<ReadoutSnapshot, Box<dyn std::error::Error>> {
+        let snapshot = self.snapshot().await?;
+        let readouts = snapshot
+            .get("readouts")
+            .cloned()
+            .ok_or("the peer snapshot carries no readout records")?;
+        Ok(serde_json::from_value(readouts)?)
+    }
+
+    /// Soft browser faults (overlap) observed so far.
     pub async fn faults(
         &mut self,
     ) -> Result<Vec<evidence::BrowserFault>, Box<dyn std::error::Error>> {
@@ -684,6 +865,37 @@ impl BrowserPeer {
             sleep(Duration::from_millis(100)).await;
         }
     }
+}
+
+/// One response's assistant output transcript, as the peer segmented it:
+/// the output between consecutive response boundaries (a user transcript
+/// delta, a commentary append, a delegation; output pauses do not split).
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadoutRecord {
+    pub index: u64,
+    /// The boundary event type that opened the response (`connect` for the
+    /// first one).
+    pub opened_by: String,
+    pub opened_ms: Option<u64>,
+    /// The boundary event type that closed it; `None` only for the response
+    /// still open at snapshot time.
+    pub closed_by: Option<String>,
+    pub closed_ms: Option<u64>,
+    /// Arrival of the response's latest non-empty output delta.
+    pub last_output_ms: Option<u64>,
+    pub text: String,
+    /// Sentences of 3 or more normalized words this response spoke more than
+    /// once (a measurement: a stutter inside one response).
+    pub stutters: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadoutSnapshot {
+    pub records: Vec<ReadoutRecord>,
+    /// The peer stopped recording responses at its bound.
+    pub overflow: bool,
 }
 
 /// Timeline anchor a scheduled fixture waits for.
@@ -791,6 +1003,9 @@ pub enum TimelineKind {
     FirstAudioPacketSent,
     /// First `session.input_transcript.delta` of the channel.
     FirstInputDelta,
+    /// A `live/assistant_playback_hint` applied to the peer's assistant
+    /// playback gate (`hint` in the detail, #1638).
+    PlaybackHint,
     #[serde(other)]
     Other,
 }
@@ -817,6 +1032,17 @@ impl TimelineEntry {
     pub fn schedule_id(&self) -> Option<u64> {
         self.detail_u64("id")
     }
+}
+
+/// The provider-stream step a `play_at` of fixture `name` records before it
+/// is scheduled. Oracles that window the provider stream use the same names.
+pub fn play_at_step(name: &str) -> String {
+    format!("play_at:{name}")
+}
+
+/// The provider-stream step a `queue` of fixtures `names` records.
+pub fn queue_step(names: &[&str]) -> String {
+    format!("queue:{}", names.join(","))
 }
 
 pub fn format_timeline(timeline: &[TimelineEntry]) -> String {

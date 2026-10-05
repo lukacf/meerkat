@@ -48,7 +48,7 @@ AuditPrefixLength == 8
 \* authority_batch_key are None; this audit does not supply governed authority.
 AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
-    \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None)
+    \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
     \/ model_step_count = 2 /\ ResolveAdmissionPlanDefaultQueueKindIdle(AuditBatch, None, None, "Prompt", None, "Ordinary", "Untyped", FALSE, None, FALSE, FALSE, FALSE)
     \/ model_step_count = 3 /\ QueueAcceptedIdle(AuditBatch)
     \/ model_step_count = 4 /\ PrepareIdle(AuditSession, AuditRun)

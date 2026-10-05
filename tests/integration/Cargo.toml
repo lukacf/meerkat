@@ -66,6 +66,15 @@ openai-live-e2e = [
     "meerkat-mob-mcp/openai-live",
     "meerkat-rpc/openai-live",
 ]
+# Deterministic replays of recorded gpt-live-1 provider streams: the public
+# Live code paths, but no provider and no key, so the tests run in every lane
+# (deliberately not `openai-live-e2e`, which tags a target live).
+gpt-live-replay = [
+    "openai-live",
+    "meerkat/openai-live",
+    "meerkat-mob-mcp/openai-live",
+    "meerkat-rpc/openai-live",
+]
 experimental-gpt-live-e2e = [
     "openai-live-e2e",
     "meerkat/experimental-gpt-live",
@@ -102,6 +111,11 @@ path = "tests/gpt_live_public_e2e.rs"
 required-features = ["openai-live-e2e"]
 
 [[test]]
+name = "gpt_live_replay"
+path = "tests/gpt_live_replay.rs"
+required-features = ["gpt-live-replay"]
+
+[[test]]
 name = "system_shared_realm"
 path = "tests/system_shared_realm.rs"
 
@@ -123,7 +137,7 @@ ignored = [
 tempfile.workspace = true
 base64.workspace = true
 chrono.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 meerkat-auth-core = { workspace = true, features = ["gcp-auth"] }
 meerkat-copilot.workspace = true
 # The e2e-fast multi-host beat #[path]-includes crates/meerkat-mob/tests/support,

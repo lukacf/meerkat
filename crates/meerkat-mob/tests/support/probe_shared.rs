@@ -522,6 +522,7 @@ pub fn portable_member_spec_for_raw_probe(
                 schedule: false,
                 image_generation: false,
                 read_only: false,
+                deny: Vec::new(),
                 mcp_servers: std::collections::BTreeMap::new(),
                 non_portable_disabled: Vec::new(),
             },

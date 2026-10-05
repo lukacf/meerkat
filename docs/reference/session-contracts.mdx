@@ -230,6 +230,14 @@ already-committed turn. Clients that see live
 `stream_truncated` reconcile from `events/list_since`, a current snapshot, or
 ATIF export.
 
+Every committed close of one of the session's live channels publishes
+`live_channel_closed` on the session event stream, after the close commits:
+`session_id`, `channel_id`, a typed `reason` (`LiveChannelCloseReason`:
+`client_requested`, `client_disconnected`, `provider_closed`, `error`,
+`media_fault`, `replaced` or `open_abandoned`) and `reopen_recommended`, true
+only for a `media_fault` while the session's one reopen is still available.
+Observers learn the cause from the stream instead of polling `live/status`.
+
 ## Assistant message identity
 
 Every assistant message the agent loop commits carries a session-scoped
@@ -503,6 +511,11 @@ writes use version 4. HeadCanonical reads preserve the original persisted v3
 head and CAS token. Retained runtime boundaries and provisional references keep
 that exact identity until normal writes advance them. Reading alone does not
 rewrite the envelope.
+
+A reader that accepts only v3 refuses new v4 data. This is the compatibility
+boundary that preserves deferred callback infrastructure failures across
+continuation. After a v4 write, rolling back to a v3-only reader is unsupported;
+do not change the version field or remove failure metadata to make it load.
 
 RuntimeStore also maintains a small catalog entry in the same atomic boundary
 as physical authority. The catalog can answer listing and lifecycle discovery,

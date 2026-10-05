@@ -169,6 +169,61 @@ impl LiveDelegationRuntimeBinding {
     }
 }
 
+/// Session event publication for committed live channel closes. The runtime
+/// calls it once per committed close, after `RecordLiveCloseClosed`, with the
+/// typed reason the closing path named (a media fault recorded by the
+/// generated media-health edge takes precedence) and, for a media fault,
+/// whether the session's one reopen is still available.
+#[async_trait::async_trait]
+pub trait LiveChannelCloseEventPublisher: Send + Sync {
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    );
+
+    /// Finalized unregister removed the session's runtime entry, so the
+    /// machine no longer holds a Closed record for any of its channels and
+    /// the close tombstones kept for them may go. Called exactly once per
+    /// committed unregister, after its durability transaction; never on a
+    /// resume or on an unregister that rolled back.
+    async fn retire_live_session_close_tombstones(&self, _session_id: &SessionId) {}
+}
+
+/// The generated verdict on one channel's first assistant output
+/// (`LiveChannelMediaHealthJudged`): a media fault when the output's
+/// transcript was non-empty but the client decoded no audible audio for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveMediaHealthJudgement {
+    media_faulted: bool,
+    reopen_recommended: bool,
+}
+
+impl LiveMediaHealthJudgement {
+    pub(crate) const fn new(media_faulted: bool, reopen_recommended: bool) -> Self {
+        Self {
+            media_faulted,
+            reopen_recommended,
+        }
+    }
+
+    /// The output decoded silent: the channel's media path is broken and the
+    /// channel must close with reason `media_fault`.
+    #[must_use]
+    pub const fn media_faulted(&self) -> bool {
+        self.media_faulted
+    }
+
+    /// For a media fault: the session's one media-fault reopen is still
+    /// available, so the client may reopen with the retained context.
+    #[must_use]
+    pub const fn reopen_recommended(&self) -> bool {
+        self.reopen_recommended
+    }
+}
+
 pub(crate) fn bridge_phase_from_dsl(
     phase: crate::meerkat_machine::dsl::LiveBridgeOperationPhase,
 ) -> LiveBridgeOperationPhase {
@@ -3353,6 +3408,16 @@ impl LiveDelegationNarrationAuthority {
                 }
             ),
         )
+        .map(|authority| {
+            // A Failed narration is the delegation's last word: it ends
+            // without a result, so the provider session stops naming it as
+            // still running.
+            if self.kind == LiveDelegationNarrationKind::Failed {
+                authority.__ending_the_delegation()
+            } else {
+                authority
+            }
+        })
         .ok_or(LiveExecutionAuthorityError::CorrelationMismatch)
     }
 }
@@ -3983,15 +4048,57 @@ pub struct LiveContextAppendAuthority {
 pub const LIVE_SUPERSEDING_SPEECH_HEADING: &str =
     "Said aloud later in this call, superseding it where they conflict:";
 
+/// Line after the superseding speech: it reasserts the typed row's content
+/// that the speech did not change. Ending on the correction alone, gpt-live-1
+/// dropped the whole typed update (Turbo S S99: only the code word was
+/// corrected aloud, and the model answered the pre-typed favourite flower;
+/// s99re R1 and the 0.8.51 live gate, #1629).
+pub const LIVE_SUPERSEDED_TYPED_STILL_CURRENT: &str =
+    "Everything in the typed text above that this later speech does not change is still current.";
+
+/// Line after [`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`] on a superseded typed
+/// user input only: a typed request the later speech did not replace still
+/// needs a response. A typed turn's reply is never a request, so its append
+/// does not invite one (the model answered the reply's clause aloud with only
+/// the corrected value, then dropped the rest of the typed update; S99, #1629).
+pub const LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN: &str = "If the typed text is a user request that this later speech did not replace, it still needs a response.";
+
+/// Who wrote a superseded typed row, from the committed row's typed author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupersededTypedRowRole {
+    /// The user's typed input: it may be a request that still needs a
+    /// response.
+    UserInput,
+    /// The reply to a typed turn: context, never a request.
+    Reply,
+}
+
 /// Payload of a superseded typed row: the row, then every later heard user
-/// speech row still queued behind it, in canonical order. `None` when no
+/// speech row still queued behind it, in canonical order, then
+/// [`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`], then, for a user input only,
+/// [`LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN`]. `None` when no
 /// superseding row is given: the generated edge only supersedes a row with at
 /// least one later heard-speech row queued, and sending the typed row without
 /// its correction is the failure this bundling exists to prevent (S99), so a
 /// caller must fail closed instead of sending it bare.
+/// A post-close merge reply replayed on a reopened channel, framed as the
+/// result of its own voice request: the delegation's title (the user's own
+/// words) and the typed fact that the result never reached the user, since
+/// a merge only runs for a result that did not cross the provider boundary
+/// before the close (Turbo S S104 R3/R4 on 10f4f053c: the executor's recap
+/// claimed the ode was "read back", and the voice relayed that recap instead
+/// of reading the replayed ode).
+#[must_use]
+pub fn post_close_result_context(title: &str, context: &str) -> String {
+    format!(
+        "Finished voice request: \"{title}\". It finished after the call closed, so the user has not heard this result. The result follows. If the user asked to have it read back, read it back word for word.\n{context}"
+    )
+}
+
 #[must_use]
 pub fn superseded_typed_row_context<'a>(
     typed: &str,
+    role: SupersededTypedRowRole,
     superseding_speech: impl IntoIterator<Item = &'a str>,
 ) -> Option<String> {
     let mut speech = superseding_speech.into_iter().peekable();
@@ -4003,6 +4110,12 @@ pub fn superseded_typed_row_context<'a>(
         context.push('\n');
         context.push_str(row);
     }
+    context.push('\n');
+    context.push_str(LIVE_SUPERSEDED_TYPED_STILL_CURRENT);
+    if role == SupersededTypedRowRole::UserInput {
+        context.push(' ');
+        context.push_str(LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN);
+    }
     Some(context)
 }
 
@@ -4011,14 +4124,19 @@ pub fn superseded_typed_row_context<'a>(
 pub enum LiveContextAppendKind {
     Ordinary,
     CausalReassertion,
-    /// A typed row the provider never received, held behind the late summary
-    /// while the user said something newer aloud: delivered quietly, never
-    /// described as heard or answered.
+    /// A typed row the provider never received (voiced or text chat), held
+    /// behind the late summary while the user said something newer aloud:
+    /// delivered quietly, never described as heard or answered.
     SupersededTypedRow,
     /// Runtime work output the model has never seen (a job result merged
     /// while the call was down): delivered quietly as background context,
     /// never described as heard or answered.
     RuntimeWorkReplay,
+    /// A row of a host-typed turn (the text chat: the typed input or its
+    /// reply), which the user typed and read in the chat: delivered quietly
+    /// as text-chat context, never voiced (#1614). A text-chat row the user's
+    /// newer speech superseded arrives as [`Self::SupersededTypedRow`].
+    TextChatReplay,
     HistoryBootstrap,
 }
 
@@ -4316,7 +4434,7 @@ impl LiveContextQueuedRow {
             == crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable;
         // Heard user speech replays as ReassertCausalTail, the assistant's own
         // speech as ReassertAssistantOutput, runtime work output as
-        // ReplayRuntimeWork.
+        // ReplayRuntimeWork, text-chat rows as ReplayTextChat.
         let user_authored = row.author() == crate::meerkat_machine::dsl::LiveContextRowAuthor::User;
         let reasserted_speech = *disposition == LiveContextRowDisposition::ReassertCausalTail
             && materializable
@@ -4336,12 +4454,16 @@ impl LiveContextQueuedRow {
                     || reasserted_speech
                     || (reasserted_output && !user_authored)
             }
-            // Runtime work output is replayed quietly instead of voiced.
+            // Runtime work output and text-chat rows are replayed quietly
+            // instead of voiced.
             LiveContextRowDisposition::MirrorParentText => {
                 *disposition == LiveContextRowDisposition::MirrorParentText
                     || (*disposition == LiveContextRowDisposition::ReplayRuntimeWork
                         && row.source()
                             == crate::meerkat_machine::dsl::LiveContextRowSource::RuntimeWork)
+                    || (*disposition == LiveContextRowDisposition::ReplayTextChat
+                        && row.source()
+                            == crate::meerkat_machine::dsl::LiveContextRowSource::TextChat)
             }
             _ => disposition == &expected_disposition,
         };
@@ -4383,7 +4505,8 @@ impl LiveContextQueuedRow {
             LiveContextRowDisposition::MirrorParentText => self.row.provider_context(),
             LiveContextRowDisposition::ReassertCausalTail
             | LiveContextRowDisposition::ReassertAssistantOutput
-            | LiveContextRowDisposition::ReplayRuntimeWork => self.row.causal_context(),
+            | LiveContextRowDisposition::ReplayRuntimeWork
+            | LiveContextRowDisposition::ReplayTextChat => self.row.causal_context(),
             LiveContextRowDisposition::AlreadyPresentInLiveChannel
             | LiveContextRowDisposition::AssistantObservation
             | LiveContextRowDisposition::ExcludedFromLiveContext => None,
@@ -4413,6 +4536,13 @@ impl LiveContextQueuedRow {
     #[must_use]
     pub fn is_runtime_work_replay(&self) -> bool {
         self.disposition == LiveContextRowDisposition::ReplayRuntimeWork
+    }
+
+    /// A quiet replay of a text-chat row (a host-typed turn's input or
+    /// reply), which the user typed and read in the chat (#1614).
+    #[must_use]
+    pub fn is_text_chat_replay(&self) -> bool {
+        self.disposition == LiveContextRowDisposition::ReplayTextChat
     }
 }
 
@@ -4616,16 +4746,21 @@ impl LiveContextAppendAuthority {
         )
         .map(|authority| {
             authority.map(|mut authority| {
-                // The generated edge reports a voiced typed row whose channel
-                // already heard newer user speech; it travels quietly with its
-                // own framing, distinct from replayed heard speech.
+                // The generated edge reports a typed row (voiced, or a quiet
+                // text-chat row) whose channel already heard newer user
+                // speech; it travels quietly with its own superseded framing,
+                // distinct from replayed heard speech and from current
+                // text-chat context (S99: framed as current text chat, the
+                // stale typed value outranked the later spoken correction).
                 authority.kind = if authority.kind == LiveContextAppendKind::SupersededTypedRow {
                     debug_assert_eq!(
                         queued.row().disposition(),
                         meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::MirrorParentText,
-                        "only a voiced parent text row can be superseded"
+                        "only a parent text row can be superseded"
                     );
                     LiveContextAppendKind::SupersededTypedRow
+                } else if queued.is_text_chat_replay() {
+                    LiveContextAppendKind::TextChatReplay
                 } else if queued.is_runtime_work_replay() {
                     LiveContextAppendKind::RuntimeWorkReplay
                 } else if queued.is_causal_reassertion() {
@@ -4633,6 +4768,34 @@ impl LiveContextAppendAuthority {
                 } else {
                     LiveContextAppendKind::Ordinary
                 };
+                authority
+            })
+        })
+    }
+
+    /// Authority for one append carrying the contiguous causal tail
+    /// (previous, next] at the outbox head (generated edge
+    /// AuthorizeLiveContextCausalTailBatch): the head row's append identity
+    /// over the whole range, lowered as one quiet replay. Live-only, like its
+    /// one caller (the outbox drain).
+    #[cfg(feature = "live")]
+    pub(crate) fn from_causal_tail_batch_effect(
+        head: &LiveContextQueuedRow,
+        previous_cursor: u64,
+        next_cursor: u64,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        Self::from_generated_effect(
+            head.binding.session_id(),
+            head.binding.channel_id(),
+            head.append_id(),
+            previous_cursor,
+            next_cursor,
+            effect,
+        )
+        .map(|authority| {
+            authority.map(|mut authority| {
+                authority.kind = LiveContextAppendKind::CausalReassertion;
                 authority
             })
         })
@@ -5370,24 +5533,76 @@ impl LiveDelegationResultDeliveryReceipt {
 
 #[cfg(test)]
 mod tests {
+
+    /// A post-close merge reply is framed as its voice request's result: the
+    /// user's own words, the typed fact that they have not heard it, and the
+    /// read-back clause every live result carries, ahead of the row.
+    #[test]
+    fn a_post_close_result_is_framed_as_its_voice_request() {
+        let framed = super::post_close_result_context(
+            "Start a job for me. Read it back to me.",
+            r#"{"role":"assistant","text":"O coffee"}"#,
+        );
+        assert!(
+            framed.starts_with(
+                "Finished voice request: \"Start a job for me. Read it back to me.\"."
+            )
+        );
+        assert!(framed.contains("the user has not heard this result"));
+        assert!(
+            framed.contains("If the user asked to have it read back, read it back word for word.")
+        );
+        assert!(framed.ends_with("\n{\"role\":\"assistant\",\"text\":\"O coffee\"}"));
+        assert!(!framed.to_lowercase().contains("delegat"));
+    }
     /// A superseded typed row is never composed without its correction: the
     /// empty set is typed as `None` so the drain fails closed.
     #[test]
     fn superseded_typed_row_context_requires_superseding_speech() {
+        use super::SupersededTypedRowRole::{Reply, UserInput};
         assert_eq!(
-            super::superseded_typed_row_context("typed", std::iter::empty()),
+            super::superseded_typed_row_context("typed", UserInput, std::iter::empty()),
             None
         );
-        let composed =
-            super::superseded_typed_row_context("typed", ["first spoken", "second spoken"])
-                .expect("superseding speech present");
+        let composed = super::superseded_typed_row_context(
+            "typed",
+            UserInput,
+            ["first spoken", "second spoken"],
+        )
+        .expect("superseding speech present");
         let typed_at = composed.find("typed").expect("typed row");
         let heading_at = composed
             .find(super::LIVE_SUPERSEDING_SPEECH_HEADING)
             .expect("heading");
         let first_at = composed.find("first spoken").expect("first");
         let second_at = composed.find("second spoken").expect("second");
+        let still_current_at = composed
+            .find(super::LIVE_SUPERSEDED_TYPED_STILL_CURRENT)
+            .expect("the unchanged typed content is reasserted");
         assert!(typed_at < heading_at && heading_at < first_at && first_at < second_at);
+        assert!(
+            second_at < still_current_at,
+            "the reassertion comes after the correction"
+        );
+        assert!(
+            composed.ends_with(super::LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN),
+            "a typed user input may still be an open request"
+        );
+    }
+
+    /// #1629: a typed turn's reply is never a request, so its superseded
+    /// append ends on the reassertion and invites no response.
+    #[test]
+    fn a_superseded_typed_reply_invites_no_response() {
+        let composed = super::superseded_typed_row_context(
+            "Acknowledged: Violet and Marigold.",
+            super::SupersededTypedRowRole::Reply,
+            ["Correction: the code word is Cobalt."],
+        )
+        .expect("superseding speech present");
+        assert!(composed.ends_with(super::LIVE_SUPERSEDED_TYPED_STILL_CURRENT));
+        assert!(!composed.contains(super::LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN));
+        assert!(!composed.contains("needs a response"));
     }
 
     use super::*;
@@ -5692,6 +5907,72 @@ mod tests {
             cancelled.into_sideband_append_authority(binding, "exact captured summary"),
             Err(LiveExecutionAuthorityError::ProviderBindingMismatch)
         ));
+    }
+
+    /// A Failed narration is a delegation's last word: its sideband
+    /// authority, and so the provider command it authorizes, says the
+    /// delegation ended without a result, which stops the provider session
+    /// naming it as still running. Every other narration kind leaves it
+    /// running.
+    #[cfg(feature = "live")]
+    #[test]
+    fn only_a_failed_narration_ends_its_delegation_at_the_provider() {
+        use meerkat_live::{LiveSidebandCommand, LiveSidebandProviderCommand};
+        for kind in [
+            LiveDelegationNarrationKind::Queued,
+            LiveDelegationNarrationKind::Claimed,
+            LiveDelegationNarrationKind::Blocked,
+            LiveDelegationNarrationKind::Completed,
+            LiveDelegationNarrationKind::SourceBusy,
+            LiveDelegationNarrationKind::Failed,
+        ] {
+            let session_id = session(1);
+            let operation = exact_operation("channel-a", "provider-turn-secret", 11);
+            let correlation = operation.domain_correlation();
+            let effect = MeerkatMachineEffect::LiveDelegationNarrationAuthorized {
+                channel_id: correlation.channel_id().to_string(),
+                interaction_id: correlation.interaction_id().to_string(),
+                operation_id: DslOperationId::from_domain(operation.operation_id()),
+                provider_turn_correlation: correlation.provider().user_turn_id().to_owned(),
+                kind,
+            };
+            let authority = LiveDelegationNarrationAuthority::from_generated_effect(
+                &session_id,
+                &operation,
+                kind,
+                &effect,
+            )
+            .expect("narration effect")
+            .expect("matching narration effect");
+            let binding = ProviderWebrtcBinding::new(
+                correlation.channel_id().clone(),
+                session_id,
+                meerkat_live::LiveRuntimeBindingGeneration::new(7),
+                meerkat_live::LiveRuntimeBindingFence::new(9),
+            );
+            let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation-secret".to_string(),
+                "private-provider-delegation-id".to_string(),
+            )
+            .expect("delegation");
+            let sideband = authority
+                .into_sideband_narration_authority(binding, &delegation)
+                .expect("narration conversion");
+            let command =
+                LiveSidebandCommand::narrate_delegation(sideband, delegation, "narration")
+                    .expect("narration command");
+            let LiveSidebandProviderCommand::NarrateDelegationContext {
+                ends_delegation, ..
+            } = command.__into_provider_command()
+            else {
+                panic!("a narration lowers to a narration command");
+            };
+            assert_eq!(
+                ends_delegation,
+                kind == LiveDelegationNarrationKind::Failed,
+                "{kind:?}"
+            );
+        }
     }
 
     #[cfg(feature = "live")]

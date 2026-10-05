@@ -169,11 +169,14 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         ci.contains("format('main-{0}-{1}', github.ref_name, github.sha)"),
         "release commits, re-runs and dispatches keep one group per commit"
     );
-    let supersedable = "github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v')";
+    // Release integration branches are never superseded either: every merge
+    // there needs its own completed verdict.
+    let supersedable = "github.event_name == 'push' && github.run_attempt == 1 && !contains(github.event.head_commit.message, 'chore: release v') && !startsWith(github.ref, 'refs/heads/release/')";
     assert_eq!(
         ci.matches(supersedable).count(),
         2,
-        "the superseding group and its cancel-in-progress use the same condition"
+        "the superseding group and its cancel-in-progress use the same condition, \
+         both exempting release/** pushes"
     );
 
     let jobs = doc
@@ -234,7 +237,10 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "require_ran \"WASM timer ownership\"",
         "require_ran \"Integration tests\"",
         "require_ran \"Governed JSONL\"",
-        "--test '*' --profile ci-pr",
+        // Every tests/*.rs binary of an integration suite, unless the suite
+        // names its targets (the gpt-live replay suite runs one).
+        "test_flags=(--test '*')",
+        "\"${test_flags[@]}\" --profile ci-pr",
         "a build-relevant change produced no lanes",
         "neither a unit lane nor a deferred package list",
         "unit tests deferred to the push-to-main run",

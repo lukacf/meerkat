@@ -446,6 +446,8 @@ pub fn job_runtime_delivery_composition() -> CompositionSchema {
             runtime_delivery_first_commit_witness(),
             runtime_delivery_notification_commit_witness(),
             runtime_delivery_crash_retry_reuse_witness(),
+            runtime_delivery_out_of_order_acknowledgement_witness(),
+            runtime_delivery_apply_after_ahead_acknowledgement_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -1080,6 +1082,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             basic_round_trip_witness(),
             retire_runtime_path_witness(),
             destroy_runtime_path_witness(),
+            stop_holds_and_resume_releases_member_run_starts_witness(),
         ],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
@@ -1103,14 +1106,33 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                 machine_name: mach_id("WorkAttentionLifecycleMachine"),
                 actor: act_id("attention_authority"),
             },
+            MachineInstance {
+                instance_id: mi_id("admission"),
+                machine_name: mach_id("WorkItemAdmissionMachine"),
+                actor: act_id("admission_authority"),
+            },
         ],
         actors: vec![
             machine_actor("workgraph_authority"),
             machine_actor("attention_authority"),
+            machine_actor("admission_authority"),
         ],
         handoff_protocols: vec![],
         entry_inputs: vec![],
-        routes: vec![Route {
+        routes: vec![
+            Route {
+                name: route_id("work_item_create_binds_admission"),
+                from_machine: mi_id("workgraph"),
+                effect_variant: ev_id("Created"),
+                to: RouteTarget::new(mi_id("admission"), rv(RouteTargetKind::Input, "Bind")),
+                bindings: vec![
+                    bind("admission_key", "admission_key"),
+                    bind("request_digest", "admission_request_digest"),
+                ],
+                delivery: RouteDelivery::Immediate,
+                teardown: None,
+            },
+            Route {
             name: route_id("work_item_close_stops_attention"),
             from_machine: mi_id("workgraph"),
             effect_variant: ev_id("Closed"),
@@ -1127,7 +1149,15 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
         }],
         route_target_selectors: vec![],
         driver: None,
-        transaction_plans: vec![transaction_plan(
+        transaction_plans: vec![
+            transaction_plan(
+                "transactional_create_binds_admission",
+                "create_work_item",
+                "a work item create and its admission identity commit together: the item row, its Created event and (for a keyed create) the realm/namespace key index are written in one store transaction, so no item exists without its identity and no identity without its item",
+                "WorkGraphStore::insert_item_admitted",
+                &["work_item_create_binds_admission"],
+            ),
+            transaction_plan(
             "transactional_close_stops_attention",
             "close_work_item",
             "terminal work item close atomically stops one co-resident live attention binding; production fan-out applies this transaction per binding",
@@ -1137,6 +1167,31 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![
+            CompositionInvariant {
+                name: "work_item_create_routes_to_admission_bind".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("workgraph"),
+                    effect_variant: ev_id("Created"),
+                    to_machine: mi_id("admission"),
+                    input_variant: rv(RouteTargetKind::Input, "Bind"),
+                },
+                statement: "structural: the work item Created effect is routed to the admission Bind input for that create's identity. This is not a delivery or atomicity proof; \"no keyed item without its Admitted identity\" rests on Immediate delivery plus the single-transaction WorkGraphStore::insert_item_admitted (transactional_create_binds_admission) and its crash-between-writes test".into(),
+                references_machines: vec![mi_id("workgraph"), mi_id("admission")],
+                references_actors: vec![act_id("workgraph_authority"), act_id("admission_authority")],
+            },
+            CompositionInvariant {
+                name: "admission_bind_originates_from_work_item_create".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: route_id("work_item_create_binds_admission"),
+                    to_machine: mi_id("admission"),
+                    input_variant: rv(RouteTargetKind::Input, "Bind"),
+                    from_machine: mi_id("workgraph"),
+                    effect_variant: ev_id("Created"),
+                },
+                statement: "observed provenance: every admission Bind observed in a run originates from a work item Created effect over work_item_create_binds_admission, so the model admits no orphan admission; durable atomicity is the store transaction's job, not this check's".into(),
+                references_machines: vec![mi_id("workgraph"), mi_id("admission")],
+                references_actors: vec![act_id("workgraph_authority"), act_id("admission_authority")],
+            },
             CompositionInvariant {
                 name: "closed_work_item_routes_to_attention_stop".into(),
                 kind: CompositionInvariantKind::RoutePresent {
@@ -1166,30 +1221,7 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
         witnesses: vec![CompositionWitness {
             name: witness_id("close_stops_attention_route"),
             preload_inputs: vec![
-                witness_input(
-                    "workgraph",
-                    "CreateOpen",
-                    vec![
-                        witness_field("due_at_utc_ms", Expr::None),
-                        witness_field("not_before_utc_ms", Expr::None),
-                        witness_field("snoozed_until_utc_ms", Expr::None),
-                        witness_field(
-                            "completion_policy",
-                            named_variant("WorkCompletionPolicy", "SelfAttest"),
-                        ),
-                        witness_field("completion_supervisor_owner_key", Expr::None),
-                        witness_field("completion_reviewer_quorum_threshold", Expr::None),
-                        witness_field(
-                            "failed_child_join_policy",
-                            named_variant("FailedChildJoinPolicy", "RequireSuccess"),
-                        ),
-                        witness_field(
-                            "cancelled_child_join_policy",
-                            named_variant("CancelledChildJoinPolicy", "RequireSuccess"),
-                        ),
-                        witness_field("unresolved_blocker_count", Expr::U64(0)),
-                    ],
-                ),
+                workgraph_create_open_witness_input(Expr::None, Expr::None),
                 witness_input(
                     "workgraph",
                     "CloseCompleted",
@@ -1199,11 +1231,15 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                     ],
                 ),
             ],
-            expected_routes: vec![route_id("work_item_close_stops_attention")],
+            expected_routes: vec![
+                route_id("work_item_create_binds_admission"),
+                route_id("work_item_close_stops_attention"),
+            ],
             expected_scheduler_rules: vec![],
             expected_states: vec![],
             expected_transitions: vec![
                 witness_transition("workgraph", "CreateOpen"),
+                witness_transition("admission", "BindUnkeyed"),
                 witness_transition("workgraph", "CloseOpenCompleted"),
                 witness_transition("attention", "StopActive"),
             ],
@@ -1221,12 +1257,253 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
                 set_limit: 0,
                 map_limit: 0,
             },
-        }],
+        },
+        workgraph_keyed_admission_replay_witness(),
+        workgraph_unkeyed_admission_replay_witness(),
+        workgraph_unpaired_admission_rejected_witness(
+            "unpaired_create_open_admission_rejected",
+            "CreateOpen",
+            workgraph_create_witness_input(
+                "CreateOpen",
+                some_string("workadmissionkeyref_1"),
+                Expr::None,
+            ),
+            true,
+        ),
+        workgraph_unpaired_admission_rejected_witness(
+            "unpaired_create_blocked_admission_rejected",
+            "CreateBlocked",
+            workgraph_create_witness_input(
+                "CreateBlocked",
+                Expr::None,
+                some_string("workadmissiondigestref_1"),
+            ),
+            false,
+        )],
         deep_domain_cardinality: 3,
         deep_domain_overrides: std::collections::BTreeMap::new(),
         witness_domain_cardinality: 2,
         ci_limits: Some(default_ci_limits()),
         closed_world: true,
+    }
+}
+
+fn workgraph_create_open_witness_input(
+    admission_key: Expr,
+    admission_request_digest: Expr,
+) -> CompositionWitnessInput {
+    workgraph_create_witness_input("CreateOpen", admission_key, admission_request_digest)
+}
+
+fn workgraph_create_witness_input(
+    input: &str,
+    admission_key: Expr,
+    admission_request_digest: Expr,
+) -> CompositionWitnessInput {
+    witness_input(
+        "workgraph",
+        input,
+        vec![
+            witness_field("due_at_utc_ms", Expr::None),
+            witness_field("not_before_utc_ms", Expr::None),
+            witness_field("snoozed_until_utc_ms", Expr::None),
+            witness_field(
+                "completion_policy",
+                named_variant("WorkCompletionPolicy", "SelfAttest"),
+            ),
+            witness_field("completion_supervisor_owner_key", Expr::None),
+            witness_field("completion_reviewer_quorum_threshold", Expr::None),
+            witness_field(
+                "failed_child_join_policy",
+                named_variant("FailedChildJoinPolicy", "RequireSuccess"),
+            ),
+            witness_field(
+                "cancelled_child_join_policy",
+                named_variant("CancelledChildJoinPolicy", "RequireSuccess"),
+            ),
+            witness_field("unresolved_blocker_count", Expr::U64(0)),
+            witness_field("admission_key", admission_key),
+            witness_field("admission_request_digest", admission_request_digest),
+        ],
+    )
+}
+
+fn workgraph_classify_admission_witness_input(key: Expr, digest: Expr) -> CompositionWitnessInput {
+    witness_input(
+        "admission",
+        "ClassifyAdmissionReplay",
+        vec![
+            witness_field("requested_admission_key", key),
+            witness_field("requested_request_digest", digest),
+        ],
+    )
+}
+
+fn workgraph_admission_witness_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 8,
+        pending_input_limit: 8,
+        pending_route_limit: 2,
+        delivered_route_limit: 1,
+        emitted_effect_limit: 6,
+        seq_limit: 0,
+        set_limit: 0,
+        map_limit: 0,
+    }
+}
+
+/// A keyed item replays exactly under its own key and digest, conflicts under
+/// its key with another digest, and is a key mismatch under another key. Each
+/// expectation holds on every behavior that completes the script, so a guard
+/// that lets one request take a second classification arm fails the witness.
+fn workgraph_keyed_admission_replay_witness() -> CompositionWitness {
+    let key = "workadmissionkeyref_1";
+    let digest = "workadmissiondigestref_1";
+    CompositionWitness {
+        name: witness_id("keyed_admission_replay_classification"),
+        preload_inputs: vec![
+            workgraph_create_open_witness_input(some_string(key), some_string(digest)),
+            workgraph_classify_admission_witness_input(plain_string(key), plain_string(digest)),
+            workgraph_classify_admission_witness_input(
+                plain_string(key),
+                plain_string("workadmissiondigestref_2"),
+            ),
+            workgraph_classify_admission_witness_input(
+                plain_string("workadmissionkeyref_2"),
+                plain_string(digest),
+            ),
+        ],
+        expected_routes: vec![route_id("work_item_create_binds_admission")],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("workgraph", "CreateOpen"),
+            witness_transition("admission", "BindKeyed"),
+            witness_transition("admission", "ClassifyAdmissionReplayExactAdmitted"),
+            witness_transition("admission", "ClassifyAdmissionReplayConflictAdmitted"),
+            witness_transition("admission", "ClassifyAdmissionReplayKeyMismatchAdmitted"),
+        ],
+        expected_transition_order: vec![
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("workgraph", "CreateOpen"),
+                later: witness_transition("admission", "BindKeyed"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("admission", "BindKeyed"),
+                later: witness_transition("admission", "ClassifyAdmissionReplayExactAdmitted"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("admission", "ClassifyAdmissionReplayExactAdmitted"),
+                later: witness_transition("admission", "ClassifyAdmissionReplayConflictAdmitted"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("admission", "ClassifyAdmissionReplayConflictAdmitted"),
+                later: witness_transition(
+                    "admission",
+                    "ClassifyAdmissionReplayKeyMismatchAdmitted",
+                ),
+            },
+        ],
+        state_limits: workgraph_admission_witness_limits(),
+    }
+}
+
+/// An item created without admission identity is a key mismatch for any
+/// keyed request: an unkeyed create never replays or conflicts.
+fn workgraph_unkeyed_admission_replay_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("unkeyed_admission_replay_is_key_mismatch"),
+        preload_inputs: vec![
+            workgraph_create_open_witness_input(Expr::None, Expr::None),
+            workgraph_classify_admission_witness_input(
+                plain_string("workadmissionkeyref_1"),
+                plain_string("workadmissiondigestref_1"),
+            ),
+        ],
+        expected_routes: vec![route_id("work_item_create_binds_admission")],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("workgraph", "CreateOpen"),
+            witness_transition("admission", "BindUnkeyed"),
+            witness_transition("admission", "ClassifyAdmissionReplayKeyMismatchUnkeyed"),
+        ],
+        expected_transition_order: vec![
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("workgraph", "CreateOpen"),
+                later: witness_transition("admission", "BindUnkeyed"),
+            },
+            CompositionWitnessTransitionOrder {
+                earlier: witness_transition("admission", "BindUnkeyed"),
+                later: witness_transition("admission", "ClassifyAdmissionReplayKeyMismatchUnkeyed"),
+            },
+        ],
+        state_limits: workgraph_admission_witness_limits(),
+    }
+}
+
+/// A half-present admission identity is refused on a create input, and the
+/// item stays creatable through that same input. A witness only admits its
+/// expected transitions, so each create input gets its own script ending in
+/// a successful create of that kind: dropping the paired guard on that input
+/// lets its create arm take the half-present request, the rejection goes
+/// unobserved, and the witness cannot complete.
+fn workgraph_unpaired_admission_rejected_witness(
+    name: &str,
+    create_input: &str,
+    half_present: CompositionWitnessInput,
+    classify_first: bool,
+) -> CompositionWitness {
+    let order = |earlier: (&str, &str), later: (&str, &str)| CompositionWitnessTransitionOrder {
+        earlier: witness_transition(earlier.0, earlier.1),
+        later: witness_transition(later.0, later.1),
+    };
+    let rejected_name = format!("{create_input}RejectedUnpairedAdmission");
+    let classify_absent = ("admission", "ClassifyAdmissionReplayKeyMismatchAbsent");
+    let rejected = ("workgraph", rejected_name.as_str());
+    let create = ("workgraph", create_input);
+    let bind = ("admission", "BindUnkeyed");
+    let mut preload_inputs = Vec::new();
+    let mut steps = Vec::new();
+    if classify_first {
+        // Nothing is bound yet: a classify is a key mismatch in Absent.
+        preload_inputs.push(workgraph_classify_admission_witness_input(
+            plain_string("workadmissionkeyref_1"),
+            plain_string("workadmissiondigestref_1"),
+        ));
+        steps.push(classify_absent);
+    }
+    preload_inputs.push(half_present);
+    preload_inputs.push(workgraph_create_witness_input(
+        create_input,
+        Expr::None,
+        Expr::None,
+    ));
+    steps.extend([rejected, create, bind]);
+    CompositionWitness {
+        name: witness_id(name),
+        preload_inputs,
+        expected_routes: vec![route_id("work_item_create_binds_admission")],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: steps
+            .iter()
+            .map(|(machine, transition)| witness_transition(machine, transition))
+            .collect(),
+        expected_transition_order: steps
+            .windows(2)
+            .map(|pair| order(pair[0], pair[1]))
+            .collect(),
+        state_limits: CompositionStateLimits {
+            step_limit: 16,
+            pending_input_limit: 8,
+            pending_route_limit: 2,
+            delivered_route_limit: 1,
+            emitted_effect_limit: 8,
+            seq_limit: 0,
+            set_limit: 0,
+            map_limit: 0,
+        },
     }
 }
 
@@ -1997,6 +2274,10 @@ fn some_string(value: &str) -> Expr {
     Expr::Some(Box::new(Expr::String(value.into())))
 }
 
+fn plain_string(value: &str) -> Expr {
+    Expr::String(value.into())
+}
+
 // The seam route owns no runtime epoch (MobMachine holds no such fact), so the
 // witness registers the session epochless: the mob-owned route and the
 // epochless registration agree, which is what the routed binding then asserts.
@@ -2009,6 +2290,7 @@ fn seam_runtime_session_registration_input() -> CompositionWitnessInput {
         vec![
             witness_field("session_id", Expr::String("sessionid_1".into())),
             witness_field("runtime_epoch_id", Expr::None),
+            witness_field("initial_run_start_holds", Expr::EmptySet),
         ],
     )
 }
@@ -2228,6 +2510,58 @@ fn retire_runtime_path_witness() -> CompositionWitness {
         // RetireRunningReleasing 5 + RetireRequested 1 + ObserveRetired 1); steps
         // ~17 (4 injects + 9 transitions + 4 route deliveries).
         state_limits: meerkat_mob_seam_witness_limits(21, 4, 16),
+    }
+}
+
+/// A Stop quiesce takes the Stop arm (which emits HoldMemberRunStarts), the
+/// mob stops, Resume releases (ResumeStopped emits ReleaseMemberRunStarts),
+/// and a later Destroy quiesce takes the non-Stop arm (which never holds).
+/// Both quiesce arms are in the script, so a guard that lets either intent
+/// take the other arm leaves an expected arm unobserved.
+fn stop_holds_and_resume_releases_member_run_starts_witness() -> CompositionWitness {
+    let quiesce = |intent: &str| {
+        witness_input(
+            "mob",
+            "BeginPlacedCompletionLifecycleQuiesce",
+            vec![witness_field(
+                "intent",
+                named_variant("PlacedCompletionLifecycleIntentKind", intent),
+            )],
+        )
+    };
+    let order = |earlier: &str, later: &str| CompositionWitnessTransitionOrder {
+        earlier: witness_transition("mob", earlier),
+        later: witness_transition("mob", later),
+    };
+    CompositionWitness {
+        name: witness_id("stop_holds_and_resume_releases_member_run_starts"),
+        preload_inputs: vec![
+            quiesce("Stop"),
+            witness_input("mob", "Stop", vec![]),
+            witness_input("mob", "Resume", vec![]),
+            quiesce("Destroy"),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![],
+        expected_transitions: vec![
+            witness_transition("mob", "BeginPlacedCompletionLifecycleQuiesceFreshStop"),
+            witness_transition("mob", "StopRunning"),
+            witness_transition("mob", "ResumeStopped"),
+            witness_transition("mob", "BeginPlacedCompletionLifecycleQuiesceFresh"),
+        ],
+        expected_transition_order: vec![
+            order(
+                "BeginPlacedCompletionLifecycleQuiesceFreshStop",
+                "StopRunning",
+            ),
+            order("StopRunning", "ResumeStopped"),
+            order(
+                "ResumeStopped",
+                "BeginPlacedCompletionLifecycleQuiesceFresh",
+            ),
+        ],
+        state_limits: meerkat_mob_seam_witness_limits(12, 0, 12),
     }
 }
 
@@ -2497,6 +2831,225 @@ fn occurrence_supersede_ack_route_witness() -> CompositionWitness {
     }
 }
 
+fn some_u64(value: u64) -> Expr {
+    Expr::Some(Box::new(Expr::U64(value)))
+}
+
+fn auth_witness_limits(step_limit: u32, pending_input_limit: u32) -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit,
+        pending_input_limit,
+        pending_route_limit: 0,
+        delivered_route_limit: 0,
+        emitted_effect_limit: step_limit,
+        seq_limit: 0,
+        set_limit: 0,
+        map_limit: 0,
+    }
+}
+
+/// A credential acquired with expiry 1 is observed fresh at time 0 (window 0)
+/// and expired at time 1 (window 0): the zero-window boundary, where the
+/// credential's expiry equals the observation time, classifies as Expired.
+fn auth_freshness_expiry_witness() -> CompositionWitness {
+    let observe = |now: u64| {
+        witness_input(
+            "auth_machine",
+            "ObserveCredentialFreshness",
+            vec![
+                witness_field("now_ts", Expr::U64(now)),
+                witness_field("refresh_window_secs", Expr::U64(0)),
+            ],
+        )
+    };
+    CompositionWitness {
+        name: witness_id("freshness_expiry"),
+        preload_inputs: vec![
+            witness_input(
+                "auth_machine",
+                "Acquire",
+                vec![
+                    witness_field("expires_at_ts", some_u64(1)),
+                    witness_field("credential_published_at_millis", Expr::U64(1)),
+                ],
+            ),
+            observe(0),
+            observe(2),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("auth_machine"),
+            phase: Some(phase_id("Expired")),
+            fields: vec![],
+        }],
+        expected_transitions: vec![
+            witness_transition("auth_machine", "Acquire"),
+            witness_transition("auth_machine", "ObserveCredentialFreshnessValid"),
+            witness_transition("auth_machine", "ObserveCredentialFreshnessExpiredFromValid"),
+        ],
+        expected_transition_order: vec![witness_transition_order(
+            "auth_machine",
+            "ObserveCredentialFreshnessValid",
+            "auth_machine",
+            "ObserveCredentialFreshnessExpiredFromValid",
+        )],
+        state_limits: auth_witness_limits(4, 3),
+    }
+}
+
+/// A credential inside its refresh window (expiry 2, now 1, window 2) becomes
+/// Expiring, refresh begins and completes with a later expiry, returning the
+/// lifecycle to Valid.
+fn auth_expiring_refresh_witness() -> CompositionWitness {
+    CompositionWitness {
+        name: witness_id("expiring_refresh"),
+        preload_inputs: vec![
+            witness_input(
+                "auth_machine",
+                "Acquire",
+                vec![
+                    witness_field("expires_at_ts", some_u64(2)),
+                    witness_field("credential_published_at_millis", Expr::U64(1)),
+                ],
+            ),
+            witness_input(
+                "auth_machine",
+                "ObserveCredentialFreshness",
+                vec![
+                    witness_field("now_ts", Expr::U64(1)),
+                    witness_field("refresh_window_secs", Expr::U64(2)),
+                ],
+            ),
+            witness_input("auth_machine", "BeginRefresh", vec![]),
+            witness_input(
+                "auth_machine",
+                "CompleteRefresh",
+                vec![
+                    witness_field("new_expires_at", some_u64(2)),
+                    witness_field("now_ts", Expr::U64(1)),
+                    witness_field("credential_published_at_millis", Expr::U64(2)),
+                ],
+            ),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("auth_machine"),
+            phase: Some(phase_id("Valid")),
+            fields: vec![],
+        }],
+        expected_transitions: vec![
+            witness_transition("auth_machine", "Acquire"),
+            witness_transition(
+                "auth_machine",
+                "ObserveCredentialFreshnessExpiringFromValid",
+            ),
+            witness_transition("auth_machine", "BeginRefreshFromExpiring"),
+            witness_transition("auth_machine", "CompleteRefresh"),
+        ],
+        expected_transition_order: vec![
+            witness_transition_order(
+                "auth_machine",
+                "ObserveCredentialFreshnessExpiringFromValid",
+                "auth_machine",
+                "BeginRefreshFromExpiring",
+            ),
+            witness_transition_order(
+                "auth_machine",
+                "BeginRefreshFromExpiring",
+                "auth_machine",
+                "CompleteRefresh",
+            ),
+        ],
+        state_limits: auth_witness_limits(5, 4),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OAuthFlowKind {
+    Browser,
+    Device,
+}
+
+/// Release with one outstanding OAuth flow drains it through the
+/// `auth_release_oauth_flow_drain` handoff. BeginRelease emits the cancellation
+/// obligation carrying the flow id; the auth-lease owner's expire feedback must
+/// name a member of that obligation (`ObligationMember`), discharges only that
+/// member, and only then does Release commit. Every owner choice completes:
+/// the owner can only name the flow the obligation carries.
+fn auth_release_drains_oauth_flow_witness(kind: OAuthFlowKind) -> CompositionWitness {
+    let (name, admit_input, admit_transition, expire_transition, mut admit_fields) = match kind {
+        OAuthFlowKind::Browser => (
+            "release_drains_oauth_flow",
+            "AdmitOAuthBrowserFlow",
+            "AdmitOAuthBrowserFlowValid",
+            "ExpireOAuthBrowserFlowValid",
+            vec![witness_field("redirect_uri", Expr::String("uri_1".into()))],
+        ),
+        OAuthFlowKind::Device => (
+            "release_drains_oauth_device_flow",
+            "AdmitOAuthDeviceFlow",
+            "AdmitOAuthDeviceFlowValid",
+            "ExpireOAuthDeviceFlowValid",
+            vec![],
+        ),
+    };
+    admit_fields.extend([
+        witness_field("flow_id", Expr::String("flow_1".into())),
+        witness_field("provider", Expr::String("provider_1".into())),
+        witness_field("expires_at_millis", Expr::U64(2)),
+        witness_field("max_outstanding_flows", Expr::U64(1)),
+        witness_field("observed_global_outstanding_flows", Expr::U64(0)),
+    ]);
+    CompositionWitness {
+        name: witness_id(name),
+        preload_inputs: vec![
+            witness_input(
+                "auth_machine",
+                "Acquire",
+                vec![
+                    witness_field("expires_at_ts", some_u64(2)),
+                    witness_field("credential_published_at_millis", Expr::U64(1)),
+                ],
+            ),
+            witness_input("auth_machine", admit_input, admit_fields),
+            witness_input("auth_machine", "BeginRelease", vec![]),
+            witness_input("auth_machine", "Release", vec![]),
+        ],
+        expected_routes: vec![],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![CompositionWitnessState {
+            machine: mi_id("auth_machine"),
+            phase: Some(phase_id("Released")),
+            fields: vec![],
+        }],
+        expected_transitions: vec![
+            witness_transition("auth_machine", "Acquire"),
+            witness_transition("auth_machine", admit_transition),
+            witness_transition("auth_machine", "BeginReleaseDrainingOAuthFlowsValid"),
+            witness_transition("auth_machine", expire_transition),
+            witness_transition("auth_machine", "Release"),
+        ],
+        expected_transition_order: vec![
+            witness_transition_order(
+                "auth_machine",
+                "BeginReleaseDrainingOAuthFlowsValid",
+                "auth_machine",
+                expire_transition,
+            ),
+            witness_transition_order("auth_machine", expire_transition, "auth_machine", "Release"),
+        ],
+        // The admitted flow lives in the OAuth membership set and maps until
+        // the drain feedback removes it.
+        state_limits: CompositionStateLimits {
+            set_limit: 2,
+            map_limit: 2,
+            ..auth_witness_limits(7, 4)
+        },
+    }
+}
+
 fn default_ci_limits() -> CompositionStateLimits {
     CompositionStateLimits {
         step_limit: 8,
@@ -2673,6 +3226,210 @@ fn runtime_delivery_crash_retry_reuse_witness() -> CompositionWitness {
         ],
         expected_transition_order: vec![],
         state_limits: runtime_delivery_witness_limits(),
+    }
+}
+
+fn runtime_delivery_input(
+    input: &str,
+    fields: Vec<CompositionWitnessField>,
+) -> CompositionWitnessInput {
+    witness_input("runtime_delivery", input, fields)
+}
+
+fn runtime_delivery_ack_witness_limits() -> CompositionStateLimits {
+    CompositionStateLimits {
+        step_limit: 30,
+        pending_input_limit: 8,
+        pending_route_limit: 4,
+        delivered_route_limit: 6,
+        emitted_effect_limit: 16,
+        seq_limit: 0,
+        set_limit: 2,
+        map_limit: 2,
+    }
+}
+
+fn runtime_delivery_two_commit_inputs() -> Vec<CompositionWitnessInput> {
+    vec![
+        witness_input(
+            "job",
+            "Submit",
+            vec![
+                witness_field("job_id", Expr::String("job_1".into())),
+                witness_field(
+                    "restart_class",
+                    named_variant("DetachedJobRestartClass", "CheckpointResumable"),
+                ),
+            ],
+        ),
+        witness_input(
+            "job",
+            "ClaimAttempt",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("worker_id", Expr::String("worker_1".into())),
+                witness_field("claimed_at_ms", Expr::U64(1)),
+                witness_field("lease_expires_at_ms", Expr::U64(2)),
+                witness_field("runner_handle", Expr::String("runner_1".into())),
+            ],
+        ),
+        witness_input(
+            "job",
+            "EmitNotification",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("fence", Expr::U64(1)),
+                witness_field("notification_id", Expr::String("notification_1".into())),
+                witness_field("idempotency_key", Expr::String("key_1".into())),
+                witness_field(
+                    "runtime_delivery_id",
+                    Expr::String(RUNTIME_DELIVERY_NOTIFICATION_ID.into()),
+                ),
+                witness_field("observed_at_ms", Expr::U64(2)),
+            ],
+        ),
+        witness_input(
+            "job",
+            "CompleteAttempt",
+            vec![
+                witness_field("attempt_id", Expr::String("attempt_1".into())),
+                witness_field("fence", Expr::U64(1)),
+                witness_field("completed_at_ms", Expr::U64(2)),
+            ],
+        ),
+    ]
+}
+
+const RUNTIME_DELIVERY_NOTIFICATION_ID: &str = "job_1:notification:notification_1";
+/// `job_notification_enters_runtime_inbox` keys the runtime delivery by the
+/// notification id.
+const RUNTIME_DELIVERY_NOTIFICATION_KEY: &str = "notification_1";
+
+fn runtime_delivery_ack(
+    input: &str,
+    delivery_id: &str,
+    delivery_sequence: u64,
+) -> CompositionWitnessInput {
+    runtime_delivery_input(
+        input,
+        vec![
+            witness_field("delivery_id", Expr::String(delivery_id.into())),
+            witness_field("delivery_sequence", Expr::U64(delivery_sequence)),
+        ],
+    )
+}
+
+fn runtime_delivery_two_commit_transitions() -> Vec<CompositionWitnessTransition> {
+    vec![
+        witness_transition("job", "SubmitQueued"),
+        witness_transition("job", "ClaimQueued"),
+        witness_transition("job", "EmitRunningNotification"),
+        witness_transition("job", "CompleteRunningAttempt"),
+        witness_transition("runtime_delivery", "CommitNewDelivery"),
+        witness_transition("job", "ApplyRunningNotificationDelivery"),
+        witness_transition("job", "ApplySucceededDelivery"),
+    ]
+}
+
+fn runtime_delivery_order(earlier: &str, later: &str) -> CompositionWitnessTransitionOrder {
+    CompositionWitnessTransitionOrder {
+        earlier: witness_transition("runtime_delivery", earlier),
+        later: witness_transition("runtime_delivery", later),
+    }
+}
+
+fn runtime_delivery_cursor_at(cursor: u64) -> CompositionWitnessState {
+    CompositionWitnessState {
+        machine: mi_id("runtime_delivery"),
+        phase: None,
+        fields: vec![witness_field("applied_cursor", Expr::U64(cursor))],
+    }
+}
+
+/// Two committed deliveries acknowledged out of order through every
+/// acknowledgement arm: the second is acknowledged ahead of the cursor and
+/// parked, a prefix advance with nothing parked at the cursor is a typed
+/// no-op (so an advance that ignores containment fails the witness), the
+/// first is acknowledged at the cursor, the prefix advance
+/// carries the cursor over the parked one, and a late acknowledgement of the
+/// first observes it already applied. Witness expectations hold on every
+/// behavior that completes the script, so a guard that lets one
+/// acknowledgement take a second arm fails the witness.
+fn runtime_delivery_out_of_order_acknowledgement_witness() -> CompositionWitness {
+    let mut preload_inputs = runtime_delivery_two_commit_inputs();
+    preload_inputs.extend([
+        runtime_delivery_ack("AcknowledgeDelivery", "terminal", 2),
+        runtime_delivery_input("AdvanceAcknowledgedPrefix", vec![]),
+        runtime_delivery_ack("AcknowledgeDelivery", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+        runtime_delivery_input("AdvanceAcknowledgedPrefix", vec![]),
+        runtime_delivery_ack("AcknowledgeDelivery", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+    ]);
+    let mut expected_transitions = runtime_delivery_two_commit_transitions();
+    expected_transitions.extend([
+        witness_transition("runtime_delivery", "AcknowledgeAheadOfCursor"),
+        witness_transition("runtime_delivery", "AdvanceAcknowledgedPrefixNothingParked"),
+        witness_transition("runtime_delivery", "AcknowledgeNextDelivery"),
+        witness_transition("runtime_delivery", "AdvanceOverAcknowledgedDelivery"),
+        witness_transition("runtime_delivery", "ObserveAlreadyAppliedAcknowledgement"),
+    ]);
+    CompositionWitness {
+        name: witness_id("runtime_delivery_out_of_order_acknowledgement"),
+        preload_inputs,
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("job_terminal_enters_runtime_inbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![runtime_delivery_cursor_at(2)],
+        expected_transitions,
+        expected_transition_order: vec![
+            runtime_delivery_order(
+                "AcknowledgeAheadOfCursor",
+                "AdvanceAcknowledgedPrefixNothingParked",
+            ),
+            runtime_delivery_order(
+                "AdvanceAcknowledgedPrefixNothingParked",
+                "AcknowledgeNextDelivery",
+            ),
+            runtime_delivery_order("AcknowledgeNextDelivery", "AdvanceOverAcknowledgedDelivery"),
+            runtime_delivery_order(
+                "AdvanceOverAcknowledgedDelivery",
+                "ObserveAlreadyAppliedAcknowledgement",
+            ),
+        ],
+        state_limits: runtime_delivery_ack_witness_limits(),
+    }
+}
+
+/// A delivery acknowledged ahead of the cursor and then applied in order is
+/// no longer pending: applying it removes it from the acknowledged set.
+fn runtime_delivery_apply_after_ahead_acknowledgement_witness() -> CompositionWitness {
+    let mut preload_inputs = runtime_delivery_two_commit_inputs();
+    preload_inputs.extend([
+        runtime_delivery_ack("AcknowledgeDelivery", "terminal", 2),
+        runtime_delivery_ack("MarkDeliveryApplied", RUNTIME_DELIVERY_NOTIFICATION_KEY, 1),
+        runtime_delivery_ack("MarkDeliveryApplied", "terminal", 2),
+    ]);
+    let mut expected_transitions = runtime_delivery_two_commit_transitions();
+    expected_transitions.extend([
+        witness_transition("runtime_delivery", "AcknowledgeAheadOfCursor"),
+        witness_transition("runtime_delivery", "ApplyNextDelivery"),
+    ]);
+    CompositionWitness {
+        name: witness_id("runtime_delivery_apply_after_ahead_acknowledgement"),
+        preload_inputs,
+        expected_routes: vec![
+            route_id("job_notification_enters_runtime_inbox"),
+            route_id("job_terminal_enters_runtime_inbox"),
+        ],
+        expected_scheduler_rules: vec![],
+        expected_states: vec![runtime_delivery_cursor_at(2)],
+        expected_transitions,
+        expected_transition_order: vec![runtime_delivery_order(
+            "AcknowledgeAheadOfCursor",
+            "ApplyNextDelivery",
+        )],
+        state_limits: runtime_delivery_ack_witness_limits(),
     }
 }
 
@@ -3799,11 +4556,9 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     input_variant: iv_id("ExpireOAuthBrowserFlow"),
                     field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("flow_id"),
-                        // Distinct owner-context labels per feedback input: the
-                        // codegen derives the TLA bound-variable name from this
-                        // string, so two `flow_id` labels in the same handoff
-                        // collide as duplicate `\E owner_ctx_flow_id` binders.
-                        source: FeedbackFieldSource::OwnerContext("browser_flow_id".into()),
+                        // The expired flow must be one the drain obligation
+                        // carries; the feedback discharges only that member.
+                        source: FeedbackFieldSource::ObligationMember(fld_id("browser_flow_ids")),
                     }],
                 },
                 FeedbackInputRef {
@@ -3811,7 +4566,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     input_variant: iv_id("ExpireOAuthDeviceFlow"),
                     field_bindings: vec![FeedbackFieldBinding {
                         input_field: fld_id("flow_id"),
-                        source: FeedbackFieldSource::OwnerContext("device_flow_id".into()),
+                        source: FeedbackFieldSource::ObligationMember(fld_id("device_flow_ids")),
                     }],
                 },
             ],
@@ -3966,6 +4721,10 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             references_actors: vec![act_id("auth_machine_authority"), act_id("auth_lease_owner")],
         }],
         witnesses: vec![
+            auth_freshness_expiry_witness(),
+            auth_expiring_refresh_witness(),
+            auth_release_drains_oauth_flow_witness(OAuthFlowKind::Browser),
+            auth_release_drains_oauth_flow_witness(OAuthFlowKind::Device),
         ],
         deep_domain_cardinality: 2,
         deep_domain_overrides: std::collections::BTreeMap::new(),

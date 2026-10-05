@@ -15,6 +15,7 @@ use meerkat_core::memory::{
     MemoryRankingPolicy, MemoryRecord, MemoryResult, MemoryScopeDropReceipt, MemorySearchScope,
     MemoryStore, MemoryStoreError,
 };
+use meerkat_core::types::MemoryIndexableContent;
 use meerkat_core::types::SessionId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -195,9 +196,11 @@ impl EmbeddingModel for BagOfWordsEmbeddingModel {
 
 /// The memory store's schema domain in the per-file migration ledger.
 ///
-/// Version 2 is the released 0.8.10 floor and current shape. The historical
-/// v1 step remains only as an ingredient of the direct current initializer;
-/// a ledger-v1 or unledgered owned schema is refused.
+/// Version 2 is the released 0.8.10 floor and the current catalog. Version 3
+/// is data-only: it purges rows whose text is empty or whitespace-only, which
+/// earlier releases indexed and which matched every query. The historical v1
+/// step remains only as an ingredient of the direct current initializer; a
+/// ledger-v1 or unledgered owned schema is refused.
 pub const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "memory",
     migrations: &[
@@ -211,11 +214,19 @@ pub const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDo
             name: "scoped-projection-and-staging",
             apply: migration_0002_scoped_projection,
         },
+        meerkat_sqlite::Migration {
+            version: 3,
+            name: "purge-empty-text",
+            apply: migration_0003_purge_empty_text,
+        },
     ],
     initialize_current: initialize_current_memory_schema,
-    allowed_existing_versions: &[2],
+    allowed_existing_versions: &[2, 3],
     bridge_recoverable_versions: &[1],
-    released_predecessors: &[],
+    released_predecessors: &[meerkat_sqlite::SchemaPredecessor {
+        version: 2,
+        verify: verify_released_v2_memory_schema,
+    }],
     owned_objects: &[
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
@@ -250,12 +261,159 @@ pub const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDo
 };
 
 fn initialize_current_memory_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    // Version 3 changes data only, so a fresh database is already current.
     migration_0001_memory_schema(tx)?;
     migration_0002_scoped_projection(tx)
 }
 
+/// Owned objects of the released v2 memory schema (0.8.10 through 0.8.50).
+/// Version 3 adds no objects, so this equals the current catalog.
+const RELEASED_V2_MEMORY_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "memory_metadata",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "memory_text",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_memory_metadata_session_id",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "memory_allocator",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "memory_compaction_stage",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_memory_compaction_stage_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "memory_scope_tombstone",
+    },
+];
+
+fn build_released_v2_memory_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    migration_0001_memory_schema(tx)?;
+    migration_0002_scoped_projection(tx)
+}
+
+fn verify_released_v2_memory_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &MEMORY_DOMAIN,
+        RELEASED_V2_MEMORY_OBJECTS,
+        build_released_v2_memory_schema,
+    )
+}
+
 fn migration_0001_memory_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch(CREATE_MEMORY_SCHEMA_SQL)
+}
+
+/// Whether durable memory text has nothing to match: empty or whitespace-only.
+fn is_empty_memory_text(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
+/// Purge the empty-text rows earlier releases indexed (one per compacted
+/// message whose text projection was empty, such as a tool-call-only
+/// assistant turn). Their embeddings are zero vectors, which cosine distance
+/// scores as a perfect match for every query, so they crowded real hits out of
+/// the top-k. Undecodable text is left for the typed corruption fault.
+///
+/// Staged (not yet finalized) compaction batches are rewritten without their
+/// empty entries, with the payload digest and entry count recomputed, so a
+/// retried stage of the same rewrite still compares equal.
+fn migration_0003_purge_empty_text(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let empty_points = {
+        let mut stmt = tx.prepare("SELECT point_id, content FROM memory_text")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut empty = Vec::new();
+        for row in rows {
+            let (point_id, bytes) = row?;
+            if std::str::from_utf8(&bytes).is_ok_and(is_empty_memory_text) {
+                empty.push(point_id);
+            }
+        }
+        empty
+    };
+    for point_id in empty_points {
+        tx.execute(
+            "DELETE FROM memory_text WHERE point_id = ?1",
+            params![point_id],
+        )?;
+        tx.execute(
+            "DELETE FROM memory_metadata WHERE point_id = ?1",
+            params![point_id],
+        )?;
+    }
+
+    let staged = {
+        let mut stmt = tx.prepare(
+            "SELECT session_id, parent_revision, revision, commit_fingerprint, entries_json \
+             FROM memory_compaction_stage WHERE state = 'staged'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (session_id, parent_revision, revision, commit_fingerprint, entries_json) in staged {
+        // An undecodable stage is left as is; finalizing it already fails
+        // typed.
+        let Ok(entries) = serde_json::from_slice::<Vec<DurableCompactionStageEntry>>(&entries_json)
+        else {
+            continue;
+        };
+        let before = entries.len();
+        let entries = entries
+            .into_iter()
+            .filter(|entry| !is_empty_memory_text(&entry.content))
+            .collect::<Vec<_>>();
+        if entries.len() == before {
+            continue;
+        }
+        let to_sql_error = |error: String| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
+        };
+        let entries_json =
+            serde_json::to_vec(&entries).map_err(|error| to_sql_error(error.to_string()))?;
+        let payload_digest = compaction_stage_payload_digest(&entries)
+            .map_err(|error| to_sql_error(error.to_string()))?;
+        let indexed_entries =
+            i64::try_from(entries.len()).map_err(|error| to_sql_error(error.to_string()))?;
+        tx.execute(
+            "UPDATE memory_compaction_stage \
+             SET entries_json = ?5, payload_digest = ?6, indexed_entries = ?7 \
+             WHERE session_id = ?1 AND parent_revision = ?2 AND revision = ?3 \
+               AND commit_fingerprint = ?4 AND state = 'staged'",
+            params![
+                session_id,
+                parent_revision,
+                revision,
+                commit_fingerprint,
+                entries_json,
+                payload_digest,
+                indexed_entries,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn migration_0002_scoped_projection(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -407,6 +565,17 @@ fn allocate_point_ids(tx: &Transaction<'_>, count: usize) -> Result<Vec<i64>, Me
 
 type MemoryHnswIndex = Hnsw<'static, f32, DistCosine>;
 
+/// Whether an embedding has a direction cosine distance can compare.
+///
+/// A zero (or non-finite) vector has none: `DistCosine` scores it at distance
+/// 0, a perfect match, against every vector. Such embeddings are never put in
+/// the index and never used as a query, whatever produced them (empty text, or
+/// an injected model that maps unknown text to zero).
+fn embedding_can_match(embedding: &[f32]) -> bool {
+    let norm_sq: f32 = embedding.iter().map(|x| x * x).sum();
+    norm_sq.is_finite() && norm_sq > 0.0
+}
+
 fn bounded_index_elements_hint(entries: usize) -> usize {
     entries.max(MIN_INDEX_ELEMENTS_HINT)
 }
@@ -522,8 +691,13 @@ impl ScopedHnswIndex {
         }
     }
 
+    /// Insert a point; an embedding that cannot match (see
+    /// [`embedding_can_match`]) is left out so it never occupies a
+    /// nearest-neighbor slot.
     fn insert(&self, embedding: &[f32], point_id: usize) {
-        self.index.insert((embedding, point_id));
+        if embedding_can_match(embedding) {
+            self.index.insert((embedding, point_id));
+        }
     }
 }
 
@@ -699,11 +873,10 @@ impl MemoryStore for HnswMemoryStore {
         let mut entries = Vec::new();
         for request in requests {
             let (_scope, content, metadata) = request.into_parts();
-            if content.is_indexable() {
-                entries.push(DurableCompactionStageEntry {
-                    content: content.into_indexable_text(),
-                    metadata,
-                });
+            // `normalized` turns empty or whitespace-only text into
+            // `Excluded(EmptyText)`, so it is skipped like any exclusion.
+            if let MemoryIndexableContent::Indexable(content) = content.normalized() {
+                entries.push(DurableCompactionStageEntry { content, metadata });
             }
         }
         let staged_entries = entries.len();
@@ -1142,11 +1315,11 @@ impl MemoryStore for HnswMemoryStore {
             // message Indexable(text) or Excluded(reason) via the typed
             // MemoryIndexableContent. The store indexes the former and skips
             // the latter, rather than the producer pre-flattening to a String
-            // and dropping empties blindly.
-            if !content.is_indexable() {
+            // and dropping empties blindly. `normalized` makes empty or
+            // whitespace-only text `Excluded(EmptyText)` whoever built it.
+            let MemoryIndexableContent::Indexable(text) = content.normalized() else {
                 continue;
-            }
-            let text = content.into_indexable_text();
+            };
             let meta_json = serde_json::to_vec(&metadata)
                 .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
             let embedding = self.policy.embed(&text);
@@ -1423,6 +1596,12 @@ impl HnswMemoryStore {
             // older rebuild snapshot.
             let _publication_guard = publication_guard;
             let embedding = embedding_model.embed(&query);
+            // A query with no direction (empty or whitespace-only text)
+            // matches nothing; with cosine distance it would score every
+            // point as a perfect match.
+            if !embedding_can_match(&embedding) {
+                return Ok(Some(Vec::new()));
+            }
             let conn = open_connection(&db_path)?;
             if scope_is_tombstoned(&conn, scope.session_id())? {
                 // Cross-instance finalization can publish a stale local index
@@ -3694,5 +3873,253 @@ mod tests {
             .expect_err("limit zero must be rejected");
         assert!(matches!(error, MemoryStoreError::EnumerationLimitZero));
         assert_eq!(error.error_code(), "memory_enumeration_limit_zero");
+    }
+
+    fn batch(session_id: &SessionId, contents: &[&str]) -> MemoryIndexBatch {
+        MemoryIndexBatch::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            contents
+                .iter()
+                .map(|content| request(*content, session_id))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_text_is_never_indexed_and_never_outranks_a_real_match() {
+        let dir = TempDir::new().unwrap();
+        let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        // A producer can still build `Indexable("")` directly; the store's
+        // seam must skip it on both the live and the staged path.
+        let receipt = store
+            .index_scoped_batch(batch(
+                &session_id,
+                &["", "the quick brown fox", "  \n\t ", ""],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(receipt.indexed_entries, 1);
+        let staged = store
+            .stage_compaction_batch(
+                compaction_projection(&session_id, "parent-empty", "revision-empty"),
+                batch(&session_id, &["", "   ", "staged lazy dog"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(staged.staged_entries, 1);
+
+        let results = store.search(&scope, "fox", 10).await.unwrap();
+        assert_eq!(results.len(), 1, "only the real entry is indexed");
+        assert_eq!(results[0].content, "the quick brown fox");
+        assert_eq!(
+            query_i64(
+                &dir.path().join("memory").join("memory.sqlite3"),
+                "SELECT COUNT(*) FROM memory_text",
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_query_returns_no_hits() {
+        let dir = TempDir::new().unwrap();
+        let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        store
+            .index_scoped_batch(batch(&session_id, &["something real to find"]))
+            .await
+            .unwrap();
+
+        for query in ["", "   ", "\n\t"] {
+            assert!(
+                store.search(&scope, query, 10).await.unwrap().is_empty(),
+                "query {query:?} has no direction and must match nothing"
+            );
+        }
+        assert_eq!(store.search(&scope, "real", 10).await.unwrap().len(), 1);
+    }
+
+    /// Bag-of-words embeddings, except that the text "opaque" embeds to the
+    /// zero vector, as an injected model might for text it cannot represent.
+    struct ZeroForOpaqueModel {
+        inner: BagOfWordsEmbeddingModel,
+    }
+
+    impl EmbeddingModel for ZeroForOpaqueModel {
+        fn dimension(&self) -> usize {
+            self.inner.dimension()
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            if text == "opaque" {
+                vec![0.0; self.inner.dimension()]
+            } else {
+                self.inner.embed(text)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_norm_embeddings_never_occupy_a_neighbor_slot() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let policy = || {
+            MemoryRankingPolicy::new(
+                Arc::new(ZeroForOpaqueModel {
+                    inner: BagOfWordsEmbeddingModel::new(DEFAULT_VOCAB_DIM),
+                }),
+                HnswParams::default(),
+            )
+        };
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        {
+            let store = HnswMemoryStore::open_with_policy(&memory_dir, policy()).unwrap();
+            store
+                .index_scoped_batch(batch(
+                    &session_id,
+                    &["opaque", "apple pie recipe", "opaque"],
+                ))
+                .await
+                .unwrap();
+            let live = store.search(&scope, "apple", 10).await.unwrap();
+            assert_eq!(live.len(), 1, "zero-norm points stay out of the live index");
+            assert_eq!(live[0].content, "apple pie recipe");
+        }
+        // The lazy rebuild from durable rows applies the same rule.
+        let store = HnswMemoryStore::open_with_policy(&memory_dir, policy()).unwrap();
+        let rebuilt = store.search(&scope, "apple", 10).await.unwrap();
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].content, "apple pie recipe");
+        assert_eq!(store.hnsw_point_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn released_v2_store_with_empty_rows_is_purged_on_open() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let db_path = memory_dir.join("memory.sqlite3");
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let projection = compaction_projection(&session_id, "parent-v2", "revision-v2");
+
+        {
+            let store = HnswMemoryStore::open(&memory_dir).unwrap();
+            store
+                .index_scoped_batch(batch(
+                    &session_id,
+                    &["deploy the release on friday", "the cat sat on the mat"],
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Shape the file as 0.8.50 left it: ledger version 2, empty rows
+        // written by compaction, and a staged batch carrying an empty entry
+        // whose digest and count include it.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE meerkat_schema SET version = 2 WHERE domain = 'memory'",
+                [],
+            )
+            .unwrap();
+            for (offset, text) in ["", "", "   ", "\n", ""].iter().enumerate() {
+                let point_id = 1_000 + i64::try_from(offset).unwrap();
+                let meta_json = serde_json::to_vec(&meta(&session_id)).unwrap();
+                conn.execute(
+                    "INSERT INTO memory_metadata (point_id, metadata_json, session_id) \
+                     VALUES (?1, ?2, ?3)",
+                    params![point_id, meta_json, session_id.to_string()],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO memory_text (point_id, content) VALUES (?1, ?2)",
+                    params![point_id, text.as_bytes()],
+                )
+                .unwrap();
+            }
+            let staged_entries = vec![
+                DurableCompactionStageEntry {
+                    content: String::new(),
+                    metadata: meta(&session_id),
+                },
+                DurableCompactionStageEntry {
+                    content: "staged real memory".to_string(),
+                    metadata: meta(&session_id),
+                },
+            ];
+            conn.execute(
+                "INSERT INTO memory_compaction_stage \
+                 (session_id, parent_revision, revision, commit_fingerprint, entries_json, \
+                  payload_digest, indexed_entries, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, 'staged')",
+                params![
+                    projection.session_id().to_string(),
+                    projection.parent_revision(),
+                    projection.revision(),
+                    projection.commit_fingerprint(),
+                    serde_json::to_vec(&staged_entries).unwrap(),
+                    compaction_stage_payload_digest(&staged_entries).unwrap(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        assert_eq!(
+            query_i64(
+                &db_path,
+                "SELECT version FROM meerkat_schema WHERE domain = 'memory'"
+            ),
+            3
+        );
+        assert_eq!(query_i64(&db_path, "SELECT COUNT(*) FROM memory_text"), 2);
+        assert_eq!(
+            query_i64(&db_path, "SELECT COUNT(*) FROM memory_metadata"),
+            2
+        );
+        assert_eq!(
+            query_i64(
+                &db_path,
+                "SELECT indexed_entries FROM memory_compaction_stage WHERE state = 'staged'"
+            ),
+            1
+        );
+
+        let results = store.search(&scope, "release friday", 10).await.unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].content, "deploy the release on friday");
+        assert!(
+            results
+                .iter()
+                .all(|result| !result.content.trim().is_empty())
+        );
+
+        // A retried stage of the same rewrite still compares equal to the
+        // rewritten stage, and finalizing publishes only the real entry.
+        let retried = store
+            .stage_compaction_batch(
+                projection.clone(),
+                batch(&session_id, &["", "staged real memory"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried.staged_entries, 1);
+        let finalized = store.finalize_compaction_batch(&projection).await.unwrap();
+        assert_eq!(finalized.indexed_entries, 1);
+        let staged_hits = store.search(&scope, "staged real memory", 1).await.unwrap();
+        assert_eq!(staged_hits[0].content, "staged real memory");
+        drop(store);
+
+        // Idempotent: a later open finds nothing more to purge.
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        assert_eq!(query_i64(&db_path, "SELECT COUNT(*) FROM memory_text"), 3);
+        assert_eq!(store.search(&scope, "cat mat", 10).await.unwrap().len(), 3);
     }
 }

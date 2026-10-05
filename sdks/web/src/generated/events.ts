@@ -370,6 +370,8 @@ export type LiveBridgeEffectKind = "model_computation" | "read_only_memory_snaps
 
 export type LiveBridgeEffectOutcome = "committed" | "failed" | "unknown";
 
+export type LiveChannelCloseReason = "client_requested" | "client_disconnected" | "provider_closed" | "error" | "media_fault" | "replaced" | "open_abandoned";
+
 export type LiveChannelId = string;
 
 export interface LiveContextObservationId {
@@ -970,7 +972,7 @@ export type TranscriptRewriteSelection = {
   type: "compaction_message_range";
 };
 
-export type TranscriptTurnInput = "runtime_authored";
+export type TranscriptTurnInput = "runtime_authored" | "typed_text";
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 
@@ -1330,6 +1332,14 @@ export interface BoundaryAppendsDiscardedEvent {
   type: "boundary_appends_discarded";
 }
 
+export interface LiveChannelClosedEvent {
+  channel_id: string;
+  reason: LiveChannelCloseReason;
+  reopen_recommended: boolean;
+  session_id: SessionId;
+  type: "live_channel_closed";
+}
+
 export interface OperationObservationFailedEvent {
   operation_id: OperationId;
   phase: OperationObservationPhase;
@@ -1393,7 +1403,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "peer_content_ingested",
   "provider_cache_breakpoints_discarded",
   "boundary_append_applied",
-  "boundary_appends_discarded"
+  "boundary_appends_discarded",
+  "live_channel_closed"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1446,5 +1457,6 @@ export type AgentEvent =
   ModelFallbackTargetFailedEvent |
   BoundaryAppendAppliedEvent |
   BoundaryAppendsDiscardedEvent |
+  LiveChannelClosedEvent |
   OperationObservationFailedEvent |
   HookLaunchRefusedEvent;

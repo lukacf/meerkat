@@ -346,6 +346,7 @@ impl LlmClientAdapter {
         let mut reasoning_started = false;
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
+        let mut saw_done = false;
 
         while let Some(result) = stream.next().await {
             self.stream_activity.fetch_add(1, Ordering::SeqCst);
@@ -469,6 +470,7 @@ impl LlmClientAdapter {
                         LlmDoneOutcome::Success {
                             stop_reason: completed_reason,
                         } => {
+                            saw_done = true;
                             stop_reason = completed_reason;
                         }
                         LlmDoneOutcome::Error { error } => {
@@ -480,6 +482,22 @@ impl LlmClientAdapter {
                     return Err(error.into_agent_error(self.provider.as_str()));
                 }
             }
+        }
+        // A stream that ends without its terminal event is truncated, whatever
+        // the client: its partial blocks are never assembled into a result,
+        // so nothing of the attempt reaches the transcript and the retry
+        // replays the turn (provider clients already wrap their streams in
+        // `ensure_terminal_done`; this keeps the guarantee at the one point
+        // every provider passes through).
+        if !saw_done {
+            let error = LlmError::IncompleteResponse {
+                message: "Stream ended without Done event".to_string(),
+            };
+            return Err(AgentError::llm(
+                self.provider.as_str(),
+                error.failure_reason(),
+                error.to_string(),
+            ));
         }
         if reasoning_started {
             let reasoning_text = assembler.current_reasoning_text();
@@ -1403,6 +1421,86 @@ mod tests {
                 .all(|event| event.assistant_message_id().is_none()),
             "output outside the request-attempt path is not a transcript assistant message"
         );
+        Ok(())
+    }
+
+    /// A provider stream truncated mid-answer (text, reasoning and a tool
+    /// call started, then no terminal event) fails the attempt with a
+    /// retryable `IncompleteResponse`. Only the live deltas were published:
+    /// no reasoning completion, no tool call, and no result to commit. The
+    /// same holds whether the client wraps its stream in
+    /// `ensure_terminal_done` or not.
+    #[tokio::test]
+    async fn a_truncated_stream_fails_retryably_and_publishes_only_live_deltas()
+    -> Result<(), String> {
+        let truncated = || {
+            vec![
+                Ok(LlmEvent::ReasoningDelta {
+                    delta: "weighing".to_string(),
+                }),
+                Ok(LlmEvent::TextDelta {
+                    delta: "partial answer".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::ToolCallDelta {
+                    id: "call-1".to_string(),
+                    name: Some("lookup".to_string()),
+                    args_delta: "{\"q\":".to_string(),
+                }),
+            ]
+        };
+        for wrapped in [false, true] {
+            let events = if wrapped {
+                crate::streaming::ensure_terminal_done(Box::pin(stream::iter(truncated())))
+                    .collect::<Vec<_>>()
+                    .await
+            } else {
+                truncated()
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let adapter = LlmClientAdapter::with_event_channel(
+                Arc::new(ScriptedClient { events }),
+                "scripted-model".to_string(),
+                tx,
+            );
+            let Err(error) = adapter
+                .stream_response(
+                    &[Message::User(UserMessage::text("answer"))],
+                    &[],
+                    1024,
+                    None,
+                    None,
+                )
+                .await
+            else {
+                return Err(format!("a truncated stream must fail (wrapped: {wrapped})"));
+            };
+            let AgentError::Llm {
+                reason: meerkat_core::error::LlmFailureReason::ProviderError(provider_error),
+                ..
+            } = error
+            else {
+                return Err(format!("expected a provider error, got {error:?}"));
+            };
+            assert_eq!(
+                provider_error.kind,
+                meerkat_core::error::LlmProviderErrorKind::IncompleteResponse
+            );
+            assert!(provider_error.is_retryable(), "wrapped: {wrapped}");
+            let published = std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|event| match event {
+                    AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
+                    AgentEvent::TextDelta { .. } => "text_delta",
+                    AgentEvent::ReasoningComplete { .. } => "reasoning_complete",
+                    _ => "other",
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                published,
+                vec!["reasoning_delta", "text_delta"],
+                "only live deltas (wrapped: {wrapped})"
+            );
+        }
         Ok(())
     }
 

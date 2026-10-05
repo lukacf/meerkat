@@ -754,10 +754,11 @@ async fn relink_past_max_run_retires_a_child_still_running() {
         .get_by_identity(&child)
         .and_then(|entry| entry.fork_job.clone())
         .expect("durable fork job record");
-    job.max_run_ms = Some(now_ms().saturating_sub(job.started_at_ms).max(1));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The limit is already past on the record itself: a start a minute back
+    // against a 1 ms limit, so no clock has to advance before the re-link.
+    job.started_at_ms = job.started_at_ms.saturating_sub(60_000);
+    job.max_run_ms = Some(1);
 
-    let started = tokio::time::Instant::now();
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
         &relink_delivery(&fixture),
@@ -767,11 +768,10 @@ async fn relink_past_max_run_retires_a_child_still_running() {
         &job,
     )
     .await;
+    // The child's turn is still held by its gate, which opens only below:
+    // the re-link returning at all proves the elapsed limit applied without
+    // waiting for the run. No wall-clock margin is involved.
     assert_eq!(action, ForkRelinkAction::Delivered);
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "an elapsed limit applies at once, without waiting for the run"
-    );
     assert!(handle.get_member(&child).await.unwrap().is_none());
     await_completion_record(&fixture, &owner, &job_id).await;
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
@@ -2203,8 +2203,15 @@ async fn a_status_read_held_past_max_run_still_retires_the_child_at_the_deadline
     job.max_run_ms = Some(now_ms().saturating_sub(job.started_at_ms) + 2_500);
     let deadline_ms = job.started_at_ms + job.max_run_ms.unwrap();
 
-    let (status_entered, release_status) =
+    let (status_entered, mut release_status) =
         meerkat_mob::MobHandle::arm_member_status_read_test_gate(child.clone());
+    // The held read owns the gate's release receiver, so the release sender
+    // closes exactly when the re-link abandons that read: the moment the
+    // limit decides. The sender is handed back so the gate stays unreleased.
+    let read_abandoned = tokio::spawn(async move {
+        release_status.closed().await;
+        (now_ms(), release_status)
+    });
     let action = tokio::time::timeout(
         Duration::from_secs(20),
         meerkat_mob_mcp::fork_relink::relink_child(
@@ -2218,25 +2225,23 @@ async fn a_status_read_held_past_max_run_still_retires_the_child_at_the_deadline
     )
     .await
     .expect("the limit decides although the status read is held");
-    let decided_ms = now_ms();
     assert_eq!(action, ForkRelinkAction::Delivered);
-    assert!(
-        decided_ms >= deadline_ms,
-        "decided at the deadline, not before"
-    );
-    // The child is retired before the re-link returns; retiring the cancelled
-    // child takes about two seconds of that here. A status read left to its
-    // own 5 s bound would hold the decision until 4.5 s past the deadline,
-    // before the retirement even starts.
-    assert!(
-        decided_ms < deadline_ms + 3_500,
-        "retired within a margin of the deadline, not after the held status read's own bound: \
-         {} ms late",
-        decided_ms - deadline_ms
-    );
     status_entered
         .await
         .expect("the re-link's status read was held");
+    // The re-link decided by abandoning the read it was still holding: the
+    // gate was never released (the release sender is returned unsent). That
+    // the read's bound is cut to the deadline, not its own 5 s, is the pure
+    // `within_limit` rule, unit-tested in `fork_relink`; this test proves the
+    // held read does not hold the limit back, which needs no wall-clock
+    // margin. Timers never fire early, so the lower bound is load-proof.
+    let (abandoned_ms, release_status) = read_abandoned
+        .await
+        .expect("the held read was abandoned when the limit decided");
+    assert!(
+        abandoned_ms >= deadline_ms,
+        "decided at the deadline, not before"
+    );
     await_completion_record(&fixture, &owner, job_id).await;
     let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
     assert_eq!(outcome["status"], "max_run_elapsed", "{outcome}");

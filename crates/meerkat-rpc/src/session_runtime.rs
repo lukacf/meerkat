@@ -168,12 +168,23 @@ pub(crate) enum LlmReconfigureBoundaryOwnership {
     AlreadyHeld,
 }
 
+impl LlmReconfigureBoundaryOwnership {
+    /// Where this apply's pre-turn staleness check runs.
+    fn staleness_position(self) -> LiveStalenessPosition {
+        match self {
+            Self::Acquire => LiveStalenessPosition::OutsideTurnBoundary,
+            Self::AlreadyHeld => LiveStalenessPosition::TurnBoundaryHeld,
+        }
+    }
+}
+
 // W2-A: surface-agnostic LiveOpenPrecheckError + precheck_identity +
 // apply_precheck_gates moved to `meerkat::session_runtime::errors` and
 // `meerkat::session_runtime::live_orchestration`. RPC keeps a re-export
 // so existing handlers/tests resolve the same type.
 pub use meerkat::session_runtime::errors::LiveOpenPrecheckError;
 use meerkat::session_runtime::live_orchestration::{apply_precheck_gates, precheck_identity};
+use meerkat::session_runtime::runtime_state::LiveStalenessPosition;
 
 #[cfg(test)]
 type ServiceStartTurnResultReceiver =
@@ -2759,13 +2770,29 @@ impl SessionRuntime {
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
         provider_hint: Option<&str>,
     ) -> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-        meerkat_runtime::runtime_stamped_prompt_turn_metadata(Self::turn_metadata_from_overrides(
-            skill_references,
-            turn_tool_overlay,
-            additional_instructions,
-            overrides,
-            provider_hint,
+        meerkat_runtime::runtime_stamped_prompt_turn_metadata(Self::typed_text_turn(
+            Self::turn_metadata_from_overrides(
+                skill_references,
+                turn_tool_overlay,
+                additional_instructions,
+                overrides,
+                provider_hint,
+            ),
         ))
+    }
+
+    /// Stamp a host-submitted prompt turn's authorship as typed text
+    /// (`TranscriptTurnInput::TypedText`) on its transcript identity, so every
+    /// row the turn commits (the user row and its reply) carries it: a live
+    /// channel's mirror reads it from the row and takes the text chat as
+    /// quiet context instead of speech to voice (#1614).
+    fn typed_text_turn(
+        metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        let mut metadata = metadata.unwrap_or_default();
+        metadata.transcript_identity.turn_input =
+            Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        Some(metadata)
     }
 
     pub(crate) fn turn_overrides_from_metadata(
@@ -2830,11 +2857,15 @@ impl SessionRuntime {
         Ok(metadata.keep_alive)
     }
 
-    async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
+    async fn live_session_is_stale(
+        &self,
+        session_id: &SessionId,
+        position: LiveStalenessPosition,
+    ) -> Result<bool, RpcError> {
         let snapshot = self.realm_context_snapshot();
         let recovery_ctx = self.recovery_context(&snapshot, Some(session_id));
         self.runtime_state_ops()
-            .live_session_is_stale(session_id, &recovery_ctx)
+            .live_session_is_stale(session_id, &recovery_ctx, position)
             .await
             .map_err(session_error_to_rpc)
     }
@@ -2932,7 +2963,8 @@ impl SessionRuntime {
         let stale = if archived {
             false
         } else {
-            self.live_session_is_stale(session_id).await?
+            self.live_session_is_stale(session_id, LiveStalenessPosition::TurnBoundaryHeld)
+                .await?
         };
         drop(turn_boundary);
 
@@ -2974,8 +3006,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let job_store = persistence.job_store();
-        let runtime_delivery_inbox =
-            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+        let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -3123,8 +3154,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let job_store = persistence.job_store();
-        let runtime_delivery_inbox =
-            meerkat_runtime::RuntimeDeliveryInbox::new(persistence.runtime_store());
+        let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
@@ -4341,6 +4371,20 @@ impl SessionRuntime {
         self.runtime_adapter.provider_auth_runtime_authority()
     }
 
+    /// The runtime's default MCP credential source (see
+    /// [`meerkat::default_mcp_auth_resolver`]).
+    #[cfg(feature = "mcp")]
+    pub fn default_mcp_auth_resolver(&self) -> Option<Arc<dyn meerkat::McpAuthResolver>> {
+        let persistence = match self.provider_auth_persistence() {
+            Ok(persistence) => persistence,
+            Err(error) => {
+                tracing::warn!(error = %error, "provider-auth persistence unavailable for MCP OAuth");
+                None
+            }
+        };
+        meerkat::default_mcp_auth_resolver(persistence, self.provider_auth_runtime_authority())
+    }
+
     /// Override the shared default LLM client used by this runtime.
     pub fn set_default_llm_client(&self, client: Option<Arc<dyn LlmClient>>) {
         *self
@@ -4738,6 +4782,26 @@ impl SessionRuntime {
         let cleanup = self.archive_runtime_cleanup();
         self.live_orchestrator(&snapshot, cleanup, None)
             .close_experimental_live_channel(host, authority, channel_id)
+            .await
+    }
+
+    /// `live/media_health`: judge the client's decoded-audio counters for the
+    /// requested output; a media fault closes the channel via the shared owner.
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    pub async fn report_experimental_live_media_health(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        authority: &dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &meerkat_live::LiveChannelId,
+        report: &meerkat_contracts::LiveMediaHealthParams,
+    ) -> Result<
+        meerkat_contracts::LiveMediaHealthResult,
+        meerkat::surface::ExperimentalLiveMediaHealthError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup, None)
+            .report_experimental_live_media_health(host, authority, channel_id, report)
             .await
     }
 
@@ -5363,28 +5427,20 @@ impl SessionRuntime {
             ));
         }
 
-        let jobs = self
-            .job_store
-            .list_all(10_000)
+        // Visit exactly the runtimes the delivery authority reports as holding
+        // undrained rows for this realm's jobs. The previous job-row window
+        // (`list_all(10_000)`, ordered by job id) missed sessions whose jobs
+        // aged out of it while their inbox rows stayed pending forever.
+        // Subscriber fan-out happens inside each origin runtime's rows.
+        let sessions = projector
+            .sessions_with_pending_deliveries()
             .await
             .map_err(|error| error.to_string())?;
-        let mut sessions = BTreeMap::new();
-        for job in jobs
-            .into_iter()
-            .filter(|job| job.spec.realm_id == realm_id.as_str())
-        {
-            let origin_session_id = job.spec.origin_session_id;
-            sessions.insert(origin_session_id.to_string(), origin_session_id);
-            for subscription in job.subscriptions {
-                let session_id = subscription.session_id().clone();
-                sessions.insert(session_id.to_string(), session_id);
-            }
-        }
         let base_sink: Arc<dyn meerkat::JobDeliverySink> =
             Arc::new(SessionRuntimeJobDeliverySink {
                 runtime: Arc::clone(self),
             });
-        for session_id in sessions.into_values() {
+        for session_id in sessions {
             let sink: Arc<dyn meerkat::JobDeliverySink> = match self
                 .runtime_adapter
                 .ops_lifecycle_registry(&session_id)
@@ -7423,7 +7479,10 @@ impl SessionRuntime {
             .await?;
         let workgraph_service = self.workgraph_service().ok();
 
-        if self.live_session_is_stale(session_id).await? {
+        if self
+            .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?
+        {
             self.discard_stale_live_session(session_id).await?;
         }
 
@@ -7481,13 +7540,13 @@ impl SessionRuntime {
             }
         }
 
-        let turn_metadata = Self::turn_metadata_from_overrides(
+        let turn_metadata = Self::typed_text_turn(Self::turn_metadata_from_overrides(
             skill_references,
             turn_tool_overlay,
             additional_instructions,
             overrides.as_ref(),
             Some(effective_identity.provider.as_str()),
-        );
+        ));
 
         // Injected context lowers through the prompt input's typed slot so
         // the runtime batch places the InjectedContext-role appends
@@ -7890,7 +7949,10 @@ impl SessionRuntime {
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
 
-        if self.live_session_is_stale(session_id).await? {
+        if self
+            .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?
+        {
             self.discard_stale_live_session(session_id).await?;
         }
         if let Err(primary) = self.ensure_runtime_executor(session_id).await {
@@ -8342,7 +8404,11 @@ impl SessionRuntime {
                 data: None,
             })?;
 
-        if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
+        if pending_session.is_none()
+            && !self
+                .live_session_is_stale(session_id, llm_reconfigure_boundary.staleness_position())
+                .await?
+        {
             let active_turn = match pre_admission.as_mut() {
                 Some(admission) => {
                     Self::take_runtime_pre_admission_guard(admission, session_id)?.into_admission()
@@ -9562,7 +9628,10 @@ impl SessionRuntime {
             Some(effective_identity.provider.as_str()),
         ));
 
-        if self.live_session_is_stale(session_id).await? {
+        if self
+            .live_session_is_stale(session_id, LiveStalenessPosition::OutsideTurnBoundary)
+            .await?
+        {
             return Box::pin(self.try_recover_persisted_session(
                 session_id,
                 turn_prompt,
@@ -11659,7 +11728,14 @@ impl SessionRuntime {
             meerkat_core::RuntimeBuildMode::StandaloneEphemeral => {
                 meerkat::mcp::standalone_router()
             }
-        };
+        }
+        // Live `mcp/add` servers use the same interactive MCP auth as
+        // factory-built sessions: stored credentials, or the typed
+        // human-authorization status. Never a browser.
+        .with_mcp_auth(
+            meerkat::McpAuthMode::Interactive,
+            self.default_mcp_auth_resolver(),
+        );
         let adapter = Arc::new(McpRouterAdapter::new(router));
         let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
         let combined = match build_config.external_tools.clone() {
@@ -11759,7 +11835,7 @@ impl SessionRuntime {
             action.operation == ToolConfigChangeOperation::Remove
                 && action.phase == McpLifecyclePhase::Draining
         }) {
-            Self::spawn_mcp_drain_task_if_needed(adapter.clone(), drain_task_running, lifecycle_tx);
+            adapter.spawn_removal_drain(drain_task_running, lifecycle_tx);
         }
 
         queued_actions.extend(result.delta.lifecycle_actions);
@@ -11792,47 +11868,6 @@ impl SessionRuntime {
             *turn_prompt = ContentInput::Blocks(blocks);
         }
         Ok(())
-    }
-
-    #[cfg(feature = "mcp")]
-    fn spawn_mcp_drain_task_if_needed(
-        adapter: Arc<McpRouterAdapter>,
-        task_running: Arc<AtomicBool>,
-        lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
-    ) {
-        if task_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let delta = match adapter.progress_removals().await {
-                    Ok(delta) => delta,
-                    Err(err) => {
-                        tracing::warn!("background MCP drain apply failed: {err}");
-                        break;
-                    }
-                };
-
-                for action in delta.lifecycle_actions {
-                    let _ = lifecycle_tx.send(action);
-                }
-
-                match adapter.has_removing_servers().await {
-                    Ok(true) => continue,
-                    Ok(false) => break,
-                    Err(err) => {
-                        tracing::warn!("background MCP drain state check failed: {err}");
-                        break;
-                    }
-                }
-            }
-            task_running.store(false, Ordering::Release);
-        });
     }
 
     #[cfg(feature = "mcp")]
@@ -12525,6 +12560,7 @@ mod tests {
                     session.to_string(),
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test::register_session",
         )
@@ -12563,6 +12599,7 @@ mod tests {
                     session_id.clone(),
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test::register_session",
         )
@@ -12788,6 +12825,31 @@ mod tests {
         assert_eq!(
             metadata.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    /// #1614: a host-submitted prompt turn (turn/start, a session's initial
+    /// prompt) is stamped as typed text, with or without other overrides, so
+    /// a live channel's mirror takes its rows as quiet text-chat context.
+    #[test]
+    fn host_prompt_turns_are_stamped_as_typed_text() {
+        let typed = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+        let bare = SessionRuntime::runtime_stamped_prompt_turn_metadata_from_overrides(
+            None, None, None, None, None,
+        );
+        assert_eq!(bare.transcript_identity.turn_input, typed);
+        let with_overrides = SessionRuntime::runtime_stamped_prompt_turn_metadata_from_overrides(
+            None,
+            None,
+            Some(vec!["runtime note".to_string()]),
+            None,
+            None,
+        );
+        assert_eq!(with_overrides.transcript_identity.turn_input, typed);
+        assert_eq!(
+            SessionRuntime::typed_text_turn(None)
+                .and_then(|metadata| metadata.transcript_identity.turn_input),
+            typed
         );
     }
 
@@ -14490,6 +14552,87 @@ mod tests {
         AgentFactory::new(temp.path().join("sessions"))
     }
 
+    /// An MCP endpoint that always demands OAuth.
+    #[cfg(feature = "mcp")]
+    async fn spawn_oauth_required_mcp_endpoint() -> String {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(
+                        "www-authenticate",
+                        r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#,
+                    )],
+                )
+                    .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn live_mcp_servers_get_interactive_auth_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp).with_provider_auth_persistence(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+        );
+        let runtime = make_runtime(factory, 2);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        assert!(runtime.default_mcp_auth_resolver().is_some());
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create session");
+        let mut config = McpServerConfig::streamable_http(
+            "guarded",
+            spawn_oauth_required_mcp_endpoint().await,
+            std::collections::HashMap::new(),
+        );
+        if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport {
+            http.oauth_account = Some("subject-7".to_owned());
+        }
+        let target = meerkat::McpServerIdentity::from_config(&config).unwrap();
+        runtime
+            .mcp_stage_add(&session_id, config)
+            .await
+            .expect("stage guarded server");
+        let adapter = runtime
+            .mcp_adapter_for_session(&session_id)
+            .await
+            .expect("session has a live MCP adapter");
+        adapter.apply_staged().await.expect("apply staged add");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            adapter.poll_lifecycle_actions().await.unwrap();
+            let awaiting = adapter.servers_awaiting_authorization().await;
+            if !awaiting.is_empty() {
+                assert_eq!(
+                    awaiting,
+                    vec![target],
+                    "the default resolver reports the typed human-authorization status"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "OAuth-protected live server never reported awaiting authorization"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> Arc<SessionRuntime> {
         make_runtime_with_config(factory, max_sessions, Config::default())
     }
@@ -14599,6 +14742,239 @@ mod tests {
         AgentBuildConfig {
             llm_client_override: Some(Arc::new(MockLlmClient)),
             ..AgentBuildConfig::new("claude-sonnet-4-5")
+        }
+    }
+
+    /// The other half of the staleness rule: a live actor left holding an
+    /// uncommitted terminal (a run that ended without committing its
+    /// boundary) is stale even to a turn/start outside the turn-finalization
+    /// boundary, because no commit is coming for it. The racing turn/start
+    /// discards it as before and the next turn runs on durable truth: the
+    /// stopped run's rows never reach it. Only a run whose commit may still
+    /// land is left alone (see the racing test below).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_uncommitted_terminal_is_stale_from_either_position_and_the_next_turn_runs_on_durable_truth()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(AgentFactory::new(temp.path().join("sessions")), 4);
+        // The next turn rebuilds the session from durable truth, which does
+        // not carry the build's in-memory client override: the runtime's
+        // default client stands in for the host's configured provider.
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let (build, calls, release) = block_after_first_build_config();
+        let session_id = runtime
+            .create_or_resume_session_without_turn(build, None, None, Default::default())
+            .await
+            .unwrap();
+        let turn = |prompt: &'static str| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        prompt.into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+        turn("committed prompt")
+            .await
+            .unwrap()
+            .expect("the first turn commits");
+
+        // A stopped run ends without committing its boundary.
+        let mut notifications = capture_session_events(&runtime);
+        let stopped = turn("stopped prompt");
+        wait_for_llm_calls(&calls, 2, "the second turn's provider call is in flight").await;
+        let run_id = run_started_run_id(&mut notifications, &session_id).await;
+        assert!(matches!(
+            runtime
+                .stop_run(&session_id, &run_id, "stop it".into())
+                .await
+                .expect("stop the run"),
+            meerkat_runtime::RunStopReceipt::Stopped { .. }
+        ));
+        assert!(
+            tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, stopped)
+                .await
+                .expect("the stopped turn returns")
+                .unwrap()
+                .is_err(),
+            "the stopped turn reports cancellation"
+        );
+
+        // The actor holds the stopped run's rows and no commit is coming for
+        // them: stale from either position.
+        for position in [
+            LiveStalenessPosition::OutsideTurnBoundary,
+            LiveStalenessPosition::TurnBoundaryHeld,
+        ] {
+            assert!(
+                runtime
+                    .live_session_is_stale(&session_id, position)
+                    .await
+                    .unwrap(),
+                "{position:?}: the stopped run's uncommitted image is stale"
+            );
+        }
+
+        release.notify_one();
+        turn("next prompt")
+            .await
+            .unwrap()
+            .expect("the next turn runs on durable truth");
+        let transcript = serde_json::to_string(
+            runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .unwrap()
+                .messages(),
+        )
+        .unwrap();
+        assert!(
+            transcript.contains("committed prompt") && transcript.contains("next prompt"),
+            "{transcript}"
+        );
+        assert!(
+            !transcript.contains("stopped prompt"),
+            "the stopped run's uncommitted rows were resynced away: {transcript}"
+        );
+    }
+
+    /// Where a run of the racing test is held.
+    #[derive(Clone, Copy, Debug)]
+    enum InFlightRunWindow {
+        /// The run applied (its rows are in the live actor) and its boundary
+        /// commit has not landed.
+        BeforeBoundaryCommit,
+        /// The commit landed and the executor has not acknowledged it.
+        BeforeBoundaryAcknowledgement,
+    }
+
+    /// A text `turn/start` that arrives while another run on the session
+    /// is between its apply and its boundary acknowledgement keeps that run
+    /// and the session (turbo-live combined3 S99: an ExistingMember live
+    /// delegation worker on its source session, raced by the user typing).
+    ///
+    /// Before the fix, `turn/start`'s pre-admission staleness check saw the
+    /// live actor's uncommitted rows (`LiveUncommittedTranscript`), read the
+    /// missing live export as an absent actor, and judged the session stale:
+    /// it discarded the actor, dropping the checkpointer the run's
+    /// provisional promotion acknowledges through ("promoted WholeBlob
+    /// boundary has no exact live checkpointer"), and unregistered the
+    /// session.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turn_start_racing_an_in_flight_runs_boundary_keeps_the_run_and_the_session() {
+        const STEP: Duration = Duration::from_secs(30);
+        for window in [
+            InFlightRunWindow::BeforeBoundaryCommit,
+            InFlightRunWindow::BeforeBoundaryAcknowledgement,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = make_runtime(AgentFactory::new(temp.path().join("sessions")), 4);
+            let session_id = runtime
+                .create_or_resume_session_without_turn(
+                    mock_build_config(),
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            let adapter = runtime.runtime_adapter();
+            let (entered, release) = match window {
+                InFlightRunWindow::BeforeBoundaryCommit => {
+                    adapter.arm_runtime_loop_before_terminal_commit_test_hook(session_id.clone())
+                }
+                InFlightRunWindow::BeforeBoundaryAcknowledgement => adapter
+                    .arm_runtime_loop_before_boundary_acknowledgement_test_hook(session_id.clone()),
+            };
+            let turn = |prompt: &'static str| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    runtime
+                        .start_turn_via_runtime(
+                            &session_id,
+                            prompt.into(),
+                            Vec::new(),
+                            event_tx,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                })
+            };
+            let first = turn("first in-flight run");
+            tokio::time::timeout(STEP, entered)
+                .await
+                .unwrap_or_else(|_| panic!("{window:?}: the first run reaches its hold"))
+                .unwrap();
+
+            // The check a racing turn/start runs before admission.
+            assert!(
+                !runtime
+                    .live_session_is_stale(&session_id, LiveStalenessPosition::OutsideTurnBoundary)
+                    .await
+                    .unwrap(),
+                "{window:?}: a run between its apply and its boundary acknowledgement is not \
+                 a stale live session"
+            );
+            let second = turn("second racing turn");
+            release.send(()).unwrap();
+            let first = tokio::time::timeout(STEP, first)
+                .await
+                .unwrap_or_else(|_| panic!("{window:?}: the first run finishes"))
+                .unwrap();
+            assert!(
+                first.is_ok(),
+                "{window:?}: the in-flight run commits and acknowledges its boundary: {first:?}"
+            );
+            let second = tokio::time::timeout(STEP, second)
+                .await
+                .unwrap_or_else(|_| panic!("{window:?}: the racing turn finishes"))
+                .unwrap();
+            assert!(
+                second.is_ok(),
+                "{window:?}: the racing turn runs: {second:?}"
+            );
+            assert!(
+                runtime
+                    .service
+                    .live_session_actor_registered(&session_id)
+                    .await,
+                "{window:?}: the live actor survives"
+            );
+            assert!(
+                adapter.contains_session(&session_id).await,
+                "{window:?}: the runtime registration survives"
+            );
+            let transcript = serde_json::to_string(
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .unwrap()
+                    .messages(),
+            )
+            .unwrap();
+            assert!(
+                transcript.contains("first in-flight run")
+                    && transcript.contains("second racing turn"),
+                "{window:?}: both turns are in the transcript: {transcript}"
+            );
         }
     }
 
@@ -22201,7 +22577,10 @@ mod tests {
 
         assert!(
             !runtime
-                .live_session_is_stale(&direct.session_id)
+                .live_session_is_stale(
+                    &direct.session_id,
+                    LiveStalenessPosition::OutsideTurnBoundary,
+                )
                 .await
                 .expect("query timestamp-only stale predicate"),
             "timestamp-only durable projection must not evict live runtime mechanics"
@@ -26064,7 +26443,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "flaky under load (8/30): Remove event missing at the remove boundary, #1461"]
     async fn start_turn_applies_staged_mcp_remove_and_reload_at_turn_boundary() {
         let server_config = mcp_server_config("test-server");
         let temp = tempfile::tempdir().unwrap();
@@ -26099,6 +26477,17 @@ mod tests {
                 && payload.target == "test-server"
                 && payload.status_text() == "pending"
         }));
+        // The add connects in the background. A remove staged while it is
+        // still pending is deferred to a later boundary, so wait until the
+        // server is connected and installed.
+        let adapter = runtime
+            .mcp_adapter_for_session(&session_id)
+            .await
+            .expect("mcp adapter");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
 
         runtime
             .mcp_stage_remove(&session_id, "test-server".to_string())
@@ -26118,11 +26507,14 @@ mod tests {
             .await
             .expect("turn remove should apply staged remove");
         let remove_events = collect_tool_config_events(&mut event_rx).await;
-        assert!(remove_events.iter().any(|payload| {
-            payload.operation == ToolConfigChangeOperation::Remove
-                && payload.target == "test-server"
-                && matches!(payload.status_text().as_str(), "applied" | "draining")
-        }));
+        assert!(
+            remove_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Remove
+                    && payload.target == "test-server"
+                    && matches!(payload.status_text().as_str(), "applied" | "draining")
+            }),
+            "remove boundary events: {remove_events:?}"
+        );
     }
 
     #[cfg(feature = "mcp")]
@@ -26202,20 +26594,12 @@ mod tests {
                 && payload.status_text() == "draining"
         }));
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if !adapter
-                    .has_removing_servers()
-                    .await
-                    .expect("check removing state")
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for forced removal to finalize");
+        assert!(
+            adapter
+                .wait_removals_finalized(Duration::from_secs(10))
+                .await,
+            "the drain must finalize the timed-out removal"
+        );
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
@@ -26230,17 +26614,7 @@ mod tests {
             )
             .await
             .expect("follow-up boundary");
-        let second_turn_events = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let events = collect_tool_config_events(&mut event_rx).await;
-                if !events.is_empty() {
-                    break events;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_default();
+        let second_turn_events = collect_tool_config_events(&mut event_rx).await;
         assert!(
             second_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Remove
@@ -26253,7 +26627,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "flaky under load (11/30): depends on the 100 ms MCP drain poll, #1461"]
     async fn staged_ops_remain_boundary_gated_while_background_drain_runs() {
         let server1_config = mcp_server_config("server-draining");
         let server2_config = mcp_server_config("server-staged");
@@ -26287,6 +26660,12 @@ mod tests {
             .mcp_adapter_for_session(&session_id)
             .await
             .expect("mcp adapter");
+        // The add connects in the background; the server must be installed
+        // before its in-flight count is set and its remove is staged.
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
         adapter
             .set_removal_timeout_for_testing(Duration::from_secs(3))
             .await
@@ -26329,7 +26708,12 @@ mod tests {
             .await
             .expect("stage second add");
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // What the background drain does on every wake: progressing
+        // removals must not apply the staged add outside a boundary.
+        adapter
+            .progress_removals()
+            .await
+            .expect("progress removals");
         assert!(
             adapter.tools().is_empty(),
             "background drain must not apply newly staged add outside boundary"
@@ -26362,9 +26746,15 @@ mod tests {
             "expected Add+pending for server-staged at boundary, got: {next_turn_events:?}"
         );
 
-        // Turn 4: after the background connection resolves, drain_pending
-        // picks it up and the server becomes visible.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Turn 4: once the background connection delivers its result,
+        // drain_pending at the boundary picks it up and the server becomes
+        // visible.
+        assert!(
+            adapter
+                .wait_connect_results_delivered(Duration::from_secs(10))
+                .await,
+            "the staged add must deliver its connect result"
+        );
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
             .start_turn(
@@ -26399,7 +26789,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "fails under load (3/3 on 2 cores): fixed sleep on the 100 ms MCP drain poll, #1461"]
     async fn queued_lifecycle_actions_survive_boundary_apply_failure() {
         let server_config = mcp_server_config("lossless-server");
 
@@ -26432,8 +26821,18 @@ mod tests {
             .mcp_adapter_for_session(&session_id)
             .await
             .expect("mcp adapter");
+        // The add connects in the background; the server must be installed
+        // before its in-flight count is set and its remove is staged.
         adapter
-            .set_removal_timeout_for_testing(Duration::from_millis(20))
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
+        // A removal timeout far past the test (a hang guard only): the
+        // removal must still be draining after the remove boundary, so the
+        // background drain, not that boundary, finalizes it. A 20 ms timeout
+        // raced the boundary's own removal pass and finalized there under load.
+        adapter
+            .set_removal_timeout_for_testing(Duration::from_secs(60))
             .await
             .expect("set timeout");
         adapter
@@ -26445,7 +26844,7 @@ mod tests {
             .mcp_stage_remove(&session_id, "lossless-server".to_string())
             .await
             .expect("stage remove");
-        let (event_tx, _event_rx) = mpsc::channel(64);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
             .start_turn(
                 &session_id,
@@ -26458,11 +26857,28 @@ mod tests {
             )
             .await
             .expect("remove boundary");
+        let remove_turn_events = collect_tool_config_events(&mut event_rx).await;
+        assert!(
+            remove_turn_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Remove
+                    && payload.target == "lossless-server"
+                    && payload.status_text() == "draining"
+            }),
+            "the remove boundary starts draining, got: {remove_turn_events:?}"
+        );
 
-        // Wait for the background drain task to process the forced removal.
-        // Drain task polls every 100ms, timeout is 20ms, so after 500ms
-        // the forced removal should be queued in lifecycle_rx.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The in-flight call finishes: the background drain wakes on it,
+        // finalizes the removal and queues its action for the next boundary.
+        adapter
+            .set_inflight_calls_for_testing("lossless-server", 0)
+            .await
+            .expect("finish inflight call");
+        assert!(
+            adapter
+                .wait_removals_finalized(Duration::from_secs(10))
+                .await,
+            "the drain must finalize the drained removal"
+        );
 
         runtime
             .mcp_stage_add(
@@ -27082,7 +27498,11 @@ mod tests {
         let probe = meerkat_live::LiveChannelId::random_uuid();
         assert!(
             matches!(
-                host.reserve_channel_close_observation(&probe).await,
+                host.reserve_channel_close_observation(
+                    &probe,
+                    meerkat_core::LiveChannelCloseReason::ClientRequested
+                )
+                .await,
                 Err(meerkat_live::LiveAdapterHostError::ChannelNotFound(_))
             ),
             "host must hold no live channels after a fail-closed no-factory open"

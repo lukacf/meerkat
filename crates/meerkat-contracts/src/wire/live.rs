@@ -648,6 +648,89 @@ pub struct LiveAssistantOutputAvailableParams {
     pub content_index: u32,
 }
 
+/// The playback a `live/assistant_playback_hint` asks the client for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum LiveAssistantPlaybackHint {
+    /// The user's speech and audible assistant audio overlap (a barge-in,
+    /// either side starting): silence assistant playback now.
+    Duck,
+    /// The user's speech or the assistant's output has gone quiet: play
+    /// assistant audio normally again.
+    Restore,
+}
+
+/// Runtime notification `live/assistant_playback_hint`: a barge-in playback
+/// hint for the channel's assistant audio. The user hears the assistant until
+/// the provider stops sending audio and the client drains what is already in
+/// flight; a client that applies `duck` silences it as soon as the user's
+/// speech and assistant audio overlap instead, and `restore` ends the duck. The runtime derives both from
+/// the provider's reflected input and output audio on the provider's audio
+/// clock; a client that ignores them plays as before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveAssistantPlaybackHintParams {
+    pub channel_id: String,
+    pub hint: LiveAssistantPlaybackHint,
+}
+
+/// Runtime request notification `live/media_health_requested`: at the typed
+/// end of a channel's first assistant output (its first segment settled with
+/// a non-empty transcript), the runtime asks the client for its raw
+/// decoded-audio counters from the channel's media start to now (nothing was
+/// audible before the first output). The `output_id` is only the report key;
+/// that output is already settled and is not a playback handle. The client
+/// answers with `live/media_health`. A client that never answers leaves the
+/// output unjudged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveMediaHealthRequestedParams {
+    pub channel_id: String,
+    pub output_id: String,
+}
+
+/// `live/media_health` request: the client's raw decoded-audio counters from
+/// the channel's media start to now, for the output a
+/// `live/media_health_requested` notification named. The runtime judges them;
+/// the client never sends a verdict.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveMediaHealthParams {
+    pub channel_id: String,
+    pub output_id: String,
+    /// Audio frames the client decoded since the channel's media start.
+    pub decoded_frames: u64,
+    /// Decoded frames whose RMS reached the client's non-silent floor.
+    pub audible_frames: u64,
+    /// Highest decoded RMS, in linear amplitude (0.0 to 1.0).
+    pub max_rms: f64,
+}
+
+/// The runtime's verdict on one `live/media_health` report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveMediaHealthVerdict {
+    /// The output was audible; the channel stays open.
+    Audible,
+    /// The output had a transcript but no audible audio: the runtime closed
+    /// the channel with reason `media_fault` before answering.
+    MediaFault,
+}
+
+/// `live/media_health` result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveMediaHealthResult {
+    pub verdict: LiveMediaHealthVerdict,
+    /// For a media fault: whether the session may reopen the channel with its
+    /// retained context (one media-fault reopen per session).
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub reopen_recommended: bool,
+}
+
 /// Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].
 ///
 /// Internally-tagged on `modality` (snake_case) — matches the core enum's
@@ -1220,7 +1303,16 @@ pub enum WireLiveAdapterStatus {
         reason: WireLiveDegradationReason,
     },
     Closing,
-    Closed,
+    /// The channel is closed. `reason` is present when the runtime closed it
+    /// for a typed cause (a media fault); `reopen_recommended` says whether
+    /// the session may reopen it with its retained context. A plain close
+    /// serializes as `{"status":"closed"}`, as before.
+    Closed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<WireLiveCloseReason>,
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        reopen_recommended: bool,
+    },
     /// R5-3 (P3): explicit fail-loud variant for unknown core variants.
     ///
     /// The core [`LiveAdapterStatus`] enum is `#[non_exhaustive]`. When a
@@ -1239,6 +1331,34 @@ pub enum WireLiveAdapterStatus {
     },
 }
 
+impl WireLiveAdapterStatus {
+    /// A plain close, with no typed cause.
+    #[must_use]
+    pub const fn closed() -> Self {
+        Self::Closed {
+            reason: None,
+            reopen_recommended: false,
+        }
+    }
+
+    /// Whether this is any `closed` status, whatever its cause.
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed { .. })
+    }
+}
+
+/// Typed cause of a runtime-initiated live channel close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WireLiveCloseReason {
+    /// The channel's first assistant output had a non-empty transcript but
+    /// the client decoded no audible audio for it: the media path is broken.
+    MediaFault,
+}
+
 impl From<LiveAdapterStatus> for WireLiveAdapterStatus {
     fn from(value: LiveAdapterStatus) -> Self {
         match value {
@@ -1249,7 +1369,7 @@ impl From<LiveAdapterStatus> for WireLiveAdapterStatus {
                 reason: reason.into(),
             },
             LiveAdapterStatus::Closing => Self::Closing,
-            LiveAdapterStatus::Closed => Self::Closed,
+            LiveAdapterStatus::Closed => Self::closed(),
             // Core enum is `#[non_exhaustive]`. R5-3 (P3): surface unknown
             // variants explicitly via `Unknown { debug }` rather than
             // silently coercing to `Closed` (the previous fail-open default

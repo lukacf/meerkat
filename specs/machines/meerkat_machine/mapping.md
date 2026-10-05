@@ -1181,6 +1181,69 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbortCancelAfterBoundaryDispatchDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `HoldRunStartsInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldRunStartsInertDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsLastInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsLastIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsLastAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsLastRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsLastRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsLastStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsLastDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseRunStartsStillHeldDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryAppliedPublish`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
@@ -2582,6 +2645,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeLifecycleKickoffAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeLifecycleKickoffRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseAcceptedAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2672,10 +2741,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrepareIdleRetainingUnsettledCompletion`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `PrepareHeldIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PrepareAttachedRetainingUnsettledCompletion`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareHeldAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `DrainQueuedRunRetired`
@@ -2684,13 +2759,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DrainQueuedRunRetiredRetainingUnsettledCompletion`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DrainQueuedRunHeldRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartConversationRunIdleWithBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartConversationRunHeldIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StartConversationRunInitializing`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `StartConversationRunHeldInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartConversationRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartConversationRunHeldAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StartConversationRunRunning`
@@ -2699,7 +2786,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StartImmediateAppendInitializing`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `StartImmediateAppendHeldInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartImmediateAppendAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartImmediateAppendHeldAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StartImmediateAppendRunning`
@@ -5018,6 +5111,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeLiveContextAppendRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeLiveContextCausalTailBatchIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextCausalTailBatchAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextCausalTailBatchRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveContextAppendSupersededIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -5628,6 +5730,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecordLiveChannelStatusStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestLiveMediaHealthAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestLiveMediaHealthRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthAudibleAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthAudibleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentReopenAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentReopenRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentExhaustedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveChannelMediaHealthSilentExhaustedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedIdle`
@@ -7600,6 +7726,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BoundaryCancelAlreadyPending`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RunStartsHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunStartsReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunStartHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WakeInterrupt`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8164,6 +8299,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveChannelStatusResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveMediaHealthRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveChannelMediaHealthJudged`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RealtimeTranscriptAppended`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8290,6 +8431,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_media_health_budget_and_verdicts_are_consistent`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `fence_requires_bound_runtime`

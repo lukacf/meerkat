@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use meerkat::experimental_gpt_live::provider_recording;
 use meerkat::experimental_gpt_live::thinking_capture;
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,17 @@ pub enum ProviderDegradationCause {
     /// speech and was behind processing it. A timeout without that provider
     /// evidence is not degradation; it stays a failure.
     TimedOutBehindProviderBacklog { backlog_ms: u64 },
+    /// A planted token never reached the provider's own input transcript,
+    /// and the provider's reflected input shows an untranscribed ingest
+    /// stall in the same window ([`ProviderIngestWindow::untranscribed_ingest_stall`]):
+    /// the provider caught up on `burst_ms` of audio in one block after
+    /// `stall_gap_ms` without a reflected frame, and transcribed none of it.
+    /// The words were lost before anything Meerkat reads (#1706).
+    InputTranscriptOmission {
+        token: String,
+        stall_gap_ms: u64,
+        burst_ms: u64,
+    },
 }
 
 /// The provider input latency read from `live/status` when an exchange timed
@@ -133,14 +145,18 @@ pub struct ProviderDegradation {
 /// of every exchange that reached its final, plus the exchange that timed
 /// out before its final (if any) with the provider input backlog read at
 /// that moment. `None` is a valid (healthy) run.
+/// Lag p90 over the exchanges that reached an input final.
+fn lag_p90_ms(lags: &[(String, i64)]) -> Option<i64> {
+    let mut sorted: Vec<i64> = lags.iter().map(|(_, lag)| *lag).collect();
+    sorted.sort_unstable();
+    (!sorted.is_empty()).then(|| sorted[((sorted.len() * 9) / 10).min(sorted.len() - 1)])
+}
+
 pub fn provider_degradation_verdict(
     lags: &[(String, i64)],
     timed_out: Option<(&str, Option<u64>)>,
 ) -> Option<ProviderDegradation> {
-    let mut sorted: Vec<i64> = lags.iter().map(|(_, lag)| *lag).collect();
-    sorted.sort_unstable();
-    let p90_ms =
-        (!sorted.is_empty()).then(|| sorted[((sorted.len() * 9) / 10).min(sorted.len() - 1)]);
+    let p90_ms = lag_p90_ms(lags);
     let backlog_ms = timed_out.and_then(|(_, backlog)| backlog);
     if let Some((exchange, lag_ms)) = lags
         .iter()
@@ -180,6 +196,202 @@ pub fn provider_degradation_verdict(
             })
         }
         _ => None,
+    }
+}
+
+/// PCM16 sample rate of the provider's reflected input
+/// (`session.input_audio.append` server frames on the sideband).
+pub const REFLECTED_INPUT_SAMPLE_RATE_HZ: u64 = 24_000;
+/// The provider reflects the user's input in frames of this many samples
+/// (200 ms). The only unit the ingest-stall predicate uses.
+pub const REFLECTED_INPUT_FRAME_SAMPLES: u64 = REFLECTED_INPUT_SAMPLE_RATE_HZ / 5;
+
+/// One provider input transcript delta, on the provider's input audio clock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputTranscriptDelta {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// One reflected input frame: the span of the reflected input clock it
+/// carries (cumulative reflected samples since the channel opened), and the
+/// recording time since the previous reflected frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReflectedInputFrame {
+    pub audio_start_ms: u64,
+    pub audio_end_ms: u64,
+    pub samples: u64,
+    pub gap_since_previous_ms: u64,
+}
+
+/// What the provider heard and reflected for one channel between two
+/// recorded steps.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderIngestWindow {
+    pub transcript: Vec<InputTranscriptDelta>,
+    pub frames: Vec<ReflectedInputFrame>,
+}
+
+/// An untranscribed ingest stall: see
+/// [`ProviderIngestWindow::untranscribed_ingest_stall`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReflectedIngestStall {
+    pub stall_gap_ms: u64,
+    pub burst_ms: u64,
+    pub audio_start_ms: u64,
+    pub audio_end_ms: u64,
+}
+
+fn samples_to_ms(samples: u64) -> u64 {
+    samples.saturating_mul(1000) / REFLECTED_INPUT_SAMPLE_RATE_HZ
+}
+
+impl ProviderIngestWindow {
+    /// The channel's transcript deltas and reflected input frames recorded
+    /// strictly between the `start` and `end` steps. The reflected input
+    /// clock counts every reflected sample since the channel opened, so it
+    /// is comparable with the transcript's audio clock. A missing step, an
+    /// undecodable frame, or a malformed transcript delta is an error, never
+    /// an empty window.
+    pub fn between_steps(
+        lines: &[provider_recording::Line],
+        channel: u32,
+        start: &str,
+        end: &str,
+    ) -> Result<Self, String> {
+        use base64::Engine as _;
+        let mut window = Self::default();
+        let mut inside = false;
+        let mut closed = false;
+        let mut clock_samples = 0_u64;
+        let mut previous_elapsed: Option<u64> = None;
+        for line in lines.iter().filter(|line| line.channel_ordinal == channel) {
+            match &line.entry {
+                provider_recording::Entry::Marker { step } if step == start && !closed => {
+                    inside = true;
+                }
+                provider_recording::Entry::Marker { step } if step == end && inside => {
+                    closed = true;
+                    break;
+                }
+                provider_recording::Entry::ServerFrame { raw } => match raw["type"].as_str() {
+                    Some("session.input_audio.append") => {
+                        let audio = raw["audio"]
+                            .as_str()
+                            .ok_or("a reflected input frame carries no audio")?;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(audio)
+                            .map_err(|error| {
+                                format!("a reflected input frame is not base64: {error}")
+                            })?;
+                        let samples = (bytes.len() / 2) as u64;
+                        let start_samples = clock_samples;
+                        clock_samples = clock_samples.saturating_add(samples);
+                        let gap = previous_elapsed
+                            .map_or(0, |previous| line.elapsed_ms.saturating_sub(previous));
+                        previous_elapsed = Some(line.elapsed_ms);
+                        if inside {
+                            window.frames.push(ReflectedInputFrame {
+                                audio_start_ms: samples_to_ms(start_samples),
+                                audio_end_ms: samples_to_ms(clock_samples),
+                                samples,
+                                gap_since_previous_ms: gap,
+                            });
+                        }
+                    }
+                    Some("session.input_transcript.delta") if inside => {
+                        let field = |name: &str| {
+                            raw[name]
+                                .as_u64()
+                                .ok_or_else(|| format!("an input transcript delta has no {name}"))
+                        };
+                        window.transcript.push(InputTranscriptDelta {
+                            start_ms: field("start_ms")?,
+                            end_ms: field("end_ms")?,
+                            text: raw["delta"]
+                                .as_str()
+                                .ok_or("an input transcript delta has no text")?
+                                .to_owned(),
+                        });
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        if !closed {
+            return Err(format!(
+                "the provider stream has no {start:?} .. {end:?} window on channel {channel}"
+            ));
+        }
+        Ok(window)
+    }
+
+    /// The provider's input transcript over the window.
+    pub fn transcript_text(&self) -> String {
+        self.transcript
+            .iter()
+            .map(|delta| delta.text.as_str())
+            .collect()
+    }
+
+    /// The first untranscribed ingest stall in the window. Exact predicate,
+    /// with no wall-clock threshold beyond the 200 ms frame unit:
+    ///
+    /// a reflected input frame carrying more than one frame unit
+    /// ([`REFLECTED_INPUT_FRAME_SAMPLES`]) of audio, i.e. the provider caught
+    /// up on input in one block, AND no input transcript delta in the window
+    /// overlaps that block's span of the reflected input clock
+    /// (`delta.start_ms < block.audio_end_ms && delta.end_ms > block.audio_start_ms`).
+    ///
+    /// `stall_gap_ms` is the recorded time since the previous reflected frame
+    /// and `burst_ms` the block's audio; both are reported, neither is judged.
+    pub fn untranscribed_ingest_stall(&self) -> Option<ReflectedIngestStall> {
+        self.frames
+            .iter()
+            .filter(|frame| frame.samples > REFLECTED_INPUT_FRAME_SAMPLES)
+            .find(|block| {
+                !self.transcript.iter().any(|delta| {
+                    delta.start_ms < block.audio_end_ms && delta.end_ms > block.audio_start_ms
+                })
+            })
+            .map(|block| ReflectedIngestStall {
+                stall_gap_ms: block.gap_since_previous_ms,
+                burst_ms: block.audio_end_ms.saturating_sub(block.audio_start_ms),
+                audio_start_ms: block.audio_start_ms,
+                audio_end_ms: block.audio_end_ms,
+            })
+    }
+}
+
+/// Why a planted token reached none of a window's executor inputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlantedTokenLoss {
+    /// The provider transcribed the token and no executor input carries it:
+    /// Meerkat lost it. A failure.
+    DroppedAfterTranscript,
+    /// The provider's transcript lacks the token and the window has an
+    /// untranscribed ingest stall: provider-degraded, the run is void.
+    OmittedDuringIngestStall(ReflectedIngestStall),
+    /// The provider's transcript lacks the token with no ingest stall: the
+    /// provider transcribed something else in its place. A failure, because
+    /// that can come from our own prompt (S103 chk R5 heard "meerkat" for
+    /// "marigold" while the voice instructions named the product).
+    TranscribedOtherwise { heard: String },
+}
+
+/// Classify a planted token that reached none of the window's executor
+/// inputs, from the provider's own evidence for that window. Matching is
+/// case-insensitive substring, like the executor-input check.
+pub fn classify_planted_token_loss(token: &str, window: &ProviderIngestWindow) -> PlantedTokenLoss {
+    let heard = window.transcript_text();
+    if heard.to_lowercase().contains(&token.to_lowercase()) {
+        return PlantedTokenLoss::DroppedAfterTranscript;
+    }
+    match window.untranscribed_ingest_stall() {
+        Some(stall) => PlantedTokenLoss::OmittedDuringIngestStall(stall),
+        None => PlantedTokenLoss::TranscribedOtherwise { heard },
     }
 }
 
@@ -275,6 +487,23 @@ pub enum NativeRecord {
         audio: AudioEvidence,
     },
     Audio {
+        browser_ms: f64,
+        audio: AudioEvidence,
+    },
+    /// The provider's acknowledgement of a client append
+    /// (`session.*.appended`) as the peer saw it, with the media counters at
+    /// that moment.
+    Appended {
+        event_type: String,
+        client_event_id: Option<String>,
+        event_index: u64,
+        browser_ms: f64,
+        audio: AudioEvidence,
+    },
+    /// A `live/assistant_playback_hint` the peer applied to its assistant
+    /// playback gate (#1638), with the media counters at that moment.
+    PlaybackHint {
+        hint: String,
         browser_ms: f64,
         audio: AudioEvidence,
     },
@@ -891,12 +1120,30 @@ pub enum Record {
         acknowledged: usize,
         greeted: bool,
     },
-    /// A tolerant (model-dependent) check: recorded with its outcome, never
-    /// a gate on its own. The deterministic checks assert.
-    Tolerant {
+    /// The runtime's verdict on the client's decoded-audio counters for a
+    /// channel's first assistant output (`live/media_health`).
+    MediaHealthJudged {
         channel: u32,
-        check: String,
-        passed: bool,
+        output_id: String,
+        decoded_frames: u64,
+        audible_frames: u64,
+        max_rms: f64,
+        media_fault: bool,
+        reopen_recommended: bool,
+    },
+    /// The runtime closed `from_channel` on a media fault and the harness
+    /// reopened the session on `to_channel`; the exchange that waited on the
+    /// silent output is spoken again there.
+    MediaFaultReopened {
+        from_channel: u32,
+        to_channel: u32,
+        exchange: String,
+    },
+    /// A measurement journaled for diagnosis. It carries no verdict: a
+    /// scenario's verdict comes only from its deterministic contract checks.
+    Metric {
+        channel: u32,
+        metric: String,
         detail: String,
     },
 }
@@ -925,8 +1172,6 @@ struct State {
     instructions_append_texts: Vec<String>,
     /// Running count of owned thinking-append attempts seen on the wire.
     thinking_append_attempts: usize,
-    /// Bounded copy of the attempted thinking-append texts, for echo checks.
-    thinking_append_texts: Vec<String>,
     /// Owned instructions-lane appends the provider acknowledged (matched an
     /// owned client event id and was accepted).
     instructions_acknowledged: usize,
@@ -939,6 +1184,9 @@ struct State {
     /// recorded when the create request is built, before `SessionAttached`).
     session_input_seeds: Vec<(u32, SessionInputSeed)>,
     session_input_texts: Vec<(u32, Vec<String>)>,
+    /// Session-lane (voiced canonical row) commentary appends per channel:
+    /// `(channel, text prefix, whole content bytes)`.
+    session_commentary_appends: Vec<(u32, String, usize)>,
     /// Owned instructions-lane attempts (one per wire fragment) and how many
     /// reassembled appends opened a framed summary.
     instructions_append_attempts: usize,
@@ -949,6 +1197,9 @@ struct State {
     instructions_appends: HashMap<String, InstructionsAppendReassembly>,
     /// Soft browser faults (overlap, duplicate readout); never invalidate.
     browser_faults: Vec<BrowserFault>,
+    /// The peer's `session.*.appended` sightings: (channel, client event id,
+    /// peer event index, media counters).
+    appended: Vec<(u32, String, u64, AudioEvidence)>,
     /// Speech end to input final lag of every exchange that reached its
     /// final, in order.
     exchange_lags: Vec<(String, i64)>,
@@ -957,6 +1208,9 @@ struct State {
     /// The exchange that timed out before its final, with the provider input
     /// backlog read at that moment.
     timed_out_exchange: Option<(String, Option<u64>)>,
+    /// A provider input transcript omission a scenario's oracle classified
+    /// (the exchange and its cause); the first one wins.
+    transcript_omission: Option<(String, ProviderDegradationCause)>,
 }
 
 #[derive(Default)]
@@ -1012,10 +1266,19 @@ struct Inner {
     secrets: Vec<String>,
     limits: Limits,
     wire: thinking_capture::Capture,
+    /// Every provider crossing (create request/response, client events,
+    /// raw server frames) in causal order: the raw input of a replay
+    /// fixture, scrubbed by `scripts/gpt-live-scrub-provider-stream` before
+    /// it is committed. Evidence only; a write failure never fails the run,
+    /// it marks the recording incomplete at finish.
+    provider_stream: provider_recording::Recorder,
 }
 
 #[derive(Clone)]
 pub struct Journal(Arc<Inner>);
+
+/// The provider-stream recording beside `journal.jsonl`.
+pub const PROVIDER_STREAM_FILE: &str = "provider-stream.jsonl";
 
 impl Journal {
     pub fn create(expected_phrase: String) -> Result<Self, Fault> {
@@ -1024,8 +1287,14 @@ impl Journal {
 
     /// One journal under `target/e2e-live-audio-artifacts/<label>/<uuid>`.
     pub fn create_for(label: &'static str, expected_phrase: String) -> Result<Self, Fault> {
-        let directory = super::workspace_root()
-            .join("target/e2e-live-audio-artifacts")
+        // Under Bazel the journal goes to the test's undeclared outputs, so a
+        // remote (BuildBuddy) run returns it with the test logs; locally it
+        // stays under target/.
+        let root = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| super::workspace_root().join("target/e2e-live-audio-artifacts"));
+        let directory = root
             .join(label.to_ascii_lowercase())
             .join(uuid::Uuid::new_v4().to_string());
         let secrets = [
@@ -1075,6 +1344,9 @@ impl Journal {
             options.mode(0o600);
         }
         let file = options.open(&path).map_err(|_| Fault::Io)?;
+        let provider_stream =
+            provider_recording::Recorder::create(&directory.join(PROVIDER_STREAM_FILE))
+                .map_err(|_| Fault::Io)?;
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         let journal = Self(Arc::new(Inner {
             state: Mutex::new(State {
@@ -1095,15 +1367,17 @@ impl Journal {
                 thinking_appends: Vec::new(),
                 session_input_seeds: Vec::new(),
                 session_input_texts: Vec::new(),
+                session_commentary_appends: Vec::new(),
                 thinking_append_attempts: 0,
-                thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
                 framed_summary_attempts: 0,
                 instructions_appends: HashMap::new(),
                 browser_faults: Vec::new(),
+                appended: Vec::new(),
                 exchange_lags: Vec::new(),
                 pending_exchange: None,
                 timed_out_exchange: None,
+                transcript_omission: None,
             }),
             started: Instant::now(),
             path,
@@ -1112,6 +1386,7 @@ impl Journal {
             secrets,
             limits,
             wire: thinking_capture::Capture::new(),
+            provider_stream,
         }));
         journal.record(Record::Fixture {
             expected_phrase,
@@ -1138,6 +1413,66 @@ impl Journal {
     }
     pub fn wire(&self, channel: u32) -> thinking_capture::Capture {
         self.0.wire.for_channel(channel)
+    }
+
+    /// The provider-stream recorder for one channel; scope a connect with it
+    /// (next to [`Self::wire`]) so that channel's broker records into
+    /// `provider-stream.jsonl` beside this journal.
+    pub fn provider_recording(&self, channel: u32) -> provider_recording::Recorder {
+        self.0.provider_stream.for_channel(channel)
+    }
+
+    /// Mark a test-driven step (a scheduled utterance, a peer disconnect) in
+    /// the provider stream: a replay holds every later server frame of the
+    /// channel until the replaying test reaches the same step.
+    pub fn provider_step(&self, channel: u32, step: &str) {
+        self.0.provider_stream.for_channel(channel).mark(step);
+    }
+
+    /// Every complete line recorded so far in `provider-stream.jsonl`. The
+    /// oracles that join the sideband with the browser (talk-over segments,
+    /// result deliveries) read it back while the recorder may still be
+    /// writing, so an unterminated final line is not yet a line. A recording
+    /// that lost a line cannot serve them: that is an error, never an empty
+    /// answer.
+    pub fn provider_stream_lines(&self) -> Result<Vec<provider_recording::Line>, String> {
+        if let Some(failure) = self.0.provider_stream.failure() {
+            return Err(format!(
+                "the provider-stream recording lost a line: {failure}"
+            ));
+        }
+        let directory = self
+            .0
+            .path
+            .parent()
+            .ok_or("the evidence journal has no directory")?;
+        let text = std::fs::read_to_string(directory.join(PROVIDER_STREAM_FILE))
+            .map_err(|error| format!("reading {PROVIDER_STREAM_FILE}: {error}"))?;
+        let complete = match text.rfind('\n') {
+            Some(end) => &text[..end],
+            None => "",
+        };
+        complete
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).map_err(|error| {
+                    format!("{PROVIDER_STREAM_FILE} holds a malformed line: {error}")
+                })
+            })
+            .collect()
+    }
+
+    /// A recording that lost a line is not a fixture: rename it so the
+    /// re-capture procedure cannot pick it up. The run's verdict is unchanged.
+    fn seal_provider_stream(&self) {
+        if self.0.provider_stream.failure().is_some()
+            && let Some(directory) = self.0.path.parent()
+        {
+            let _ = std::fs::rename(
+                directory.join(PROVIDER_STREAM_FILE),
+                directory.join(format!("{PROVIDER_STREAM_FILE}.incomplete")),
+            );
+        }
     }
 
     /// An exchange's fixture is about to play; it awaits its input final.
@@ -1180,16 +1515,52 @@ impl Journal {
         })
     }
 
-    /// This run's provider-degraded verdict from its own evidence.
+    /// This run's provider-degraded verdict from its own evidence: the lag
+    /// rules first, then an input transcript omission an oracle classified.
     pub fn provider_degradation(&self) -> Result<Option<ProviderDegradation>, Fault> {
         let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
-        Ok(provider_degradation_verdict(
+        let lag_verdict = provider_degradation_verdict(
             &state.exchange_lags,
             state
                 .timed_out_exchange
                 .as_ref()
                 .map(|(exchange, backlog)| (exchange.as_str(), *backlog)),
-        ))
+        );
+        Ok(lag_verdict.or_else(|| {
+            state
+                .transcript_omission
+                .as_ref()
+                .map(|(exchange, cause)| ProviderDegradation {
+                    exchange: exchange.clone(),
+                    cause: cause.clone(),
+                    p90_ms: lag_p90_ms(&state.exchange_lags),
+                    provider_input_backlog_ms: None,
+                })
+        }))
+    }
+
+    /// Record a planted token the provider never transcribed during an
+    /// untranscribed ingest stall ([`PlantedTokenLoss::OmittedDuringIngestStall`]).
+    /// The run then finishes provider-degraded (void). The first omission
+    /// wins.
+    pub fn note_input_transcript_omission(
+        &self,
+        exchange: &str,
+        token: &str,
+        stall: &ReflectedIngestStall,
+    ) -> Result<(), Fault> {
+        let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        state.transcript_omission.get_or_insert_with(|| {
+            (
+                exchange.to_owned(),
+                ProviderDegradationCause::InputTranscriptOmission {
+                    token: token.to_owned(),
+                    stall_gap_ms: stall.stall_gap_ms,
+                    burst_ms: stall.burst_ms,
+                },
+            )
+        });
+        Ok(())
     }
 
     pub fn stage(&self, stage: Stage) -> Result<(), Fault> {
@@ -1278,7 +1649,40 @@ impl Journal {
                 }
             }
         }
+        if let NativeRecord::Appended {
+            client_event_id: Some(client_event_id),
+            event_index,
+            audio,
+            ..
+        } = &record
+        {
+            self.0
+                .state
+                .lock()
+                .map_err(|_| Fault::Poisoned)?
+                .appended
+                .push((channel, client_event_id.clone(), *event_index, *audio));
+        }
         self.record(Record::Native { channel, record })
+    }
+
+    /// The peer's first sighting of the provider's acknowledgement of the
+    /// client append `client_event_id` on `channel`: its event index in the
+    /// peer's event log and the media counters at that moment.
+    pub fn appended_ack(
+        &self,
+        channel: u32,
+        client_event_id: &str,
+    ) -> Result<Option<(u64, AudioEvidence)>, Fault> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .appended
+            .iter()
+            .find(|(c, id, _, _)| *c == channel && id == client_event_id)
+            .map(|(_, _, index, audio)| (*index, *audio)))
     }
 
     /// Soft browser faults recorded so far. Scenarios assert on this; the
@@ -1336,9 +1740,6 @@ impl Journal {
             {
                 let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
                 state.thinking_append_attempts += 1;
-                if state.thinking_append_texts.len() < thinking_capture::Capture::MAX_EVENTS {
-                    state.thinking_append_texts.push(text.clone());
-                }
                 // Fragments of one thinking append share the token in their
                 // client event id (`meerkat-thinking-<token>-<index>`).
                 let token = client_event_id
@@ -1399,6 +1800,22 @@ impl Journal {
                 }
                 if state.instructions_append_texts.len() < thinking_capture::Capture::MAX_EVENTS {
                     state.instructions_append_texts.push(text.clone());
+                }
+            }
+            if let thinking_capture::EventKind::CommentaryAppendAttempt {
+                delegation: false,
+                text,
+                text_bytes,
+                ..
+            } = &event.event
+            {
+                let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+                if state.session_commentary_appends.len() < thinking_capture::Capture::MAX_EVENTS {
+                    state.session_commentary_appends.push((
+                        event.channel_ordinal,
+                        text.clone(),
+                        *text_bytes,
+                    ));
                 }
             }
             if let thinking_capture::EventKind::InstructionsAppended {
@@ -1492,6 +1909,22 @@ impl Journal {
             .collect())
     }
 
+    /// Session-lane commentary appends on `channel`, in order: the voiced
+    /// canonical rows the provider had not heard (a typed row, or the
+    /// executor's reply to a later non-voice input such as a peer response).
+    /// Each is `(text prefix, whole content bytes)`; the prefix is the first
+    /// capture text limit of the content.
+    pub fn session_commentary_appends(&self, channel: u32) -> Result<Vec<(String, usize)>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .session_commentary_appends
+            .iter()
+            .filter(|(c, _, _)| *c == channel)
+            .map(|(_, text, bytes)| (text.clone(), *bytes))
+            .collect())
+    }
+
     /// Reassembled text of the first owned thinking append on `channel`
     /// (the late bootstrap summary rides there by default).
     pub fn first_owned_thinking_append(&self, channel: u32) -> Result<Option<String>, Fault> {
@@ -1527,21 +1960,6 @@ impl Journal {
             thinking_acknowledged: state.thinking_acknowledged,
             framed_summaries: state.framed_summary_attempts,
         })
-    }
-
-    /// Texts of every owned thinking-append attempt so far. Pre-ACK causal
-    /// reassertions may trickle out for a while (the provider acknowledges
-    /// thinking appends at turn boundaries), so echo detection compares
-    /// content, not counts.
-    pub fn thinking_append_attempt_texts(&self) -> Result<Vec<String>, Fault> {
-        self.flush_wire()?;
-        Ok(self
-            .0
-            .state
-            .lock()
-            .map_err(|_| Fault::Poisoned)?
-            .thinking_append_texts
-            .clone())
     }
 
     pub fn require_attached(&self, channel: u32) -> Result<(), Fault> {
@@ -1718,6 +2136,7 @@ impl Journal {
         if state.finished {
             return state.fault.map_or(Ok(()), Err);
         }
+        self.seal_provider_stream();
         let outcome = if state.fault.is_some() {
             Outcome::Failed
         } else {
@@ -1838,6 +2257,223 @@ fn redact_and_bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    // ---- #1706: planted-token loss classification ------------------------
+
+    /// Steady 200 ms reflected frames covering `[from_ms, to_ms)`.
+    fn steady_frames(from_ms: u64, to_ms: u64) -> Vec<ReflectedInputFrame> {
+        (from_ms..to_ms)
+            .step_by(200)
+            .map(|start| ReflectedInputFrame {
+                audio_start_ms: start,
+                audio_end_ms: start + 200,
+                samples: REFLECTED_INPUT_FRAME_SAMPLES,
+                gap_since_previous_ms: 200,
+            })
+            .collect()
+    }
+
+    fn deltas(values: &[(u64, u64, &str)]) -> Vec<InputTranscriptDelta> {
+        values
+            .iter()
+            .map(|(start_ms, end_ms, text)| InputTranscriptDelta {
+                start_ms: *start_ms,
+                end_ms: *end_ms,
+                text: (*text).to_owned(),
+            })
+            .collect()
+    }
+
+    /// Cut from S103 control R6 (release/0.8.51 555200d37, BB 0375acca),
+    /// provider audio clock 15.0-26.0 s: the provider reflected nothing for
+    /// 5967 ms, then one 139200-sample block (17.4-23.2 s), and transcribed
+    /// nothing from "is the" (16.6 s) to "'Pelican" (24.6 s).
+    fn r6_copenhagen_window() -> ProviderIngestWindow {
+        let mut frames = steady_frames(15_000, 17_400);
+        frames.push(ReflectedInputFrame {
+            audio_start_ms: 17_400,
+            audio_end_ms: 23_200,
+            samples: 139_200,
+            gap_since_previous_ms: 5_967,
+        });
+        frames.extend(steady_frames(23_200, 26_000));
+        ProviderIngestWindow {
+            transcript: deltas(&[
+                (15_400, 15_600, " venue"),
+                (15_600, 15_800, ", uh"),
+                (15_800, 16_000, ", the"),
+                (16_200, 16_400, " venue"),
+                (16_400, 16_600, " is the"),
+                (24_600, 24_800, " 'Pelican"),
+                (24_800, 25_000, ".' Don't ask"),
+                (25_000, 25_200, " me"),
+                (25_400, 25_600, " why"),
+            ]),
+            frames,
+        }
+    }
+
+    /// Cut from S103 chk R5 (2026-10-03), provider audio clock 3.0-9.0 s:
+    /// steady reflection, and the provider heard "meerkat" for "Marigold"
+    /// while the voice instructions named the product.
+    fn r5_marigold_window() -> ProviderIngestWindow {
+        ProviderIngestWindow {
+            transcript: deltas(&[
+                (3_000, 3_200, " loud"),
+                (3_200, 3_400, " for a"),
+                (3_600, 3_800, " second"),
+                (3_800, 4_000, " here"),
+                (4_000, 4_200, ". The"),
+                (4_400, 4_600, " client"),
+                (4_600, 4_800, " is"),
+                (4_800, 5_000, " the meer"),
+                (5_200, 5_400, "kat"),
+                (5_600, 5_800, " account"),
+                (6_200, 6_400, ", and"),
+                (6_600, 6_800, " uh"),
+                (6_800, 7_000, ", they"),
+                (7_200, 7_400, " want the"),
+                (7_800, 8_000, " kickoff"),
+                (8_200, 8_400, " moved"),
+                (8_800, 9_000, "... not"),
+            ]),
+            frames: steady_frames(3_000, 9_000),
+        }
+    }
+
+    #[test]
+    fn a_token_lost_inside_an_untranscribed_ingest_stall_is_a_provider_omission() {
+        // (b): R6's "copenhagen".
+        assert_eq!(
+            classify_planted_token_loss("copenhagen", &r6_copenhagen_window()),
+            PlantedTokenLoss::OmittedDuringIngestStall(ReflectedIngestStall {
+                stall_gap_ms: 5_967,
+                burst_ms: 5_800,
+                audio_start_ms: 17_400,
+                audio_end_ms: 23_200,
+            })
+        );
+    }
+
+    #[test]
+    fn a_token_the_provider_transcribed_is_ours_when_no_executor_input_carries_it() {
+        // (a): the provider heard "Pelican" (R6) and "kickoff" (R5), so an
+        // executor input without them is our loss, stall or not.
+        assert_eq!(
+            classify_planted_token_loss("pelican", &r6_copenhagen_window()),
+            PlantedTokenLoss::DroppedAfterTranscript
+        );
+        assert_eq!(
+            classify_planted_token_loss("kickoff", &r5_marigold_window()),
+            PlantedTokenLoss::DroppedAfterTranscript
+        );
+    }
+
+    #[test]
+    fn a_substitution_without_an_ingest_stall_stays_a_failure() {
+        // (c): R5's "marigold", heard as "meerkat" with steady reflection.
+        let window = r5_marigold_window();
+        assert_eq!(window.untranscribed_ingest_stall(), None);
+        match classify_planted_token_loss("marigold", &window) {
+            PlantedTokenLoss::TranscribedOtherwise { heard } => {
+                assert!(heard.contains("the meerkat account"), "{heard:?}");
+            }
+            other => panic!("a substitution must stay a failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_catch_up_block_the_provider_transcribed_is_not_a_stall() {
+        // The same R6 block, but with a transcript delta inside its span: the
+        // provider caught up and heard it, so a missing token is not excused.
+        let mut window = r6_copenhagen_window();
+        window.transcript.push(InputTranscriptDelta {
+            start_ms: 20_000,
+            end_ms: 20_200,
+            text: " downstairs".to_owned(),
+        });
+        assert_eq!(window.untranscribed_ingest_stall(), None);
+        assert!(matches!(
+            classify_planted_token_loss("copenhagen", &window),
+            PlantedTokenLoss::TranscribedOtherwise { .. }
+        ));
+    }
+
+    #[test]
+    fn the_ingest_window_counts_the_reflected_clock_from_the_channel_start() {
+        use base64::Engine as _;
+        let audio = |samples: usize| {
+            json!(base64::engine::general_purpose::STANDARD.encode(vec![0_u8; samples * 2]))
+        };
+        let frame = |seq: u64, channel: u32, elapsed_ms: u64, raw: serde_json::Value| {
+            provider_recording::Line {
+                seq,
+                channel_ordinal: channel,
+                elapsed_ms,
+                entry: provider_recording::Entry::ServerFrame { raw },
+            }
+        };
+        let marker = |seq: u64, elapsed_ms: u64, step: &str| provider_recording::Line {
+            seq,
+            channel_ordinal: 1,
+            elapsed_ms,
+            entry: provider_recording::Entry::Marker {
+                step: step.to_owned(),
+            },
+        };
+        let append =
+            |samples| json!({"type": "session.input_audio.append", "audio": audio(samples)});
+        let lines = vec![
+            // Before the window: counts toward the clock only.
+            frame(0, 1, 100, append(4_800)),
+            marker(1, 150, "play_at:m"),
+            frame(2, 1, 300, append(4_800)),
+            frame(3, 2, 310, append(48_000)),
+            frame(
+                4,
+                1,
+                320,
+                json!({"type": "session.input_transcript.delta", "start_ms": 200, "end_ms": 400, "delta": " hello"}),
+            ),
+            frame(5, 1, 2_300, append(9_600)),
+            marker(6, 2_400, "queue:b,c"),
+            frame(7, 1, 2_500, append(4_800)),
+        ];
+        let window = ProviderIngestWindow::between_steps(&lines, 1, "play_at:m", "queue:b,c")
+            .expect("window");
+        assert_eq!(
+            window.frames,
+            vec![
+                ReflectedInputFrame {
+                    audio_start_ms: 200,
+                    audio_end_ms: 400,
+                    samples: 4_800,
+                    gap_since_previous_ms: 200,
+                },
+                ReflectedInputFrame {
+                    audio_start_ms: 400,
+                    audio_end_ms: 800,
+                    samples: 9_600,
+                    gap_since_previous_ms: 2_000,
+                },
+            ]
+        );
+        assert_eq!(window.transcript_text(), " hello");
+        assert_eq!(
+            window.untranscribed_ingest_stall(),
+            Some(ReflectedIngestStall {
+                stall_gap_ms: 2_000,
+                burst_ms: 400,
+                audio_start_ms: 400,
+                audio_end_ms: 800,
+            })
+        );
+        assert!(
+            ProviderIngestWindow::between_steps(&lines, 1, "play_at:m", "queue:missing").is_err(),
+            "a window without its closing step is an error, never empty"
+        );
+    }
 
     fn lags(values: &[(&str, i64)]) -> Vec<(String, i64)> {
         values
@@ -2078,6 +2714,58 @@ mod tests {
         )));
     }
 
+    /// The timeline record S97 and S99 now write (`BrowserPeer::record_timeline`)
+    /// carries exactly what the lag rule's journal reader parses
+    /// (`/tmp/rb/journal-lag.py`): a `timeline` record whose entries pair a
+    /// `fixture_start`'s `t_ms + detail.speech_ms` with the next
+    /// `input_final`'s `detail.t_ms`.
+    #[test]
+    fn a_timeline_record_carries_the_lag_rule_inputs() {
+        use super::super::TimelineKind;
+        let root = root();
+        let journal = Journal::at(
+            &root.path().join("timeline"),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let entries = vec![
+            TimelineEntry {
+                t_ms: 1_000,
+                kind: TimelineKind::FixtureStart,
+                detail: serde_json::json!({"name": "greeting", "speech_ms": 2_000}),
+            },
+            TimelineEntry {
+                t_ms: 4_100,
+                kind: TimelineKind::InputFinal,
+                detail: serde_json::json!({"t_ms": 3_900, "text": "hello"}),
+            },
+        ];
+        journal
+            .record(Record::Timeline {
+                channel: 1,
+                entries,
+            })
+            .unwrap();
+        journal.finish(Outcome::Passed).unwrap();
+        let text = std::fs::read_to_string(journal.path()).unwrap();
+        let timeline = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|line| line["record"]["kind"] == "timeline")
+            .expect("a timeline record");
+        let entries = timeline["record"]["entries"].as_array().unwrap();
+        assert_eq!(timeline["record"]["channel"], 1);
+        assert_eq!(entries[0]["kind"], "fixture_start");
+        assert_eq!(entries[1]["kind"], "input_final");
+        // The reader's pairing: speech end, then the next input final.
+        let speech_end = entries[0]["t_ms"].as_i64().unwrap()
+            + entries[0]["detail"]["speech_ms"].as_i64().unwrap();
+        let input_final = entries[1]["detail"]["t_ms"].as_i64().unwrap();
+        assert_eq!(input_final - speech_end, 900);
+    }
+
     #[test]
     fn forced_failure_retains_whitelisted_evidence_after_scenario_cleanup() {
         let root = root();
@@ -2243,6 +2931,61 @@ mod tests {
             Err(Fault::AfterFinish)
         );
         assert_eq!(journal.check(), Err(Fault::AfterFinish));
+    }
+
+    /// The peer's `session.*.appended` sightings are kept per channel and
+    /// client event id with their media counters (S97's readout baseline);
+    /// the first sighting wins and an id-less one is not indexed.
+    #[test]
+    fn appended_sightings_carry_the_media_counters_of_that_moment() {
+        let root = root();
+        let journal = Journal::at(
+            root.path(),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let appended = |id: Option<&str>, index: u64, frames: u64| -> NativeRecord {
+            serde_json::from_value(serde_json::json!({
+                "kind": "appended",
+                "event_type": "session.commentary.appended",
+                "client_event_id": id,
+                "event_index": index,
+                "browser_ms": 1000.0,
+                "audio": {
+                    "decoded_non_silent_frames": frames, "decoded_non_silent_seconds": 0.5,
+                    "non_silent_frames": frames, "total_audio_energy": null,
+                    "total_samples_received": null, "total_samples_duration": null,
+                    "bytes_received": 10, "packets_received": 10
+                }
+            }))
+            .unwrap()
+        };
+        journal.native(1, appended(None, 3, 1)).unwrap();
+        journal
+            .native(1, appended(Some("meerkat-append-6"), 7, 42))
+            .unwrap();
+        journal
+            .native(1, appended(Some("meerkat-append-6"), 9, 99))
+            .unwrap();
+        let (index, audio) = journal
+            .appended_ack(1, "meerkat-append-6")
+            .unwrap()
+            .unwrap();
+        assert_eq!((index, audio.decoded_non_silent_frames), (7, 42));
+        assert!(
+            journal
+                .appended_ack(2, "meerkat-append-6")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            journal
+                .appended_ack(1, "meerkat-append-7")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

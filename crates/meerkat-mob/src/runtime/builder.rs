@@ -352,7 +352,7 @@ async fn drive_recovered_placed_lifecycle_intent(
             return;
         }
         let result = match intent {
-            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop => handle.stop().await,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop => handle.stop().await.map(|_| ()),
             mob_dsl::PlacedCompletionLifecycleIntentKind::Reset => handle.reset().await,
             mob_dsl::PlacedCompletionLifecycleIntentKind::Complete => handle.complete().await,
             mob_dsl::PlacedCompletionLifecycleIntentKind::RetireAll => handle.retire_all().await,
@@ -546,6 +546,12 @@ pub struct MobBuilder {
     /// knob. `None` (the default) = local members' live verbs typed-reject
     /// `LiveTransportUnavailable` — honest degradation, zero cost.
     member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
+    /// Run-start holds restored members' registrations apply (#1500), by
+    /// identity; see [`MobBuilder::hold_restored_member_run_starts`].
+    restored_member_run_start_holds: BTreeMap<
+        AgentIdentity,
+        std::collections::BTreeSet<super::stop_report::HostRunStartHoldReason>,
+    >,
 }
 
 enum BuilderMode {
@@ -6768,6 +6774,7 @@ impl MobBuilder {
             realtime_session_factory: None,
             controlling_acceptor: None,
             member_live_host: None,
+            restored_member_run_start_holds: BTreeMap::new(),
         }
     }
 
@@ -6845,6 +6852,7 @@ impl MobBuilder {
             realtime_session_factory: None,
             controlling_acceptor: None,
             member_live_host: None,
+            restored_member_run_start_holds: BTreeMap::new(),
         }
     }
 
@@ -7019,6 +7027,25 @@ impl MobBuilder {
         self
     }
 
+    /// Hold the run starts of these restored members for `reason` (#1500):
+    /// each one's runtime registration applies the hold, so it starts no run
+    /// until [`MobHandle::release_member_run_starts`] releases `reason`. Only
+    /// members whose runtime this process hosts are held; a listed identity
+    /// that is not a restored local member is not held.
+    pub fn hold_restored_member_run_starts(
+        mut self,
+        reason: super::stop_report::HostRunStartHoldReason,
+        identities: impl IntoIterator<Item = AgentIdentity>,
+    ) -> Self {
+        for identity in identities {
+            self.restored_member_run_start_holds
+                .entry(identity)
+                .or_default()
+                .insert(reason);
+        }
+        self
+    }
+
     /// Create the mob: emit MobCreated event, start the actor, return handle.
     #[cfg(feature = "runtime-adapter")]
     pub async fn create(self) -> Result<MobHandle, MobError> {
@@ -7053,6 +7080,8 @@ impl MobBuilder {
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
+                // A created mob has no restored members to hold.
+                restored_member_run_start_holds: _,
             } = builder;
             #[cfg(not(feature = "runtime-adapter"))]
             let runtime_adapter: RuntimeAdapterOption = None;
@@ -7288,6 +7317,7 @@ impl MobBuilder {
             realtime_session_factory,
             controlling_acceptor,
             member_live_host,
+            restored_member_run_start_holds,
         } = self;
         #[cfg(not(feature = "runtime-adapter"))]
         let runtime_adapter: RuntimeAdapterOption = None;
@@ -7544,6 +7574,12 @@ impl MobBuilder {
             )
             .await?,
         );
+        // Resume can bind members before any actor runs (#1500): every bind
+        // delivers the posture of the machine state at that point. It is set
+        // again once the lifecycle phase and intent are recovered below.
+        supervisor_bridge.set_member_run_start_posture(
+            super::supervisor_bridge::MemberRunStartPosture::of(initial_dsl_authority.state()),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let supervisor_startup_guard =
             SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
@@ -7697,6 +7733,7 @@ impl MobBuilder {
                 Arc::new(super::handle::ResumeOperationRegistry::default());
             let member_admission_backlog =
                 Arc::new(super::handle::MemberAdmissionBacklogGauge::default());
+            let lifecycle_observations = Arc::new(super::MemberLifecycleObservations::default());
             let mut wiring = RuntimeWiring {
                 roster: roster_state.clone(),
                 dsl_authority: initial_dsl_authority,
@@ -7739,6 +7776,7 @@ impl MobBuilder {
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
+                lifecycle_observations: Arc::clone(&lifecycle_observations),
                 // One overlay map for the preview, the actor and the launched
                 // handle: restored members' tools keep this handle, and a
                 // durable fork through any of them reads the same overlays.
@@ -7750,6 +7788,23 @@ impl MobBuilder {
                 wiring.dsl_authority.state().topology_epoch,
             ));
 
+            // The host's run-start holds on restored members (#1500), staged
+            // before any member runtime can register: a running mob's members
+            // register in the reconcile just below.
+            for entry in roster.list() {
+                let Some(reasons) = restored_member_run_start_holds.get(&entry.agent_identity)
+                else {
+                    continue;
+                };
+                for reason in reasons {
+                    runtime_provisioner
+                        .stage_member_registration_run_start_hold(
+                            &entry.member_ref,
+                            reason.runtime(),
+                        )
+                        .await?;
+                }
+            }
             let mut per_spawn_external_tools_seed = super::fork_build::RetainedOverlays::default();
             let mut recovered_direct_member_adoption_pending = false;
             if resumed_state == MobState::Running
@@ -7875,6 +7930,26 @@ impl MobBuilder {
                     recovered_completion_lifecycle_intent,
                 )?;
             }
+            // The recovered phase and lifecycle intent decide whether member
+            // run starts are held (#1500): publish that before anything else
+            // can bind a member.
+            supervisor_bridge.set_member_run_start_posture(
+                super::supervisor_bridge::MemberRunStartPosture::of(wiring.dsl_authority.state()),
+            );
+            // A restored mob whose member run starts are held (a Stopped
+            // mob) holds its local members' runtimes from their registration
+            // on: the in-memory holds of the previous process are gone.
+            // Resume releases them, before or after they register.
+            if wiring.dsl_authority.state().member_run_starts_held {
+                for entry in roster.list() {
+                    runtime_provisioner
+                        .stage_member_registration_run_start_hold(
+                            &entry.member_ref,
+                            meerkat_runtime::RunStartHoldReason::MobStop,
+                        )
+                        .await?;
+                }
+            }
 
             let restore_diagnostics_snapshot =
                 preview_handle.restore_diagnostics.read().await.clone();
@@ -7957,6 +8032,7 @@ impl MobBuilder {
                 flow_target_provisioner,
                 explicit_resume_operations,
                 member_admission_backlog,
+                lifecycle_observations,
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
@@ -8928,6 +9004,10 @@ impl MobBuilder {
                         continue;
                     }
                 };
+                super::tools::attach_declared_bundle_tools(
+                    &mut resumed_config,
+                    super::tools::resolve_profile_bundle_tools(profile, tool_bundles),
+                );
                 resumed_config.keep_alive =
                     entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                 // A fork-derived member is rebuilt with its persisted lineage.
@@ -9153,6 +9233,10 @@ impl MobBuilder {
                 system_prompt_override: restore_spec.system_prompt_override.clone(),
             })
             .await?;
+            super::tools::attach_declared_bundle_tools(
+                &mut config,
+                super::tools::resolve_profile_bundle_tools(&profile, tool_bundles),
+            );
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             config.fork_source = entry.fork_source.clone();
             if let Some(ref auth_binding) = restore_spec.auth_binding {
@@ -9594,6 +9678,7 @@ impl MobBuilder {
                 Arc::new(super::handle::ResumeOperationRegistry::default());
             let member_admission_backlog =
                 Arc::new(super::handle::MemberAdmissionBacklogGauge::default());
+            let lifecycle_observations = Arc::new(super::MemberLifecycleObservations::default());
 
             Self::start_runtime_with_components(
                 definition,
@@ -9627,6 +9712,7 @@ impl MobBuilder {
                 flow_target_provisioner,
                 explicit_resume_operations,
                 member_admission_backlog,
+                lifecycle_observations,
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
@@ -9674,6 +9760,7 @@ impl MobBuilder {
         >,
         explicit_resume_operations: Arc<super::handle::ResumeOperationRegistry>,
         member_admission_backlog: Arc<super::handle::MemberAdmissionBacklogGauge>,
+        lifecycle_observations: Arc<super::MemberLifecycleObservations>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
         controlling_acceptor: Option<ControllingAcceptorConfig>,
         member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
@@ -9741,6 +9828,7 @@ impl MobBuilder {
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
+                lifecycle_observations: Arc::clone(&lifecycle_observations),
                 per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
             // Row #320: the orphan budget is MobMachine state (seeded once in
@@ -9895,9 +9983,14 @@ impl MobBuilder {
                 autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
                 autonomous_stop_interrupts: BTreeMap::new(),
                 autonomous_stop_interrupted: BTreeMap::new(),
+                stop_member_outcomes: BTreeMap::new(),
+                #[cfg(test)]
+                resume_readiness_fault: None,
                 pending_autonomous_stop: None,
                 next_autonomous_stop_ticket: 0,
                 pending_autonomous_stop_controls: VecDeque::new(),
+                retained_actor_completions: VecDeque::new(),
+                shutdown_exit: None,
                 autonomous_stop_interrupt_cursor: 0,
                 next_spawn_ticket: 0,
                 // ADJ-8 (multi-host fence reseed): the shell fence counter must
@@ -9940,6 +10033,11 @@ impl MobBuilder {
                 ),
                 next_member_effect_ticket: 0,
                 retirements: BTreeMap::new(),
+                stuck_retirements: BTreeMap::new(),
+                shutdown_report: super::MobShutdownReport::default(),
+                shutdown_deadline: None,
+                pending_shutdown_teardown: None,
+                pending_stuck_redrives: std::collections::VecDeque::new(),
                 next_retirement_ticket: 0,
                 retirement_batch: None,
                 wiring_io_tasks: tokio::task::JoinSet::new(),
@@ -9973,6 +10071,7 @@ impl MobBuilder {
                 policy_spawn_waiters: HashMap::new(),
                 spawn_cleanup_waiters: Vec::new(),
                 member_admission_backlog,
+                lifecycle_observations,
                 inline_step_watchdog: super::actor::ActorInlineStepWatchdog::new(),
                 pending_resume_lifecycle: None,
                 pending_resume_controls: std::collections::VecDeque::new(),
@@ -10183,29 +10282,10 @@ impl MobBuilder {
             for identity in recovered_retirements {
                 let retire_handle = handle.clone();
                 actor.actor_io_tasks.spawn(async move {
-                #[cfg(test)]
-                let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
-                let mut retry_delay = std::time::Duration::from_millis(25);
-                loop {
-                    match retire_handle.retire(identity.clone()).await {
-                        Ok(()) | Err(MobError::MemberNotFound(_)) => break,
-                        Err(MobError::ActorCommandChannelClosed) => break,
-                        Err(error) => {
-                            tracing::warn!(
-                                mob_id = %retire_handle.mob_id(),
-                                agent_identity = %identity,
-                                error = %error,
-                                retry_delay_ms = retry_delay.as_millis(),
-                                "automatic recovery of durable member retirement remains incomplete"
-                            );
-                            tokio::time::sleep(retry_delay).await;
-                            retry_delay = retry_delay
-                                .saturating_mul(2)
-                                .min(std::time::Duration::from_secs(2));
-                        }
-                    }
-                }
-            });
+                    #[cfg(test)]
+                    let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
+                    recover_durable_member_retirement(&retire_handle, identity).await;
+                });
             }
             if resume_destroy_cleanup {
                 let destroy_handle = handle.clone();
@@ -14504,4 +14584,52 @@ mod member_endpoint_defect_tests {
             Some("no durable endpoint".to_string())
         );
     }
+}
+
+/// Drive one durably started member retirement found at cold start to its
+/// settlement, through the typed re-drive transition. The retirement is owned
+/// by the actor once re-driven; this task only reports how it settles. A
+/// re-drive still running when its caller budget elapses is awaited on its
+/// settlement watch, never re-issued on a timer.
+async fn recover_durable_member_retirement(
+    handle: &MobHandle,
+    identity: crate::ids::AgentIdentity,
+) {
+    let result = loop {
+        match handle.redrive_retirement(identity.clone()).await {
+            // Not yet admitted by the starting actor: the retry joins the same
+            // single-flight retirement slot and waits on it.
+            Err(MobError::MemberRetirementAdmissionPending { .. }) => {}
+            result => break result,
+        }
+    };
+    let error = match result {
+        Ok(()) | Err(MobError::MemberNotFound(_) | MobError::ActorCommandChannelClosed) => {
+            return;
+        }
+        Err(error) if error.is_retirement_in_progress() => {
+            let Some(mut settlement) = handle.retirement_settlement(&identity) else {
+                return;
+            };
+            if let Some(super::RetirementSettlement::Stuck { stage, cause }) =
+                settlement.settled().await
+            {
+                tracing::warn!(
+                    mob_id = %handle.mob_id(),
+                    agent_identity = %identity,
+                    %stage,
+                    %cause,
+                    "recovered durable member retirement is stuck; it stays owned and reported"
+                );
+            }
+            return;
+        }
+        Err(error) => error,
+    };
+    tracing::warn!(
+        mob_id = %handle.mob_id(),
+        agent_identity = %identity,
+        %error,
+        "recovered durable member retirement did not settle; it stays owned and reported"
+    );
 }

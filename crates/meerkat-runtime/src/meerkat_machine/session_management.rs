@@ -778,6 +778,7 @@ fn fresh_registered_runtime_authority(
             runtime_epoch_id: Some(crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(
                 runtime_epoch_id,
             )),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .map_err(|err| {
@@ -1513,6 +1514,32 @@ impl MeerkatMachine {
         session_id: &SessionId,
         runtime_epoch_id: &meerkat_core::RuntimeEpochId,
     ) -> Result<super::driver::ReconciledRuntimeAuthority, RuntimeDriverError> {
+        let mut reconciled = self
+            .unheld_runtime_authority_for_registration(runtime_id, session_id, runtime_epoch_id)
+            .await?;
+        // A new entry's authority carries the staged run-start holds (#1500)
+        // before any runtime loop exists for it.
+        for reason in self.registration_run_start_holds(session_id) {
+            dsl::MeerkatMachineMutator::apply(
+                &mut reconciled.authority,
+                dsl::MeerkatMachineInput::HoldRunStarts { reason },
+            )
+            .map_err(|error| {
+                RuntimeDriverError::Internal(super::dsl_authority::map_error(
+                    error,
+                    "staged run-start hold at registration",
+                ))
+            })?;
+        }
+        Ok(reconciled)
+    }
+
+    async fn unheld_runtime_authority_for_registration(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_id: &SessionId,
+        runtime_epoch_id: &meerkat_core::RuntimeEpochId,
+    ) -> Result<super::driver::ReconciledRuntimeAuthority, RuntimeDriverError> {
         let Some(store) = self.store.as_ref() else {
             return Ok(super::driver::ReconciledRuntimeAuthority {
                 authority: super::dsl_authority::new_registered_authority(
@@ -2180,6 +2207,7 @@ impl MeerkatMachine {
             pending_user_interrupt_dispatch: None,
             provisional_materialization_claim_id: None,
             dsl_authority,
+            dsl_commits: Arc::new(crate::tokio::sync::watch::Sender::new(0)),
             drain_slot: CommsDrainSlot::new(),
             composition_signal_dispatcher: None,
             composition_materialization_claim_id: None,
@@ -2365,6 +2393,7 @@ impl MeerkatMachine {
             pending_user_interrupt_dispatch: None,
             provisional_materialization_claim_id: None,
             dsl_authority,
+            dsl_commits: Arc::new(crate::tokio::sync::watch::Sender::new(0)),
             drain_slot: CommsDrainSlot::new(),
             composition_signal_dispatcher: None,
             composition_materialization_claim_id: None,
@@ -2583,6 +2612,7 @@ impl MeerkatMachine {
             pending_user_interrupt_dispatch: None,
             provisional_materialization_claim_id: None,
             dsl_authority,
+            dsl_commits: Arc::new(crate::tokio::sync::watch::Sender::new(0)),
             drain_slot: CommsDrainSlot::new(),
             composition_signal_dispatcher: None,
             composition_materialization_claim_id: None,
@@ -3889,6 +3919,7 @@ impl MeerkatMachine {
                     // entry), which makes the machine's idempotent arm the
                     // verdict rather than its epoch-conflict arm.
                     runtime_epoch_id: Some(dsl::RuntimeEpochId::from_domain(expected_epoch)),
+                    initial_run_start_holds: self.registration_run_start_holds(session_id),
                 },
                 "MissingLiveMaterializationReadmit",
             )
@@ -4394,6 +4425,7 @@ impl MeerkatMachine {
                         pending_user_interrupt_dispatch: None,
                         provisional_materialization_claim_id: None,
                         dsl_authority: Arc::clone(&dsl_authority),
+                        dsl_commits: Arc::new(crate::tokio::sync::watch::Sender::new(0)),
                         drain_slot: CommsDrainSlot::new(),
                         composition_signal_dispatcher: None,
                         composition_materialization_claim_id: None,
@@ -10399,7 +10431,18 @@ Ok::<(), RuntimeDriverError>(())
         #[cfg(feature = "live")]
         drop(live_lifecycle_lease);
         drop(registration_transaction_guard);
+        #[cfg(feature = "live")]
+        let entry_removed = removed_entry.is_some();
         drop(removed_entry);
+        // The entry carried the session's machine state, including every
+        // channel's Closed record: the host's close tombstones go with it.
+        // After the locks above, so the publisher cannot contend with them.
+        #[cfg(feature = "live")]
+        if entry_removed && let Some(publisher) = self.live_channel_close_publisher() {
+            publisher
+                .retire_live_session_close_tombstones(session_id)
+                .await;
+        }
         Ok(())
     }
 
@@ -11002,6 +11045,167 @@ Ok::<(), RuntimeDriverError>(())
             })
     }
 
+    /// Hold run starts for `session_id` for `reason` (#1500): until that
+    /// reason is released with [`Self::release_run_starts`], no transition
+    /// establishes a new run, so admitted input stays queued. The current run,
+    /// if any, is unaffected and reported, so the caller can cancel exactly
+    /// that run. Idempotent per reason; a stopped runtime records the hold, a
+    /// destroyed one ignores it.
+    pub async fn hold_run_starts(
+        &self,
+        session_id: &SessionId,
+        reason: super::RunStartHoldReason,
+    ) -> Result<super::RunStartsHold, RuntimeDriverError> {
+        let _gate = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::HoldRunStarts {
+                    reason: reason.dsl(),
+                },
+                "HoldRunStarts",
+            )
+            .await
+            .map_err(RuntimeDriverError::Internal)?;
+        let current_run = effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::RunStartsHeld {
+                    current_run,
+                } => Some(current_run.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "HoldRunStarts committed without RunStartsHeld".to_string(),
+                )
+            })?;
+        let current_run = current_run
+            .map(|run_id| {
+                uuid::Uuid::parse_str(&run_id.0)
+                    .map(meerkat_core::lifecycle::RunId::from_uuid)
+                    .map_err(|error| {
+                        RuntimeDriverError::Internal(format!(
+                            "RunStartsHeld carried a malformed run id {run_id:?}: {error}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        Ok(super::RunStartsHold { current_run })
+    }
+
+    /// Release `reason`'s hold on `session_id` (#1500), whether it was taken
+    /// by [`Self::hold_run_starts`] or staged for registration with
+    /// [`Self::stage_registration_run_start_hold`]. Runs start again once no
+    /// reason holds the runtime: a runtime loop that parked on the hold is
+    /// woken when input is queued. Releasing a reason that does not hold is a
+    /// no-op, and so is releasing on a session not registered yet: its
+    /// registration then applies no hold for `reason`.
+    pub async fn release_run_starts(
+        &self,
+        session_id: &SessionId,
+        reason: super::RunStartHoldReason,
+    ) -> Result<(), RuntimeDriverError> {
+        // Unstage first: a registration reads the staged reasons under the
+        // session's mutation gate, so it either already applied this hold
+        // (and the gate below orders this release after it) or never sees it.
+        self.unstage_registration_run_start_hold(session_id, reason);
+        if self.session_mutation_gate(session_id).await.is_none() {
+            return Ok(());
+        }
+        let gate = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ReleaseRunStarts {
+                    reason: reason.dsl(),
+                },
+                "ReleaseRunStarts",
+            )
+            .await
+            .map_err(RuntimeDriverError::Internal)?;
+        let queued = effects.as_slice().iter().any(|effect| {
+            matches!(
+                effect,
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::RunStartsReleased {
+                    queued: true
+                }
+            )
+        });
+        let wake_tx = if queued {
+            self.sessions
+                .read()
+                .await
+                .get(session_id)
+                .and_then(RuntimeSessionEntry::wake_sender)
+        } else {
+            None
+        };
+        drop(gate);
+        if let Some(wake_tx) = wake_tx {
+            let _ = wake_tx.try_send(());
+        }
+        Ok(())
+    }
+
+    /// Stage a run-start hold that `session_id`'s registration applies
+    /// (#1500), before its runtime loop can start a run. If the session is
+    /// already registered, the hold is applied now as well. The reason stays
+    /// staged until [`Self::release_run_starts`] releases it, so a later
+    /// re-registration re-applies it.
+    pub async fn stage_registration_run_start_hold(
+        &self,
+        session_id: &SessionId,
+        reason: super::RunStartHoldReason,
+    ) -> Result<(), RuntimeDriverError> {
+        self.registration_run_start_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.clone())
+            .or_default()
+            .insert(reason.dsl());
+        if self.session_mutation_gate(session_id).await.is_some() {
+            self.hold_run_starts(session_id, reason).await?;
+        }
+        Ok(())
+    }
+
+    fn unstage_registration_run_start_hold(
+        &self,
+        session_id: &SessionId,
+        reason: super::RunStartHoldReason,
+    ) {
+        let mut staged = self
+            .registration_run_start_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reasons) = staged.get_mut(session_id) {
+            reasons.remove(&reason.dsl());
+            if reasons.is_empty() {
+                staged.remove(session_id);
+            }
+        }
+    }
+
+    /// The run-start holds `session_id`'s registration applies (#1500).
+    /// Read under the session's mutation gate.
+    pub(super) fn registration_run_start_holds(
+        &self,
+        session_id: &SessionId,
+    ) -> std::collections::BTreeSet<crate::meerkat_machine::dsl::RunStartHoldReason> {
+        self.registration_run_start_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Request cancellation at the next safe boundary for the currently-running turn.
     pub async fn cancel_after_boundary(
         &self,
@@ -11195,6 +11399,189 @@ Ok::<(), RuntimeDriverError>(())
             .await?;
         }
         Ok(abandoned)
+    }
+
+    /// Abandon every input `session_id` holds queued, in either lane, at one
+    /// cancel point, and report the run the machine records as current there.
+    ///
+    /// The cancel point is one hold of the session mutation gate, the gate
+    /// the runtime loop holds to stage queued input into a run. While it is
+    /// held nothing is staged, so the snapshot of the current run and the
+    /// queued inputs is exact, and each queued input is abandoned through the
+    /// machine's `AbandonInput` transition before any of them could start.
+    /// Input admitted after the gate is released is never named here, so it
+    /// is never touched.
+    ///
+    /// The current run is left running: the caller cancels exactly that run
+    /// (for example with [`Self::cancel_after_boundary_run_if_current`]). A run
+    /// started after the cancel point comes from input admitted after it.
+    ///
+    /// Returns `Ok(None)` when the session is not registered.
+    pub async fn abandon_queued_inputs_at_cancel_point(
+        &self,
+        session_id: &SessionId,
+        reason: impl Into<String>,
+    ) -> Result<Option<AdmittedWork>, RuntimeDriverError> {
+        use crate::input_state::InputAbandonReason;
+
+        let reason = reason.into();
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(None);
+            };
+            entry.driver.clone()
+        };
+        let gate_guard = match self
+            .lock_current_session_driver_gate(session_id, &driver)
+            .await
+        {
+            Ok(gate_guard) => gate_guard,
+            Err(
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                }
+                | RuntimeDriverError::Destroyed,
+            ) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let (runtime_id, completions, mutation_gate, publication_handle, dsl_authority) = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(None);
+            };
+            (
+                entry.runtime_id.clone(),
+                entry.completions.clone(),
+                Arc::clone(&entry.mutation_gate),
+                entry.publication_handle(),
+                Arc::clone(&entry.dsl_authority),
+            )
+        };
+
+        let mut driver_guard = driver.lock().await;
+        let (current_run, lane) = {
+            let authority = dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            let mut lane = state
+                .input_lane
+                .keys()
+                .map(|key| {
+                    let seq = state
+                        .input_admission_seq
+                        .get(key)
+                        .copied()
+                        .unwrap_or(u64::MAX);
+                    (seq, key.clone())
+                })
+                .collect::<Vec<_>>();
+            lane.sort();
+            (
+                super::dsl_authority::current_run_id_from_authority(&authority),
+                lane,
+            )
+        };
+        // Each input is abandoned with its own terminal carrier, so an error
+        // leaves every input before it consistently terminal; the error is
+        // returned after those are published.
+        let mut abandoned: Vec<(InputId, Option<InputId>)> = Vec::new();
+        let mut failure = None;
+        for (_, key) in lane {
+            let input_id = match uuid::Uuid::parse_str(&key) {
+                Ok(uuid) => InputId(uuid),
+                Err(error) => {
+                    failure = Some(RuntimeDriverError::Internal(format!(
+                        "queued input lane key {key:?} is not an input id: {error}"
+                    )));
+                    break;
+                }
+            };
+            let prepared = match driver_guard
+                .prepare_runless_runtime_terminated_interaction_outboxes(
+                    std::slice::from_ref(&input_id),
+                    reason.clone(),
+                ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            };
+            match driver_guard
+                .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
+                .await
+            {
+                Ok(true) => {
+                    let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                    abandoned.push((input_id, candidate_owner_input_id));
+                }
+                // Lane membership is the queued phase, and nothing leaves the
+                // lane while the gate is held; an input that is not queued has
+                // no queued work to abandon.
+                Ok(false) => {
+                    driver_guard.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                }
+                Err(error) => {
+                    driver_guard.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        drop(driver_guard);
+
+        let dispatch = match publication_handle.clone() {
+            Some(publication_handle)
+                if abandoned
+                    .iter()
+                    .any(|(_, candidate_owner_input_id)| candidate_owner_input_id.is_some()) =>
+            {
+                Some(self.prepare_runless_terminal_publication_dispatch(
+                    &driver,
+                    &completions,
+                    &mutation_gate,
+                    publication_handle,
+                )?)
+            }
+            _ => None,
+        };
+        drop(gate_guard);
+
+        if let Some((result_rx, start_tx)) = dispatch {
+            if let Some(start_tx) = start_tx {
+                let _ = start_tx.send(());
+            }
+            self.await_runless_terminal_publication_dispatch(&runtime_id, result_rx, None)
+                .await?;
+        }
+        for (input_id, candidate_owner_input_id) in &abandoned {
+            if candidate_owner_input_id.is_some() && publication_handle.is_some() {
+                // Published by the dispatch above.
+                continue;
+            }
+            crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+                &driver,
+                Some(&completions),
+                None,
+                std::slice::from_ref(input_id),
+                candidate_owner_input_id.as_ref(),
+                &reason,
+                None,
+            )
+            .await?;
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(Some(AdmittedWork {
+            current_run,
+            queued_inputs: abandoned
+                .into_iter()
+                .map(|(input_id, _)| input_id)
+                .collect(),
+        }))
     }
 
     /// Stage a durable session visibility filter through the machine-owned visibility state.

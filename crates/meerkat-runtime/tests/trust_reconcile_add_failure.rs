@@ -69,6 +69,7 @@ fn obligation(
         MeerkatMachineInput::RegisterSession {
             session_id: SessionId::from("trust-reconcile-add-failure-test"),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("RegisterSession input");

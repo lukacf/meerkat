@@ -112,6 +112,14 @@ fn decode_resume_override_field(
     }
 }
 
+/// Decode the canonical public profile input into the internal profile.
+///
+/// Host-only fields (`mcp_servers`, `rust_bundles`) have no public input and
+/// stay empty.
+pub fn decode_public_profile(input: MobProfileInput) -> Result<Profile, String> {
+    decode_profile(input)
+}
+
 fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
     Ok(Profile {
         model_fallback: input.model_fallback,
@@ -136,6 +144,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             schedule: input.tools.schedule,
             image_generation: input.tools.image_generation,
             read_only: input.tools.read_only,
+            deny: input.tools.deny,
             mcp: input.tools.mcp,
             mcp_servers: vec![],
             rust_bundles: Vec::new(),

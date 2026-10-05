@@ -1608,6 +1608,12 @@ struct RuntimeSessionEntry {
     /// including several Maps/Sets) so holding a reference to a
     /// `RuntimeSessionEntry` does not bloat async future sizes.
     dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+    /// Commit generation of `dsl_authority`. It advances once after every
+    /// transition committed through the session's apply seam
+    /// (`apply_session_dsl_input*`), which carries every live delegation
+    /// result-release guard input. Waiters re-check a refused guarded
+    /// transition on each advance instead of on a timer.
+    dsl_commits: Arc<crate::tokio::sync::watch::Sender<u64>>,
     /// Per-session comms drain lifecycle slot.
     ///
     /// Collapsed from the sibling `MeerkatMachine.comms_drain_slots:
@@ -1977,16 +1983,52 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
     epoch_id: meerkat_core::RuntimeEpochId,
 }
 
-/// Opaque identity for one exact runtime-session registration.
-///
-/// Unlike [`RuntimeExecutorAttachmentWitness`], this witness deliberately
-/// carries no executor identity. It exists for machine-owned cleanup of a
-/// terminal registration that never published an attachment (for example, a
-/// registration materialized only to recover its durable ops lifecycle).
-/// Callers may clone and compare the witness, but only this machine can use it
-/// to admit exact compare-and-remove teardown. Durable epoch identity alone is
-/// not exact because an epoch may survive an in-process entry rebuild; the
-/// private weak mutation-gate identity distinguishes those incarnations.
+/// What a run-start hold (#1500) found when it took effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStartsHold {
+    /// The run current when the hold took effect: the only run that may still
+    /// execute, and the only one a stop may still cancel. `None` means the
+    /// member had no run.
+    pub current_run: Option<meerkat_core::lifecycle::RunId>,
+}
+
+/// The work a session had admitted at a cancel point, taken by
+/// [`MeerkatMachine::abandon_queued_inputs_at_cancel_point`] under one hold
+/// of the session's mutation gate.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedWork {
+    /// The run the machine recorded as current at the cancel point. The cancel
+    /// point leaves it running; the caller cancels exactly this run.
+    pub current_run: Option<meerkat_core::lifecycle::RunId>,
+    /// The inputs that were queued at the cancel point, in either lane, in
+    /// admission order. The cancel point abandoned each of them.
+    pub queued_inputs: Vec<InputId>,
+}
+
+/// Why a runtime's run starts are held (#1500). No new run starts while any
+/// reason holds a runtime; each holder releases only its own reason.
+#[non_exhaustive]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStartHoldReason {
+    /// A mob Stop holds its members until Resume.
+    MobStop,
+    /// A restored member waits until its host has published its tools.
+    ToolsNotPublished,
+}
+
+impl RunStartHoldReason {
+    pub(crate) fn dsl(self) -> dsl::RunStartHoldReason {
+        match self {
+            Self::MobStop => dsl::RunStartHoldReason::MobStop,
+            Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
+        }
+    }
+}
+
 /// What a caller refused with
 /// [`RuntimeBindingsError::RegistrationOwned`](crate::RuntimeBindingsError::RegistrationOwned) observes once a session's
 /// actor-materialization claim is no longer in flight.
@@ -2024,6 +2066,16 @@ impl std::fmt::Debug for MaterializationClaimObservation {
     }
 }
 
+/// Opaque identity for one exact runtime-session registration.
+///
+/// Unlike [`RuntimeExecutorAttachmentWitness`], this witness deliberately
+/// carries no executor identity. It exists for machine-owned cleanup of a
+/// terminal registration that never published an attachment (for example, a
+/// registration materialized only to recover its durable ops lifecycle).
+/// Callers may clone and compare the witness, but only this machine can use it
+/// to admit exact compare-and-remove teardown. Durable epoch identity alone is
+/// not exact because an epoch may survive an in-process entry rebuild; the
+/// private weak mutation-gate identity distinguishes those incarnations.
 #[derive(Clone)]
 pub struct RuntimeSessionRegistrationWitness {
     machine: std::sync::Weak<MeerkatMachineShared>,
@@ -6300,6 +6352,135 @@ impl MeerkatMachine {
         }
     }
 
+    /// Deterministically pause the runtime loop's next terminal run commit
+    /// of `session_id` after the store commit landed and before the
+    /// committed boundary is acknowledged to the session executor. The
+    /// turn-finalization boundary stays held. The first receiver resolves
+    /// when the commit reaches the gate; sending on (or dropping) the
+    /// returned sender lets it go on. Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_runtime_loop_before_boundary_acknowledgement_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_runtime_loop_before_boundary_acknowledgement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "runtime-loop boundary-acknowledgement test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_runtime_loop_before_boundary_acknowledgement_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_runtime_loop_before_boundary_acknowledgement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+    }
+
+    /// Runtime-loop parks on held run starts (#1500). Test support: wait for
+    /// the park as a positive event instead of a quiet period.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn run_start_held_parks(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.test_run_start_held_parks.subscribe()
+    }
+
+    /// Whether `session_id`'s run starts are held (#1500). Test support.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn run_starts_held_for_test(&self, session_id: &SessionId) -> Option<bool> {
+        self.session_dsl_state(session_id)
+            .await
+            .ok()
+            .map(|state| !state.run_start_holds.is_empty())
+    }
+
+    /// Boundary cancels dispatched to an executor's boundary handle (#1471).
+    /// Test support: wait for the dispatch as a positive event.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn boundary_cancel_dispatches(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.test_boundary_cancel_dispatches.subscribe()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn note_run_start_held_park(&self) {
+        self.test_run_start_held_parks
+            .send_modify(|parks| *parks = parks.wrapping_add(1));
+    }
+
+    /// Record whether `session_id`'s runtime loop is parked: set as it awaits
+    /// its next wake with no buffered wake or effect, cleared the moment any
+    /// of them fires. Test support.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn note_runtime_loop_parked(&self, session_id: &SessionId, parked: bool) {
+        self.test_runtime_loop_parked.send_if_modified(|sessions| {
+            if parked {
+                sessions.insert(session_id.clone())
+            } else {
+                sessions.remove(session_id)
+            }
+        });
+    }
+
+    /// Sessions whose runtime loop is parked: it awaits its next wake with
+    /// none buffered, so input admitted now without a wake stays queued
+    /// unless something genuinely wakes the loop. Test support: a positive
+    /// event, never a state poll, which cannot see a wake buffered while the
+    /// loop was busy. A loop can park while a run is in flight (it awaits the
+    /// run's effect), so a test pairs the park with the settled phase.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn runtime_loop_parked(
+        &self,
+    ) -> crate::tokio::sync::watch::Receiver<std::collections::HashSet<SessionId>> {
+        self.test_runtime_loop_parked.subscribe()
+    }
+
+    /// Buffer one wake for `session_id`'s runtime loop without admitting
+    /// input, as a wake sent while the loop is busy is buffered. Test
+    /// support for the parked-wait regression.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn buffer_runtime_loop_wake_for_test(&self, session_id: &SessionId) -> bool {
+        let wake_tx = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .and_then(|entry| entry.wake_sender())
+        };
+        wake_tx.is_some_and(|wake_tx| wake_tx.try_send(()).is_ok())
+    }
+
     /// Deterministically pause the runtime loop after its ready-effect drain
     /// and before queue authority is acquired. Exposed only by test builds so
     /// cross-crate integration tests can admit a complete same-boundary batch.
@@ -6324,6 +6505,57 @@ impl MeerkatMachine {
         );
         *hook = Some((session_id, entered_tx, release_rx));
         (entered_rx, release_tx)
+    }
+
+    /// Deterministically pause the runtime loop after it staged a run and
+    /// signalled its turn start, immediately before the executor's `apply`
+    /// (#1471). Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_runtime_loop_before_executor_apply_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_runtime_loop_before_executor_apply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "runtime-loop executor-apply test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_runtime_loop_before_executor_apply_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_runtime_loop_before_executor_apply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -6839,6 +7071,73 @@ impl MeerkatMachine {
         Self::preview_dsl_input_on_authority(preview, input, context)
     }
 
+    /// The run the machine currently records for `session_id`, if any (`None`
+    /// also for a session that is not registered).
+    pub async fn current_run(&self, session_id: &SessionId) -> Option<RunId> {
+        let authority = self.session_dsl_authority(session_id).await.ok()?;
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        dsl_authority::current_run_id_from_authority(&authority)
+    }
+
+    /// The turn terminal outcome the machine retains for exactly `run_id` of
+    /// `session_id`: `None` while that run's turn has not terminalized, when
+    /// the retained terminal witness belongs to another run, or when the
+    /// session is not registered.
+    pub async fn run_turn_terminal(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+    ) -> Option<meerkat_core::turn_execution_authority::TurnTerminalOutcome> {
+        let authority = self.session_dsl_authority(session_id).await.ok()?;
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        if state.turn_terminal_run_id.as_ref() != Some(&dsl::RunId::from_domain(run_id)) {
+            return None;
+        }
+        state
+            .terminal_outcome
+            .map(dsl_authority::core_turn_terminal_outcome)
+    }
+
+    /// Wait until `run_id` is no longer the run the machine records for
+    /// `session_id`.
+    ///
+    /// The runtime records a run's end in the session's machine state; a
+    /// session service reporting its turn inactive precedes that record, so a
+    /// caller that must act only once a run is over (a stopped member about
+    /// to be unregistered or resumed) waits here instead. Typed and event
+    /// driven: the runtime loop that executes the run signals after recording
+    /// its end, and this re-reads machine truth on every signal, subscribing
+    /// before the first read so no signal between read and wait is lost.
+    /// Unbounded: callers bound it with their own deadline.
+    pub async fn wait_run_settled(&self, session_id: &SessionId, run_id: &RunId) {
+        let mut settlements = self.run_settlements.subscribe();
+        while self.current_run(session_id).await.as_ref() == Some(run_id) {
+            if settlements.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Wait until the run current for `session_id` when this is called is no
+    /// longer current, and return its id; `None` when no run was current.
+    /// See [`Self::wait_run_settled`].
+    pub async fn wait_current_run_settled(&self, session_id: &SessionId) -> Option<RunId> {
+        let run_id = self.current_run(session_id).await?;
+        self.wait_run_settled(session_id, &run_id).await;
+        Some(run_id)
+    }
+
+    /// Wake every [`Self::wait_run_settled`] waiter to re-check.
+    pub(crate) fn publish_run_settlement(&self) {
+        self.run_settlements
+            .send_modify(|settlements| *settlements = settlements.wrapping_add(1));
+    }
+
     async fn session_dsl_state(
         &self,
         session_id: &SessionId,
@@ -7001,6 +7300,11 @@ impl MeerkatMachine {
                 context,
             )
             .await;
+        #[cfg(any(test, feature = "test-support"))]
+        if live_dispatch_result.is_ok() {
+            self.test_boundary_cancel_dispatches
+                .send_modify(|dispatches| *dispatches = dispatches.wrapping_add(1));
+        }
 
         // Reserve bounded-channel capacity without M. A wedged executor may
         // delay this process-owned transaction, but it cannot retain the
@@ -8660,6 +8964,9 @@ pub struct LiveChannelStatusAuthority {
     pub status_observation_sequence: u64,
     pub degradation_reason: Option<dsl::LiveChannelDegradationReason>,
     pub degradation_detail: Option<String>,
+    /// Set when the channel closed on a media fault: whether the session may
+    /// reopen it (its one media-fault reopen is not spent).
+    pub media_fault_reopen_recommended: Option<bool>,
     pub channel_status_commit_authority: Option<meerkat_live::LiveChannelStatusCommitAuthority>,
 }
 
@@ -8672,6 +8979,7 @@ impl LiveChannelStatusAuthority {
         status_observation_sequence: u64,
         degradation_reason: Option<dsl::LiveChannelDegradationReason>,
         degradation_detail: Option<String>,
+        media_fault_reopen_recommended: Option<bool>,
     ) -> Result<Self, String> {
         Ok(Self {
             status,
@@ -8679,6 +8987,7 @@ impl LiveChannelStatusAuthority {
             status_observation_sequence,
             degradation_reason,
             degradation_detail,
+            media_fault_reopen_recommended,
             channel_status_commit_authority: Some(build_live_channel_status_commit_authority(
                 channel_id,
                 status_observation_sequence,
@@ -8779,11 +9088,28 @@ pub struct MeerkatMachineShared {
     #[cfg(feature = "live")]
     live_context_mirror_host:
         StdRwLock<Option<Arc<dyn crate::live_context_mirror::LiveContextMirrorHost>>>,
+    /// Session event publication for committed live channel closes.
+    #[cfg(feature = "live")]
+    live_channel_close_publisher:
+        StdRwLock<Option<Arc<dyn crate::live_execution::LiveChannelCloseEventPublisher>>>,
+    /// Live channel close operations executing right now, by channel, with
+    /// the waiters woken as each one ends. See
+    /// [`MeerkatMachine::begin_live_channel_close`].
+    #[cfg(feature = "live")]
+    live_channel_closes_in_flight: Arc<LiveChannelClosesInFlight>,
     /// Sealed committed-row custody retained across generated unsafe turn
     /// boundaries. Keys are session-scoped canonical row sequences.
     #[cfg(feature = "live")]
     live_context_queued_rows:
         StdMutex<HashMap<(SessionId, u64), crate::live_execution::LiveContextQueuedRow>>,
+    /// Titles of voice delegations whose result was merged into the session
+    /// after their channel closed, keyed by the delegation's interaction (the
+    /// merge reply's transcript interaction): a reopened channel replays the
+    /// reply framed as that request's result
+    /// ([`crate::live_execution::post_close_result_context`]).
+    #[cfg(feature = "live")]
+    post_close_result_titles:
+        StdMutex<HashMap<(SessionId, meerkat_core::interaction::InteractionId), String>>,
     #[cfg(feature = "live")]
     live_context_preparation_leases: StdMutex<
         HashMap<
@@ -8849,6 +9175,12 @@ pub struct MeerkatMachineShared {
     /// it for their lifetime; the registry is scoped to this `MeerkatMachine`
     /// instance, so tests / multi-runtime processes get clean isolation.
     session_claims: Arc<crate::handles::RuntimeSessionClaimRegistry>,
+    /// Wake signal for [`MeerkatMachine::wait_run_settled`]. The
+    /// runtime loops of this machine, which execute every run and record its
+    /// end, bump it after each run iteration, each loop iteration and at loop
+    /// exit. It carries no state: waiters re-check the session's DSL
+    /// `current_run_id` after every wake.
+    run_settlements: crate::tokio::sync::watch::Sender<u64>,
     /// One-shot deterministic fault for the materializer's executor-attach
     /// publication window. Test-support only; production builds compile the
     /// post-ensure hook to a no-op and carry no field.
@@ -8879,7 +9211,7 @@ pub struct MeerkatMachineShared {
     /// per machine: a short bound would make every success-path interrupt
     /// race the process-global cleanup dispatcher that all in-process tests
     /// share, so only a test that exercises a wedged callback shortens it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_user_interrupt_ack_timeout: StdMutex<std::time::Duration>,
     /// Deterministic test gate after fenced input captures its residency slot
     /// and exact session gate but before it locks that session gate.
@@ -8930,11 +9262,55 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// Run-start holds a session's next registration applies (#1500),
+    /// before its runtime loop can start a run. A reason stays staged until
+    /// it is released, so every re-registration re-applies exactly the
+    /// reasons still outstanding.
+    registration_run_start_holds:
+        std::sync::Mutex<HashMap<SessionId, std::collections::BTreeSet<dsl::RunStartHoldReason>>>,
+    /// One-shot deterministic gate after the runtime loop's terminal run
+    /// commit landed in the store but before the committed boundary is
+    /// acknowledged to the session executor (the turn-finalization boundary
+    /// is still held).
+    #[cfg(any(test, feature = "test-support"))]
+    test_runtime_loop_before_boundary_acknowledgement: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    /// Runtime-loop parks on held run starts (#1500), counted so tests can
+    /// wait for the park as a positive event.
+    #[cfg(any(test, feature = "test-support"))]
+    test_run_start_held_parks: crate::tokio::sync::watch::Sender<u64>,
+    /// Sessions whose runtime loop is parked with no buffered wake or effect:
+    /// it awaits its next wake. Test support, so a test can admit input "now
+    /// that the loop is idle" as a positive event instead of a state poll.
+    #[cfg(any(test, feature = "test-support"))]
+    test_runtime_loop_parked:
+        crate::tokio::sync::watch::Sender<std::collections::HashSet<SessionId>>,
+    /// Boundary cancels dispatched to an executor's boundary handle (#1471),
+    /// counted so tests can wait for the dispatch as a positive event.
+    #[cfg(any(test, feature = "test-support"))]
+    test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender<u64>,
     /// One-shot deterministic gate after the runtime loop's first ready-effect
     /// drain but before it acquires queue authority. Tests publish an executor
     /// effect in this exact gap and prove the consumed wake is retained.
     #[cfg(any(test, feature = "test-support"))]
     test_runtime_loop_before_queue_authority: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    /// One-shot deterministic gate after the runtime loop staged a run and
+    /// signalled its turn start but before it calls the executor's `apply`
+    /// (#1471): the run is current in the machine and the session has not
+    /// claimed the turn yet.
+    #[cfg(any(test, feature = "test-support"))]
+    test_runtime_loop_before_executor_apply: StdMutex<
         Option<(
             SessionId,
             crate::tokio::sync::oneshot::Sender<()>,
@@ -9256,6 +9632,17 @@ impl MeerkatMachine {
         slot.lock_owned().await
     }
 
+    /// Hold `session_id`'s registration transaction until the guard drops, so
+    /// a test can stand a session's unregister admission behind it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn hold_session_registration_transaction_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> crate::tokio::sync::OwnedMutexGuard<()> {
+        self.lock_session_registration_transaction(session_id).await
+    }
+
     #[cfg(test)]
     pub(crate) fn probe_next_session_registration_transaction_contention_for_test(
         &self,
@@ -9457,6 +9844,64 @@ impl MeerkatMachine {
             .live_context_mirror_host
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
+    }
+
+    /// Install the session event publication every committed live channel
+    /// close reports to (`AgentEvent::LiveChannelClosed`).
+    #[cfg(feature = "live")]
+    pub fn set_live_channel_close_publisher(
+        &self,
+        publisher: Arc<dyn crate::live_execution::LiveChannelCloseEventPublisher>,
+    ) {
+        *self
+            .shared
+            .live_channel_close_publisher
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(publisher);
+    }
+
+    /// Register a live channel close operation for as long as the returned
+    /// guard lives. Every close path holds one from its first step to its
+    /// last, whether it commits or fails, so another owner can tell a close
+    /// that is executing from one that already ended.
+    #[cfg(feature = "live")]
+    pub fn begin_live_channel_close(
+        &self,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> LiveChannelCloseInFlightGuard {
+        LiveChannelCloseInFlightGuard::begin(
+            Arc::clone(&self.shared.live_channel_closes_in_flight),
+            channel_id.as_str(),
+        )
+    }
+
+    /// Whether a close of this channel is executing right now.
+    #[cfg(feature = "live")]
+    #[must_use]
+    pub fn live_channel_close_in_flight(&self, channel_id: &meerkat_core::LiveChannelId) -> bool {
+        self.shared
+            .live_channel_closes_in_flight
+            .contains(channel_id.as_str())
+    }
+
+    /// Completes when the next live channel close operation ends, on any
+    /// channel. `notify_waiters` keeps no permit: create and `enable` the
+    /// future before reading [`Self::live_channel_close_in_flight`], then
+    /// await it while that reads `true`.
+    #[cfg(feature = "live")]
+    pub fn live_channel_close_ended(&self) -> tokio::sync::futures::Notified<'_> {
+        self.shared.live_channel_closes_in_flight.ended.notified()
+    }
+
+    #[cfg(feature = "live")]
+    pub(crate) fn live_channel_close_publisher(
+        &self,
+    ) -> Option<Arc<dyn crate::live_execution::LiveChannelCloseEventPublisher>> {
+        self.shared
+            .live_channel_close_publisher
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     #[cfg(feature = "live")]
@@ -10296,10 +10741,18 @@ impl MeerkatMachine {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 
+    /// Whether both handles retain the same live runtime owner. A separately
+    /// constructed machine is a different owner even over the same store.
+    #[must_use]
+    pub fn is_same_runtime_owner(&self, other: &Self) -> bool {
+        self.shares_runtime_execution_owner_with(other)
+    }
+
     /// Whether this adapter shares the same runtime persistence authority as
     /// another adapter. Runtime-backed composition surfaces use this to reject
     /// mismatched adapters before visible terminal events can outrun the store
-    /// that owns their durable commit.
+    /// that owns their durable commit. Two distinct owners can share a store;
+    /// use [`Self::is_same_runtime_owner`] to decide ownership.
     #[must_use]
     pub fn shares_runtime_persistence_with(&self, other: &Self) -> bool {
         match (&self.store, &other.store) {
@@ -10365,7 +10818,13 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
+                live_channel_close_publisher: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_channel_closes_in_flight: Arc::default(),
+                #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                post_close_result_titles: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
@@ -10386,6 +10845,7 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                run_settlements: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -10398,7 +10858,7 @@ impl MeerkatMachine {
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
@@ -10415,7 +10875,20 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_executor_apply: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_parked: crate::tokio::sync::watch::Sender::new(
+                    std::collections::HashSet::new(),
+                ),
+                #[cfg(any(test, feature = "test-support"))]
+                test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
@@ -10516,7 +10989,13 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
+                live_channel_close_publisher: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_channel_closes_in_flight: Arc::default(),
+                #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                post_close_result_titles: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
@@ -10537,6 +11016,7 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                run_settlements: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -10549,7 +11029,7 @@ impl MeerkatMachine {
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
                 #[cfg(test)]
                 test_fenced_accept_after_lease: StdMutex::new(None),
@@ -10566,7 +11046,20 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_executor_apply: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_parked: crate::tokio::sync::watch::Sender::new(
+                    std::collections::HashSet::new(),
+                ),
+                #[cfg(any(test, feature = "test-support"))]
+                test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
@@ -11306,4 +11799,67 @@ pub(crate) fn execution_custody_error(
         }
     };
     RuntimeDriverError::ControllerReadinessUnavailable { reason }
+}
+
+/// Close operations executing per live channel (a count: close paths nest).
+#[cfg(feature = "live")]
+#[derive(Default)]
+pub(crate) struct LiveChannelClosesInFlight {
+    by_channel: StdMutex<HashMap<String, usize>>,
+    ended: tokio::sync::Notify,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelClosesInFlight {
+    fn contains(&self, channel_id: &str) -> bool {
+        self.by_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(channel_id)
+    }
+}
+
+/// Holds one live channel close operation in flight; dropping it ends the
+/// operation and wakes [`MeerkatMachine::live_channel_close_ended`] waiters.
+#[cfg(feature = "live")]
+#[must_use = "the close is in flight only while the guard lives"]
+pub struct LiveChannelCloseInFlightGuard {
+    registry: Arc<LiveChannelClosesInFlight>,
+    channel_id: String,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelCloseInFlightGuard {
+    fn begin(registry: Arc<LiveChannelClosesInFlight>, channel_id: &str) -> Self {
+        *registry
+            .by_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(channel_id.to_string())
+            .or_default() += 1;
+        Self {
+            registry,
+            channel_id: channel_id.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "live")]
+impl Drop for LiveChannelCloseInFlightGuard {
+    fn drop(&mut self) {
+        {
+            let mut by_channel = self
+                .registry
+                .by_channel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(count) = by_channel.get_mut(&self.channel_id) {
+                *count -= 1;
+                if *count == 0 {
+                    by_channel.remove(&self.channel_id);
+                }
+            }
+        }
+        self.registry.ended.notify_waiters();
+    }
 }

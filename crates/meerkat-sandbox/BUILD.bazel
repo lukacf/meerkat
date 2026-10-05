@@ -58,7 +58,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
     },
     proc_macro_deps = all_crate_deps(
@@ -89,7 +89,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
     },
     proc_macro_deps = all_crate_deps(
@@ -124,7 +124,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
     },
     tags = [
@@ -175,7 +175,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "bootstrap_integrity",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
     },
@@ -227,7 +227,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "compiled_confinement",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
     },
@@ -279,7 +279,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "process_confinement",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
     },

@@ -2425,6 +2425,10 @@ pub fn router(state: AppState) -> Router {
             post(crate::auth_endpoints::complete_login),
         )
         .route(
+            "/auth/login/cancel",
+            post(crate::auth_endpoints::cancel_login),
+        )
+        .route(
             "/auth/login/device/start",
             post(crate::auth_endpoints::start_device_login),
         )
@@ -5333,7 +5337,7 @@ async fn create_session_inner(
     // Create MCP adapter and compose with external tools.
     #[cfg(feature = "mcp")]
     let mcp_external_tools = {
-        let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+        let adapter = Arc::new(McpRouterAdapter::new(session_mcp_router(state)));
         let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
         let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
         let mcp_state = SessionMcpState {
@@ -5393,6 +5397,7 @@ async fn create_session_inner(
     let mut build = SessionBuildOptions {
         model_fallback: None,
         tool_access_policy: None,
+        declared_tool_restriction: None,
         tool_dispatch_admission: None,
         application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
         tool_consequence_policy_registry: None,
@@ -6620,6 +6625,7 @@ async fn continue_session_inner(
         let mut build = SessionBuildOptions {
             model_fallback: None,
             tool_access_policy: None,
+            declared_tool_restriction: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
@@ -7735,7 +7741,7 @@ async fn apply_mcp_boundary(
         action.operation == ToolConfigChangeOperation::Remove
             && action.phase == McpLifecyclePhase::Draining
     }) {
-        spawn_mcp_drain_task(adapter, drain_task_running, lifecycle_tx);
+        adapter.spawn_removal_drain(drain_task_running, lifecycle_tx);
     }
 
     queued_actions.extend(result.delta.lifecycle_actions);
@@ -7775,44 +7781,18 @@ async fn apply_mcp_boundary_to_turn_prompt(
     Ok(())
 }
 
-/// Spawn a background task that monitors removing MCP servers.
+/// The live MCP router of one REST session. Live `mcp/add` servers use the
+/// same interactive MCP auth as factory-built sessions: stored credentials,
+/// or the typed human-authorization status. Never a browser.
 #[cfg(feature = "mcp")]
-fn spawn_mcp_drain_task(
-    adapter: Arc<McpRouterAdapter>,
-    task_running: Arc<AtomicBool>,
-    lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
-) {
-    if task_running
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let delta = match adapter.progress_removals().await {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!("background MCP drain apply failed: {e}");
-                    break;
-                }
-            };
-            for action in delta.lifecycle_actions {
-                let _ = lifecycle_tx.send(action);
-            }
-            match adapter.has_removing_servers().await {
-                Ok(true) => continue,
-                Ok(false) => break,
-                Err(e) => {
-                    tracing::warn!("background MCP drain state check failed: {e}");
-                    break;
-                }
-            }
-        }
-        task_running.store(false, Ordering::Release);
-    });
+fn session_mcp_router(state: &AppState) -> McpRouter {
+    McpRouter::new().with_mcp_auth(
+        meerkat::McpAuthMode::Interactive,
+        meerkat::default_mcp_auth_resolver(
+            Some(state.provider_auth_persistence.clone()),
+            state.runtime_adapter.provider_auth_runtime_authority(),
+        ),
+    )
 }
 
 /// Validate session existence and retrieve its MCP adapter.
@@ -10351,6 +10331,138 @@ mod tests {
                 .contains_session(&peer_session_id)
                 .await,
             "archived peer terminal webhook should unregister stale runtime state"
+        );
+    }
+
+    /// A session read and a run stop on a session whose turn is in flight
+    /// answer without waiting for that turn to end. The read observes the
+    /// session task's published transcript authority instead of asking the
+    /// busy task, and the stop's presence check never waits behind the run it
+    /// is stopping. The mock LLM call is never released here: only the stop
+    /// can end the run.
+    #[tokio::test]
+    async fn rest_read_and_stop_answer_while_the_turn_is_in_flight() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 4).await;
+        let calls = Arc::new(tokio::sync::watch::channel(0).0);
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        }));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+
+        let state_for_turn = state.clone();
+        let turn_session_id = session_id.to_string();
+        let running_turn = tokio::spawn(async move {
+            let body_session_id = turn_session_id.clone();
+            Box::pin(continue_session_inner(
+                &state_for_turn,
+                &turn_session_id,
+                ContinueSessionRequest {
+                    injected_context: None,
+                    transient_turn_context: None,
+                    session_id: body_session_id,
+                    prompt: ContentInput::Text("hold the turn open".to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    auth_binding: None,
+                    max_tokens: None,
+                    hooks_override: None,
+                    enable_web_search: None,
+                    skill_refs: None,
+                    turn_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await
+        });
+        wait_for_rest_llm_calls(&calls, 1, "the turn reaches the LLM").await;
+
+        let app = router(state.clone());
+        let read = tokio::time::timeout(
+            FAILURE_BOUND,
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("a session read must not wait for the in-flight turn")
+        .unwrap();
+        assert_eq!(read.status(), StatusCode::OK);
+        assert!(!running_turn.is_finished(), "the turn is still in flight");
+
+        let post_stop = |run_id: String| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{session_id}/runs/{run_id}/stop"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reason":"stop the in-flight run"}"#))
+                .unwrap()
+        };
+        let stop_receipt = |response: axum::response::Response| async move {
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            serde_json::from_slice::<meerkat_contracts::StopRunResult>(&body)
+                .expect("typed StopRunResult")
+                .receipt
+        };
+        // A stale run id passes the presence check and reports the current run.
+        let stale = meerkat_core::lifecycle::RunId::new().to_string();
+        let probe = tokio::time::timeout(FAILURE_BOUND, app.clone().oneshot(post_stop(stale)))
+            .await
+            .expect("a stop's presence check must not wait for the in-flight turn")
+            .unwrap();
+        let current_run_id = match stop_receipt(probe).await {
+            meerkat_contracts::WireRunStopReceipt::NotCurrent {
+                current_run_id: Some(current_run_id),
+                ..
+            } => current_run_id,
+            other => panic!("a stale run id reports the current run: {other:?}"),
+        };
+        assert!(!running_turn.is_finished(), "the turn is still in flight");
+
+        // Stopping the exact current run reaches the interrupt and ends it.
+        let stopped = tokio::time::timeout(
+            FAILURE_BOUND,
+            app.oneshot(post_stop(current_run_id.clone())),
+        )
+        .await
+        .expect("stopping the in-flight run must not wait for it to end on its own")
+        .unwrap();
+        assert!(
+            matches!(
+                stop_receipt(stopped).await,
+                meerkat_contracts::WireRunStopReceipt::Stopped { ref run_id, .. }
+                    if run_id == &current_run_id
+            ),
+            "the exact run is stopped"
+        );
+        let _ = tokio::time::timeout(FAILURE_BOUND, running_turn).await;
+        assert_eq!(
+            release.available_permits(),
+            0,
+            "the LLM call was never released; the stop ended the run"
         );
     }
 
@@ -16100,6 +16212,64 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 .unwrap();
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn rest_session_mcp_router_gets_interactive_auth_by_default() {
+            use axum::response::IntoResponse;
+            let (state, _temp) = make_test_state().await;
+            // A standalone OAuth-demanding MCP endpoint, not a REST route
+            // (the path is not a literal so the surface scanner skips it).
+            let endpoint_path = "/mcp";
+            let app = Router::new().route(
+                endpoint_path,
+                post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        [(
+                            "www-authenticate",
+                            r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#,
+                        )],
+                    )
+                        .into_response()
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+            let mut config = meerkat_core::mcp_config::McpServerConfig::streamable_http(
+                "guarded",
+                url,
+                std::collections::HashMap::new(),
+            );
+            if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport
+            {
+                http.oauth_account = Some("subject-7".to_owned());
+            }
+            let target = meerkat::McpServerIdentity::from_config(&config).unwrap();
+            let adapter = McpRouterAdapter::new(session_mcp_router(&state));
+            // Session build binds the session's surface handle the same way.
+            meerkat_core::AgentToolDispatcher::bind_external_tool_surface_handle(
+                &adapter,
+                Arc::new(meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral()),
+            );
+            adapter.stage_add(config).await.unwrap();
+            adapter.apply_staged().await.unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                adapter.poll_lifecycle_actions().await.unwrap();
+                let awaiting = adapter.servers_awaiting_authorization().await;
+                if !awaiting.is_empty() {
+                    assert_eq!(awaiting, vec![target]);
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "OAuth-protected live server never reported awaiting authorization"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
         }
 
         #[tokio::test]

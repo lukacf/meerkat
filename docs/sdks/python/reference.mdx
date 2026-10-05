@@ -8,7 +8,7 @@ icon: "book"
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.8.50"
+print(CONTRACT_VERSION)  # "0.8.51"
 ```
 
 ## Primary handles
@@ -425,6 +425,16 @@ use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `turn_usage_accounting_identity_disputed`, `interaction_callback_pending`,
 `peer_content_ingested`, and `provider_cache_breakpoints_discarded`. See the
 [RPC event reference](/api/rpc#notifications) for their wire contracts.
+
+`live_channel_closed` has a handwritten parser class and arrives as a typed
+`LiveChannelClosed` event: `session_id`, `channel_id`, `reason` and
+`reopen_recommended`. It is published once for every committed close of one of
+the session's live channels. `reason` is one of the `LiveChannelCloseReason`
+values `client_requested`, `client_disconnected`, `provider_closed`, `error`,
+`media_fault`, `replaced` or `open_abandoned`; any other value is preserved as
+`UnknownEvent` with `type="malformed_event"`. `reopen_recommended` is true
+only for a `media_fault` whose session may still reopen the channel with its
+retained context.
 
 `RunStarted.input` preserves the typed `RunInput`: either
 `{"kind": "content", "content": ...}` or

@@ -68,10 +68,10 @@ fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
 fn semantic_coverage_rejects_all_anchor_all_scenario_entries() {
     let anchors = BTreeSet::from(["runtime", "schema"]);
     let scenarios = BTreeSet::from(["happy", "failure"]);
-    let err = validate_semantic_entries(
+    let err = meerkat_machine_schema::validate_semantic_entries(
         "machine TestMachine",
         "transition",
-        &["Apply".to_string()],
+        &BTreeSet::from(["Apply"]),
         &[SemanticCoverageEntry {
             name: "Apply".to_string(),
             anchor_ids: vec!["runtime".to_string(), "schema".to_string()],
@@ -79,6 +79,7 @@ fn semantic_coverage_rejects_all_anchor_all_scenario_entries() {
         }],
         &anchors,
         &scenarios,
+        meerkat_machine_schema::CoverageValidationMode::RequireEntries,
     )
     .expect_err("all-anchor/all-scenario coverage should be rejected");
 
@@ -978,6 +979,7 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
         ci_step_limit: None,
         tlc_model: None,
         deep_domain_overrides: Default::default(),
+        input_field_domains: Default::default(),
         named_types: vec![],
     };
 
@@ -1347,4 +1349,89 @@ fn explicit_grant_model_requires_real_action_hits_in_both_profiles() {
         &implicit,
         VerifyProfile::Ci
     ));
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn composition_positive_coverage_requires_a_completing_witness_or_an_exploring_sweep() {
+    // A completing witness alone is positive coverage, even with an init-only sweep.
+    assert!(ensure_composition_positive_coverage("c", Some(1), 1).is_ok());
+    // A main sweep that explores past its initial state alone is positive coverage.
+    assert!(ensure_composition_positive_coverage("c", Some(753), 0).is_ok());
+    // A skipped sweep with a completing witness is covered.
+    assert!(ensure_composition_positive_coverage("c", None, 2).is_ok());
+    // Init-only sweep and no completing witness: fails closed, naming the composition.
+    let err = ensure_composition_positive_coverage("auth_lease_bundle", Some(1), 0)
+        .expect_err("init-only sweep without witnesses has no coverage");
+    let message = format!("{err:#}");
+    assert!(message.contains("auth_lease_bundle"), "{message}");
+    assert!(message.contains("only 1 distinct state"), "{message}");
+    // A skipped sweep with no completing witness also fails closed.
+    let err = ensure_composition_positive_coverage("broad", None, 0)
+        .expect_err("skipped sweep without witnesses has no coverage");
+    assert!(format!("{err:#}").contains("main sweep is skipped"));
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn tlc_distinct_state_count_is_the_final_report() {
+    let output = "\
+Progress(2) at 2026-10-02: 10 states generated, 7 distinct states found, 3 states left on queue.
+Model checking completed. No error has been found.
+20,332,845 states generated, 10,339 distinct states found, 0 states left on queue.
+";
+    assert_eq!(parse_tlc_distinct_states(output), Some(10_339));
+    assert_eq!(
+        parse_tlc_distinct_states(
+            "2 states generated, 1 distinct states found, 0 states left on queue."
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        parse_tlc_distinct_states("Error: Java ran out of memory."),
+        None
+    );
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn composition_routes_must_all_fire() {
+    let schema = meerkat_machine_schema::catalog::schedule_bundle_composition();
+    let route_names = schema
+        .routes
+        .iter()
+        .map(|route| route.name.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !route_names.is_empty(),
+        "fixture composition declares routes"
+    );
+    // No coverage hit and no completed witness: every route is reported, by name.
+    let err =
+        ensure_composition_routes_fired(&schema, &TlcCoverageSummary::default(), &BTreeSet::new())
+            .expect_err("unexercised routes must fail closed");
+    let message = format!("{err:#}");
+    for route in &route_names {
+        assert!(
+            message.contains(route.as_str()),
+            "{route} missing from: {message}"
+        );
+    }
+    // A completed witness declaring every route exercises them all.
+    assert!(
+        ensure_composition_routes_fired(&schema, &TlcCoverageSummary::default(), &route_names)
+            .is_ok()
+    );
+    // Crediting all but one still fails on exactly that route.
+    let mut partial = route_names;
+    let missing = partial.pop_last().expect("at least one route");
+    let message = format!(
+        "{:#}",
+        ensure_composition_routes_fired(&schema, &TlcCoverageSummary::default(), &partial)
+            .expect_err("one unexercised route fails")
+    );
+    assert!(
+        message.contains(&missing) && message.contains("1 of"),
+        "{message}"
+    );
 }

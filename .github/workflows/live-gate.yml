@@ -1,0 +1,144 @@
+name: Live gate
+
+# Pull-request gate for the live stack. A PR whose change touches the live
+# stack (scripts/live-gate-changed: the provider adapter, live host and channel
+# code, live delegation, the GPT Live e2e harness, or Rust changes naming live
+# state) runs the GPT Live Turbo S scenarios (S97-S107) against the real
+# provider on BuildBuddy before it can merge. Every scenario runs exactly once:
+# no Bazel retry, so a scenario that would pass only on a retry is red.
+#
+# The check is always reported under the same name so it can be required in
+# branch protection: a PR that does not touch the live stack passes it at once
+# without a BuildBuddy run.
+#
+# Verdicts (scripts/live-gate-verdict):
+#   GREEN - every scenario passed on its single attempt.
+#   RED   - a scenario failed for any reason other than provider degradation,
+#           or the build failed.
+#   VOID  - the only failures carry the scenarios' typed provider-degraded
+#           verdict (provider input transcription lagged past the measured
+#           threshold). Not green: re-run the gate in a healthy provider window.
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+concurrency:
+  group: live-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  live-gate:
+    name: Live gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # BUILDBUDDY_API_KEY is job-level: the setup-buildbuddy-ci composite
+    # action checks it from the job environment (a step's env does not reach
+    # another step), as in release-turbo-s.yml.
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+      MEERKAT_CLEAN_E2E_SCENARIO_TARGETS: "1"
+    steps:
+      - name: Checkout pull request head
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Classify the change
+        id: classify
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Gate outputs live outside the workspace: the turbo-s targets take
+          # workspace files as inputs, and a file growing while Bazel hashes
+          # it fails the upload (Exit 34, digest mismatch).
+          out="${RUNNER_TEMP}/live-gate"
+          mkdir -p "$out"
+          set +e
+          scripts/live-gate-changed "$BASE_SHA" "$HEAD_SHA" > "$out/paths.txt"
+          status=$?
+          set -e
+          case "$status" in
+            0)
+              echo "live=true" >> "$GITHUB_OUTPUT"
+              echo "Live-relevant paths:"
+              cat "$out/paths.txt"
+              ;;
+            1)
+              echo "live=false" >> "$GITHUB_OUTPUT"
+              echo "The change does not touch the live stack; the live gate passes without a run."
+              ;;
+            *)
+              echo "::error::live-gate-changed failed (exit $status); refusing to classify the change as not live."
+              exit 1
+              ;;
+          esac
+
+      - name: Require credentialed inputs
+        if: steps.classify.outputs.live == 'true'
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          for key in BUILDBUDDY_API_KEY OPENAI_API_KEY; do
+            if [[ -z "${!key}" ]]; then
+              echo "::error::The live gate needs repository secret ${key}; a pull request from a fork has no secrets, so a maintainer must run the gate from a branch of this repository."
+              exit 1
+            fi
+          done
+
+      - name: Setup BuildBuddy submitter
+        if: steps.classify.outputs.live == 'true'
+        uses: ./.github/actions/setup-buildbuddy-ci
+        with:
+          profile: submitter
+
+      - name: Run the GPT Live scenarios once each on BuildBuddy
+        if: steps.classify.outputs.live == 'true'
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          provider_overrides="OPENAI_API_KEY=${OPENAI_API_KEY}"
+          echo "::add-mask::${provider_overrides}"
+          unset OPENAI_API_KEY
+          targets=()
+          for scenario in 97 98 99 100 101 102 103 104 105 106 107; do
+            targets+=("//:e2e_smoke_turbo_s_s${scenario}")
+          done
+          out="${RUNNER_TEMP}/live-gate"
+          set +e
+          # The log is uploaded as an artifact, which GitHub does not mask:
+          # drop any line that could carry a credential before it is written.
+          MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES="${provider_overrides}" \
+            scripts/buildbuddy-dev e2e-smoke-turbo-s "${targets[@]}" 2>&1 \
+            | grep -v -E 'API_KEY|sk-|Bearer|secret-env' | tee "$out/live-gate.log"
+          bazel_exit=${PIPESTATUS[0]}
+          set -e
+          scripts/live-gate-verdict "$out/live-gate.log" "$bazel_exit" | tee "$out/verdict.txt"
+          verdict_exit=${PIPESTATUS[0]}
+          {
+            echo "## Live gate"
+            echo '```'
+            cat "$out/verdict.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$verdict_exit"
+
+      - name: Upload the live gate log
+        if: always() && steps.classify.outputs.live == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-gate-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/live-gate/
+          if-no-files-found: ignore
+          retention-days: 14

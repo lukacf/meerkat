@@ -2612,12 +2612,23 @@ const S97_EXECUTOR_INSTRUCTION: &str =
     "When you inspect a directory, say whether it is empty and name any files in it.";
 
 /// S97's executor result fact: it inspects the scenario's scratch workspace,
-/// which is empty. Stated as "empty" or as "no files" (verdict 746845a3 S97
-/// R3: "The current directory has no files in it.").
+/// which is empty. Stated as "empty", "no files" (verdict 746845a3 S97 R3:
+/// "The current directory has no files in it."), "zero files", or "not any
+/// files" / "aren't any files" (soak 7f770753 S97 R2: "there aren't any files
+/// in the current directory"; the apostrophe normalizes to "aren t").
 fn s97_states_empty_workspace(text: &str) -> bool {
     let normalized = normalize_words(text);
     let words: Vec<&str> = normalized.split(' ').collect();
-    words.contains(&"empty") || words.windows(2).any(|pair| pair == ["no", "files"])
+    words.contains(&"empty")
+        || words
+            .windows(2)
+            .any(|pair| pair == ["no", "files"] || pair == ["zero", "files"])
+        || words
+            .windows(3)
+            .any(|triple| triple == ["not", "any", "files"])
+        || words
+            .windows(4)
+            .any(|quad| quad == ["aren", "t", "any", "files"])
 }
 
 /// Event ids of the output transcript deltas the provider stream recorded
@@ -12140,6 +12151,30 @@ mod config_tests {
         assert!(!super::s97_states_empty_workspace(
             "There are two files: a and b."
         ));
+        // Soak 7f770753 S97 R2 and its siblings: "not any", "aren't any"
+        // (straight or curly apostrophe), "are not any" and "zero" files all
+        // state the empty workspace.
+        for stated in [
+            "There aren't any files in the current directory.",
+            "There aren\u{2019}t any files in the current directory.",
+            "There are not any files in it.",
+            "I found there are not any files there.",
+            "There are zero files in the working directory.",
+        ] {
+            assert!(super::s97_states_empty_workspace(stated), "{stated}");
+        }
+        // Mentioning files without stating the workspace is empty is not the
+        // fact.
+        for not_stated in [
+            "I'm checking the files in the directory now.",
+            "There aren't many files: just notes.md.",
+            "I don't see any problems with the files.",
+        ] {
+            assert!(
+                !super::s97_states_empty_workspace(not_stated),
+                "{not_stated}"
+            );
+        }
     }
 
     // ---- readout rule -------------------------------------------------------

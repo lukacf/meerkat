@@ -2565,8 +2565,9 @@ them.
     and to name any files, so the result always states the fact the readout
     oracle checks; the oracle stays as strict. The readout is speech the
     provider produced after the result was sent (it can start before the
-    provider's acknowledgement arrives), and "no files" states the empty
-    workspace as well as "empty" does.
+    provider's acknowledgement arrives), and "no files", "zero files", "not
+    any files" and "aren't any files" state the empty workspace as well as
+    "empty" does.
   - S100 judges the barge-in reply by what the user hears: the assistant says
     "done" in speech that started after the user's barge-in speech, whether
     or not the provider closed the user's input final first. Talk-over is

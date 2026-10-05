@@ -12,6 +12,8 @@
 # file to ensure the work only happens once.
 
 set -euo pipefail
+# Bash >= 4.4 (see scripts/lib/require-bash.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/require-bash.sh"
 
 VERSION="${1:?Usage: release-hook.sh <version>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,16 +34,7 @@ cd "$ROOT"
 # Keep the release path on the same Python floor as the SDK/codegen targets.
 # macOS can place an older system `python3` ahead of Homebrew in PATH, so prefer
 # the supported python3.11 interpreter unless the caller selected one explicitly.
-PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3 2>/dev/null || true)}"
-if [[ -z "$PYTHON" ]] || ! "$PYTHON" -c \
-    'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-    selected_version="unavailable"
-    if [[ -n "$PYTHON" ]]; then
-        selected_version="$("$PYTHON" --version 2>&1 || true)"
-    fi
-    echo "error: release hook requires Python >= 3.10; selected '${PYTHON:-missing}' (${selected_version:-unavailable})" >&2
-    exit 1
-fi
+PYTHON="$("$ROOT/scripts/require-python" 3.10 "release hook")" || exit 1
 
 # cargo-release runs this hook per-crate. Only execute once.
 SENTINEL="$ROOT/.release-hook-done"

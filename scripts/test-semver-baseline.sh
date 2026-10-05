@@ -17,7 +17,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+PYTHON="$("$(dirname "${BASH_SOURCE[0]}")/require-python" 3.11 "$(basename "${BASH_SOURCE[0]}")")" || exit 1
 ANALYSER="$REPO_ROOT/scripts/check_semver_breaks.py"
 FIXTURES="$REPO_ROOT/scripts/fixtures/semver-breaks"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-semver-baseline.XXXXXX")"

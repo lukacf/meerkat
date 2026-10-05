@@ -53,6 +53,44 @@ them.
   must leave the audit's goal unreachable. Dropping the bootstrap-summary
   conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
   previously checked only by hand (#1607).
+- Repository scripts, hooks and Make targets that need Python 3.11 now pick
+  it explicitly and refuse an older interpreter up front. They used whatever
+  `python3` came first in `PATH`, so on macOS, where Apple's Python 3.9 can
+  come first, the pre-push nextest archive contract failed mid-hook with an
+  `AttributeError` on `hashlib.file_digest`. That helper,
+  `scripts/restore-ci-unit-mob-archive.py`, now hashes in chunks with
+  `hashlib.sha256()` (still verifying the digest before extracting), so it
+  runs on the release scripts' Python >= 3.10 floor, and refuses anything
+  older up front. The new `scripts/require-python
+  MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.13 through
+  python3.11 over `python3`, and fails with "WHO needs Python >= MIN; found
+  <version> (<path>)". It replaces the per-script copies of that selection,
+  which had no version check, in 15 scripts plus `release-hook.sh` (still
+  >= 3.10), `buildbuddy-doctor`, `gcp-buildbuddy-ci-image` (`tomllib`) and
+  the archive contract test, which selects >= 3.10 and also runs the restore
+  test on `python3.10` when one is installed. When no interpreter
+  qualifies, `PYTHON` in the Makefile becomes a lazy error, so only targets
+  that use Python stop, with that reason.
+- `make test-sdk-python`, `publish-dry-run-python` and
+  `smoke-sdk-python-artifact` install into a venv (`SDK_PYTHON_VENV`, default
+  `sdks/python/.venv`, created by `scripts/python-venv`) instead of the base
+  interpreter. uv-, Homebrew- and distro-managed Pythons refuse those
+  installs under PEP 668, which failed `make test-sdk-suites` in the 0.8.51
+  release gate.
+  `make path-classifier-selftest` runs `scripts/tests/require_python_test.sh`.
+- Repository scripts now require Bash >= 4.4 up front and say so. On macOS,
+  where `/usr/bin/env bash` can resolve to the system Bash 3.2, the pre-push
+  lane-retention contract died on `BASHPID: unbound variable`, and other
+  scripts rely on `mapfile`, associative arrays and expanding empty arrays
+  under `set -u`. `scripts/lib/require-bash.sh`, written in Bash 3.2 syntax,
+  stops the pre-push dispatcher, `release-hook.sh`,
+  `pre-push-prune-lanes.sh`, `check-semver-breaks.sh` and
+  `semver-rustdoc-json.sh` with "needs Bash >= 4.4; found <version>".
+  `rust-lane-doctor` and `release-doctor` report the version of `env bash`,
+  and `release-doctor` selects its Python through `require-python`.
+  `pre-push-prune-lanes.sh` falls back to `$$` when `BASHPID` is unset, and
+  `mapfile` uses in the semver scripts became read loops.
+  `scripts/tests/require_bash_test.sh` runs in `make path-classifier-selftest`.
 
 ## [0.8.51] - 2026-10-05
 

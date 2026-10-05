@@ -28,6 +28,8 @@
 # Exit status is 0 whenever the retention policy was applied; a failure to
 # remove one candidate is reported as a note, never as a push failure.
 set -euo pipefail
+# Bash >= 4.4 (see scripts/lib/require-bash.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/require-bash.sh"
 
 # A deleted working directory must not change any decision below; every path
 # this script handles is absolute.
@@ -263,10 +265,10 @@ live_process_reference() {
     # forking, so a lane string on grep's own command line would match itself.
     printf '%s\n%s\n' "$dir" "$lane" >"${scratch_dir}/patterns"
     match="$(grep -lsaF -f "${scratch_dir}/patterns" /proc/[0-9]*/cmdline /proc/[0-9]*/environ 2>/dev/null |
-      grep -Ev "^/proc/($$|${BASHPID})/" | head -n 1 || true)"
+      grep -Ev "^/proc/($$|${BASHPID:-$$})/" | head -n 1 || true)"
     if [[ -z "$match" ]]; then
       match="$(find /proc -mindepth 2 -maxdepth 2 -name cwd \( -lname "$dir" -o -lname "${dir}/*" \) 2>/dev/null |
-        grep -Ev "^/proc/($$|${BASHPID})/" | head -n 1 || true)"
+        grep -Ev "^/proc/($$|${BASHPID:-$$})/" | head -n 1 || true)"
     fi
     if [[ -n "$match" ]]; then
       match="${match#/proc/}"
@@ -276,14 +278,14 @@ live_process_reference() {
     return 1
   fi
   if command -v pgrep >/dev/null 2>&1; then
-    match="$(pgrep -f -- "$lane" 2>/dev/null | grep -Fxv -e "$$" -e "$BASHPID" | head -n 1 || true)"
+    match="$(pgrep -f -- "$lane" 2>/dev/null | grep -Fxv -e "$$" -e "${BASHPID:-$$}" | head -n 1 || true)"
     if [[ -n "$match" ]]; then
       printf '%s' "$match"
       return 0
     fi
   fi
   if command -v lsof >/dev/null 2>&1; then
-    match="$(lsof -Fp +d "$dir" 2>/dev/null | sed -n 's/^p//p' | grep -Fxv -e "$$" -e "$BASHPID" | head -n 1 || true)"
+    match="$(lsof -Fp +d "$dir" 2>/dev/null | sed -n 's/^p//p' | grep -Fxv -e "$$" -e "${BASHPID:-$$}" | head -n 1 || true)"
     if [[ -n "$match" ]]; then
       printf '%s' "$match"
       return 0

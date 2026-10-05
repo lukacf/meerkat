@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+PYTHON="$("$(dirname "${BASH_SOURCE[0]}")/require-python" 3.11 "$(basename "${BASH_SOURCE[0]}")")" || exit 1
 CHECKER="${ROOT}/scripts/check-bazel-path-patch-runfiles.py"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-path-patch-runfiles.XXXXXX")"
 trap 'rm -rf "${TEST_ROOT}"' EXIT

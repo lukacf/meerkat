@@ -310,7 +310,7 @@ machine! {
         disposition AttemptClaimed => local seam SurfaceResultAlignment,
         disposition LeaseRenewed => local seam SurfaceResultAlignment,
         disposition ProgressAccepted => local seam SurfaceResultAlignment,
-        disposition NotificationCommitted => routed [RuntimeDeliveryMachine] seam NoOwnerRealization,
+        disposition NotificationCommitted => routed [RuntimeDeliveryMachine] seam OwnerRealizationPlusFeedback,
         disposition NotificationSuppressed => local seam SurfaceResultAlignment,
         disposition CheckpointAccepted => local seam SurfaceResultAlignment,
         disposition ExternalWaitAccepted => local seam SurfaceResultAlignment,
@@ -318,7 +318,7 @@ machine! {
         disposition CancelRequested => local seam SurfaceResultAlignment,
         disposition LeaseExpiryRecorded => local seam SurfaceResultAlignment,
         disposition RetryScheduled => local seam SurfaceResultAlignment,
-        disposition TerminalCommitted => routed [RuntimeDeliveryMachine] seam NoOwnerRealization,
+        disposition TerminalCommitted => routed [RuntimeDeliveryMachine] seam OwnerRealizationPlusFeedback,
         disposition DeliveryApplied => local seam SurfaceResultAlignment,
 
         transition SubmitQueued {

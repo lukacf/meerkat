@@ -781,8 +781,15 @@ them.
   channel-scoped `live/*` ones, so a client could answer
   `live/media_health_requested` but never receive it. The generated SDK types
   gain `LiveAssistantOutputAvailableParams`.
-- **Pull requests that touch the live stack run the GPT Live scenarios before merge.** A new `Live gate` check (`.github/workflows/live-gate.yml`) classifies each PR (`scripts/live-gate-changed`: live-stack paths, or Rust changes naming live state) and runs Turbo S S97-S107 against the real provider on BuildBuddy, once each. Its verdict (`scripts/live-gate-verdict`) is GREEN, RED, or VOID when the only failures carry the scenarios' typed provider-degraded verdict; VOID is not green. PRs outside the live stack pass the check without a run, so it can be required in branch protection. The release Turbo S workflow reports the same typed verdict.
-
+- Pull requests that touch the live stack run the GPT Live scenarios before
+  merge. A new `Live gate` check (`.github/workflows/live-gate.yml`)
+  classifies each PR (`scripts/live-gate-changed`: live-stack paths, or Rust
+  changes naming live state) and runs Turbo S S97-S107 against the real
+  provider on BuildBuddy, once each. Its verdict (`scripts/live-gate-verdict`)
+  is GREEN, RED, or VOID when the only failures carry the scenarios' typed
+  provider-degraded verdict; VOID is not green. PRs outside the live stack
+  pass the check without a run, so it can be required in branch protection.
+  The release Turbo S workflow reports the same typed verdict (#1544).
 - `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
   handles are the same live runtime owner (clones share it; a separately
   constructed machine over the same store does not).
@@ -1316,6 +1323,29 @@ them.
 
 ### Fixed
 
+- Python and TypeScript SDKs: the automatic `rkat-rpc` download fetches the
+  asset the release actually publishes. Both SDKs requested
+  `rkat-rpc-v<version>-<target>.<ext>`, but every release names it
+  `rkat-rpc-<version>-<target>.<ext>` (the `v` belongs only to the tag), so
+  the download was a 404. Without `rkat-rpc` on `PATH` and without
+  `MEERKAT_BIN_PATH`, `connect()` failed with `BINARY_NOT_FOUND` or fell back
+  to a legacy `rkat` on `PATH`. Intel macOS now maps to the published
+  `x86_64-apple-darwin` asset instead of refusing with `UNSUPPORTED_PLATFORM`.
+  Unit tests pin the exact asset name and URL for every published target;
+  `MEERKAT_SDK_NETWORK_TESTS=1` also checks a published asset over the
+  network.
+- Python SDK packaging: the PyPI page for `meerkat-sdk` shows the SDK README
+  and project links (homepage, documentation, repository, changelog,
+  issues). `pyproject.toml` declared neither `readme` nor `[project.urls]`, so
+  published releases had an empty description.
+- TypeScript SDK packaging: `require("@rkat/sdk")` resolves. The exports map's
+  `require` condition named `dist/index.cjs`, which the ESM-only `tsc` build
+  never produced, so CommonJS consumers failed with `MODULE_NOT_FOUND`. The
+  map now lists `types`, `import` and `default` (all shipped files), so Node
+  versions that can `require()` an ES module load the package that way. A
+  test checks that `npm pack` contains every file the entry points name.
+  `package.json` now declares `repository` (with `directory`), `homepage`
+  and `bugs`, so the npm page links back to the docs, source and issues.
 - The `meerkat` facade compiles when another crate in the build turns on
   `meerkat-store/jsonl` while the facade's own `jsonl-store` is off (E0004,
   `RealmBackend::Jsonl` not covered in the disk store set). `session-store`
@@ -1323,7 +1353,6 @@ them.
   SQLite, and without `jsonl-store` the facade refuses a Jsonl realm with the
   typed `StoreError::UnsupportedRealmBackend`. `make test-feature-matrix-lib`
   checks that combination.
-
 - GPT Live Turbo S S103 no longer reports a duplicate readout when a later
   correction result prompts the voice to re-read the brief it updates
   (#1705, control 0375acca R3: the corrections came back diff-only,
@@ -1394,7 +1423,6 @@ them.
   them. A delayed success or error after reconnect cannot answer a reused
   callback ID on the replacement process; stale reader frames are ignored.
   Closing a retired child cannot reject work admitted by its replacement.
-
 - A durable voice job delegated just before its call closed could be lost
   (Turbo S S104, about 1 run in 10): the worker accepted its turn after the
   close, and publishing its start was refused because the closed channel's
@@ -1438,7 +1466,6 @@ them.
   the anchor exactly), and the session's next rewrite re-mints the anchor.
   `SessionHead::begin_row_lineage_replay_from_released_rotated_anchor` is
   the new, hidden, store-facing entry point.
-
 - A GPT Live typed update that later speech corrected only in part keeps
   its other values (Turbo S S99, #1629: after a typed "code word Violet,
   favorite flower Marigold" and a spoken "code word Cobalt", the voice
@@ -1495,6 +1522,20 @@ them.
   started while the user was still talking, now ducks as soon as it overlaps
   the user's speech in clients that apply `live/assistant_playback_hint`,
   including the e2e browser peer.
+- A barge-in playback duck no longer restores in the middle of the
+  assistant's burst (Turbo S S103: a ducked response the provider kept
+  voicing for 3.6 s resumed after 1.6 s of the user's input silence, and its
+  tail played over the user). gpt-live-1 exposes no response id and no done
+  or cancel event, so the restore waits for provider output silence: an
+  input-quiet restore now happens only once the output has been silent for
+  one burst gap (`OUTPUT_BURST_GAP_MS`, 600 ms, the browser peer's end
+  hysteresis), and otherwise fires on the output side at that gap while the
+  user is quiet. The 1600 ms output-silence restore and the duck trigger are
+  unchanged. Known trade-off: a reply that starts into the user's last words,
+  or a user backchannel over a readout, stays ducked until the assistant's
+  next burst gap, bounded by the 1600 ms output-silence restore. In the
+  re-soak, the motivating S103 correction's talk-over fell from 4102 ms to
+  100-496 ms (#1709).
 - GPT Live provider-stream recordings (`test-realtime-fixtures`) now keep
   delegation commentary that was held behind the user's unanswered
   utterance and released later. The release path sent it without
@@ -2547,6 +2588,12 @@ them.
   later push, so every merge commit on the branch gets a complete run
   (#1581).
 - PR CI runs the generated-kernel test-oracle tests (#1621).
+- PR and push CI run the facade store and cold-restart suites (#1677), and
+  the canonical TLC lane runs as three parallel parts (#1692). A failed
+  nextest archive partition can be re-run: the archive artifact is keyed by
+  run (#1676). The BuildBuddy feature-matrix submitter runs its two lanes in
+  parallel (#1698), and the Rust lane doctor passes on the release tree
+  (#1702).
 - The CI gate's 2700 s runaway ceiling no longer counts runner queue: it
   applies to each lane's terminal minus the queue on its path, so a pull
   request whose lanes all pass is not failed while hosted runners are
@@ -2578,7 +2625,21 @@ them.
     before reading its check counter (#1653);
   - two meerkat-rpc lib tests that #1623 left red are fixed: the router's
     store-committed context test and the session runtime mock client
-    (#1657).
+    (#1657);
+  - the brain-swap parity test finds the workspace root under plain
+    `cargo test` (#1672);
+  - the RPC runtime health test waits for the spawned runtime loop to park
+    before forcing the durability fault (#1697);
+  - mob test fixes: mock keep-alive turns honour an exact-run boundary
+    cancel delivered before they park (#1678), the stalled member status
+    test uses turn-driven members (#1680), and `SupervisorTrustInstaller`'s
+    runtime adapter is gated like the actor's for the minimal build (#1693);
+  - the mob-mcp held-result fixture and its tests are gated on the gate0
+    harness (#1694);
+  - the web SDK's exhaustive event switch test covers
+    `live_channel_closed` (#1686), and the `live_channel_closed` session
+    event is documented in the session contracts and both SDK references
+    (#1688).
 - A GPT Live WebRTC session whose media track carries silence while the model
   speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
   opens) no longer leaves the user in a silent call. The runtime judges the
@@ -2741,8 +2802,11 @@ them.
   ("model call settled"); shell tool calls log their tool call id at start and
   their exit code, timeout and duration at completion (never the command or
   its output) (#1563).
-- **Turbo S no longer retries a failed scenario.** The BuildBuddy Turbo S lane ran each failed shard a second time (`--flaky_test_attempts=2`), so a scenario that failed and then passed reported green. Every scenario now runs exactly once; a failure is classified (product bug, oracle or fixture brittleness, or provider-degraded void), never absorbed by a retry.
-
+- Turbo S no longer retries a failed scenario. The BuildBuddy Turbo S lane ran
+  each failed shard a second time (`--flaky_test_attempts=2`), so a scenario
+  that failed and then passed reported green. Every scenario now runs exactly
+  once; a failure is classified (product bug, oracle or fixture brittleness,
+  or provider-degraded void), never absorbed by a retry (#1544).
 - Generated machine TLA models lead each quantified `Next` disjunct with its
   transition's source-phase guard. The meaning is unchanged (the guard is also
   the first conjunct of the action), but TLC no longer enumerates every

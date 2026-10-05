@@ -2,14 +2,23 @@
   "name": "@rkat/sdk",
   "version": "0.8.50",
   "description": "TypeScript SDK for Meerkat agent runtime",
+  "homepage": "https://docs.rkat.ai/sdks/typescript/overview",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lukacf/meerkat.git",
+    "directory": "sdks/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/lukacf/meerkat/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "types": "./dist/index.d.ts"
+      "default": "./dist/index.js"
     }
   },
   "files": [

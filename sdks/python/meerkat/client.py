@@ -5105,13 +5105,17 @@ class MeerkatClient:
         return shutil.which(command_or_path)
 
     @staticmethod
-    def _platform_target() -> tuple[str, str, str]:
-        system = platform.system().lower()
-        machine = platform.machine().lower()
+    def _platform_target(
+        system: str | None = None, machine: str | None = None
+    ) -> tuple[str, str, str]:
+        system = (platform.system() if system is None else system).lower()
+        machine = (platform.machine() if machine is None else machine).lower()
         if system == "darwin":
             target = {
                 "arm64": "aarch64-apple-darwin",
                 "aarch64": "aarch64-apple-darwin",
+                "x86_64": "x86_64-apple-darwin",
+                "amd64": "x86_64-apple-darwin",
             }.get(machine)
             if target is None:
                 raise MeerkatError(
@@ -5136,13 +5140,27 @@ class MeerkatClient:
         raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported platform '{system}'.")
 
     @staticmethod
-    async def _download_rkat_rpc_binary() -> str | None:
-        target, archive_ext, binary_name = MeerkatClient._platform_target()
+    def _rkat_rpc_release_asset(
+        version: str, target: str, archive_ext: str
+    ) -> tuple[str, str]:
+        """The release asset name and download URL for one target.
+
+        Release assets are ``rkat-rpc-<version>-<target>.<ext>`` (no ``v``)
+        under the ``v<version>`` tag.
+        """
         owner, repo = _MEERKAT_REPO
-        version = CONTRACT_VERSION
-        artifact = f"{_MEERKAT_BINARY}-v{version}-{target}.{archive_ext}"
+        artifact = f"{_MEERKAT_BINARY}-{version}-{target}.{archive_ext}"
         url = (
             f"https://github.com/{owner}/{repo}/releases/download/v{version}/{artifact}"
+        )
+        return artifact, url
+
+    @staticmethod
+    async def _download_rkat_rpc_binary() -> str | None:
+        target, archive_ext, binary_name = MeerkatClient._platform_target()
+        version = CONTRACT_VERSION
+        artifact, url = MeerkatClient._rkat_rpc_release_asset(
+            version, target, archive_ext
         )
         cache_dir = _MEERKAT_BINARY_CACHE_ROOT / f"v{version}" / target
         cache_dir.mkdir(parents=True, exist_ok=True)

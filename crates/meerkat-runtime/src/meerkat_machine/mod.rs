@@ -7071,6 +7071,15 @@ impl MeerkatMachine {
         Some(run_id)
     }
 
+    /// Observe run settlements: the generation advances after each runtime
+    /// loop iteration, each run iteration and each loop exit of this machine,
+    /// whenever a run may have ended. It carries no state; an observer
+    /// re-reads the authority it cares about on every advance. In-process
+    /// only.
+    pub fn subscribe_run_settlements(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.run_settlements.subscribe()
+    }
+
     /// Wake every [`Self::wait_run_settled`] waiter to re-check.
     pub(crate) fn publish_run_settlement(&self) {
         self.run_settlements

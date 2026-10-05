@@ -2,8 +2,8 @@
 //!
 //! One owner per runtime delivery inbox projects the job outbox into the inbox
 //! and applies pending inbox rows through a host-supplied sink. It is woken
-//! only by typed signals: a job outbox commit, a runtime delivery commit, and a
-//! runtime attachment becoming serving. Arming runs one reconcile pass over
+//! only by typed signals: a job outbox commit, a runtime delivery commit, a
+//! runtime attachment becoming serving, and a run settlement. Arming runs one reconcile pass over
 //! the stores first, which also finds rows committed by another process. There
 //! is no timer: a row whose application fails stays pending and is retried on
 //! the next wake that names its runtime, or on the next arming.
@@ -55,6 +55,7 @@ pub struct RuntimeDeliveryOwner {
     job_store: Arc<dyn DetachedJobStore>,
     runtime_inbox: RuntimeDeliveryInbox,
     attachment_commits: Option<watch::Receiver<u64>>,
+    run_settlements: Option<watch::Receiver<u64>>,
 }
 
 impl std::fmt::Debug for RuntimeDeliveryOwner {
@@ -70,6 +71,7 @@ impl RuntimeDeliveryOwner {
             job_store,
             runtime_inbox,
             attachment_commits: None,
+            run_settlements: None,
         }
     }
 
@@ -84,6 +86,17 @@ impl RuntimeDeliveryOwner {
     #[must_use]
     pub fn with_attachment_commits(mut self, attachment_commits: watch::Receiver<u64>) -> Self {
         self.attachment_commits = Some(attachment_commits);
+        self
+    }
+
+    /// Also retry blocked sessions when a run may have ended, for example
+    /// from [`meerkat_runtime::MeerkatMachine::subscribe_run_settlements`]: a
+    /// session refuses a delivery while a callback tool batch awaits its
+    /// results, and that batch resolves inside a run. When this signal closes
+    /// the owner stops.
+    #[must_use]
+    pub fn with_run_settlements(mut self, run_settlements: watch::Receiver<u64>) -> Self {
+        self.run_settlements = Some(run_settlements);
         self
     }
 
@@ -108,6 +121,7 @@ impl RuntimeDeliveryOwner {
             job_commits,
             inbox_commits,
             attachment_commits: self.attachment_commits,
+            run_settlements: self.run_settlements,
             passes,
         }));
         Ok(RuntimeDeliveryOwnerHandle {
@@ -165,6 +179,7 @@ struct OwnerLoop {
     job_commits: watch::Receiver<u64>,
     inbox_commits: watch::Receiver<u64>,
     attachment_commits: Option<watch::Receiver<u64>>,
+    run_settlements: Option<watch::Receiver<u64>>,
     passes: watch::Sender<RuntimeDeliveryPass>,
 }
 
@@ -173,6 +188,9 @@ struct OwnerLoop {
 struct Wake {
     reconcile: bool,
     job_commit: bool,
+    inbox_commit: bool,
+    /// An attachment committed or a run may have ended: retry blocked
+    /// sessions.
     attachment_commit: bool,
 }
 
@@ -183,6 +201,7 @@ async fn run_owner(mut owner: OwnerLoop) {
         ..Wake::default()
     };
     let mut generation = 0_u64;
+    let mut reported_failures: Vec<String> = Vec::new();
     loop {
         // Mark the job and attachment signals seen BEFORE reading the
         // authority they announce, so a commit that lands during this pass
@@ -193,24 +212,40 @@ async fn run_owner(mut owner: OwnerLoop) {
             wake.attachment_commit |= attachments.has_changed().unwrap_or(false);
             attachments.borrow_and_update();
         }
-
-        generation = generation.wrapping_add(1);
-        let mut pass = RuntimeDeliveryPass {
-            generation,
-            ..RuntimeDeliveryPass::default()
-        };
-        let Some(reconcile_failed) = run_pass(&mut owner, wake, &mut blocked, &mut pass).await
-        else {
-            return;
-        };
-        pass.blocked_sessions = blocked.iter().cloned().collect();
-        if !pass.failures.is_empty() {
-            tracing::warn!(
-                failures = ?pass.failures,
-                "durable job delivery left rows pending until the next delivery wake"
-            );
+        if let Some(settlements) = owner.run_settlements.as_mut() {
+            wake.attachment_commit |= settlements.has_changed().unwrap_or(false);
+            settlements.borrow_and_update();
         }
-        owner.passes.send_replace(pass);
+        wake.inbox_commit |= owner.inbox_commits.has_changed().unwrap_or(false);
+
+        // A retry signal with nothing blocked has nothing to do: run
+        // settlements fire on every runtime loop iteration.
+        let has_work = wake.reconcile
+            || wake.job_commit
+            || wake.inbox_commit
+            || (wake.attachment_commit && !blocked.is_empty());
+        let mut reconcile_failed = false;
+        if has_work {
+            generation = generation.wrapping_add(1);
+            let mut pass = RuntimeDeliveryPass {
+                generation,
+                ..RuntimeDeliveryPass::default()
+            };
+            let Some(failed) = run_pass(&mut owner, wake, &mut blocked, &mut pass).await else {
+                return;
+            };
+            reconcile_failed = failed;
+            pass.blocked_sessions = blocked.iter().cloned().collect();
+            // Report a failure set once, not on every retry of the same rows.
+            if !pass.failures.is_empty() && pass.failures != reported_failures {
+                tracing::warn!(
+                    failures = ?pass.failures,
+                    "durable job delivery left rows pending until the next delivery wake"
+                );
+            }
+            reported_failures.clone_from(&pass.failures);
+            owner.passes.send_replace(pass);
+        }
 
         // A failed reconcile read stays owed to the next wake.
         wake = Wake {
@@ -228,9 +263,16 @@ async fn run_owner(mut owner: OwnerLoop) {
                 if changed.is_err() {
                     return;
                 }
+                wake.inbox_commit = true;
             }
             changed = attachment_commit_changed(&mut owner.attachment_commits) => {
                 // A closed attachment signal means the runtime is gone.
+                if changed.is_err() {
+                    return;
+                }
+                wake.attachment_commit = true;
+            }
+            changed = attachment_commit_changed(&mut owner.run_settlements) => {
                 if changed.is_err() {
                     return;
                 }

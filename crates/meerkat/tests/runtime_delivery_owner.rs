@@ -395,3 +395,69 @@ async fn a_producer_projected_terminal_is_acknowledged_before_the_owner_reads_it
         0
     );
 }
+
+/// A run settlement (a callback batch resolves inside a run) retries a
+/// blocked session just like an attachment commit, and nothing retries it on
+/// a timer.
+#[tokio::test(start_paused = true)]
+async fn a_blocked_session_is_retried_when_a_run_settles() {
+    let fixture = Fixture::new();
+    let session_id = SessionId::new();
+    let job = completed_job(&fixture.jobs, "default", session_id.clone(), "settles").await;
+    fixture.sink.poison(job.clone());
+    let (settlements, run_settlements) = watch::channel(0_u64);
+
+    let handle = fixture
+        .owner()
+        .with_run_settlements(run_settlements)
+        .arm(fixture.host())
+        .expect("arm owner");
+    let mut passes = handle.subscribe_passes();
+    let blocked = wait_for_pass(&mut passes, "the blocked reconcile pass", |pass| {
+        pass.generation >= 1
+    })
+    .await;
+    assert_eq!(blocked.blocked_sessions, vec![session_id]);
+
+    fixture.sink.heal();
+    idle_for_an_hour().await;
+    assert!(fixture.sink.applied().await.is_empty());
+
+    settlements.send_modify(|generation| *generation += 1);
+    wait_for_applied(&fixture.sink, &job, &mut passes).await;
+    assert!(passes.borrow().blocked_sessions.is_empty());
+}
+
+/// Run settlements fire on every runtime loop iteration; with nothing
+/// blocked they run no pass at all.
+#[tokio::test]
+async fn a_run_settlement_with_nothing_blocked_runs_no_pass() {
+    let fixture = Fixture::new();
+    let (settlements, run_settlements) = watch::channel(0_u64);
+    let handle = fixture
+        .owner()
+        .with_run_settlements(run_settlements)
+        .arm(fixture.host())
+        .expect("arm owner");
+    let mut passes = handle.subscribe_passes();
+    wait_for_pass(&mut passes, "the reconcile pass", |pass| {
+        pass.generation >= 1
+    })
+    .await;
+    passes.borrow_and_update();
+
+    for _ in 0..8 {
+        settlements.send_modify(|generation| *generation += 1);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+    let session_id = SessionId::new();
+    let job = completed_job(&fixture.jobs, "default", session_id, "after-settlements").await;
+    wait_for_applied(&fixture.sink, &job, &mut passes).await;
+    assert_eq!(
+        passes.borrow().generation,
+        2,
+        "the settlements ran no pass; the commit ran the second"
+    );
+}

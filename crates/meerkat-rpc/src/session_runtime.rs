@@ -5136,6 +5136,7 @@ impl SessionRuntime {
             self.runtime_delivery_inbox.clone(),
         )
         .with_attachment_commits(self.runtime_adapter.subscribe_attachment_commits())
+        .with_run_settlements(self.runtime_adapter.subscribe_run_settlements())
         .arm(host)
         {
             Ok(handle) => *slot = Some(handle),

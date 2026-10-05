@@ -37,6 +37,7 @@ fn registered_authority() -> MeerkatMachineAuthority {
         MeerkatMachineInput::RegisterSession {
             session_id: SessionId("session-1".to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("session registers");

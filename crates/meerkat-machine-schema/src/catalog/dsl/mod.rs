@@ -48,6 +48,7 @@ pub mod session_turn_admission;
 pub mod temporary_council_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
+pub mod work_item_admission;
 pub mod workgraph_lifecycle;
 
 use crate::identity::{EffectVariantId, InputVariantId, SignalVariantId, TransitionId};
@@ -63,6 +64,11 @@ pub struct MachineSchemaMetadata {
     pub command_plans: Vec<CommandPlanSchema>,
     pub ci_step_limit: Option<u32>,
     pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
+    pub input_field_domains: Vec<crate::InputFieldDomain>,
+    /// `(input field, state field)` pairs expanded at attach time into one
+    /// [`crate::InputFieldDomainKind::StateField`] declaration per input
+    /// variant whose transitions bind that field.
+    pub state_bound_input_fields: Vec<(crate::identity::FieldId, crate::identity::FieldId)>,
 }
 
 impl MachineSchemaMetadata {
@@ -73,7 +79,42 @@ impl MachineSchemaMetadata {
         schema.command_plans = self.command_plans;
         schema.ci_step_limit = self.ci_step_limit;
         schema.deep_domain_overrides = self.deep_domain_overrides;
+        schema.input_field_domains = self.input_field_domains;
+        for (input_field, state_field) in self.state_bound_input_fields {
+            let variants = schema
+                .transitions
+                .iter()
+                .filter_map(|transition| match &transition.on {
+                    crate::TriggerMatch::Input { variant, bindings }
+                        if bindings.contains(&input_field) =>
+                    {
+                        Some(variant.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<indexmap::IndexSet<_>>();
+            for input in variants {
+                schema.input_field_domains.push(crate::InputFieldDomain {
+                    input,
+                    field: input_field.clone(),
+                    domain: crate::InputFieldDomainKind::StateField(state_field.clone()),
+                });
+            }
+        }
         schema
+    }
+
+    /// Explore `input_field` of every input that binds it as exactly the
+    /// current value of `state_field` (an input that echoes machine state
+    /// back, such as `expected_revision` against `revision`).
+    pub fn with_state_bound_input_field(
+        mut self,
+        input_field: crate::identity::FieldId,
+        state_field: crate::identity::FieldId,
+    ) -> Self {
+        self.state_bound_input_fields
+            .push((input_field, state_field));
+        self
     }
 
     pub fn with_ci_step_limit(mut self, ci_step_limit: u32) -> Self {
@@ -86,6 +127,22 @@ impl MachineSchemaMetadata {
     /// changed by this model-checking-only annotation.
     pub fn with_tlc_representative_input(mut self, input: InputVariantId) -> Self {
         self.tlc_representative_inputs.push(input);
+        self
+    }
+
+    /// Declare the TLC payload domain of one unsigned input field (model
+    /// checking only). See [`crate::InputFieldDomainKind`].
+    pub fn with_input_field_domain(
+        mut self,
+        input: InputVariantId,
+        field: crate::identity::FieldId,
+        domain: crate::InputFieldDomainKind,
+    ) -> Self {
+        self.input_field_domains.push(crate::InputFieldDomain {
+            input,
+            field,
+            domain,
+        });
         self
     }
 
@@ -133,6 +190,8 @@ pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
     "generated::session_persistence_version_authority";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgraph_lifecycle";
+pub const WORK_ITEM_ADMISSION_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
+pub const WORK_ITEM_ADMISSION_PRODUCTION_RUST_MODULE: &str = "machines::work_item_admission";
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::work_attention_lifecycle";
@@ -233,6 +292,8 @@ fn machine_schema_metadata(
         command_plans: Vec::new(),
         ci_step_limit: None,
         deep_domain_overrides: std::collections::BTreeMap::new(),
+        input_field_domains: Vec::new(),
+        state_bound_input_fields: Vec::new(),
     }
 }
 
@@ -1184,13 +1245,17 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ReassertCausalTail",
                     "ReplayRuntimeWork",
                     "ReassertAssistantOutput",
+                    "ReplayTextChat",
                 ],
             ),
             NamedTypeBinding::string_enum(
                 "LiveContextPayloadAvailability",
                 &["NoPayload", "Materializable"],
             ),
-            NamedTypeBinding::string_enum("LiveContextRowSource", &["Conversation", "RuntimeWork"]),
+            NamedTypeBinding::string_enum(
+                "LiveContextRowSource",
+                &["Conversation", "RuntimeWork", "TextChat"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveContextRowAuthor",
                 &["User", "Assistant", "Runtime"],
@@ -1722,6 +1787,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
+            NamedTypeBinding::string_enum("RunStartHoldReason", &["MobStop", "ToolsNotPublished"]),
             NamedTypeBinding::string_enum(
                 "InputPhase",
                 &[
@@ -2004,11 +2070,22 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "SilentRequest",
                     "Ack",
                     "PlainEvent",
+                    "PeerLifecycleKickoff",
                 ],
             ),
             NamedTypeBinding::string_enum(
                 "PeerIngressLifecycleClass",
-                &["PeerAdded", "PeerRetired", "PeerUnwired"],
+                &[
+                    "PeerAdded",
+                    "PeerRetired",
+                    "PeerUnwired",
+                    "KickoffPending",
+                    "KickoffStarting",
+                    "KickoffStarted",
+                    "KickoffCallbackPending",
+                    "KickoffFailed",
+                    "KickoffCancelled",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "PeerIngressAuthorityPhaseClass",
@@ -2769,6 +2846,8 @@ runtime_internal_inputs!(
         AbandonLiveOpenAdmission,
         AbortCancelAfterBoundaryDispatch,
         CancelAfterBoundaryForRun,
+        HoldRunStarts,
+        ReleaseRunStarts,
         AbortOp,
         AcknowledgeTerminal,
         AddDirectPeerEndpoint,
@@ -3079,6 +3158,8 @@ runtime_internal_inputs!(
         AuthorizeLiveDelegationSteer,
         ReconcileLiveDelegationSteer,
         ResolveLiveDelegationSteerDelivery,
+        RequestLiveMediaHealth,
+        ObserveLiveChannelMediaHealth,
         ResolveLiveDelegationCancellation,
         RecordLiveDelegationWorkerTerminal,
         ReconcileRevokedLiveDelegationWorkerAfterRestart,
@@ -3117,6 +3198,7 @@ runtime_internal_inputs!(
         FailLiveContextPreparation,
         ObserveLiveContextDeliveryReadiness,
         AuthorizeLiveContextAppend,
+        AuthorizeLiveContextCausalTailBatch,
         EnqueueLiveContextRow,
         AdvanceLiveContextCanonicalCoverage,
         ResolveLiveContextAppend,
@@ -3162,6 +3244,7 @@ fn mob_spawn_command_plans() -> Vec<CommandPlanSchema> {
         vec![
             transition_id("StageSpawnRunning"),
             transition_id("CompleteSpawnRunning"),
+            transition_id("CompleteSpawnStopped"),
             transition_id("CompleteSpawnLateArrivalRunning"),
             transition_id("CompleteSpawnLateArrivalStopped"),
             transition_id("CompleteSpawnLateArrivalCompleted"),
@@ -4637,11 +4720,50 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
 
 pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {
     workgraph_lifecycle_schema_metadata()
+        .with_state_bound_input_field(
+            crate::identity::FieldId::from_trusted_catalog_literal("expected_revision"),
+            crate::identity::FieldId::from_trusted_catalog_literal("revision"),
+        )
         .attach_to(workgraph_lifecycle::WorkGraphLifecycleMachineState::schema())
+}
+
+pub fn dsl_work_item_admission_machine() -> MachineSchema {
+    work_item_admission_schema_metadata()
+        .attach_to(work_item_admission::WorkItemAdmissionMachineState::schema())
+}
+
+pub fn dsl_work_item_admission_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_work_item_admission_machine(),
+        WORK_ITEM_ADMISSION_PRODUCTION_RUST_CRATE,
+        WORK_ITEM_ADMISSION_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn work_item_admission_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "WorkItemAdmissionPhase",
+                &["Absent", "Unkeyed", "Admitted"],
+            ),
+            NamedTypeBinding::string("WorkAdmissionKeyRef"),
+            NamedTypeBinding::string("WorkAdmissionDigestRef"),
+            NamedTypeBinding::string_enum(
+                "WorkAdmissionReplayKind",
+                &["KeyMismatch", "Replayed", "Conflict"],
+            ),
+        ],
+        vec![],
+    )
 }
 
 pub fn dsl_work_attention_lifecycle_machine() -> MachineSchema {
     work_attention_lifecycle_schema_metadata()
+        .with_state_bound_input_field(
+            crate::identity::FieldId::from_trusted_catalog_literal("expected_revision"),
+            crate::identity::FieldId::from_trusted_catalog_literal("revision"),
+        )
         .attach_to(work_attention_lifecycle::WorkAttentionLifecycleMachineState::schema())
 }
 
@@ -4889,6 +5011,8 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("WorkItemKey"),
+            NamedTypeBinding::string("WorkAdmissionKeyRef"),
+            NamedTypeBinding::string("WorkAdmissionDigestRef"),
             NamedTypeBinding::type_path_struct(
                 "WorkEdgeKey",
                 "crate::catalog::dsl::workgraph_lifecycle::WorkEdgeKey",
@@ -4967,6 +5091,8 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "UnsupportedBackend",
                     "AttentionTargetRealmMismatch",
                     "BackingStoreUnavailable",
+                    "UnpairedAdmissionIdentity",
+                    "SchemaMismatch",
                 ],
             ),
             NamedTypeBinding::string_enum(

@@ -41,6 +41,48 @@ impl MeerkatMachine {
     /// such input (or no such key yet). An unregistered session on a store-less
     /// machine fails `NotReady`, and a never-admitted session on a persistent
     /// machine fails `NotFound`.
+    /// Wait until `session_id`'s live runtime has admitted an input for
+    /// `idempotency_key` and return its id. Woken by the admission itself
+    /// (the driver signals every accepted input); never re-reads on a timer.
+    ///
+    /// `Ok(None)` when the session has no live registration, now or once it
+    /// is torn down while waiting: the caller reads durable evidence instead.
+    /// Bound the call by the caller's own deadline.
+    pub async fn wait_input_admitted_by_idempotency_key(
+        &self,
+        session_id: &SessionId,
+        idempotency_key: &str,
+    ) -> Result<Option<InputId>, RuntimeDriverError> {
+        loop {
+            let driver = {
+                let sessions = self.sessions.read().await;
+                sessions.get(session_id).map(|entry| entry.driver.clone())
+            };
+            let Some(driver) = driver else {
+                return Ok(None);
+            };
+            let mut admissions = {
+                let guard = driver.lock().await;
+                if let Some(input_id) = guard
+                    .as_driver()
+                    .input_id_for_idempotency_key(idempotency_key)
+                {
+                    return Ok(Some(input_id));
+                }
+                // Subscribed under the driver: an admission after the check
+                // above is a change on this receiver.
+                guard.subscribe_admissions()
+            };
+            // Hold no session resources while parked, so teardown can drop
+            // the driver and close the signal.
+            drop(driver);
+            if admissions.changed().await.is_err() {
+                // The driver is gone; re-resolve the registration.
+                continue;
+            }
+        }
+    }
+
     pub async fn input_terminal_receipt(
         &self,
         session_id: &SessionId,
@@ -123,20 +165,21 @@ impl MeerkatMachine {
     /// the signals that already mark a pending input's terminal: a resolved
     /// completion waiter (batch finalization or runtime termination), a
     /// mechanically failed waiter (boot revival, a failed batch start), and
-    /// the receipt-less terminal observer woken by the admission that
-    /// coalesces or supersedes the input. A wake carries nothing; the receipt
+    /// the per-input receipt observer, woken by the admission that coalesces
+    /// or supersedes the input and by a directed batch's receipt
+    /// finalization. A wake carries nothing; the receipt
     /// is re-read. Dropping the future unregisters both registrations.
     ///
-    /// Directed (peer-request) batches wake late. Their receipt is finalized
-    /// before the batch's interaction terminals are published, and their
-    /// completion waiters are resolved only once publication succeeds. While
-    /// a transient publication failure is being retried,
-    /// [`Self::input_terminal_receipt`] already reads the finalized receipt
-    /// but this wait stays parked until publication succeeds or the session
-    /// is torn down. A caller that must observe such a terminal promptly
-    /// bounds each wait and re-reads, as the mob delivery wait does.
-    /// Undirected inputs (prompts, external events) publish no interaction
-    /// terminals and are not affected.
+    /// `Resolved` means the input's receipt is finalized (or it reached a
+    /// receipt-less terminal). It says nothing about interaction-terminal
+    /// publication. Directed (peer-request) batches finalize their receipt
+    /// before the batch's interaction terminals are published, and resolve
+    /// their completion waiters only once publication succeeds. Finalizing
+    /// the receipt wakes the receipt observers, so this wait resolves at
+    /// finalization, exactly when [`Self::input_terminal_receipt`] starts
+    /// reading the finalized receipt, even while a transient publication
+    /// failure is still being retried. A caller that needs the published
+    /// terminal waits on the input's completion instead.
     pub async fn wait_input_terminal_receipt(
         &self,
         session_id: &SessionId,

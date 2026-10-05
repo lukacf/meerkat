@@ -51,6 +51,224 @@ use crate::meerkat_machine_types::{
     SwitchTurnRequest,
 };
 
+/// Turbo S S104 R7: a durable worker's start is authorized under the
+/// channel's exact binding, the channel closes (its runtime binding is
+/// removed), and only then does the worker resolve its start. The start must
+/// commit, so the job runs and the session settles; a still-bound channel
+/// with a stale fence is refused as before, and a retired channel cannot be
+/// claimed for an operation that belongs to another channel.
+#[tokio::test]
+async fn live_delegation_worker_start_resolves_after_its_channel_closed() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-worker-start-after-close");
+    let interaction_id = meerkat_core::InteractionId::new();
+    let provider =
+        meerkat_core::OpaqueProviderCorrelation::new("provider-delegation", "provider-turn")
+            .expect("opaque provider correlation");
+    let correlation =
+        meerkat_core::LiveUserTurnCorrelation::new(channel.clone(), interaction_id, provider)
+            .expect("live turn correlation");
+    let operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
+        OperationId::new(),
+        correlation.clone(),
+    );
+    let provisional = meerkat_core::ProvisionalLiveHandoff::new(
+        correlation,
+        "write the ode",
+        meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+    )
+    .expect("provisional handoff");
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-start-after-close");
+    let fence_token = 31;
+    let generation = 4;
+    let dsl_channel = channel.to_string();
+    let dsl_operation = mm_dsl::OperationId::from_domain(operation.operation_id());
+
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        state.active_runtime_id = Some(mm_dsl::AgentRuntimeId::from_domain(&runtime_id));
+        state.active_fence_token = Some(mm_dsl::FenceToken::from_domain(fence_token));
+        state.active_runtime_generation = Some(mm_dsl::Generation::from_domain(generation));
+        state
+            .live_active_channel_by_session
+            .insert(session_id.to_string(), dsl_channel.clone());
+        state
+            .live_channel_session_by_channel
+            .insert(dsl_channel.clone(), session_id.to_string());
+        state.live_channel_identity_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::SessionLlmIdentity {
+                model: "experimental-live".to_string(),
+                provider: mm_dsl::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params_repr: None,
+                auth_binding: None,
+            },
+        );
+        state.live_execution_runtime_id_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+        );
+        state.live_execution_fence_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::FenceToken::from_domain(fence_token),
+        );
+        state.live_execution_generation_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::Generation::from_domain(generation),
+        );
+        state
+            .live_interaction_channel_by_id
+            .insert(interaction_id.to_string(), dsl_channel.clone());
+        state
+            .live_active_interaction_by_channel
+            .insert(dsl_channel.clone(), interaction_id.to_string());
+        state
+            .live_delegation_operation_by_interaction
+            .insert(interaction_id.to_string(), dsl_operation.clone());
+        state
+            .live_delegation_channel_by_operation
+            .insert(dsl_operation.clone(), dsl_channel.clone());
+        state.live_delegation_schedule_state_by_operation.insert(
+            dsl_operation.clone(),
+            mm_dsl::LiveDelegationScheduleState::Created,
+        );
+        state
+            .live_delegation_interaction_by_operation
+            .insert(dsl_operation.clone(), interaction_id.to_string());
+        state
+            .live_delegation_provider_turn_by_operation
+            .insert(dsl_operation.clone(), "provider-turn".to_string());
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_operation.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed confirmed live delegation state");
+    }
+    let admission = machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &operation,
+            &provisional,
+            "live-worker-start-after-close",
+        )
+        .await
+        .expect("authorize worker start under the exact binding");
+
+    // While the channel is still bound, a stale fence is refused as before.
+    assert!(
+        machine
+            .resolve_live_delegation_worker_start(
+                &runtime_id,
+                fence_token + 1,
+                generation,
+                &admission,
+                true,
+            )
+            .await
+            .is_err(),
+        "a still-bound channel refuses a stale fence"
+    );
+
+    // The channel closes before the worker accepts its turn: close removes
+    // the channel's runtime binding.
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        state
+            .live_execution_runtime_id_by_channel
+            .remove(&dsl_channel);
+        state.live_execution_fence_by_channel.remove(&dsl_channel);
+        state
+            .live_execution_generation_by_channel
+            .remove(&dsl_channel);
+        state
+            .live_active_channel_by_session
+            .remove(&session_id.to_string());
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed with the worker start still authorized");
+    }
+
+    // While the start is still authorized, a retired channel cannot be claimed for an operation that belongs to
+    // another channel: the generated guard joins the operation to its own
+    // channel.
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let refused = mm_dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            mm_dsl::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+                channel_id: "some-other-retired-channel".to_string(),
+                runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+                generation: mm_dsl::Generation::from_domain(generation),
+                interaction_id: interaction_id.to_string(),
+                operation_id: dsl_operation.clone(),
+                worker_identity: "live-worker-start-after-close".to_string(),
+                started: true,
+            },
+        );
+        assert!(
+            refused.is_err(),
+            "no aliasing through another retired channel id"
+        );
+    }
+
+    machine
+        .resolve_live_delegation_worker_start(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+            true,
+        )
+        .await
+        .expect("a start authorized before the close resolves after it");
+    {
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            authority
+                .state()
+                .live_delegation_worker_phase_by_operation
+                .get(&dsl_operation)
+                .copied(),
+            Some(mm_dsl::LiveDelegationWorkerPhase::Running),
+            "the job runs"
+        );
+    }
+    machine
+        .resolve_live_delegation_worker_start(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+            true,
+        )
+        .await
+        .expect("the committed start replays idempotently after the close");
+}
+
 #[tokio::test]
 async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
     let machine = MeerkatMachine::ephemeral();
@@ -413,6 +631,62 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
             operation_id,
             mm_dsl::LiveDelegationResultDisposition::OpenTurn,
         );
+        // The channel's bootstrap summary is acknowledged and a replay of the
+        // user's heard speech is still queued behind it: the result must not
+        // wait for that replay (results follow the summary only).
+        let dsl_channel = channel.to_string();
+        state.live_context_preparation_phase_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::LiveContextPreparationPhase::ProviderAcknowledged,
+        );
+        state
+            .live_context_preparation_lease_by_channel
+            .insert(dsl_channel.clone(), "lease-acknowledged".to_string());
+        state
+            .live_context_reserved_cursor_by_channel
+            .insert(dsl_channel.clone(), 0);
+        state.live_context_preparation_runtime_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+        );
+        state.live_context_preparation_fence_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::FenceToken::from_domain(fence_token),
+        );
+        state.live_context_preparation_generation_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::Generation::from_domain(generation),
+        );
+        state
+            .live_context_observation_counter_by_channel
+            .insert(dsl_channel.clone(), 0);
+        state
+            .live_context_ack_cut_by_channel
+            .insert(dsl_channel.clone(), 0);
+        state
+            .live_context_bootstrap_append_by_channel
+            .insert(dsl_channel.clone(), "bootstrap-append".to_string());
+        state
+            .live_context_bootstrap_digest_by_channel
+            .insert(dsl_channel, "bootstrap-digest".to_string());
+        let replay = "queued-replay".to_string();
+        state
+            .live_context_queued_session_by_append
+            .insert(replay.clone(), session_id.to_string());
+        state
+            .live_context_queued_cursor_by_append
+            .insert(replay.clone(), 1);
+        state
+            .live_context_queued_digest_by_append
+            .insert(replay.clone(), "replay-digest".to_string());
+        state
+            .live_context_queued_commit_token_by_append
+            .insert(replay.clone(), "replay-commit".to_string());
+        state.live_context_queued_disposition_by_append.insert(
+            replay.clone(),
+            mm_dsl::LiveContextRowDisposition::ReassertCausalTail,
+        );
+        state.live_context_queued_append_by_cursor.insert(1, replay);
         *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
             .expect("seed committed result release state");
     }
@@ -441,6 +715,11 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
             .result_delivery()
     };
     assert_eq!(result_delivery().await, None, "delivery is in flight");
+    let mut commits = machine
+        .subscribe_session_machine_commits(&session_id)
+        .await
+        .expect("registered session exposes its machine commit signal");
+    commits.borrow_and_update();
     machine
         .resolve_live_delegation_result_delivery(
             &delivery,
@@ -448,6 +727,13 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         )
         .await
         .expect("resolve result delivery");
+    assert!(
+        commits
+            .has_changed()
+            .expect("the session entry is still registered"),
+        "the provider acknowledgement that frees the channel's result slot \
+         advances the commit signal a refused release waits on"
+    );
     assert_eq!(
         result_delivery().await,
         Some(crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered),
@@ -593,6 +879,86 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         first_recovery.fence_token()
     );
     assert_eq!(recovered_recovery.generation(), first_recovery.generation());
+}
+
+/// A waiter on the commit signal retries a guarded transition on each
+/// advance. A refusal, and an observation that leaves the machine state
+/// unchanged, must not advance it: the release loop applies such an
+/// observation on every retry, and a self-advance would wake it in a hot
+/// loop (combined3 S99, 405 refused attempts in 350 ms).
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn state_preserving_observations_and_refusals_do_not_advance_the_commit_signal() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live session");
+    let channel = "live-commit-signal".to_string();
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        state
+            .live_channel_session_by_channel
+            .insert(channel.clone(), session_id.to_string());
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed the channel's session binding");
+    }
+    let mut commits = machine
+        .subscribe_session_machine_commits(&session_id)
+        .await
+        .expect("registered session exposes its machine commit signal");
+    commits.borrow_and_update();
+
+    let (_, effects) = machine
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
+                session_id: session_id.to_string(),
+                channel_id: channel.clone(),
+            },
+            "ObserveLiveContextDeliveryReadiness",
+        )
+        .await
+        .expect("the readiness observation applies");
+    assert!(
+        effects.as_slice().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveContextDeliveryReadinessObserved { .. }
+        )),
+        "the observation emitted its readiness"
+    );
+    assert!(
+        !commits
+            .has_changed()
+            .expect("the session entry is still registered"),
+        "an observation that leaves the state unchanged is not a commit"
+    );
+
+    machine
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
+                session_id: SessionId::new().to_string(),
+                channel_id: channel,
+            },
+            "ObserveLiveContextDeliveryReadiness",
+        )
+        .await
+        .expect_err("another session's observation is refused");
+    assert!(
+        !commits
+            .has_changed()
+            .expect("the session entry is still registered"),
+        "a refused input is not a commit"
+    );
 }
 
 fn uuid(n: u128) -> uuid::Uuid {
@@ -4342,6 +4708,131 @@ async fn aborted_directed_candidate_checkpoint_recovers_exact_completed_terminal
     );
     await_runtime_recovery_stop(&machine, &session_id).await;
     drop(runtime_bindings);
+}
+
+/// A directed batch finalizes its receipt before publishing its interaction
+/// terminals, and resolves completion waiters only after publication. A
+/// receipt wait armed while the input was pending must resolve at the
+/// finalization, not park until publication (which a transient failure can
+/// delay): finalization wakes the receipt observers. The mob delivery wait
+/// used to re-read every second to cover that window.
+#[tokio::test]
+async fn receipt_wait_resolves_at_directed_finalization_while_publication_is_parked() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = Arc::new(MeerkatMachine::persistent(
+        inner as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let checkpoint_entered = Arc::new(Notify::new());
+    let release_checkpoint = Arc::new(Notify::new());
+    let first_publish_entered = Arc::new(Notify::new());
+    let release_first_publish = Arc::new(Notify::new());
+    let publisher = Arc::new(RuntimeRecoveryTerminalPublisher::blocking_first_publish(
+        Arc::clone(&first_publish_entered),
+        Arc::clone(&release_first_publish),
+    ));
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    machine
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(RuntimeRecoveryExecutor {
+                session: runtime_recovery_session(&session_id, "directed receipt wake"),
+                result_text: "directed receipt wake".to_string(),
+                publisher: Some(Arc::clone(&publisher)),
+                first_reconcile_gate: None,
+                first_checkpoint_gate: Some((
+                    Arc::clone(&checkpoint_entered),
+                    Arc::clone(&release_checkpoint),
+                )),
+                target_checkpoint_calls: Arc::new(AtomicUsize::new(0)),
+                expected_compaction_intents: Vec::new(),
+                projection_order: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+        )
+        .await
+        .expect("install executor");
+
+    let interaction_uuid = meerkat_core::time_compat::new_uuid_v7();
+    let input = crate::mob_adapter::create_tracked_flow_step_input(
+        "directed-receipt-wake-step",
+        meerkat_core::types::ContentInput::Text("directed receipt wake".to_string()),
+        "directed-receipt-wake-flow",
+        None,
+        &interaction_uuid.to_string(),
+    )
+    .expect("construct directed input");
+    let input_id = input.id().clone();
+    let (_outcome, completion) = machine
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("accept directed input");
+    let completion = completion.expect("accepted directed input has a completion waiter");
+
+    // Held at the committed-boundary checkpoint, before receipt finalization.
+    tokio::time::timeout(Duration::from_secs(5), checkpoint_entered.notified())
+        .await
+        .expect("the run reaches the committed-boundary checkpoint");
+    let pending = machine
+        .input_terminal_receipt(
+            &session_id,
+            crate::terminal_status::InteractionSelector::InputId(input_id.clone()),
+        )
+        .await
+        .expect("read receipt")
+        .expect("the input is held live");
+    assert!(
+        !pending.report.is_resolved(),
+        "the receipt is not finalized before the checkpoint returns: {:?}",
+        pending.report
+    );
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let input_id = input_id.clone();
+        tokio::spawn(async move {
+            machine
+                .wait_input_terminal_receipt(&session_id, &input_id)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "the waiter parks on the pending input"
+    );
+
+    release_checkpoint.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), first_publish_entered.notified())
+        .await
+        .expect("publication begins after the receipt is finalized");
+    // Publication is parked; the receipt wait resolves anyway. The deadline
+    // only bounds a broken run.
+    let resolved = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("receipt finalization wakes the receipt wait while publication is parked")
+        .expect("waiter task")
+        .expect("receipt wait runs")
+        .expect("the input is known");
+    match resolved {
+        crate::terminal_status::InputTerminalReceiptWait::Resolved(read) => {
+            assert!(read.report.is_resolved(), "{:?}", read.report);
+        }
+        other => panic!("expected a resolved receipt, got {other:?}"),
+    }
+    assert_eq!(publisher.calls(), 1, "publication is still parked");
+
+    release_first_publish.notify_one();
+    match tokio::time::timeout(Duration::from_secs(5), completion.wait_authorized())
+        .await
+        .expect("completion resolves after publication")
+    {
+        CompletionOutcome::Completed(result) => assert_eq!(result.text, "directed receipt wake"),
+        other => panic!("expected a completed directed terminal, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -9633,6 +10124,7 @@ fn revival_arms_preserve_identity_reset_placement_and_refuse_while_draining() {
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId("session-revive".to_string()),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-2".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("same-session re-registration must revive a stopped machine");
@@ -9731,6 +10223,7 @@ fn revival_arms_preserve_identity_reset_placement_and_refuse_while_draining() {
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId("session-revive".to_string()),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-2".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("the draining refusal is a typed verdict, not a guard rejection");
@@ -10212,6 +10705,7 @@ fn re_registration_is_idempotent_on_same_epoch_and_a_typed_verdict_on_a_differen
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: session_id.clone(),
             runtime_epoch_id: Some(epoch.clone()),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("same-session, same-epoch re-registration is the machine-owned no-op");
@@ -10226,6 +10720,7 @@ fn re_registration_is_idempotent_on_same_epoch_and_a_typed_verdict_on_a_differen
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: session_id.clone(),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-b".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("the conflict verdict is a machine-owned outcome, not a guard rejection");
@@ -10255,6 +10750,7 @@ fn re_registration_is_idempotent_on_same_epoch_and_a_typed_verdict_on_a_differen
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id,
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("epochless re-registration resolves to the same typed verdict");
@@ -10296,6 +10792,7 @@ fn new_binding_from_stopped_sets_the_new_registration_epoch() {
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId("new-tenant".to_string()),
             runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-new".to_string())),
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("a new session binding over Stopped must be admitted");
@@ -11305,6 +11802,116 @@ async fn destroy_relooks_current_entry_after_same_id_replacement() {
         ControlCommandLookupTestKind::Destroy,
     )
     .await;
+}
+
+/// An input admitted after an attachment's runtime loop released the
+/// registration gate, and before the attachment reacquired it, finds the slot
+/// Pending and so has no wake sender; the attachment read its queue before the
+/// input existed. Commit must still wake the loop for it: a mob resume
+/// reviving a member while a detached completion was delivered to it left the
+/// completion queued forever (#1482).
+#[tokio::test]
+async fn input_admitted_before_a_pending_attachment_regates_wakes_at_commit() {
+    struct RecordingExecutor {
+        applied: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RecordingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.applied.notify_one();
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register pending-attachment fixture");
+    let applied = Arc::new(Notify::new());
+    let (regate_reached_tx, regate_reached) = tokio::sync::oneshot::channel();
+    let (release_regate, release_regate_rx) = tokio::sync::oneshot::channel();
+    *machine
+        .test_pending_attachment_before_regate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((regate_reached_tx, release_regate_rx));
+    let ensure = tokio::spawn({
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let applied = Arc::clone(&applied);
+        async move {
+            machine
+                .ensure_session_with_executor_factory(session_id, move |_| {
+                    Box::new(RecordingExecutor { applied }) as Box<dyn CoreExecutor>
+                })
+                .await
+        }
+    });
+    // The runtime loop has finished startup and released the registration
+    // gate; the attachment is Pending and has not reacquired the gate.
+    regate_reached
+        .await
+        .expect("the attachment reaches the gap before reacquiring its gate");
+
+    let applied_wait = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("admitted before commit"))
+        .await
+        .expect("admit while the attachment is pending");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    release_regate
+        .send(())
+        .expect("release the attachment to reacquire its gate");
+    let pending = match ensure
+        .await
+        .expect("ensure task must not panic")
+        .expect("prepare the pending attachment")
+    {
+        EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+        EnsureRuntimeExecutorAttachment::Existing(witness) => {
+            panic!("fresh fixture unexpectedly found {witness:?}")
+        }
+    };
+    pending
+        .commit()
+        .await
+        .expect("commit the pending attachment");
+
+    // Hang guard only: a lost wake never applies the input.
+    tokio::time::timeout(Duration::from_secs(30), applied_wait)
+        .await
+        .expect("the committed attachment must run the input admitted while it was pending");
 }
 
 #[tokio::test]
@@ -14223,6 +14830,638 @@ async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_e
     );
 }
 
+/// Executor that counts applies and reports each one, for the #1500 hold tests.
+struct CountingApplyExecutor {
+    applies: Arc<AtomicUsize>,
+    applied: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for CountingApplyExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        self.applies.fetch_add(1, Ordering::SeqCst);
+        self.applied.notify_one();
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            None,
+        ))
+    }
+
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+async fn counting_executor_session(
+    machine: &Arc<MeerkatMachine>,
+) -> (SessionId, Arc<AtomicUsize>, Arc<Notify>) {
+    counting_executor_session_with_staged_holds(machine, &[]).await
+}
+
+/// A counting-executor session whose registration applies `staged` run-start
+/// holds, staged before the session exists (#1500).
+async fn counting_executor_session_with_staged_holds(
+    machine: &Arc<MeerkatMachine>,
+    staged: &[crate::RunStartHoldReason],
+) -> (SessionId, Arc<AtomicUsize>, Arc<Notify>) {
+    let session_id = SessionId::new();
+    for reason in staged {
+        machine
+            .stage_registration_run_start_hold(&session_id, *reason)
+            .await
+            .expect("stage a registration hold");
+    }
+    let applies = Arc::new(AtomicUsize::new(0));
+    let applied = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingApplyExecutor {
+                applies: Arc::clone(&applies),
+                applied: Arc::clone(&applied),
+            }),
+        )
+        .await
+        .expect("register the counting executor");
+    (session_id, applies, applied)
+}
+
+/// #1500: while run starts are held, admitted input stays queued and the
+/// runtime loop parks instead of starting a run; releasing the hold runs it
+/// exactly once.
+#[tokio::test]
+async fn held_run_starts_park_the_loop_and_release_runs_the_input_once() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+
+    let hold = machine
+        .hold_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("hold run starts");
+    assert_eq!(hold.current_run, None, "an attached member has no run");
+
+    let mut parks = machine.run_start_held_parks();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("held until resume"))
+        .await
+        .expect("admit while held");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    // Hang guard only: the park is the positive event.
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the runtime loop parks on the hold")
+        .expect("park signal");
+    assert_eq!(
+        applies.load(Ordering::SeqCst),
+        0,
+        "no run starts while held"
+    );
+    let held = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state");
+    assert!(!held.run_start_holds.is_empty());
+    assert_eq!(held.current_run_id, None);
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("release run starts");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the queued input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 1, "it runs exactly once");
+}
+
+/// #1500: holds are per reason. With a mob Stop's hold and a host's hold both
+/// on the runtime, releasing the Stop's leaves it held; releasing the host's
+/// too runs the queued input exactly once.
+#[tokio::test]
+async fn run_starts_stay_held_until_every_reason_is_released() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    for reason in [
+        crate::RunStartHoldReason::MobStop,
+        crate::RunStartHoldReason::ToolsNotPublished,
+    ] {
+        machine
+            .hold_run_starts(&session_id, reason)
+            .await
+            .expect("hold run starts");
+    }
+    let mut parks = machine.run_start_held_parks();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("held by two reasons"))
+        .await
+        .expect("admit while held");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the runtime loop parks on the hold")
+        .expect("park signal");
+
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("release the Stop's hold");
+    let state = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state");
+    assert_eq!(
+        state.run_start_holds,
+        std::collections::BTreeSet::from([dsl::RunStartHoldReason::ToolsNotPublished]),
+        "the host's hold still holds"
+    );
+    assert_eq!(
+        applies.load(Ordering::SeqCst),
+        0,
+        "no run starts while held"
+    );
+
+    // A reason that does not hold is a no-op release.
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("release an absent reason");
+    assert!(
+        !machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("machine state")
+            .run_start_holds
+            .is_empty()
+    );
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("release the host's hold");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the queued input runs once nothing holds it");
+    assert_eq!(applies.load(Ordering::SeqCst), 1, "it runs exactly once");
+}
+
+/// #1500: a hold staged before a session registers is applied by its
+/// registration, before its runtime loop can start a run.
+#[tokio::test]
+async fn a_staged_registration_hold_holds_the_session_from_registration() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session_with_staged_holds(
+        &machine,
+        &[crate::RunStartHoldReason::ToolsNotPublished],
+    )
+    .await;
+    assert!(
+        !machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("machine state")
+            .run_start_holds
+            .is_empty(),
+        "the registration applied the staged hold"
+    );
+    let mut parks = machine.run_start_held_parks();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("held from registration"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the runtime loop parks on the hold")
+        .expect("park signal");
+    assert_eq!(applies.load(Ordering::SeqCst), 0);
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("release");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the queued input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+}
+
+/// #1500: releasing a staged hold before the session registers cancels it:
+/// the registration applies no hold for that reason.
+#[tokio::test]
+async fn releasing_before_registration_cancels_the_staged_hold() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .stage_registration_run_start_hold(
+            &session_id,
+            crate::RunStartHoldReason::ToolsNotPublished,
+        )
+        .await
+        .expect("stage");
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::ToolsNotPublished)
+        .await
+        .expect("a release before registration is not an error");
+    let applies = Arc::new(AtomicUsize::new(0));
+    let applied = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingApplyExecutor {
+                applies: Arc::clone(&applies),
+                applied: Arc::clone(&applied),
+            }),
+        )
+        .await
+        .expect("register");
+    assert!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("machine state")
+            .run_start_holds
+            .is_empty(),
+        "the released reason is not applied at registration"
+    );
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("runs at once"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+}
+
+/// #1500: without a hold nothing parks. A Held arm firing when run starts are
+/// not held would park the loop until a release that never comes.
+#[tokio::test]
+async fn unheld_run_starts_never_park_the_loop() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    let parks = machine.run_start_held_parks();
+
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("runs at once"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+    assert_eq!(*parks.borrow(), 0, "an unheld loop never parks");
+
+    // A hold then release with nothing queued leaves later input unaffected.
+    machine
+        .hold_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("hold");
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("release");
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("after the release"))
+        .await
+        .expect("admit after the release");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 2);
+    assert_eq!(*parks.borrow(), 0);
+}
+
+/// #1500: a hold that lands after the runtime loop woke for an input but
+/// before it took the input into a run parks the loop; it is not an error.
+#[tokio::test]
+async fn a_hold_landing_after_the_loop_woke_parks_it() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    let (gap_entered, gap_release) =
+        machine.arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("admitted before the hold"))
+        .await
+        .expect("admit");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), gap_entered)
+        .await
+        .expect("the loop wakes for the input")
+        .expect("queue-authority hook armed");
+
+    machine
+        .hold_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("hold while the loop is between wake and batch start");
+    let mut parks = machine.run_start_held_parks();
+    gap_release.send(()).expect("release the loop");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the loop parks on the hold")
+        .expect("park signal");
+    assert_eq!(applies.load(Ordering::SeqCst), 0);
+
+    let ran = applied.notified();
+    machine
+        .release_run_starts(&session_id, crate::RunStartHoldReason::MobStop)
+        .await
+        .expect("release run starts");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("the input runs after the release");
+    assert_eq!(applies.load(Ordering::SeqCst), 1);
+}
+
+/// A cancel point taken while the runtime loop has woken for queued input but
+/// not yet staged it abandons that input (every queued input, in admission
+/// order) and names no current run. Input admitted after the cancel point is
+/// untouched and runs.
+#[tokio::test]
+async fn a_cancel_point_abandons_the_queued_input_and_spares_later_input() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let (session_id, applies, applied) = counting_executor_session(&machine).await;
+    let (gap_entered, gap_release) =
+        machine.arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+
+    let mut admitted = Vec::new();
+    let mut completions = Vec::new();
+    for text in ["queued first", "queued second"] {
+        let (outcome, completion) = machine
+            .accept_input_with_completion(&session_id, make_prompt(text))
+            .await
+            .expect("admit");
+        let AcceptOutcome::Accepted { input_id, .. } = outcome else {
+            panic!("input must be accepted: {outcome:?}");
+        };
+        admitted.push(input_id);
+        completions.push(completion.expect("an accepted input has a completion"));
+    }
+    tokio::time::timeout(Duration::from_secs(30), gap_entered)
+        .await
+        .expect("the loop wakes for the input")
+        .expect("queue-authority hook armed");
+
+    let cancel_point = machine
+        .abandon_queued_inputs_at_cancel_point(&session_id, "cancel point under test")
+        .await
+        .expect("cancel point")
+        .expect("registered session");
+    assert_eq!(cancel_point.current_run, None, "no run was staged");
+    assert_eq!(
+        cancel_point.queued_inputs, admitted,
+        "every queued input, in admission order"
+    );
+    // Each abandoned input's own terminal is a cancellation, and its waiter
+    // receives the published runless terminal carrying the cancel reason.
+    for (input_id, completion) in admitted.iter().zip(completions) {
+        let stored = machine
+            .input_state(&session_id, input_id)
+            .await
+            .expect("read input state")
+            .expect("the abandoned input is retained");
+        assert_eq!(
+            stored.seed.terminal_outcome,
+            Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                reason: crate::input_state::InputAbandonReason::Cancelled,
+            }),
+            "the input is abandoned as cancelled"
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(30), completion.wait())
+            .await
+            .expect("the abandoned input's waiter resolves")
+            .expect("completion outcome");
+        assert!(
+            matches!(
+                &outcome,
+                CompletionOutcome::RuntimeTerminated { reason, .. }
+                    if reason == "cancel point under test"
+            ),
+            "the waiter receives the published cancellation terminal: {outcome:?}"
+        );
+    }
+
+    gap_release.send(()).expect("release the loop");
+    let ran = applied.notified();
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("admitted after"))
+        .await
+        .expect("admit after the cancel point");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    tokio::time::timeout(Duration::from_secs(30), ran)
+        .await
+        .expect("input admitted after the cancel point runs");
+    assert_eq!(
+        applies.load(Ordering::SeqCst),
+        1,
+        "only the input admitted after the cancel point ran"
+    );
+}
+
+/// #1471: a boundary cancel taken after the runtime loop started a run but
+/// before the executor entered it (here: blocked at the top of `apply`) is not
+/// lost. The executor receives a cooperative cancel bound to that exact run
+/// while the run is still in flight, nothing reaches the ambient
+/// executor-wide cancel, and nothing hard-cancels the run.
+#[tokio::test]
+async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
+    struct ExactBoundaryHandle {
+        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
+        exact_cancel_seen: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for ExactBoundaryHandle {
+        async fn cancel_after_boundary(
+            &self,
+            expected_run_id: &RunId,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.exact_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(expected_run_id.clone());
+            self.exact_cancel_seen.notify_one();
+            Ok(())
+        }
+    }
+
+    struct CountingInterruptHandle {
+        hard_cancels: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for CountingInterruptHandle {
+        async fn hard_cancel_run_if_current(
+            &self,
+            _expected_run_id: &RunId,
+            _reason: String,
+        ) -> Result<bool, CoreExecutorError> {
+            self.hard_cancels.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    struct GatedExecutor {
+        apply_started: Arc<Notify>,
+        allow_apply: Arc<Notify>,
+        ambient_cancels: Arc<AtomicUsize>,
+        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
+        exact_cancel_seen: Arc<Notify>,
+        hard_cancels: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedExecutor {
+        fn boundary_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(ExactBoundaryHandle {
+                exact_cancels: Arc::clone(&self.exact_cancels),
+                exact_cancel_seen: Arc::clone(&self.exact_cancel_seen),
+            }))
+        }
+
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(Arc::new(CountingInterruptHandle {
+                hard_cancels: Arc::clone(&self.hard_cancels),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let allowed = self.allow_apply.notified();
+            self.apply_started.notify_one();
+            allowed.await;
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.ambient_cancels.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let allow_apply = Arc::new(Notify::new());
+    let ambient_cancels = Arc::new(AtomicUsize::new(0));
+    let exact_cancels = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let exact_cancel_seen = Arc::new(Notify::new());
+    let hard_cancels = Arc::new(AtomicUsize::new(0));
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(GatedExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_apply: Arc::clone(&allow_apply),
+                ambient_cancels: Arc::clone(&ambient_cancels),
+                exact_cancels: Arc::clone(&exact_cancels),
+                exact_cancel_seen: Arc::clone(&exact_cancel_seen),
+                hard_cancels: Arc::clone(&hard_cancels),
+            }),
+        )
+        .await
+        .expect("register the gated executor");
+
+    let started = apply_started.notified();
+    let (outcome, _completion) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("cancelled before entry"))
+        .await
+        .expect("admit the prompt");
+    assert!(outcome.is_accepted(), "{outcome:?}");
+    // Hang guard only.
+    tokio::time::timeout(Duration::from_secs(30), started)
+        .await
+        .expect("the run reaches the executor");
+    let run_id = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state")
+        .current_run_id
+        .expect("the started run");
+
+    // The cancel lands while the executor has not entered the run yet.
+    let delivered = exact_cancel_seen.notified();
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("cancel after boundary");
+    tokio::time::timeout(Duration::from_secs(30), delivered)
+        .await
+        .expect("the run-bound cancel reaches the executor while the run is in flight");
+    allow_apply.notify_one();
+
+    let exact = exact_cancels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        exact,
+        vec![RunId::from_uuid(
+            uuid::Uuid::parse_str(&run_id.0).expect("run id")
+        )],
+        "the cancel is bound to that exact run"
+    );
+    assert_eq!(
+        ambient_cancels.load(Ordering::SeqCst),
+        0,
+        "nothing reaches the ambient executor-wide cancel"
+    );
+    assert_eq!(
+        hard_cancels.load(Ordering::SeqCst),
+        0,
+        "nothing hard-cancels the run"
+    );
+}
+
 #[tokio::test]
 async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_apply() {
     struct BlockingExecutor {
@@ -15746,6 +16985,65 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
 /// Cancellation, retry, and ownership pins for the machine-owned stop /
 /// unregister coordinator. Production cleanup hooks own external material
 /// only; recursive unregister is tested separately as a typed self-join error.
+/// A waiter for a delivery's admission is woken by the admission itself:
+/// it stays parked while nothing holds the key, resolves with the admitted
+/// input's id once an input with that idempotency key is accepted, and is
+/// `None` for a session without a live registration.
+#[tokio::test]
+async fn admission_wait_is_woken_by_the_admission_of_its_key() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let key = "delivery-admission-wait";
+
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            machine
+                .wait_input_admitted_by_idempotency_key(&session_id, key)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "nothing holds the key yet, so the waiter stays parked"
+    );
+
+    let mut input = make_prompt("admitted delivery");
+    let Input::Prompt(prompt) = &mut input else {
+        unreachable!("make_prompt always constructs Prompt input")
+    };
+    prompt.header.idempotency_key = Some(crate::identifiers::IdempotencyKey::new(key));
+    let accepted = match machine
+        .accept_input(&session_id, input)
+        .await
+        .expect("accept keyed input")
+    {
+        AcceptOutcome::Accepted { input_id, .. } => input_id,
+        other => panic!("expected a fresh accepted input, got {other:?}"),
+    };
+    let admitted = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("the admission wakes the waiter")
+        .expect("waiter task")
+        .expect("admission wait runs");
+    assert_eq!(admitted, Some(accepted));
+
+    assert_eq!(
+        machine
+            .wait_input_admitted_by_idempotency_key(&SessionId::new(), key)
+            .await
+            .expect("admission wait runs"),
+        None,
+        "a session without a live registration has nothing to wait on"
+    );
+}
+
 mod stop_teardown_coordinator_class {
     use super::*;
 
@@ -20998,6 +22296,26 @@ impl InterruptYieldingTestRig {
         .expect("runtime should settle attached with empty queues");
     }
 
+    /// Wait for the runtime loop to be idle with nothing pending. The state
+    /// poll only establishes that the run is over ("attached and empty"); it
+    /// cannot see a wake source still pending for the loop (a buffered wake,
+    /// an unobserved completion-feed advance), which runs whatever is
+    /// admitted next. Admission is gated on the loop's park event instead:
+    /// published as it awaits its next wake with none pending and cleared by
+    /// any wake, so a park observed after the run settled means nothing can
+    /// run new input until something genuinely wakes the loop.
+    async fn wait_until_parked_attached_and_empty(&self) {
+        self.wait_until_attached_and_empty().await;
+        let mut parked = self.adapter.runtime_loop_parked();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            parked.wait_for(|sessions| sessions.contains(&self.session_id)),
+        )
+        .await
+        .expect("runtime loop should park once the run settled")
+        .expect("park signal stays open while the machine lives");
+    }
+
     async fn wait_until_completion_is_resolved(&self, input_id: &InputId) {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -21549,6 +22867,13 @@ async fn run_advancing_during_live_boundary_preparation_preserves_successor_clai
 
     rig.allow_finish.notify_waiters();
     rig.wait_for_apply_calls(2).await;
+    // A wake sent while the successor run is busy is buffered; the loop runs
+    // it once the run settles. The sentinel below must be admitted only once
+    // that buffered wake is spent, which the park-driven wait guarantees and
+    // an "attached and empty" state poll does not.
+    rig.adapter
+        .buffer_runtime_loop_wake_for_test(&rig.session_id)
+        .await;
     let successor_claim = rig
         .adapter
         .meerkat_machine_spine_snapshot(&rig.session_id)
@@ -21571,7 +22896,7 @@ async fn run_advancing_during_live_boundary_preparation_preserves_successor_clai
     );
 
     rig.allow_finish.notify_waiters();
-    rig.wait_until_attached_and_empty().await;
+    rig.wait_until_parked_attached_and_empty().await;
 
     let sentinel = make_progress_input("successor-claim wake sentinel");
     let sentinel_id = sentinel.id().clone();
@@ -33797,6 +35122,7 @@ fn registered_dsl_authority_for_session(session_id: &str) -> mm_dsl::MeerkatMach
         mm_dsl::MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId(session_id.to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("register session");
@@ -35127,7 +36453,10 @@ async fn live_status_session_lookup_uses_generated_close_history() {
     );
 
     let close_observation = host
-        .reserve_channel_close_observation(&channel_id)
+        .reserve_channel_close_observation(
+            &channel_id,
+            meerkat_core::LiveChannelCloseReason::ClientRequested,
+        )
         .await
         .expect("host should mint typed close observation");
     host.prepare_channel_physical_close(&close_observation)
@@ -35515,6 +36844,7 @@ fn live_channel_status_result_is_machine_owned() {
                 status_observation_sequence: 11,
                 degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::NetworkUnstable),
                 degradation_detail: None,
+                media_fault_reopen_recommended: None,
             } if channel_id == "live-channel-1"
         )),
         "machine authority must emit the typed public status effect"
@@ -44065,6 +45395,10 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
             format!("not_found:{runtime_id}")
         }
         RuntimeDriverError::Destroyed => "destroyed".to_string(),
+        RuntimeDriverError::LiveContextBarrierRevoked {
+            session_id,
+            channel_id,
+        } => format!("live_context_barrier_revoked:{session_id}:{channel_id}"),
         RuntimeDriverError::RecoveryCorruption { reason } => {
             format!("recovery_corruption:{reason}")
         }
@@ -49096,4 +50430,310 @@ async fn run_input_read_refuses_a_driver_replaced_or_removed_while_it_waited() {
         matches!(removed, Err(RuntimeDriverError::NotReady { .. })),
         "a removed session is not held: {removed:?}"
     );
+}
+
+/// #1476: the production close of a staged live channel (custody revoke,
+/// then the recorded close) must leave the session unregisterable. The close
+/// keeps the receipts, execution mode/profile and capability sets as its
+/// tombstone (closed replays match against it), so unregister must not
+/// require them to be empty.
+#[test]
+fn unregister_completes_after_normal_close_of_a_staged_live_channel() {
+    let session = mm_dsl::SessionId("staged-close-session".to_string());
+    let runtime = mm_dsl::AgentRuntimeId("staged-close-runtime".to_string());
+    let s = "staged-close-session".to_string();
+    let c = "staged-close-channel".to_string();
+    let mut authority = registered_dsl_authority_for_session("staged-close-session");
+    let mut apply = |input: mm_dsl::MeerkatMachineInput, step: &str| {
+        mm_dsl::MeerkatMachineMutator::apply(&mut authority, input)
+            .unwrap_or_else(|error| panic!("{step}: {error:?}"));
+    };
+    apply(
+        mm_dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: runtime.clone(),
+            fence_token: mm_dsl::FenceToken(1),
+            generation: Some(mm_dsl::Generation(1)),
+            runtime_epoch_id: None,
+            session_id: session.clone(),
+        },
+        "prepare bindings",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            llm_identity: dsl_live_identity("gpt-realtime-2"),
+        },
+        "live open",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            profile_id: "profile".to_string(),
+            requested_mode: mm_dsl::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+        "execution mode",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::StageExperimentalLiveExecution {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            runtime_id: runtime.clone(),
+            fence_token: mm_dsl::FenceToken(1),
+            generation: mm_dsl::Generation(1),
+            canonical_seed_cursor: 0,
+            pending_receipt: "pending".to_string(),
+        },
+        "stage",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            pending_receipt: Some("pending".to_string()),
+            activation_receipt: None,
+        },
+        "revoke close custody",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            session_id: s.clone(),
+            channel_id: c.clone(),
+            close_observation_sequence: 1,
+        },
+        "record closed",
+    );
+    let binding = |input: fn(
+        mm_dsl::SessionId,
+        Option<mm_dsl::AgentRuntimeId>,
+        Option<mm_dsl::FenceToken>,
+        Option<mm_dsl::Generation>,
+    ) -> mm_dsl::MeerkatMachineInput| {
+        input(
+            session.clone(),
+            Some(runtime.clone()),
+            Some(mm_dsl::FenceToken(1)),
+            Some(mm_dsl::Generation(1)),
+        )
+    };
+    apply(
+        binding(|session_id, agent_runtime_id, fence_token, generation| {
+            mm_dsl::MeerkatMachineInput::BeginUnregisterSession {
+                session_id,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                runtime_epoch_id: None,
+            }
+        }),
+        "begin unregister",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+            session_id: session.clone(),
+            forced_abort: false,
+        },
+        "runtime loop stopped",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+            session_id: session.clone(),
+            forced_abort: false,
+        },
+        "comms drain exited",
+    );
+    apply(
+        mm_dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+            session_id: session.clone(),
+        },
+        "completion waiters resolved",
+    );
+    apply(
+        binding(|session_id, agent_runtime_id, fence_token, generation| {
+            mm_dsl::MeerkatMachineInput::UnregisterSession {
+                session_id,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                runtime_epoch_id: None,
+            }
+        }),
+        "unregister after a normal live close",
+    );
+    assert_eq!(authority.state().session_id, None);
+}
+
+#[cfg(feature = "live")]
+#[derive(Default)]
+struct CapturingLiveChannelClosePublisher {
+    closes: std::sync::Mutex<
+        Vec<(
+            SessionId,
+            meerkat_core::LiveChannelId,
+            meerkat_core::LiveChannelCloseReason,
+            bool,
+        )>,
+    >,
+    retired_tombstones: std::sync::Mutex<Vec<SessionId>>,
+}
+
+#[cfg(feature = "live")]
+#[async_trait::async_trait]
+impl crate::live_execution::LiveChannelCloseEventPublisher for CapturingLiveChannelClosePublisher {
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    ) {
+        self.closes.lock().unwrap().push((
+            session_id.clone(),
+            channel_id.clone(),
+            reason,
+            reopen_recommended,
+        ));
+    }
+
+    async fn retire_live_session_close_tombstones(&self, session_id: &SessionId) {
+        self.retired_tombstones
+            .lock()
+            .unwrap()
+            .push(session_id.clone());
+    }
+}
+
+/// Finalized unregister removes the session's runtime entry and with it every
+/// channel's Closed record, so it retires the session's close tombstones
+/// exactly once per committed unregister.
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn finalized_unregister_retires_the_sessions_close_tombstones_once() {
+    let machine = MeerkatMachine::ephemeral();
+    let publisher = Arc::new(CapturingLiveChannelClosePublisher::default());
+    machine.set_live_channel_close_publisher(publisher.clone());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    assert!(publisher.retired_tombstones.lock().unwrap().is_empty());
+
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister session");
+    assert_eq!(
+        *publisher.retired_tombstones.lock().unwrap(),
+        vec![session_id.clone()]
+    );
+
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register the session again");
+    assert_eq!(
+        publisher.retired_tombstones.lock().unwrap().len(),
+        1,
+        "registering retires nothing"
+    );
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister again");
+    assert_eq!(
+        *publisher.retired_tombstones.lock().unwrap(),
+        vec![session_id.clone(), session_id]
+    );
+}
+
+/// Open one live channel, close it with `reason` through generated close
+/// authority, and return what the close publisher received.
+#[cfg(feature = "live")]
+async fn committed_close_publishes(
+    reason: meerkat_core::LiveChannelCloseReason,
+) -> Vec<(
+    SessionId,
+    meerkat_core::LiveChannelId,
+    meerkat_core::LiveChannelCloseReason,
+    bool,
+)> {
+    let machine = MeerkatMachine::ephemeral();
+    let publisher = Arc::new(CapturingLiveChannelClosePublisher::default());
+    machine.set_live_channel_close_publisher(publisher.clone());
+    let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let channel_id = meerkat_live::LiveChannelId::new("live-close-published");
+    let open_authority = machine
+        .resolve_live_open_admission(
+            &session_id,
+            &channel_id,
+            &domain_live_identity("gpt-realtime-2"),
+        )
+        .await
+        .expect("generated live open admission");
+    host.open_channel_with_authority(
+        open_authority
+            .channel_open_authority()
+            .expect("generated open handoff"),
+    )
+    .await
+    .expect("host open");
+    assert!(
+        publisher.closes.lock().unwrap().is_empty(),
+        "an open publishes no close"
+    );
+    let close_observation = host
+        .reserve_channel_close_observation(&channel_id, reason)
+        .await
+        .expect("typed close observation");
+    host.prepare_channel_physical_close(&close_observation)
+        .await
+        .expect("physical close");
+    machine
+        .resolve_live_close_result(&session_id, &close_observation)
+        .await
+        .expect("generated live close result");
+    let closes = publisher.closes.lock().unwrap().clone();
+    assert!(
+        closes
+            .iter()
+            .all(|(session, channel, _, _)| *session == session_id && *channel == channel_id)
+    );
+    closes
+}
+
+/// A client's close reports exactly one `LiveChannelClosed` with its reason.
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn a_client_close_publishes_one_typed_live_channel_closed() {
+    let closes =
+        committed_close_publishes(meerkat_core::LiveChannelCloseReason::ClientRequested).await;
+    assert_eq!(closes.len(), 1);
+    assert_eq!(
+        closes[0].2,
+        meerkat_core::LiveChannelCloseReason::ClientRequested
+    );
+    assert!(!closes[0].3, "only a media fault recommends a reopen");
+}
+
+/// A provider-side close reports its own reason, not the client's.
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn a_provider_close_publishes_one_typed_live_channel_closed() {
+    let closes =
+        committed_close_publishes(meerkat_core::LiveChannelCloseReason::ProviderClosed).await;
+    assert_eq!(closes.len(), 1);
+    assert_eq!(
+        closes[0].2,
+        meerkat_core::LiveChannelCloseReason::ProviderClosed
+    );
+    assert!(!closes[0].3);
 }

@@ -701,12 +701,15 @@ impl MobActor {
                 "warm revival has no generated provision owner".to_string(),
             ));
         }
+        let bundle_tools =
+            super::super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         Ok(Box::new(DeferredResumeProvision {
             definition: Arc::clone(&self.definition),
             profile_name: work.entry.role.clone(),
             agent_identity: work.entry.agent_identity.clone(),
             profile,
             external_tools,
+            bundle_tools,
             compaction_curator_override: None,
             // No context: the rebuild carries the session's persisted one
             // forward (`build_resumed_agent_config`).

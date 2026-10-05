@@ -635,6 +635,37 @@ impl AnthropicClient {
         }
     }
 
+    /// Lower the typed tool choice to Anthropic's `tool_choice`. `Auto`
+    /// sends nothing (as before). A forced call (`any` or a named tool) is
+    /// refused with a typed error under explicit thinking and on models proven
+    /// to reject it; thinking is never switched off implicitly. Elsewhere it is
+    /// sent, and the provider's own rejection maps to the same typed error.
+    fn apply_tool_choice(&self, request: &LlmRequest, body: &mut Value) -> Result<(), LlmError> {
+        request.validate_tool_choice("anthropic")?;
+        if request.tool_choice.forces_a_tool_call()
+            && let Some(reason) = crate::request_support::forced_tool_choice_refusal(
+                &request.model,
+                anthropic_tag(request),
+            )
+        {
+            return Err(LlmError::ToolChoiceUnsupported {
+                provider: "anthropic".to_owned(),
+                choice: request.tool_choice.clone(),
+                reason,
+            });
+        }
+        let choice = match &request.tool_choice {
+            meerkat_core::ToolChoice::Auto => return Ok(()),
+            meerkat_core::ToolChoice::Required => serde_json::json!({"type": "any"}),
+            meerkat_core::ToolChoice::None => serde_json::json!({"type": "none"}),
+            meerkat_core::ToolChoice::Tool { name } => {
+                serde_json::json!({"type": "tool", "name": name})
+            }
+        };
+        body["tool_choice"] = choice;
+        Ok(())
+    }
+
     /// Build request body for Anthropic API
     pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         // Refuse request-shaping knobs the cataloged model rejects before
@@ -976,6 +1007,8 @@ impl AnthropicClient {
                 }
             }
         }
+
+        self.apply_tool_choice(request, &mut body)?;
 
         if let Some(tag) = anthropic_tag(request) {
             // Thinking: typed enum captures adaptive vs enabled;
@@ -1671,7 +1704,14 @@ impl LlmClient for AnthropicClient {
             } else {
                 let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_response(status_code, text, &headers))
+                Err(
+                    crate::request_support::provider_forced_tool_choice_rejection(
+                        request,
+                        status_code,
+                        &text,
+                    )
+                    .unwrap_or_else(|| LlmError::from_http_response(status_code, text, &headers)),
+                )
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);

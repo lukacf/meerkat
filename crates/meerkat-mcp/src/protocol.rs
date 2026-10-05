@@ -16,17 +16,26 @@ use crate::{McpError, ToolDiscoveryLimit};
 
 pub struct McpProtocol {
     service: crate::client_service::ConnectedClient,
+    /// The stdio server's process when built from a connection that owns one.
+    stdio_child: Option<crate::connection::StdioChildCustody>,
 }
 
 impl McpProtocol {
     pub fn new(service: RunningService<RoleClient, ()>) -> Self {
         Self {
             service: service.into(),
+            stdio_child: None,
         }
     }
 
-    pub(crate) fn from_client(service: crate::client_service::ConnectedClient) -> Self {
-        Self { service }
+    pub(crate) fn from_client(
+        service: crate::client_service::ConnectedClient,
+        stdio_child: Option<crate::connection::StdioChildCustody>,
+    ) -> Self {
+        Self {
+            service,
+            stdio_child,
+        }
     }
 
     pub fn server_info(&self) -> Option<Arc<rmcp::model::ServerInfo>> {
@@ -76,13 +85,7 @@ impl McpProtocol {
     }
 
     pub async fn close(self) -> Result<(), McpError> {
-        self.service
-            .cancel()
-            .await
-            .map_err(|e| McpError::ConnectionFailed {
-                reason: format!("Failed to close connection: {e:?}"),
-            })?;
-        Ok(())
+        crate::connection::close_connected(self.service, self.stdio_child).await
     }
 }
 

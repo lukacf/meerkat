@@ -32,7 +32,7 @@ import warnings
 import zipfile
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Any, Callable, Literal, NotRequired, TypedDict, cast
 from urllib.error import URLError
 
 from .errors import CapabilityUnavailableError, MeerkatError
@@ -102,7 +102,6 @@ from .generated.types import (
     LiveRefreshResult,
     LiveRefreshStatus,
     LiveStatusResult,
-    LoginStartParams,
     McpServerConfig,
     MobBindHostParams,
     MobBindHostResult,
@@ -228,6 +227,7 @@ from .mob import (
     MobWireMembersBatchEdgeInput,
     WorkOrigin,
 )
+from .live import LiveNotification, parse_live_notification
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import (
     RPC_STDOUT_LIMIT_BYTES,
@@ -452,6 +452,15 @@ def _wire_value(value: Any) -> Any:
     return value
 
 
+def _mcp_auth_target(
+    server_name: str, server_url: str, oauth_account: str | None
+) -> dict[str, Any]:
+    target: dict[str, Any] = {"server_name": server_name, "server_url": server_url}
+    if oauth_account is not None:
+        target["oauth_account"] = oauth_account
+    return target
+
+
 def _wire_params(value: Any) -> dict[str, Any]:
     converted = _wire_value(value)
     return converted if isinstance(converted, dict) else dict(converted)
@@ -579,6 +588,7 @@ class MeerkatClient:
         self._stderr_tail: _StderrTail | None = None
         self._tool_registry = ToolRegistry()
         self._tool_registration_errors: dict[str, MeerkatError] = {}
+        self._live_notification_listeners: list[Callable[[LiveNotification], None]] = []
         self._request = cast(RpcRequest, self._request_impl)
 
     # -- Tool registration -------------------------------------------------
@@ -752,6 +762,7 @@ class MeerkatClient:
             self._stderr_tail.start()
         self._dispatcher = _StdoutDispatcher(self._process.stdout)
         self._dispatcher.set_stderr_tail(self._stderr_tail)
+        self._dispatcher.set_live_notification_sink(self._dispatch_live_notification)
         if self._process.stdin:
             self._dispatcher.set_stdin_writer(self._process.stdin)
         self._dispatcher.start()
@@ -923,14 +934,15 @@ class MeerkatClient:
         `auth/login/start`. Returns `{authorize_url, state}`; client directs
         user to the URL then calls `auth_login_complete` once the redirect
         carries a code."""
-        params = LoginStartParams(
-            binding_id=binding_id,
-            provider=provider,
-            realm_id=realm_id,
-            redirect_uri=redirect_uri,
-            profile_id=profile_id,
-        )
-        return await self._request("auth/login/start", _wire_params(params))
+        params: dict[str, Any] = {
+            "provider": provider,
+            "realm_id": realm_id,
+            "binding_id": binding_id,
+            "redirect_uri": redirect_uri,
+        }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/login/start", params)
 
     async def auth_login_complete(
         self,
@@ -957,6 +969,90 @@ class MeerkatClient:
         if profile_id is not None:
             params["profile_id"] = profile_id
         return await self._request("auth/login/complete", params)
+
+    async def auth_mcp_login_start(
+        self,
+        server_name: str,
+        server_url: str,
+        redirect_uri: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Start host-driven OAuth for an MCP server via `auth/login/start`.
+
+        Returns `{authorize_url, state, redirect_uri, mcp, disposition}`;
+        `disposition` is `"joined"` when an attempt was already pending for the
+        server (its URL and state are returned; no second attempt exists).
+        `redirect_uri` must be an http loopback URL you bind yourself. The
+        authorize URL and state are host-channel data: open the URL only in a
+        browser no agent tool can observe, and never pass these values to an
+        agent, tool result, transcript or log. Finish with
+        `auth_mcp_login_complete`, or retire the attempt with
+        `auth_mcp_login_cancel`.
+        """
+        return await self._request(
+            "auth/login/start",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    async def auth_mcp_login_complete(
+        self,
+        server_name: str,
+        server_url: str,
+        *,
+        code: str,
+        state: str,
+        redirect_uri: str,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Complete host-driven MCP OAuth via `auth/login/complete` with the
+        loopback callback's `code` and `state`. Issuer, client and resource
+        come from the admitted attempt. Returns a secret-free summary."""
+        return await self._request(
+            "auth/login/complete",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "code": code,
+                "state": state,
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    async def auth_mcp_login_cancel(
+        self,
+        server_name: str,
+        server_url: str,
+        state: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire a pending MCP OAuth attempt by its `state` via
+        `auth/login/cancel` (for example after losing the loopback listener)."""
+        return await self._request(
+            "auth/login/cancel",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "state": state,
+            },
+        )
+
+    async def auth_mcp_status(
+        self,
+        server_name: str,
+        server_url: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Authorization status of an MCP server via `auth/status/get`:
+        `{mcp, phase: "authorized" | "reauth_required" |
+        "authorization_required", ...}`."""
+        return await self._request(
+            "auth/status/get",
+            {"mcp": _mcp_auth_target(server_name, server_url, oauth_account)},
+        )
 
     async def auth_login_device_start(
         self,
@@ -4327,7 +4423,15 @@ class MeerkatClient:
     _InputStreamMode = Literal["none", "reserve_interaction"]
     _ResponseStatus = Literal["accepted", "completed", "failed"]
     _PeerLifecycleKind = Literal[
-        "mob.peer_added", "mob.peer_retired", "mob.peer_unwired"
+        "mob.peer_added",
+        "mob.peer_retired",
+        "mob.peer_unwired",
+        "mob.kickoff_pending",
+        "mob.kickoff_starting",
+        "mob.kickoff_started",
+        "mob.kickoff_callback_pending",
+        "mob.kickoff_failed",
+        "mob.kickoff_cancelled",
     ]
 
     async def send(
@@ -4522,6 +4626,64 @@ class MeerkatClient:
         Returns the `LiveStatusResult` shape: `channel_id`, `status`.
         """
         return await self._request("live/status", {"channel_id": channel_id})
+
+    def on_live_notification(
+        self, callback: Callable[[LiveNotification], None]
+    ) -> Callable[[], None]:
+        """Receive the server's channel-scoped ``live/*`` notifications
+        (``live/assistant_output_available``, ``live/media_health_requested``,
+        ``live/assistant_playback_hint``) as :class:`LiveNotification` values.
+
+        Returns an unsubscribe function. Callbacks run on the reader task and
+        must not block. Notifications that arrive with no callback are
+        dropped; a method this SDK build does not know is ignored. A raising
+        callback does not stop the others or the transport.
+        """
+        self._live_notification_listeners.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._live_notification_listeners:
+                self._live_notification_listeners.remove(callback)
+
+        return unsubscribe
+
+    def _dispatch_live_notification(self, method: str, params: Any) -> None:
+        notification = parse_live_notification(method, params)
+        if notification is None:
+            return
+        for callback in list(self._live_notification_listeners):
+            try:
+                callback(notification)
+            except Exception:  # noqa: BLE001 - a callback fault is its own
+                _logger.debug("live notification callback raised", exc_info=True)
+
+    async def live_media_health(
+        self,
+        channel_id: str,
+        output_id: str,
+        decoded_frames: int,
+        audible_frames: int,
+        max_rms: float,
+    ) -> dict[str, Any]:
+        """Report decoded-audio counters for a requested output.
+
+        Wraps `live/media_health`, the answer to a
+        `live/media_health_requested` notification. Send raw counters from the
+        channel's media start to now; the runtime judges them. Returns the
+        `LiveMediaHealthResult` shape: `verdict` (`audible` or `media_fault`)
+        and, for a media fault, `reopen_recommended`. On `media_fault` the
+        runtime has already closed the channel.
+        """
+        return await self._request(
+            "live/media_health",
+            {
+                "channel_id": channel_id,
+                "output_id": output_id,
+                "decoded_frames": decoded_frames,
+                "audible_frames": audible_frames,
+                "max_rms": max_rms,
+            },
+        )
 
     async def live_close(self, channel_id: str) -> LiveCloseResult:
         """Close a live channel. Wraps `live/close`."""
@@ -4943,13 +5105,17 @@ class MeerkatClient:
         return shutil.which(command_or_path)
 
     @staticmethod
-    def _platform_target() -> tuple[str, str, str]:
-        system = platform.system().lower()
-        machine = platform.machine().lower()
+    def _platform_target(
+        system: str | None = None, machine: str | None = None
+    ) -> tuple[str, str, str]:
+        system = (platform.system() if system is None else system).lower()
+        machine = (platform.machine() if machine is None else machine).lower()
         if system == "darwin":
             target = {
                 "arm64": "aarch64-apple-darwin",
                 "aarch64": "aarch64-apple-darwin",
+                "x86_64": "x86_64-apple-darwin",
+                "amd64": "x86_64-apple-darwin",
             }.get(machine)
             if target is None:
                 raise MeerkatError(
@@ -4974,13 +5140,27 @@ class MeerkatClient:
         raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported platform '{system}'.")
 
     @staticmethod
-    async def _download_rkat_rpc_binary() -> str | None:
-        target, archive_ext, binary_name = MeerkatClient._platform_target()
+    def _rkat_rpc_release_asset(
+        version: str, target: str, archive_ext: str
+    ) -> tuple[str, str]:
+        """The release asset name and download URL for one target.
+
+        Release assets are ``rkat-rpc-<version>-<target>.<ext>`` (no ``v``)
+        under the ``v<version>`` tag.
+        """
         owner, repo = _MEERKAT_REPO
-        version = CONTRACT_VERSION
-        artifact = f"{_MEERKAT_BINARY}-v{version}-{target}.{archive_ext}"
+        artifact = f"{_MEERKAT_BINARY}-{version}-{target}.{archive_ext}"
         url = (
             f"https://github.com/{owner}/{repo}/releases/download/v{version}/{artifact}"
+        )
+        return artifact, url
+
+    @staticmethod
+    async def _download_rkat_rpc_binary() -> str | None:
+        target, archive_ext, binary_name = MeerkatClient._platform_target()
+        version = CONTRACT_VERSION
+        artifact, url = MeerkatClient._rkat_rpc_release_asset(
+            version, target, archive_ext
         )
         cache_dir = _MEERKAT_BINARY_CACHE_ROOT / f"v{version}" / target
         cache_dir.mkdir(parents=True, exist_ok=True)

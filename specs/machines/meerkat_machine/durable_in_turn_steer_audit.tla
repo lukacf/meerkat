@@ -46,7 +46,7 @@ AuditPrefixLength == 8
 \* turn is at a model boundary. Everything after it is explored exhaustively.
 AuditPrefix ==
     \/ model_step_count = 0 /\ Initialize
-    \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None)
+    \/ model_step_count = 1 /\ RegisterSessionIdle(AuditSession, None, {})
     \/ model_step_count = 2 /\ ResolveAdmissionPlanDefaultQueueKindIdle(AuditBatch, "Prompt", None, "Ordinary", "Untyped", FALSE, None, FALSE, FALSE, FALSE)
     \/ model_step_count = 3 /\ QueueAcceptedIdle(AuditBatch)
     \/ model_step_count = 4 /\ PrepareIdle(AuditSession, AuditRun)

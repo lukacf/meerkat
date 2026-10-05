@@ -28,7 +28,17 @@ fn sample_metadata() -> RuntimeTurnMetadata {
     RuntimeTurnMetadata {
         handling_mode: Some(HandlingMode::Steer),
         skill_references: Some(vec![skill_key]),
-        turn_tool_overlay: Some(TurnToolOverlay::default()),
+        // The turn's tool-choice plan rides the overlay and survives the
+        // pending-input round trip (crash retry re-runs the same turn).
+        turn_tool_overlay: Some(TurnToolOverlay {
+            tool_choice_plan: vec![
+                meerkat_core::ToolChoice::Tool {
+                    name: "deny_probe".into(),
+                },
+                meerkat_core::ToolChoice::Auto,
+            ],
+            ..TurnToolOverlay::default()
+        }),
         additional_instructions: Some(vec![
             TurnInstruction {
                 kind: TurnInstructionKind::User,
@@ -58,6 +68,8 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 thinking_budget_tokens: Some(2048),
                 ..Default::default()
             })),
+            // Request-local and never serialized; the plan lives on the overlay.
+            tool_choice: None,
         })),
         auth_binding: Some(TurnMetadataOverride::Set(AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),

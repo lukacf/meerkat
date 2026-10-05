@@ -100,6 +100,8 @@ impl OperationGuard {
         if db_path.file_name().is_none() || db_path.as_os_str() == ":memory:" {
             return Ok(Self { _lock: None });
         }
+        // Refuse an unsafe database file before planting its fence sibling.
+        crate::profile::validate_database_file(db_path)?;
         let lock_path = fence_lock_path(db_path);
         if process_holds_exclusive(&lock_path) {
             // Fence-holder self-admission (see `held_exclusive_locks`).

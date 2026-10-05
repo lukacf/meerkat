@@ -150,9 +150,63 @@ raw_cargo_workflow_hits="$(
   rg -n 'run: cargo|^\s+cargo (check|test|nextest|run|xtask|build|unit|int|e2e|clippy|machete)\b' \
     .github/workflows 2>/dev/null || true
 )"
-if [[ -n "${raw_cargo_workflow_hits}" ]]; then
+direct_nextest_workflow_hits="$(python3 - <<'PYTHON'
+from pathlib import Path
+import shlex
+
+
+def check_command(path, line_number, command):
+    if "cargo-nextest" not in command:
+        return
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        print(f"{path}:{line_number}: cannot validate direct Nextest command")
+        return
+    for index, token in enumerate(tokens):
+        if Path(token).name != "cargo-nextest":
+            continue
+        if token != "cargo-nextest" or tokens[index + 1:index + 3] not in (
+                ["nextest", "run"], ["nextest", "list"]):
+            print(f"{path}:{line_number}: only literal direct Nextest archive run/list is allowed")
+            continue
+        arguments = []
+        for argument in tokens[index + 3:]:
+            if argument == "--" or set(argument) <= set(";&|"):
+                break
+            arguments.append(argument)
+        if not any(argument == "--archive-file" or argument.startswith("--archive-file=")
+                   for argument in arguments):
+            print(f"{path}:{line_number}: direct Nextest run/list requires --archive-file")
+
+
+for path in sorted(Path(".github/workflows").glob("*.y*ml")):
+    pending = ""
+    first_line = 0
+    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+        if not pending:
+            first_line = line_number
+        line = line.rstrip()
+        continued = False
+        if line.endswith("\\"):
+            try:
+                shlex.split(line, comments=True)
+            except ValueError:
+                continued = True
+        pending += line[:-1] + " " if continued else line
+        if not continued:
+            check_command(path, first_line, pending)
+            pending = ""
+    if pending:
+        check_command(path, first_line, pending)
+PYTHON
+)"
+if [[ -n "${raw_cargo_workflow_hits}" || -n "${direct_nextest_workflow_hits}" ]]; then
   bad "GitHub workflow Rust entrypoints bypass scripts/repo-cargo"
   printf '%s\n' "${raw_cargo_workflow_hits}" >&2
+  printf '%s\n' "${direct_nextest_workflow_hits}" >&2
 else
   pass "GitHub workflow Rust entrypoints use the repo Cargo wrapper"
 fi

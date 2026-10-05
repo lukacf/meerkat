@@ -1180,6 +1180,7 @@ pub enum PeerIngressInputClass {
     SilentRequest,
     Ack,
     PlainEvent,
+    PeerLifecycleKickoff,
 }
 
 /// DSL-owned peer lifecycle classifier.
@@ -1189,6 +1190,12 @@ pub enum PeerIngressLifecycleClass {
     PeerAdded,
     PeerRetired,
     PeerUnwired,
+    KickoffPending,
+    KickoffStarting,
+    KickoffStarted,
+    KickoffCallbackPending,
+    KickoffFailed,
+    KickoffCancelled,
 }
 
 /// DSL-owned peer ingress auth classifier.
@@ -2873,12 +2880,13 @@ pub enum LiveContextRowDisposition {
     ReassertCausalTail,
     ReplayRuntimeWork,
     ReassertAssistantOutput,
+    ReplayTextChat,
 }
 
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     LiveContextDeliveryReadiness, LiveContextPayloadAvailability, LiveContextPreparationFailure,
     LiveContextPreparationPhase, LiveContextRowAuthor, LiveContextRowSource,
-    LiveConversationStartCause,
+    LiveConversationStartCause, RunStartHoldReason,
 };
 
 /// Bridging copy of the catalog-owned delegation result disposition.

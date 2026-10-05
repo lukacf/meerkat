@@ -40,38 +40,41 @@ async fn wait_delivery(
     .expect("delivery wait runs")
 }
 
-/// Poll with short deadlines until the delivery is admitted as a runtime
-/// input and still owed a terminal; returns its input id.
+/// Wait until the delivery is admitted as a runtime input and return its
+/// input id. The runtime's admission signal is the wake, not a re-read with
+/// short deadlines: one short wait can end before its first evidence read
+/// under load (`Unknown { NotObservedByDeadline }`). The member's turn is
+/// held, so the admitted input is still owed a terminal, which one typed
+/// read confirms.
 async fn admitted_pending(fixture: &Fixture, delivery: &MobDeliveryIdentity) -> InputId {
-    tokio::time::timeout(WAIT, async {
-        loop {
-            let report = wait_delivery(
-                fixture,
-                delivery,
-                &bound(),
-                std::time::Instant::now() + Duration::from_millis(200),
-            )
-            .await;
-            match report.work() {
-                // Pending at the final read, or at the last read before a
-                // final read that ran out: admitted and owed a terminal.
-                DeliveryTerminalWait::NotTerminal {
-                    input_id,
-                    cause:
-                        DeliveryNotTerminalCause::DeadlineElapsed
-                        | DeliveryNotTerminalCause::EvidenceReadTimedOut,
-                    terminal: None,
-                    ..
-                } => break input_id.clone(),
-                DeliveryTerminalWait::Unknown {
-                    cause: DeliveryUnknownCause::NotAdmittedByDeadline,
-                } => {}
-                other => panic!("expected an admitted pending delivery, got {other:?}"),
-            }
-        }
-    })
+    let adapter = fixture.service.runtime_adapter().expect("runtime owner");
+    // The admission is the signal; the deadline only bounds a broken run.
+    let input_id = tokio::time::timeout(
+        WAIT,
+        adapter
+            .wait_input_admitted_by_idempotency_key(&fixture.session_id, &delivery.idempotency_key),
+    )
     .await
     .expect("delivery is admitted from the inbox")
+    .expect("admission wait runs")
+    .expect("the member session is live");
+    let read = adapter
+        .input_terminal_receipt(
+            &fixture.session_id,
+            InteractionSelector::InputId(input_id.clone()),
+        )
+        .await
+        .expect("receipt read runs")
+        .expect("the admitted input is readable");
+    assert!(
+        matches!(
+            read.report,
+            InputTerminalReceiptRead::Pending { terminal: None, .. }
+        ),
+        "the admitted delivery is still owed a terminal: {:?}",
+        read.report
+    );
+    input_id
 }
 
 struct ReceiptView<'a> {

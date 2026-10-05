@@ -30,7 +30,14 @@ Example::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Union
+
+from .generated.types import (
+    LiveAssistantOutputAvailableParams,
+    LiveAssistantPlaybackHintParams,
+    LiveMediaHealthRequestedParams,
+)
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
@@ -246,3 +253,71 @@ class LiveChannel:
                 "LiveChannel has not been opened yet -- call open() first"
             )
         return self._channel_id
+
+
+LiveNotificationMethod = Literal[
+    "live/assistant_output_available",
+    "live/media_health_requested",
+    "live/assistant_playback_hint",
+]
+
+
+@dataclass(frozen=True)
+class LiveNotification:
+    """A server-to-client ``live/*`` notification, as delivered to
+    :meth:`MeerkatClient.on_live_notification` callbacks.
+
+    - ``live/assistant_output_available``: an actionable playback handle.
+    - ``live/media_health_requested``: answer with ``live_media_health``.
+    - ``live/assistant_playback_hint``: barge-in ``duck``/``restore`` of
+      local assistant playback. Purely advisory.
+    """
+
+    method: LiveNotificationMethod
+    params: Union[
+        LiveAssistantOutputAvailableParams,
+        LiveMediaHealthRequestedParams,
+        LiveAssistantPlaybackHintParams,
+    ]
+
+
+def parse_live_notification(method: str, params: Any) -> LiveNotification | None:
+    """Narrow one server notification to a :class:`LiveNotification`.
+
+    Returns ``None`` for a method this SDK build does not know or a malformed
+    payload, so a newer server's notifications are ignored, never misread.
+    """
+    if not isinstance(params, dict) or not isinstance(params.get("channel_id"), str):
+        return None
+    channel_id: str = params["channel_id"]
+    output_id = params.get("output_id")
+    if method == "live/assistant_output_available":
+        content_index = params.get("content_index")
+        if (
+            not isinstance(output_id, str)
+            or not isinstance(content_index, int)
+            or isinstance(content_index, bool)
+        ):
+            return None
+        return LiveNotification(
+            method="live/assistant_output_available",
+            params=LiveAssistantOutputAvailableParams(
+                channel_id=channel_id, output_id=output_id, content_index=content_index
+            ),
+        )
+    if method == "live/media_health_requested":
+        if not isinstance(output_id, str):
+            return None
+        return LiveNotification(
+            method="live/media_health_requested",
+            params=LiveMediaHealthRequestedParams(channel_id=channel_id, output_id=output_id),
+        )
+    if method == "live/assistant_playback_hint":
+        hint = params.get("hint")
+        if hint not in ("duck", "restore"):
+            return None
+        return LiveNotification(
+            method="live/assistant_playback_hint",
+            params=LiveAssistantPlaybackHintParams(channel_id=channel_id, hint=hint),
+        )
+    return None

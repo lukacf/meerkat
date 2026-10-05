@@ -158,27 +158,6 @@ fn gemini_model() -> String {
     std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.5-flash".to_string())
 }
 
-fn get_test_server_path() -> Option<std::path::PathBuf> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    let workspace_root = std::path::Path::new(&manifest_dir).parent()?.parent()?;
-    let server_path = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .and_then(|target_dir| {
-            [
-                target_dir.join("debug/mcp-test-server"),
-                target_dir.join("release/mcp-test-server"),
-            ]
-            .into_iter()
-            .find(|path| path.exists())
-        })
-        .unwrap_or_else(|| workspace_root.join("target/debug/mcp-test-server"));
-    if server_path.exists() {
-        Some(server_path)
-    } else {
-        None
-    }
-}
-
 /// Create a store adapter using JsonlStore with a temp directory
 async fn create_temp_store() -> (
     Arc<JsonlStore>,
@@ -386,10 +365,7 @@ mod tool_invocation {
             return;
         };
 
-        let Some(server_path) = get_test_server_path() else {
-            eprintln!("Skipping: MCP test server not built (run cargo build -p mcp-test-server)");
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         // Create MCP router and connect to test server
         let mut router = McpRouter::new();
@@ -792,10 +768,7 @@ mod parallel_tools {
             return;
         };
 
-        let Some(server_path) = get_test_server_path() else {
-            eprintln!("Skipping: MCP test server not built");
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         // Create MCP router with test server
         let mut router = McpRouter::new();

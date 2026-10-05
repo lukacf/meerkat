@@ -508,6 +508,7 @@ mod tests {
                         "comms-trust-reconcile-test",
                     ),
                     runtime_epoch_id: None,
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
             )
             .expect("RegisterSession input");
@@ -565,6 +566,7 @@ mod tests {
                         "comms-trust-reconcile-stale-test",
                     ),
                     runtime_epoch_id: None,
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
             )
             .expect("RegisterSession input");

@@ -903,3 +903,222 @@ async fn unmappable_outbox_row_is_skipped_and_other_jobs_keep_projecting() {
     assert_eq!(healed.projected.len(), 1);
     assert_eq!(healed.projected[0].job_id, vanished);
 }
+
+async fn monitor_job_with_notification_then_terminal(
+    jobs: &DetachedJobService,
+    session_id: SessionId,
+    key: &str,
+) -> JobId {
+    let receipt = jobs.submit(spec(key, session_id)).await.expect("submit");
+    let claim = jobs
+        .claim_attempt(
+            &receipt.job_id,
+            AttemptClaim::new(
+                WorkerId::new("monitor-worker").expect("worker"),
+                1,
+                100,
+                RunnerHandleRef::new("monitor-handle").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    jobs.emit_notification(
+        &receipt.job_id,
+        (&claim).into(),
+        2,
+        JobNotification::new("n1", "monitor:release", "Release observed", "v1 is out")
+            .expect("notification"),
+    )
+    .await
+    .expect("emit notification");
+    jobs.complete_attempt(
+        &receipt.job_id,
+        (&claim).into(),
+        3,
+        Some(JobResultRef::new("result").expect("result")),
+    )
+    .await
+    .expect("complete");
+    receipt.job_id
+}
+
+/// Wedge mode 1: a monitor job's notification row precedes its terminal row.
+/// The shell acknowledges the terminal (its completion projection already
+/// reached the session) while the notification is still unapplied. That
+/// acknowledgement must not fail out of order, an unrelated later job must
+/// not be blocked, and once the notification is applied the cursor moves over
+/// every acknowledged row without re-running their sinks.
+#[tokio::test]
+async fn shell_acknowledgement_behind_an_unapplied_notification_never_wedges_the_session() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new(job_store.clone(), inbox.clone());
+
+    let monitor =
+        monitor_job_with_notification_then_terminal(&jobs, session_id.clone(), "wedge-monitor")
+            .await;
+    projector
+        .project_job(monitor.as_str())
+        .await
+        .expect("project monitor");
+    projector
+        .acknowledge_applied(monitor.as_str())
+        .await
+        .expect("acknowledging the terminal behind the notification must not fail");
+
+    let later = completed_job(&jobs, session_id.clone(), "wedge-later").await;
+    projector
+        .project_job(later.as_str())
+        .await
+        .expect("project later job");
+    projector
+        .acknowledge_applied(later.as_str())
+        .await
+        .expect("an unrelated later job is never blocked");
+    assert_eq!(
+        inbox
+            .acknowledged_pending_sequences(&runtime_id)
+            .await
+            .expect("acknowledged"),
+        [2_u64, 3].into_iter().collect(),
+        "both terminals are recorded behind the unapplied notification"
+    );
+
+    let sink = Arc::new(RecordingDeliverySink::default());
+    let applier = JobRuntimeDeliveryApplier::new(inbox.clone(), sink.clone());
+    let drain = applier.apply_pending(&runtime_id, 10).await.expect("drain");
+    assert!(drain.is_fully_drained());
+    assert_eq!(
+        drain
+            .applied
+            .iter()
+            .map(|applied| (applied.runtime_sequence, applied.applications))
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (2, 0), (3, 0)],
+        "only the notification runs its sink; acknowledged terminals are consumed"
+    );
+    assert_eq!(sink.applications.lock().await.len(), 1);
+    assert!(
+        inbox
+            .list_pending(&runtime_id, 10)
+            .await
+            .expect("pending")
+            .is_empty()
+    );
+    assert_eq!(inbox.applied_cursor(&runtime_id).await.expect("cursor"), 3);
+}
+
+/// Wedge mode 2: two concurrent shell jobs of one session complete out of
+/// order. B (later sequence) is acknowledged before A. B must be recorded, not
+/// refused; acknowledging A then advances the cursor over both; and a third
+/// job is never blocked.
+#[tokio::test]
+async fn out_of_order_shell_acknowledgements_advance_through_the_acknowledged_prefix() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let projector = JobOutboxProjector::new(job_store.clone(), inbox.clone());
+
+    let first = completed_job(&jobs, session_id.clone(), "order-a").await;
+    let second = completed_job(&jobs, session_id.clone(), "order-b").await;
+    projector
+        .project_job(first.as_str())
+        .await
+        .expect("project a");
+    projector
+        .project_job(second.as_str())
+        .await
+        .expect("project b");
+
+    projector
+        .acknowledge_applied(second.as_str())
+        .await
+        .expect("an acknowledgement ahead of the cursor is recorded, not refused");
+    assert_eq!(inbox.applied_cursor(&runtime_id).await.expect("cursor"), 0);
+    projector
+        .acknowledge_applied(first.as_str())
+        .await
+        .expect("acknowledge a");
+    assert_eq!(
+        inbox.applied_cursor(&runtime_id).await.expect("cursor"),
+        2,
+        "the cursor advances over the contiguous acknowledged prefix"
+    );
+    assert!(
+        inbox
+            .acknowledged_pending_sequences(&runtime_id)
+            .await
+            .expect("acknowledged")
+            .is_empty()
+    );
+
+    let third = completed_job(&jobs, session_id.clone(), "order-c").await;
+    projector
+        .project_job(third.as_str())
+        .await
+        .expect("project c");
+    projector
+        .acknowledge_applied(third.as_str())
+        .await
+        .expect("an unrelated later job is never blocked");
+    assert_eq!(inbox.applied_cursor(&runtime_id).await.expect("cursor"), 3);
+    projector
+        .acknowledge_applied(second.as_str())
+        .await
+        .expect("a repeated acknowledgement is idempotent");
+}
+
+/// The drain population comes from the runtime delivery authority, not from a
+/// bounded window of job rows: every origin session with undrained rows for
+/// this realm's jobs is reported, foreign-realm runtimes are left alone, and a
+/// session drops out once its rows are applied.
+#[tokio::test]
+async fn pending_delivery_sessions_come_from_delivery_authority_scoped_to_realm() {
+    let job_store = Arc::new(MemoryDetachedJobStore::new());
+    let jobs = DetachedJobService::new(job_store.clone());
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let first_session = SessionId::new();
+    let second_session = SessionId::new();
+    let foreign_session = SessionId::new();
+    let first_job = completed_job(&jobs, first_session.clone(), "authority-a").await;
+    let _second_job = completed_job(&jobs, second_session.clone(), "authority-b").await;
+    let _foreign_job =
+        completed_job_in_realm(&jobs, "mob.other", foreign_session.clone(), "authority-c").await;
+    // An unbound projector commits every realm's rows into the shared inbox.
+    let pass = JobOutboxProjector::new(job_store.clone(), inbox.clone())
+        .project_pending(10)
+        .await
+        .expect("project");
+    assert_eq!(pass.projected.len(), 3);
+
+    let realm_projector = JobOutboxProjector::new_for_realm(job_store, inbox, "default");
+    let mut sessions = realm_projector
+        .sessions_with_pending_deliveries()
+        .await
+        .expect("pending sessions");
+    sessions.sort_by_key(ToString::to_string);
+    let mut expected = vec![first_session.clone(), second_session.clone()];
+    expected.sort_by_key(ToString::to_string);
+    assert_eq!(
+        sessions, expected,
+        "own-realm sessions only, from authority"
+    );
+
+    realm_projector
+        .acknowledge_applied(first_job.as_str())
+        .await
+        .expect("acknowledge first");
+    assert_eq!(
+        realm_projector
+            .sessions_with_pending_deliveries()
+            .await
+            .expect("pending sessions"),
+        vec![second_session],
+        "an applied session leaves the drain population"
+    );
+}

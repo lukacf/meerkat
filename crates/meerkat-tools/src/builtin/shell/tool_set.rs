@@ -64,6 +64,11 @@ impl ShellToolSet {
         ]
     }
 
+    /// The names of the tools [`Self::tools`] provides.
+    pub fn tool_names() -> &'static [&'static str] {
+        crate::builtin::SHELL_TOOL_NAMES
+    }
+
     /// Get usage instructions for the LLM on how to properly use shell tools
     ///
     /// These instructions should be injected into the system prompt when
@@ -135,6 +140,17 @@ mod tests {
 
         // Job manager should exist
         assert!(Arc::strong_count(&tool_set.job_manager) >= 1);
+    }
+
+    #[test]
+    fn tool_names_match_the_tool_definitions() {
+        let tool_set = ShellToolSet::new(ShellConfig::default());
+        let defined: Vec<String> = tool_set
+            .tools()
+            .iter()
+            .map(|tool| tool.def().name.to_string())
+            .collect();
+        assert_eq!(defined, ShellToolSet::tool_names());
     }
 
     // ==================== ShellToolSet::new Tests ====================

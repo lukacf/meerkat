@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Turbo S oracle gate: a scenario's verdict comes only from deterministic
+# checks that assert product contracts (typed events, canonical transcript
+# rows, settlement signals). A check that is evaluated but cannot fail the
+# scenario (a "tolerant", soft-fail or record-only check) lets red read as
+# green, exactly like an automatic retry, so it is rejected. Model wording and
+# wall-clock latency may be measured and journaled (record_metric), never
+# judged.
+#
+# usage: scripts/turbo-s-oracle-gate [root]
+#
+# Scans the Turbo S scenario sources (tests/integration) and fails on:
+#   - any "tolerant" identifier, record, label or doc ("Tolerant:")
+#   - soft-fail / record-only / warn-only / advisory check vocabulary
+#   - a function taking a `passed: bool` parameter, or any bool parameter on a
+#     record_*/note_*/check_*/observe_* function: the shape of a check that
+#     records its outcome instead of asserting it
+#   - a mutable `let mut *_failures` list other than `deterministic_failures`:
+#     a second list of failures that only gets printed is a soft check
+#
+# The gate is lexical: it stops the old vocabulary and shapes from coming
+# back, not deliberate evasion. The oracle rule in tests/integration/README.md
+# and review remain the real backstop.
+set -euo pipefail
+
+root="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
+scan_dir="${root}/tests/integration"
+if [[ ! -d "$scan_dir" ]]; then
+  echo "turbo-s-oracle-gate: ${scan_dir} not found" >&2
+  exit 2
+fi
+
+violations="$(
+  grep -rnE --include='*.rs' \
+    -e '[Tt]olerant|TOLERANT' \
+    -e '[Ss]oft[-_ ]?fail|[Rr]ecord[-_ ]only|[Ww]arn[-_ ]only|[Aa]dvisory' \
+    -e '\bpassed: bool\b' \
+    -e 'fn (record|note|check|observe)_[a-z0-9_]*\([^)]*: bool' \
+    "$scan_dir" || true
+)"
+
+# Any failure collection other than the verdict-bearing one.
+other_failures="$(
+  grep -rnoE --include='*.rs' 'let mut [a-z0-9_]*_failures\b' "$scan_dir" \
+    | grep -vE ':let mut deterministic_failures$' || true
+)"
+if [[ -n "$other_failures" ]]; then
+  violations="${violations:+${violations}
+}${other_failures}"
+fi
+
+if [[ -n "$violations" ]]; then
+  echo "turbo-s-oracle-gate: soft checks found in Turbo S scenario sources." >&2
+  echo "Every check must assert a product contract (fail the scenario) or be a" >&2
+  echo "plain measurement (record_metric, no verdict). Offending lines:" >&2
+  echo "$violations" >&2
+  exit 1
+fi
+echo "turbo-s-oracle-gate: ok (no soft checks in Turbo S scenario sources)"

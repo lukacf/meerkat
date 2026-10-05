@@ -20,7 +20,7 @@ meerkat-models = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
-meerkat-session = { workspace = true, features = ["session-compaction"] }
+meerkat-session = { workspace = true, features = ["session-compaction", "runtime-machine"] }
 meerkat-client = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-machine-kernels = { workspace = true }

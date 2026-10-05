@@ -384,8 +384,7 @@ impl IngressClassificationContext {
                     | PeerInputClass::PeerLifecycleAdded
                     | PeerInputClass::PeerLifecycleRetired
                     | PeerInputClass::PeerLifecycleUnwired
-                    | PeerInputClass::PeerLifecycleKickoffFailed
-                    | PeerInputClass::PeerLifecycleKickoffCancelled
+                    | PeerInputClass::PeerLifecycleKickoff
                     | PeerInputClass::Ack => {
                         meerkat_core::PeerIngressDeliveryContract::VolatileControl
                     }

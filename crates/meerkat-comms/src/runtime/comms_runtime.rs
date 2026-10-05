@@ -4947,6 +4947,7 @@ mod tests {
                     "meerkat-comms-runtime-test-projection",
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test_projection_add_authority::register_session",
         )
@@ -5069,6 +5070,7 @@ mod tests {
                     "meerkat-comms-runtime-test-projection",
                 ),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
             "test_projection_remove_authority::register_session",
         )

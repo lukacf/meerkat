@@ -63,6 +63,25 @@ use meerkat_machine_schema::{
 /// this typed error so `machine-generate` / `machine-check-drift` fail closed
 /// on malformed input. For every currently-valid schema the resolution checks
 /// pass, so generated output is unchanged.
+/// How a machine's named-type bindings depart from the canonical machine
+/// that shares its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalNamedTypeMismatchKind {
+    /// A canonical struct binding is missing.
+    MissingStructBinding,
+    /// The binding's generated domain shape differs from the canonical one.
+    DomainShape,
+}
+
+impl std::fmt::Display for CanonicalNamedTypeMismatchKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MissingStructBinding => "is missing the canonical struct binding",
+            Self::DomainShape => "has a different domain shape than the canonical binding",
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CompositionTlaError {
     /// A route's `from_machine` is not a declared machine instance.
@@ -187,6 +206,40 @@ pub enum CompositionTlaError {
     /// machine schema for a composition instance).
     #[error("composition TLA compilation failed: {0}")]
     Compile(String),
+    /// A supplied machine schema fails its own validation.
+    #[error("supplied machine `{machine}` is invalid: {error}")]
+    InvalidSuppliedMachine { machine: String, error: String },
+    /// A supplied catalog lists the same machine id twice.
+    #[error("supplied machine catalog lists machine `{machine}` more than once")]
+    DuplicateSuppliedMachine { machine: String },
+    /// A supplied machine reuses a canonical Meerkat machine id with a
+    /// different schema. A caller's catalog may include a canonical machine
+    /// unchanged, but never a shadow of it.
+    #[error(
+        "supplied machine `{machine}` shares its id with a canonical Meerkat machine but has a different schema"
+    )]
+    ShadowsCanonicalMachine { machine: String },
+    /// A machine that shares a canonical machine's id omits a canonical
+    /// struct named-type binding, or binds a shared named type with a
+    /// different generated domain shape.
+    #[error("machine `{machine}`: named type `{named_type}` {reason}")]
+    CanonicalNamedTypeMismatch {
+        machine: String,
+        named_type: String,
+        reason: CanonicalNamedTypeMismatchKind,
+    },
+    /// Two machines of one composition bind the same named type with
+    /// different generated domain shapes.
+    #[error(
+        "composition `{composition}`: named type `{named_type}` is bound with different domain shapes"
+    )]
+    DivergentNamedTypeBinding {
+        composition: String,
+        named_type: String,
+    },
+    /// The composition does not validate against the supplied catalog.
+    #[error("composition `{composition}` does not validate against the supplied catalog: {error}")]
+    InvalidCompositionForCatalog { composition: String, error: String },
 }
 
 impl From<String> for CompositionTlaError {
@@ -1388,8 +1441,30 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
 }
 
 pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> String {
+    render_composition_ci_cfg_from_catalog(schema, deep, &canonical_machine_schemas())
+}
+
+/// [`render_composition_ci_cfg`] against an explicitly supplied machine
+/// catalog, for compositions whose machines live outside Meerkat's catalog.
+pub fn render_composition_ci_cfg_with_catalog(
+    schema: &CompositionSchema,
+    deep: bool,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    Ok(render_composition_ci_cfg_from_catalog(
+        schema,
+        deep,
+        machine_catalog,
+    ))
+}
+
+fn render_composition_ci_cfg_from_catalog(
+    schema: &CompositionSchema,
+    deep: bool,
+    machine_catalog: &[MachineSchema],
+) -> String {
     let mut out = String::new();
-    let machine_catalog = canonical_machine_schemas();
     let machine_by_name = machine_catalog
         .iter()
         .map(|machine| (machine.machine.as_str(), machine))
@@ -1451,7 +1526,7 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
         );
         if machine_by_instance
             .get(protocol.producer_instance.as_str())
-            .is_some_and(|machine| !machine.state.terminal_phases.is_empty())
+            .is_some_and(|machine| terminal_closure_required(protocol, machine))
         {
             obligation_invariants.push(format!("NoOpenObligationsOnTerminal_{suffix}"));
         }
@@ -1569,8 +1644,30 @@ pub fn render_composition_witness_cfg(
     schema: &CompositionSchema,
     witness: &CompositionWitness,
 ) -> String {
+    render_composition_witness_cfg_from_catalog(schema, witness, &canonical_machine_schemas())
+}
+
+/// [`render_composition_witness_cfg`] against an explicitly supplied machine
+/// catalog, for compositions whose machines live outside Meerkat's catalog.
+pub fn render_composition_witness_cfg_with_catalog(
+    schema: &CompositionSchema,
+    witness: &CompositionWitness,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    Ok(render_composition_witness_cfg_from_catalog(
+        schema,
+        witness,
+        machine_catalog,
+    ))
+}
+
+fn render_composition_witness_cfg_from_catalog(
+    schema: &CompositionSchema,
+    witness: &CompositionWitness,
+    machine_catalog: &[MachineSchema],
+) -> String {
     let mut out = String::new();
-    let machine_catalog = canonical_machine_schemas();
     let machine_by_name = machine_catalog
         .iter()
         .map(|machine| (machine.machine.as_str(), machine))
@@ -1620,7 +1717,7 @@ pub fn render_composition_witness_cfg(
         );
         if machine_by_instance
             .get(protocol.producer_instance.as_str())
-            .is_some_and(|machine| !machine.state.terminal_phases.is_empty())
+            .is_some_and(|machine| terminal_closure_required(protocol, machine))
         {
             obligation_invariants.push(format!("NoOpenObligationsOnTerminal_{suffix}"));
         }
@@ -2111,13 +2208,30 @@ fn composition_witness_state_constraint_name(name: impl AsRef<str>) -> String {
 pub fn render_composition_semantic_model(
     schema: &CompositionSchema,
 ) -> std::result::Result<String, CompositionTlaError> {
-    let machine_catalog = canonical_machine_schemas();
+    render_composition_semantic_model_from_catalog(schema, &canonical_machine_schemas())
+}
+
+/// [`render_composition_semantic_model`] against an explicitly supplied
+/// machine catalog, for compositions whose machines live outside Meerkat's
+/// catalog.
+pub fn render_composition_semantic_model_with_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    render_composition_semantic_model_from_catalog(schema, machine_catalog)
+}
+
+fn render_composition_semantic_model_from_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<String, CompositionTlaError> {
     // Fail closed: compiler construction (unknown machine schema, empty
     // catalog) and rendering (unresolved route component, helper-call cycle,
     // absent obligation field) used to be swallowed into `String::new()`,
     // producing a broken-but-passing model. Propagate the typed error so
     // `machine-generate` / `machine-check-drift` fail on malformed input.
-    let compiler = CompositionTlaCompiler::new(schema, &machine_catalog)
+    let compiler = CompositionTlaCompiler::new(schema, machine_catalog)
         .map_err(CompositionTlaError::Compile)?;
     compiler.render()
 }
@@ -2139,9 +2253,28 @@ pub fn render_composition_semantic_model(
 /// driver descriptor continues to carry the Rust emission path for xtask
 /// consumers.
 pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
+    render_composition_driver_from_catalog(schema, &canonical_machine_schemas())
+}
+
+/// [`render_composition_driver`] against an explicitly supplied machine
+/// catalog, for compositions whose machines live outside Meerkat's catalog.
+pub fn render_composition_driver_with_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> std::result::Result<Option<String>, CompositionTlaError> {
+    validate_supplied_catalog(schema, machine_catalog)?;
+    Ok(render_composition_driver_from_catalog(
+        schema,
+        machine_catalog,
+    ))
+}
+
+fn render_composition_driver_from_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> Option<String> {
     let driver = schema.driver.as_ref()?;
 
-    let machine_catalog = canonical_machine_schemas();
     let machine_by_name = machine_catalog
         .iter()
         .map(|machine| (machine.machine.as_str(), machine))
@@ -2862,6 +2995,7 @@ fn to_snake_case_local(value: &str) -> String {
 pub fn render_machine_semantic_model(
     schema: &MachineSchema,
 ) -> std::result::Result<String, CompositionTlaError> {
+    check_canonical_named_bindings(schema)?;
     let mut compiler = MachineTlaCompiler::new(schema);
     compiler.render()
 }
@@ -5021,31 +5155,38 @@ fn collect_machine_named_bindings(
         .collect()
 }
 
-fn assert_machine_named_bindings_match_canonical(schema: &MachineSchema) {
+/// A machine that shares a canonical machine's id must bind every canonical
+/// struct named type, and bind each shared named type with the canonical
+/// generated domain shape.
+fn check_canonical_named_bindings(schema: &MachineSchema) -> Result<(), CompositionTlaError> {
     let Some(canonical) = canonical_machine_schemas()
         .into_iter()
         .find(|canonical| canonical.machine == schema.machine)
     else {
-        return;
+        return Ok(());
     };
-
+    let mismatch = |named_type: &str, reason| CompositionTlaError::CanonicalNamedTypeMismatch {
+        machine: schema.machine.as_str().to_owned(),
+        named_type: named_type.to_owned(),
+        reason,
+    };
     for canonical_binding in canonical.named_types.iter().filter(|binding| {
         matches!(
             binding.rust,
             meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. }
         )
     }) {
-        assert!(
-            schema
-                .named_types
-                .iter()
-                .any(|binding| binding.name == canonical_binding.name),
-            "generated machine `{}` missing canonical named-type `{}` binding",
-            schema.machine,
-            canonical_binding.name
-        );
+        if !schema
+            .named_types
+            .iter()
+            .any(|binding| binding.name == canonical_binding.name)
+        {
+            return Err(mismatch(
+                canonical_binding.name.as_str(),
+                CanonicalNamedTypeMismatchKind::MissingStructBinding,
+            ));
+        }
     }
-
     for binding in &schema.named_types {
         let Some(canonical_binding) = canonical
             .named_types
@@ -5054,15 +5195,102 @@ fn assert_machine_named_bindings_match_canonical(schema: &MachineSchema) {
         else {
             continue;
         };
+        if !canonical_binding
+            .rust
+            .has_same_composition_domain_shape(&binding.rust)
+        {
+            return Err(mismatch(
+                binding.name.as_str(),
+                CanonicalNamedTypeMismatchKind::DomainShape,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Internal invariant for the infallible renderers, whose callers pass
+/// canonical machines; the public fallible entry points check first.
+fn assert_machine_named_bindings_match_canonical(schema: &MachineSchema) {
+    if let Err(CompositionTlaError::CanonicalNamedTypeMismatch {
+        machine,
+        named_type,
+        reason,
+    }) = check_canonical_named_bindings(schema)
+    {
         assert!(
-            canonical_binding
-                .rust
-                .has_same_composition_domain_shape(&binding.rust),
-            "generated machine `{}` named-type `{}` binding must match canonical domain shape",
-            schema.machine,
-            binding.name
+            reason != CanonicalNamedTypeMismatchKind::MissingStructBinding,
+            "generated machine `{machine}` missing canonical named-type `{named_type}` binding"
+        );
+        assert!(
+            reason != CanonicalNamedTypeMismatchKind::DomainShape,
+            "generated machine `{machine}` named-type `{named_type}` binding must match canonical domain shape"
         );
     }
+}
+
+/// Validate a caller-supplied machine catalog before rendering a composition
+/// against it: every machine validates, ids are unique, no machine shadows a
+/// canonical Meerkat machine with a different schema, the composition's
+/// machines agree on shared named types, and the composition validates
+/// against the catalog. The render paths behind this never panic on a
+/// supplied catalog.
+fn validate_supplied_catalog(
+    schema: &CompositionSchema,
+    machine_catalog: &[MachineSchema],
+) -> Result<(), CompositionTlaError> {
+    let canonical = canonical_machine_schemas();
+    let mut seen = BTreeSet::new();
+    for machine in machine_catalog {
+        machine
+            .validate()
+            .map_err(|error| CompositionTlaError::InvalidSuppliedMachine {
+                machine: machine.machine.as_str().to_owned(),
+                error: error.to_string(),
+            })?;
+        if !seen.insert(machine.machine.as_str()) {
+            return Err(CompositionTlaError::DuplicateSuppliedMachine {
+                machine: machine.machine.as_str().to_owned(),
+            });
+        }
+        if canonical
+            .iter()
+            .any(|candidate| candidate.machine == machine.machine && candidate != machine)
+        {
+            return Err(CompositionTlaError::ShadowsCanonicalMachine {
+                machine: machine.machine.as_str().to_owned(),
+            });
+        }
+    }
+    let mut merged: BTreeMap<&str, &meerkat_machine_schema::RustTypeAtom> = BTreeMap::new();
+    for instance in &schema.machines {
+        let Some(machine) = machine_catalog
+            .iter()
+            .find(|machine| machine.machine.as_str() == instance.machine_name.as_str())
+        else {
+            continue;
+        };
+        for binding in &machine.named_types {
+            match merged.get(binding.name.as_str()) {
+                Some(existing) if !existing.has_same_composition_domain_shape(&binding.rust) => {
+                    return Err(CompositionTlaError::DivergentNamedTypeBinding {
+                        composition: schema.name.as_str().to_owned(),
+                        named_type: binding.name.as_str().to_owned(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    merged.insert(binding.name.as_str(), &binding.rust);
+                }
+            }
+        }
+    }
+    let machines = machine_catalog.iter().collect::<Vec<_>>();
+    schema.validate_against(&machines).map_err(|error| {
+        CompositionTlaError::InvalidCompositionForCatalog {
+            composition: schema.name.as_str().to_owned(),
+            error: error.to_string(),
+        }
+    })
 }
 
 /// Merge every machine's named-type bindings into one map for
@@ -5092,6 +5320,335 @@ fn collect_composition_named_bindings<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every quantified Next disjunct leads with its transition's source-phase
+    /// guard, so TLC rejects the whole disjunct in other phases instead of
+    /// enumerating each parameter tuple per state (#1499 measured 464 s
+    /// unhoisted against 158 s hoisted on work_graph_lifecycle ci, identical
+    /// state counts).
+    #[test]
+    fn quantified_next_disjuncts_lead_with_the_source_phase_guard() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        let quantified = next
+            .lines()
+            .filter(|line| line.contains("\\E "))
+            .collect::<Vec<_>>();
+        assert!(
+            !quantified.is_empty(),
+            "MeerkatMachine has quantified transitions"
+        );
+        for line in &quantified {
+            assert!(
+                line.starts_with("    \\/ (phase = "),
+                "quantified Next disjunct without a leading phase guard: {line}"
+            );
+        }
+        assert!(
+            next.contains("    \\/ (phase = \"Running\") /\\ \\E run_id \\in RunIdValues : RequestCancelAfterBoundary(run_id)"),
+            "the guard is the transition's own source phase"
+        );
+    }
+
+    fn next_disjunct_for<'a>(model: &'a str, action: &str) -> &'a str {
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        next.lines()
+            .find(|line| line.contains(&format!(" {action}(")))
+            .expect("Next disjunct for the action")
+    }
+
+    /// A declared domain, not a binding name, decides an input field's TLC
+    /// domain: additional values extend the default unsigned range, a state
+    /// binding explores exactly the state field, and an undeclared
+    /// `expected_revision` gets the plain default (the old name match is gone).
+    #[test]
+    fn declared_input_field_domains_decide_the_rendered_domain() {
+        use meerkat_machine_schema::catalog::dsl::dsl_workgraph_lifecycle_machine;
+        use meerkat_machine_schema::identity::{FieldId, InputVariantId};
+        use meerkat_machine_schema::{InputFieldDomain, InputFieldDomainKind};
+
+        let shipped = dsl_workgraph_lifecycle_machine();
+        let model = render_machine_semantic_model(&shipped).expect("render workgraph model");
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen")
+                .contains("\\E expected_revision \\in {revision} : "),
+            "a state-bound declaration explores exactly the state field"
+        );
+
+        let mut sampled = shipped.clone();
+        sampled.input_field_domains.push(InputFieldDomain {
+            input: InputVariantId::parse("CreateOpen").expect("input slug"),
+            field: FieldId::parse("unresolved_blocker_count").expect("field slug"),
+            domain: InputFieldDomainKind::AdditionalValues([3, 8].into_iter().collect()),
+        });
+        let model = render_machine_semantic_model(&sampled).expect("render sampled model");
+        assert!(
+            next_disjunct_for(&model, "CreateOpen")
+                .contains("\\E arg_unresolved_blocker_count \\in (0..2 \\cup {3, 8}) : "),
+            "additional values extend the default unsigned domain"
+        );
+
+        let mut undeclared = shipped;
+        undeclared.input_field_domains.clear();
+        let model = render_machine_semantic_model(&undeclared).expect("render undeclared model");
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen").contains("\\E expected_revision \\in 0..2 : "),
+            "without a declaration the binding name no longer selects a domain"
+        );
+    }
+
+    #[test]
+    fn substituted_compound_values_are_delimited_and_atoms_are_not() {
+        for atom in [
+            "x",
+            "packet.payload.run_id",
+            "Some(run_id)",
+            "MapSet(m, k, v)",
+            "m[k]",
+            "f(a)[b](c)",
+            "(a + 1)",
+            "\"a(b\"",
+            "42",
+        ] {
+            assert_eq!(tla_delimited(atom), atom, "{atom} is already an operand");
+        }
+        for compound in [
+            "IF c THEN a ELSE b",
+            "x + 1",
+            "s \\cup {x}",
+            "(a) + (b)",
+            "f(a) = b",
+            "~x",
+        ] {
+            assert_eq!(
+                tla_delimited(compound),
+                format!("({compound})"),
+                "{compound} must be delimited before splicing"
+            );
+        }
+    }
+
+    /// A field assigned by a conditional update earlier in the same block is
+    /// read through its pending value, a bare `IF c THEN a ELSE b`. Spliced
+    /// unparenthesized into a later expression, TLA+ precedence captured the
+    /// surrounding operator. Shipped instance: the meerkat_mob_seam
+    /// `TurnRunFailed` payload unwraps the conditionally updated
+    /// `terminal_cause_kind` as `IF "value" \in DOMAIN v THEN v["value"] ELSE
+    /// None`; with `v` bare, `["value"]` applied to v's ELSE branch only, so
+    /// the THEN branch emitted the Option record instead of its value.
+    #[test]
+    fn a_conditionally_updated_field_read_later_in_the_block_splices_as_one_operand() {
+        let model = render_composition_semantic_model(&meerkat_mob_seam_composition())
+            .expect("render meerkat_mob_seam model");
+        assert!(
+            model.contains(
+                "terminal_cause_kind |-> (IF \"value\" \\in DOMAIN (IF (IF (meerkat_terminal_cause_kind = None)"
+            ),
+            "the TurnRunFailed unwrap must test the whole conditional value"
+        );
+        assert!(
+            !model.contains("ELSE meerkat_terminal_cause_kind[\"value\"]"),
+            "no index may bind to one branch of a spliced conditional"
+        );
+    }
+
+    /// A set insert or remove of a field that a conditional update already
+    /// changed earlier in the same block takes the field's pending value, a
+    /// bare `IF c THEN a ELSE b`, as its left operand. Spliced unparenthesized,
+    /// the ELSE branch captured the set operator, so the THEN branch lost the
+    /// second update. Shipped instance: MobMachine's topology convergence
+    /// removes both absent identities from `pending_respawn_topology`; the
+    /// model removed only `a_identity` when both were absent.
+    #[test]
+    fn a_set_update_after_a_conditional_update_takes_the_whole_conditional() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        assert!(
+            model.contains(
+                "((IF ((a_identity \\in DOMAIN identity_to_runtime) = FALSE) THEN (pending_respawn_topology \\ {a_identity}) ELSE pending_respawn_topology) \\ {b_identity})"
+            ),
+            "the second removal must apply to the whole conditional value"
+        );
+        assert!(
+            !model.contains("ELSE pending_respawn_topology \\ {b_identity}"),
+            "no set operator may bind to one branch of a spliced conditional"
+        );
+    }
+
+    /// Every update kind that reads a field's pending value must splice it so
+    /// no operator after it can bind into one branch of a pending conditional
+    /// (`IF c THEN a ELSE b`, left by an earlier conditional update in the
+    /// same block): each occurrence must close an operand, followed only by
+    /// `)`, `,` or the end of the value. The match is exhaustive, so a new
+    /// `Update` kind must be classified here.
+    #[test]
+    fn every_update_kind_splices_a_pending_conditional_as_one_operand() {
+        use meerkat_machine_schema::identity::FieldId;
+        const PENDING: &str = "IF c THEN a ELSE b";
+        let field = || FieldId::parse("f").expect("field slug");
+        let x = || Expr::Binding("x".to_owned());
+        let samples = vec![
+            Update::Increment {
+                field: field(),
+                amount: 1,
+            },
+            Update::Decrement {
+                field: field(),
+                amount: 1,
+            },
+            Update::MapInsert {
+                field: field(),
+                key: x(),
+                value: x(),
+            },
+            Update::MapIncrement {
+                field: field(),
+                key: x(),
+                amount: 1,
+            },
+            Update::MapDecrement {
+                field: field(),
+                key: x(),
+                amount: 1,
+            },
+            Update::MapRemove {
+                field: field(),
+                key: x(),
+            },
+            Update::SetInsert {
+                field: field(),
+                value: x(),
+            },
+            Update::SetRemove {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqAppend {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqPrepend {
+                field: field(),
+                values: x(),
+            },
+            Update::SeqPopFront { field: field() },
+            Update::SeqRemoveValue {
+                field: field(),
+                value: x(),
+            },
+            Update::SeqRemoveAll {
+                field: field(),
+                values: x(),
+            },
+            Update::Conditional {
+                condition: Expr::Binding("d".to_owned()),
+                then_updates: vec![Update::SetInsert {
+                    field: field(),
+                    value: x(),
+                }],
+                else_updates: vec![Update::SetRemove {
+                    field: field(),
+                    value: x(),
+                }],
+            },
+            Update::ForEach {
+                binding: "y".to_owned(),
+                over: x(),
+                updates: vec![Update::SetInsert {
+                    field: field(),
+                    value: Expr::Binding("y".to_owned()),
+                }],
+            },
+        ];
+        let schema = mob_machine();
+        for update in &samples {
+            // Exhaustive: classify every kind. `Assign` does not read the
+            // field's pending value, so it cannot splice it.
+            match update {
+                Update::Assign { .. } => continue,
+                Update::Increment { .. }
+                | Update::Decrement { .. }
+                | Update::MapInsert { .. }
+                | Update::MapIncrement { .. }
+                | Update::MapDecrement { .. }
+                | Update::MapRemove { .. }
+                | Update::SetInsert { .. }
+                | Update::SetRemove { .. }
+                | Update::SeqAppend { .. }
+                | Update::SeqPrepend { .. }
+                | Update::SeqPopFront { .. }
+                | Update::SeqRemoveValue { .. }
+                | Update::SeqRemoveAll { .. }
+                | Update::Conditional { .. }
+                | Update::ForEach { .. } => {}
+            }
+            let mut compiler = MachineTlaCompiler::new(&schema);
+            let mut env = BTreeMap::from([("f".to_owned(), PENDING.to_owned())]);
+            let binding_types =
+                BTreeMap::from([("x".to_owned(), TypeRef::Set(Box::new(TypeRef::U64)))]);
+            compiler.apply_update("Probe", &mut env, &BTreeMap::new(), &binding_types, update);
+            let rendered = env.get("f").expect("the update writes f");
+            assert!(
+                rendered.contains(PENDING),
+                "{update:?} must read the pending value: {rendered}"
+            );
+            for (at, _) in rendered.match_indices(PENDING) {
+                let after = rendered[at + PENDING.len()..].chars().next();
+                assert!(
+                    matches!(after, None | Some(')' | ',')),
+                    "{update:?} lets {after:?} bind into the pending conditional: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// A `for` loop lowers to one fold per touched field, and each fold must
+    /// read the other fields as they were BEFORE the loop, as the sequential
+    /// kernel does within an iteration. Writing each fold back into the env
+    /// while lowering handed later folds an earlier field's post-loop value:
+    /// the causal-tail batch then looked up already-removed cursors and left
+    /// orphaned queued rows, which the generated outbox invariant caught. So
+    /// no fold of a loop may take another fold of the same loop as an
+    /// argument.
+    #[test]
+    fn a_for_each_fold_reads_the_other_fields_before_the_loop() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let mut checked = 0;
+        for line in model.lines() {
+            let Some(eq) = line.find("' = ") else {
+                continue;
+            };
+            let rhs = &line[eq + 4..];
+            let Some(open) = rhs.find('(') else {
+                continue;
+            };
+            let head = &rhs[..open];
+            let Some(pos) = head.find("_ForEach") else {
+                continue;
+            };
+            let digits: String = head[pos + "_ForEach".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            let same_loop = format!("{}_ForEach{digits}_", &head[..pos]);
+            assert!(
+                !rhs[open..].contains(&same_loop),
+                "a for-loop fold takes another fold of the same loop as an argument: {line}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "the MeerkatMachine model has for-loop folds to check"
+        );
+    }
     use meerkat_machine_schema::RustTypeAtom;
     use meerkat_machine_schema::catalog::dsl::{
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -5572,6 +6129,31 @@ fn domain_dependency_depth(ty: &TypeRef) -> usize {
         | TypeRef::Named(_)
         | TypeRef::Enum(_) => 0,
     }
+}
+
+/// The rendered payload of one owner feedback input.
+struct FeedbackPayload {
+    payload_expr: String,
+    quantifiers: Vec<String>,
+    /// `(obligation field, bound member variable)` per `ObligationMember`.
+    members: Vec<(String, String)>,
+}
+
+/// Whether `NoOpenObligationsOnTerminal_<protocol>` applies: the producer has
+/// terminal phases and the protocol is `AckRequired`, so only owner feedback
+/// closes its obligations. Under `AckOrAbort` and `TerminalClosure` the
+/// terminal phase is itself the closure, and a `PublicationOnly` protocol has
+/// no feedback (the publication closes it), so for those the invariant would be
+/// unsatisfiable once the producer reaches a terminal phase.
+fn terminal_closure_required(
+    protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    producer: &MachineSchema,
+) -> bool {
+    !producer.state.terminal_phases.is_empty()
+        && matches!(
+            protocol.closure_policy,
+            meerkat_machine_schema::ClosurePolicy::AckRequired
+        )
 }
 
 fn render_type_domain_expr(ty: &TypeRef) -> String {
@@ -6556,7 +7138,12 @@ impl<'a> CompositionTlaCompiler<'a> {
                 let Some(ty) = binding_types.get(binding.as_str()) else {
                     return self.machine_transition_name(instance_id, transition);
                 };
-                let domain = self.binding_domain_for_binding(instance_id, binding.as_str(), ty);
+                let domain = self.binding_domain_for_binding(
+                    instance_id,
+                    trigger_input_variant(transition),
+                    binding.as_str(),
+                    ty,
+                );
                 let domain = if transition_uses_tlc_representative_payload(
                     self.machine(instance_id),
                     transition,
@@ -6600,19 +7187,27 @@ impl<'a> CompositionTlaCompiler<'a> {
         }
     }
 
-    fn binding_domain_for_binding(&self, instance_id: &str, binding: &str, ty: &TypeRef) -> String {
-        if binding == "expected_revision"
-            && matches!(ty, TypeRef::U64)
-            && self
-                .machine(instance_id)
-                .state
-                .fields
-                .iter()
-                .any(|field| field.name.as_str() == "revision" && matches!(field.ty, TypeRef::U64))
-        {
-            return format!("{{{}}}", self.field_var(instance_id, "revision"));
+    /// Payload domain for one bound field of `input` on `instance_id`: the
+    /// machine's declared input field domain if it has one, otherwise the
+    /// type's default domain.
+    fn binding_domain_for_binding(
+        &self,
+        instance_id: &str,
+        input: Option<&str>,
+        binding: &str,
+        ty: &TypeRef,
+    ) -> String {
+        let declared =
+            input.and_then(|input| self.machine(instance_id).input_field_domain(input, binding));
+        match declared {
+            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+                format!("{{{}}}", self.field_var(instance_id, state_field.as_str()))
+            }
+            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+                additional_values_domain(&self.binding_domain_for_type(ty), values)
+            }
+            None => self.binding_domain_for_type(ty),
         }
-        self.binding_domain_for_type(ty)
     }
 
     fn machine_vars(&self) -> Vec<String> {
@@ -6682,14 +7277,19 @@ impl<'a> CompositionTlaCompiler<'a> {
             })
     }
 
+    /// The feedback input's payload record, the quantifiers over the values it
+    /// leaves open, and the obligation members it names. An `ObligationMember`
+    /// value ranges over that set field of the obligation token, so the owner
+    /// can only name a member the obligation actually carries.
     fn feedback_payload_expr(
         &self,
         feedback: &FeedbackInputRef,
         token_var: &str,
-    ) -> std::result::Result<(String, Vec<String>), String> {
+    ) -> std::result::Result<FeedbackPayload, String> {
         let variant = self.feedback_variant(feedback)?;
         let mut owner_context_quantifiers = Vec::new();
         let mut payload_fields = Vec::new();
+        let mut members = Vec::new();
 
         for field in &variant.fields {
             let binding = feedback
@@ -6700,6 +7300,15 @@ impl<'a> CompositionTlaCompiler<'a> {
             let expr = match &binding.source {
                 FeedbackFieldSource::ObligationField(source_field) => {
                     format!("{token_var}.{}", tla_ident(source_field))
+                }
+                FeedbackFieldSource::ObligationMember(source_field) => {
+                    let var_name = format!("member_{}", tla_ident(source_field));
+                    owner_context_quantifiers.push(format!(
+                        "{var_name} \\in {token_var}.{}",
+                        tla_ident(source_field)
+                    ));
+                    members.push((tla_ident(source_field), var_name.clone()));
+                    var_name
                 }
                 FeedbackFieldSource::OwnerContext(name) => {
                     let var_name = format!("owner_ctx_{}", tla_ident(name));
@@ -6717,7 +7326,27 @@ impl<'a> CompositionTlaCompiler<'a> {
             format!("[{}]", payload_fields.join(", "))
         };
 
-        Ok((payload_expr, owner_context_quantifiers))
+        Ok(FeedbackPayload {
+            payload_expr,
+            quantifiers: owner_context_quantifiers,
+            members,
+        })
+    }
+
+    /// Obligation fields some feedback input of `protocol` names members of.
+    /// The obligation token stays open while any of them is non-empty.
+    fn protocol_member_fields(
+        protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+    ) -> BTreeSet<String> {
+        protocol
+            .allowed_feedback_inputs
+            .iter()
+            .flat_map(|feedback| feedback.field_bindings.iter())
+            .filter_map(|binding| match &binding.source {
+                FeedbackFieldSource::ObligationMember(field) => Some(tla_ident(field)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Renders obligation closure invariants into the TLA+ output.
@@ -6746,8 +7375,13 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .map(meerkat_machine_schema::identity::PhaseId::as_str)
                 .collect();
 
-            // NoOpenObligationsOnTerminal: terminal phase => obligation set is empty
-            if !terminal_phases.is_empty() {
+            // NoOpenObligationsOnTerminal: terminal phase => obligation set is
+            // empty. Only an AckRequired protocol needs owner feedback to close
+            // its obligations; under AckOrAbort and TerminalClosure the terminal
+            // phase is itself the closure, and a PublicationOnly protocol has no
+            // feedback (the publication closes it), so for those the invariant
+            // would be unsatisfiable once the producer reaches a terminal phase.
+            if terminal_closure_required(protocol, machine) {
                 let inv_name = format!("NoOpenObligationsOnTerminal_{}", suffix);
                 let terminal_disjuncts: Vec<String> = terminal_phases
                     .iter()
@@ -6828,8 +7462,11 @@ impl<'a> CompositionTlaCompiler<'a> {
 
             for feedback in &protocol.allowed_feedback_inputs {
                 let action_name = self.owner_feedback_action_name(protocol, feedback);
-                let (payload_expr, owner_context_quantifiers) =
-                    self.feedback_payload_expr(feedback, "token")?;
+                let FeedbackPayload {
+                    payload_expr,
+                    quantifiers: owner_context_quantifiers,
+                    members,
+                } = self.feedback_payload_expr(feedback, "token")?;
                 let input_expr = format!(
                     "[machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token.effect_id, payload |-> {}]",
                     tla_string(&feedback.machine_instance),
@@ -6847,9 +7484,34 @@ impl<'a> CompositionTlaCompiler<'a> {
                 } else {
                     format!("\\E {} : ", owner_context_quantifiers.join(", "))
                 };
+                // Feedback naming obligation members discharges only those
+                // members; the token closes once every member-bearing field of
+                // the protocol is empty. Other feedback closes the token.
+                let obligation_update = if members.is_empty() {
+                    format!("{var}' = {var} \\ {{token}}")
+                } else {
+                    let residual = format!(
+                        "[token EXCEPT {}]",
+                        members
+                            .iter()
+                            .map(|(field, member)| format!("!.{field} = @ \\ {{{member}}}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    let drained = Self::protocol_member_fields(protocol)
+                        .iter()
+                        .map(|field| format!("{residual}.{field} = {{}}"))
+                        .collect::<Vec<_>>()
+                        .join(" /\\ ");
+                    // Parenthesised: an unbracketed ELSE would swallow the
+                    // conjuncts that follow it in the action.
+                    format!(
+                        "{var}' = (IF {drained} THEN {var} \\ {{token}} ELSE ({var} \\ {{token}}) \\cup {{{residual}}})"
+                    )
+                };
                 writeln!(
                     out,
-                    "        /\\ {quantifier_prefix}(/\\ pending_inputs' = Append(pending_inputs, {input_expr}) /\\ observed_inputs' = observed_inputs \\cup {{{input_expr}}} /\\ {var}' = {var} \\ {{token}} /\\ model_step_count' = model_step_count + 1)"
+                    "        /\\ {quantifier_prefix}(/\\ pending_inputs' = Append(pending_inputs, {input_expr}) /\\ observed_inputs' = observed_inputs \\cup {{{input_expr}}} /\\ {obligation_update} /\\ model_step_count' = model_step_count + 1)"
                 )
                 .expect("write to string");
 
@@ -8729,6 +9391,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                             );
                             let domain = self.binding_domain_for_binding(
                                 route.to.machine.as_str(),
+                                Some(target_variant.name.as_str()),
                                 binding.to_field.as_str(),
                                 &target_field.ty,
                             );
@@ -9125,7 +9788,11 @@ impl<'a> MachineTlaCompiler<'a> {
                     let Some(ty) = binding_types.get(binding.as_str()) else {
                         return Ok(String::new());
                     };
-                    let domain = self.binding_domain_for_binding(binding.as_str(), ty);
+                    let domain = self.binding_domain_for_binding(
+                        trigger_input_variant(transition),
+                        binding.as_str(),
+                        ty,
+                    );
                     let domain =
                         if transition_uses_tlc_representative_payload(self.schema, transition) {
                             tlc_representative_domain(domain)
@@ -9155,7 +9822,23 @@ impl<'a> MachineTlaCompiler<'a> {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{prefix}{}({})", transition.name, args)
+                // Hoist the source-phase guard ahead of the parameter
+                // quantifiers. The guard is the first conjunct of the action
+                // body too, so the disjunct is unchanged in meaning, but TLC
+                // no longer splits it into one action per parameter tuple
+                // that it must enumerate in every state: states outside the
+                // source phase reject the whole disjunct at once.
+                let from_guard = transition
+                    .from
+                    .iter()
+                    .map(|phase| format!("phase = {}", tla_string(phase)))
+                    .collect::<Vec<_>>()
+                    .join(" \\/ ");
+                if prefix.is_empty() || from_guard.is_empty() {
+                    format!("{prefix}{}({})", transition.name, args)
+                } else {
+                    format!("({from_guard}) /\\ {prefix}{}({})", transition.name, args)
+                }
             };
             pushln!(&mut out, "    \\/ {}", call);
         }
@@ -10685,19 +11368,23 @@ impl<'a> MachineTlaCompiler<'a> {
         }
     }
 
-    fn binding_domain_for_binding(&self, binding: &str, ty: &TypeRef) -> String {
-        if binding == "expected_revision"
-            && matches!(ty, TypeRef::U64)
-            && self
-                .schema
-                .state
-                .fields
-                .iter()
-                .any(|field| field.name.as_str() == "revision" && matches!(field.ty, TypeRef::U64))
-        {
-            return "{revision}".into();
+    /// Payload domain for one bound field of `input`: the declared input
+    /// field domain if the schema has one, otherwise the type's default.
+    fn binding_domain_for_binding(
+        &self,
+        input: Option<&str>,
+        binding: &str,
+        ty: &TypeRef,
+    ) -> String {
+        match input.and_then(|input| self.schema.input_field_domain(input, binding)) {
+            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+                format!("{{{}}}", state_field.as_str())
+            }
+            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+                additional_values_domain(&self.binding_domain_for_type(ty), values)
+            }
+            None => self.binding_domain_for_type(ty),
         }
-        self.binding_domain_for_type(ty)
     }
 
     fn compile_updates(
@@ -10795,9 +11482,12 @@ impl<'a> MachineTlaCompiler<'a> {
                 );
             }
             Update::SetInsert { field, value } => {
+                // The field's pending value may be an unparenthesized
+                // conditional (`IF c THEN a ELSE b`); spliced bare as the left
+                // operand, the ELSE branch would capture the set operator.
                 let current = env
                     .get(field.as_str())
-                    .cloned()
+                    .map(|value| tla_delimited(value))
                     .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);
@@ -10807,9 +11497,12 @@ impl<'a> MachineTlaCompiler<'a> {
                 );
             }
             Update::SetRemove { field, value } => {
+                // The field's pending value may be an unparenthesized
+                // conditional (`IF c THEN a ELSE b`); spliced bare as the left
+                // operand, the ELSE branch would capture the set operator.
                 let current = env
                     .get(field.as_str())
-                    .cloned()
+                    .map(|value| tla_delimited(value))
                     .unwrap_or_else(|| field.as_str().to_owned());
                 let value_expr =
                     self.render_expr_with_types(value, env, binding_env, binding_types);
@@ -10926,6 +11619,13 @@ impl<'a> MachineTlaCompiler<'a> {
                 self.helper_counter += 1;
                 let over_expr = self.render_expr_with_types(over, env, binding_env, binding_types);
                 let touched = collect_update_fields(updates);
+                // Every touched field's fold reads the other fields as they
+                // were BEFORE the loop: the loop below writes each fold back
+                // into `env` as it goes, so reading `env` there would hand a
+                // later field the earlier field's post-loop value (all of its
+                // iterations already applied), not the value an iteration
+                // reads in the sequential kernel.
+                let base_env = env.clone();
                 let referenced_bindings = collect_update_bindings(updates)
                     .into_iter()
                     .filter(|item| item != binding)
@@ -10933,12 +11633,15 @@ impl<'a> MachineTlaCompiler<'a> {
                 let referenced_fields = collect_update_fields_exprs(updates)
                     .into_iter()
                     .filter(|field| {
-                        touched.contains(field) || env.get(field.as_str()) != Some(field)
+                        touched.contains(field) || base_env.get(field.as_str()) != Some(field)
                     })
                     .collect::<BTreeSet<_>>();
 
                 for field in touched {
-                    let current = env.get(&field).cloned().unwrap_or_else(|| field.clone());
+                    let current = base_env
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| field.clone());
                     let helper_name = format!(
                         "{}_ForEach{}_{}",
                         tla_ident(transition_name),
@@ -10976,7 +11679,7 @@ impl<'a> MachineTlaCompiler<'a> {
                         if *ref_field == field {
                             continue;
                         }
-                        let current_expr = env
+                        let current_expr = base_env
                             .get(ref_field)
                             .cloned()
                             .unwrap_or_else(|| ref_field.clone());
@@ -11239,10 +11942,17 @@ impl<'a> MachineTlaCompiler<'a> {
             ),
             Expr::CurrentPhase => self.phase_symbol.clone().unwrap_or_else(|| "phase".into()),
             Expr::Phase(value) => tla_string(value),
-            Expr::Field(name) => env
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or_else(|| name.as_str().to_owned()),
+            // A field already assigned earlier in the same update block reads
+            // its pending value, which may be an unparenthesized compound
+            // (a conditional update renders `IF c THEN a ELSE b`). Spliced bare
+            // into a larger expression, TLA+ precedence would capture the
+            // surrounding operator: `IF c THEN a ELSE b = x` parses as
+            // `IF c THEN a ELSE (b = x)`. Delimit every substituted value.
+            Expr::Field(name) => match env.get(name.as_str()) {
+                Some(value) if value != name.as_str() => tla_delimited(value),
+                Some(value) => value.clone(),
+                None => name.as_str().to_owned(),
+            },
             Expr::Binding(name) => binding_env
                 .get(name)
                 .cloned()
@@ -12486,4 +13196,94 @@ fn tla_ident(value: impl AsRef<str>) -> String {
 
 fn tla_string(value: impl AsRef<str>) -> String {
     format!("\"{}\"", value.as_ref().replace('"', "\\\""))
+}
+
+/// Wrap a rendered TLA+ expression in parentheses unless it is already an
+/// atom (an identifier, field path, number or string, optionally applied with balanced
+/// `(...)`/`[...]` suffixes, or one parenthesized group), so it can be spliced
+/// as an operand without TLA+ operator precedence reaching into it.
+fn tla_delimited(expr: &str) -> String {
+    if tla_is_atom(expr) {
+        expr.to_owned()
+    } else {
+        format!("({expr})")
+    }
+}
+
+fn tla_is_atom(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut index = 0;
+    match bytes.first() {
+        Some(b'(') => {}
+        Some(b'"') => {
+            index = 1;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += 1;
+            }
+            if index >= bytes.len() {
+                return false;
+            }
+            index += 1;
+        }
+        Some(byte) if byte.is_ascii_alphanumeric() || *byte == b'_' => {
+            // Identifiers and record field paths (`packet.payload.run_id`):
+            // field access binds tighter than every operator.
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric()
+                    || bytes[index] == b'_'
+                    || bytes[index] == b'.')
+            {
+                index += 1;
+            }
+        }
+        _ => return false,
+    }
+    // Zero or more balanced `(...)` / `[...]` groups, with nothing between.
+    while index < bytes.len() {
+        let (open, close) = match bytes[index] {
+            b'(' => (b'(', b')'),
+            b'[' => (b'[', b']'),
+            _ => return false,
+        };
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut end = None;
+        for (offset, byte) in bytes[index..].iter().enumerate() {
+            match *byte {
+                b'"' => in_string = !in_string,
+                b if b == open && !in_string => depth += 1,
+                b if b == close && !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(end) => index = end + 1,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// The input variant a transition is triggered by, if it is input-triggered.
+fn trigger_input_variant(transition: &TransitionSchema) -> Option<&str> {
+    match &transition.on {
+        TriggerMatch::Input { variant, .. } => Some(variant.as_str()),
+        _ => None,
+    }
+}
+
+/// The default unsigned domain extended with declared additional values.
+fn additional_values_domain(default: &str, values: &BTreeSet<u64>) -> String {
+    let values = values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({default} \\cup {{{values}}})")
 }

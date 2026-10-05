@@ -35,8 +35,2156 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_runtime::live_execution::superseded_typed_row_context` takes a
+  `SupersededTypedRowRole` (`UserInput` or `Reply`, new) after the typed
+  row: only a typed user input carries the open-request clause (#1629). See
+  Fixed.
+- `meerkat_runtime::live_execution::LiveContextAppendKind` gains
+  `TextChatReplay`, the quiet text-chat append of a host-typed turn's rows
+  (#1614); `HistoryBootstrap`'s discriminant shifts. Exhaustive matches must
+  handle the new variant. See Fixed.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): `LiveContextRowDisposition` gains
+  the variant `ReplayTextChat` and `LiveContextRowSource` gains the variant
+  `TextChat` (#1614, #1623). Exhaustive matches must handle them. See Fixed.
+- `meerkat::session_runtime::runtime_state::RuntimeStateOps::live_session_is_stale`
+  takes a `meerkat_session::LiveStalenessPosition` (`TurnBoundaryHeld` or
+  `OutsideTurnBoundary`): whether the caller holds the session's
+  turn-finalization boundary. See Fixed.
+- Member-kickoff status notices are typed one-way lifecycle notices (#1608).
+  `PeerLifecycleKind` (meerkat-core) gains `PeerLifecycleKind::KickoffPending`,
+  `PeerLifecycleKind::KickoffStarting`, `PeerLifecycleKind::KickoffStarted`,
+  `PeerLifecycleKind::KickoffCallbackPending`,
+  `PeerLifecycleKind::KickoffFailed` and `PeerLifecycleKind::KickoffCancelled`
+  (wire `mob.kickoff_*`, now valid `peer_lifecycle` kinds on REST, RPC and
+  MCP). `PeerInputClass` (meerkat-core) replaces the never-produced
+  `PeerInputClass::PeerLifecycleKickoffFailed` and
+  `PeerInputClass::PeerLifecycleKickoffCancelled` with one
+  `PeerInputClass::PeerLifecycleKickoff`, so the later variants
+  `PeerInputClass::SilentRequest`, `PeerInputClass::Ack` and
+  `PeerInputClass::PlainEvent` shift down one discriminant.
+  `CommsNoticeKind` gains `CommsNoticeKind::Lifecycle` (wire `lifecycle`) and
+  `PeerConversationProjection` gains `PeerConversationProjection::Lifecycle`.
+  The generated MeerkatMachine `PeerIngressLifecycleClass`
+  (meerkat-machine-schema, meerkat-machine-kernels, meerkat-runtime) gains
+  `PeerIngressLifecycleClass::KickoffPending`,
+  `PeerIngressLifecycleClass::KickoffStarting`,
+  `PeerIngressLifecycleClass::KickoffStarted`,
+  `PeerIngressLifecycleClass::KickoffCallbackPending`,
+  `PeerIngressLifecycleClass::KickoffFailed` and
+  `PeerIngressLifecycleClass::KickoffCancelled`; `PeerIngressInputClass`
+  gains `PeerIngressInputClass::PeerLifecycleKickoff`; the kernel
+  `TransitionId` gains
+  `TransitionId::ClassifyExternalEnvelopeLifecycleKickoffAttached` and
+  `TransitionId::ClassifyExternalEnvelopeLifecycleKickoffRunning`, appended.
+  Code matching any of these enums exhaustively must handle the new
+  variants.
+- MobMachine state records that member run starts are held (#1500):
+  `MobMachineState` (meerkat-machine-schema) and the kernel `State`
+  (meerkat-machine-kernels) gain the field `member_run_starts_held`, so code
+  that builds either struct literally must set it.
+- A Stopped or Completed mob keeps its phase on flow bookkeeping. The kernel
+  `TransitionId` enum gains a Stopped and a Completed variant for each of the
+  48 flow, frame and loop authorization, RecordLoop* and AdmitDestroyCleanup
+  transitions, appended after every existing variant so no existing
+  discriminant shifts. Added variants:
+  `TransitionId::AdmitDestroyCleanupStopped`,
+  `TransitionId::AdmitDestroyCleanupCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandAdmitNextReadyNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCancelNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCancelNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCompleteNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandCompleteNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandFailNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandFailNodeCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandRecordNodeOutputStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandRecordNodeOutputCompleted`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandSkipNodeStopped`,
+  `TransitionId::AuthorizeFlowFrameReducerCommandSkipNodeCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCancelStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCancelStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCompleteStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandCompleteStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionPassedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionPassedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionRejectedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandConditionRejectedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandDispatchStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandDispatchStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalatingStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalatingCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycleCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrameCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandNodeExecutionReleasedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandNodeExecutionReleasedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalatingCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycleCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpFrameSchedulerStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpFrameSchedulerCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpNodeSchedulerStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandPumpNodeSchedulerCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordStepOutputStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordStepOutputCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetCanceledStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetCanceledCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetFailureStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetFailureCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetSuccessStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetSuccessCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRecordTargetTerminalFailureCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterPendingBodyFrameCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReadyCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterTargetsStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandRegisterTargetsCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandSkipStepStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandSkipStepCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandStartRunStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandStartRunCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCanceledStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCanceledCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCompletedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalCompletedCompleted`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalFailedStopped`,
+  `TransitionId::AuthorizeFlowRunReducerCommandTerminalFailedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCanceledStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCanceledCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCompletedStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameCompletedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameFailedStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameFailedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameStartedStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandBodyFrameStartedCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandCancelLoopStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandCancelLoopCompleted`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandUntilFeedbackStopped`,
+  `TransitionId::AuthorizeLoopIterationReducerCommandUntilFeedbackCompleted`,
+  `TransitionId::RecordLoopBodyFrameCompletedStopped`,
+  `TransitionId::RecordLoopBodyFrameCompletedCompleted`,
+  `TransitionId::RecordLoopUntilConditionFailedExhaustedStopped`,
+  `TransitionId::RecordLoopUntilConditionFailedExhaustedCompleted`,
+  `TransitionId::RecordLoopUntilConditionFailedStopped`,
+  `TransitionId::RecordLoopUntilConditionFailedCompleted`,
+  `TransitionId::RecordLoopUntilConditionMetStopped`,
+  `TransitionId::RecordLoopUntilConditionMetCompleted`.
+- `meerkat_mob::MobHandle::stop` returns `Result<MobStopReport, MobError>`
+  instead of `Result<(), MobError>` (#1500).
+- Generated machine types gain the run-start hold (#1500). Machine DSL changes
+  add variants to the generated MeerkatMachine, MobMachine and kernel enums,
+  shifting the discriminants and order of: `EffectKind::*`, `InputKind::*`,
+  `MeerkatMachineEffect::*`, `MeerkatMachineEffectVariant::*`,
+  `MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MobMachineEffect::*`, `MobMachineEffectVariant::*`, `TransitionId::*`.
+  Added variants: `Effect::HoldMemberRunStarts`,
+  `Effect::ReleaseMemberRunStarts`, `Effect::RunStartHeld`,
+  `Effect::RunStartsHeld`, `Effect::RunStartsReleased`;
+  `EffectKind::HoldMemberRunStarts`, `EffectKind::ReleaseMemberRunStarts`,
+  `EffectKind::RunStartHeld`, `EffectKind::RunStartsHeld`,
+  `EffectKind::RunStartsReleased`; `Input::HoldRunStarts`,
+  `Input::ReleaseRunStarts`; `InputKind::HoldRunStarts`,
+  `InputKind::ReleaseRunStarts`; `MeerkatMachineEffect::RunStartHeld`,
+  `MeerkatMachineEffect::RunStartsHeld`,
+  `MeerkatMachineEffect::RunStartsReleased`;
+  `MeerkatMachineEffectVariant::RunStartHeld`,
+  `MeerkatMachineEffectVariant::RunStartsHeld`,
+  `MeerkatMachineEffectVariant::RunStartsReleased`;
+  `MeerkatMachineInput::HoldRunStarts`,
+  `MeerkatMachineInput::ReleaseRunStarts`;
+  `MeerkatMachineInputVariant::HoldRunStarts`,
+  `MeerkatMachineInputVariant::ReleaseRunStarts`;
+  `MobMachineEffect::HoldMemberRunStarts`,
+  `MobMachineEffect::ReleaseMemberRunStarts`;
+  `MobMachineEffectVariant::HoldMemberRunStarts`,
+  `MobMachineEffectVariant::ReleaseMemberRunStarts`;
+  `TransitionId::BeginPlacedCompletionLifecycleQuiesceFreshStop`,
+  `TransitionId::BeginPlacedCompletionLifecycleQuiesceReplayStop`,
+  `TransitionId::CompleteSpawnStopped`,
+  `TransitionId::DrainQueuedRunHeldRetired`,
+  `TransitionId::HoldRunStartsAttached`, `TransitionId::HoldRunStartsIdle`,
+  `TransitionId::HoldRunStartsInertDestroyed`,
+  `TransitionId::HoldRunStartsInitializing`,
+  `TransitionId::HoldRunStartsRetired`, `TransitionId::HoldRunStartsRunning`,
+  `TransitionId::HoldRunStartsStopped`,
+  `TransitionId::PrepareHeldAttached`, `TransitionId::PrepareHeldIdle`,
+  `TransitionId::ReleaseRunStartsLastAttached`,
+  `TransitionId::ReleaseRunStartsLastDestroyed`,
+  `TransitionId::ReleaseRunStartsLastIdle`,
+  `TransitionId::ReleaseRunStartsLastInitializing`,
+  `TransitionId::ReleaseRunStartsLastRetired`,
+  `TransitionId::ReleaseRunStartsLastRunning`,
+  `TransitionId::ReleaseRunStartsLastStopped`,
+  `TransitionId::ReleaseRunStartsStillHeldAttached`,
+  `TransitionId::ReleaseRunStartsStillHeldDestroyed`,
+  `TransitionId::ReleaseRunStartsStillHeldIdle`,
+  `TransitionId::ReleaseRunStartsStillHeldInitializing`,
+  `TransitionId::ReleaseRunStartsStillHeldRetired`,
+  `TransitionId::ReleaseRunStartsStillHeldRunning`,
+  `TransitionId::ReleaseRunStartsStillHeldStopped`,
+  `TransitionId::StartConversationRunHeldAttached`,
+  `TransitionId::StartConversationRunHeldIdle`,
+  `TransitionId::StartConversationRunHeldInitializing`,
+  `TransitionId::StartImmediateAppendHeldAttached`,
+  `TransitionId::StartImmediateAppendHeldInitializing`. Added fields:
+  `BridgeCapabilities.run_start_hold`, `MeerkatMachineState.run_start_holds`,
+  `MobLifecycleResult.stop_report`, `State.run_start_holds`, and
+  `initial_run_start_holds` on the `RegisterSession` variant of
+  `MeerkatMachineInput` and `Input`.
+- `meerkat_mob_mcp::MobMcpState::mob_stop` returns the `MobStopReport`, and
+  `mob_lifecycle_action` returns `MobLifecycleReports` (destroy and stop
+  reports) instead of `Option<MobDestroyReport>` (#1500).
+- `meerkat_sqlite::SqliteStoreError` and `meerkat_store::StoreError` gain
+  `UnsupportedDatabaseFile { path, detail }`, the typed refusal for a
+  database path SQLite cannot safely address by one name (#1551, see Fixed).
+  Exhaustive matches must handle it.
+- `meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral::LifecycleOperationPending`
+  gains `member: meerkat_mob::AgentIdentity`, the member whose
+  explicit-resume work defers the revival, so the wait can observe that
+  operation's own completion.
+- `meerkat_machine_codegen::CompositionTlaError` gains the variants
+  `InvalidSuppliedMachine`, `DuplicateSuppliedMachine`,
+  `ShadowsCanonicalMachine`, `CanonicalNamedTypeMismatch`,
+  `DivergentNamedTypeBinding` and `InvalidCompositionForCatalog`, so
+  exhaustive matches need arms. `render_machine_semantic_model` now returns
+  `CanonicalNamedTypeMismatch` for a machine that keeps a canonical id but
+  drops or rebinds a canonical named type, where it used to panic.
+- `meerkat_machine_schema::MachineSchema` gains the public field
+  `input_field_domains: Vec<InputFieldDomain>`, and
+  `meerkat_machine_schema::catalog::dsl::MachineSchemaMetadata` gains
+  `input_field_domains` and `state_bound_input_fields`. Struct literals must
+  set them; an empty `Vec` keeps today's behaviour.
+  `meerkat_machine_schema::MachineSchemaError` gains the variant
+  `InvalidInputFieldDomain { variant, field, reason }`, so exhaustive matches
+  need an arm.
+- `meerkat::session_runtime::live_orchestration::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS`
+  and `LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY` are removed. The deferred
+  close settlement no longer retries on a timer (see Fixed);
+  `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND` remains as its single hang guard.
+- `meerkat::experimental_gpt_live::ExperimentalLivePumpRetirementError`
+  replaces `SemanticUncommitted(String)` with typed retry kinds:
+  `CloseInFlight(String)`, `SessionBusy(String)` and `Permanent(String)`
+  (see Fixed). The default `retire_bound_channel_after_pump_exit` reports
+  `Permanent`.
+- Security fix (behaviour, managed hosts): members of child mobs (mobs a
+  member creates with the agent `mob_create` tool, and `delegate` helpers)
+  no longer run without the host's application tool policy. Previously a member
+  constrained by a host consequence policy could create a child mob whose
+  members were unmanaged, because the child builder received neither the
+  host's policy registry nor any binding. Now:
+  - `MobMcpState::with_tool_consequence_policy_registry` installs the host
+    registry, which is forwarded to every child mob builder.
+  - `MobMcpState::with_child_application_tool_policy(binding)` is the host's
+    explicit choice for child members, applied to every spawn into a child
+    mob and never settable by callers. An explicit
+    `ApplicationToolPolicyBinding::Unmanaged` is a valid opt-out.
+  - A managed host (registry installed) with no child policy refuses the
+    agent's `mob_create` and `delegate`, and spawns into existing child mobs,
+    with the typed `ChildToolPolicyRefused::PolicyRequired`, whose message
+    says why and names the fix. The agent sees the refusal as a `policy_denied` tool error
+    (code `child_tool_policy_required`) and its turn continues. A provider
+    child policy without a registry refuses with `RegistryMissing`, and
+    `Inherit` with `InheritNotAllowed`. A host without a registry keeps
+    today's behaviour (unmanaged children).
+  - `delegate` helpers previously ran unmanaged even on a managed host: the
+    implicit delegation mob is now a child mob, so helpers run under the
+    child policy, and `delegate` is refused up front like `mob_create`.
+  - Only child mobs are governed. Mobs the host creates (including public
+    `meerkat_mob_create`), same-mob `fork_off` and `mob_spawn_member`, and
+    temporary councils keep their own member bindings. The classification
+    comes from the mob's persisted owner bridge authority, so it survives
+    restore.
+- `meerkat_mob::MobError` gains `ToolBundleUnavailable { bundle }`, the typed
+  refusal for a member whose profile names a tool bundle its mob's builder
+  does not register (previously an untyped `MobError::Internal`). Exhaustive
+  matches must handle it.
+- `meerkat_runtime::EphemeralRuntimeDriver` is no longer `UnwindSafe` or
+  `RefUnwindSafe`: it now holds the runtime admission signal added with the
+  typed admission wait (#1431). Callers that relied on these auto traits (for
+  example `std::panic::catch_unwind` around a driver reference) must wrap it in
+  `AssertUnwindSafe`.
+- `meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorRotationObserve`
+  gains the public field `hold_until_terminal_ms: Option<u64>`.
+  `meerkat_contracts::wire::supervisor_bridge::BridgeCapabilities` gains the
+  public field `rotation_observe_hold: bool`. Struct literals must set them;
+  `None` and `false` keep today's behaviour. On the wire both are omitted when
+  unset, so payloads to and from members that predate them are unchanged. The
+  supervisor bridge protocol version stays V6.
+- `meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureHost::service`
+  changes from `Arc<dyn SessionRuntimeLlmReconfigureService>` to
+  `std::sync::Weak<dyn SessionRuntimeLlmReconfigureService>`; construct it
+  with `Arc::downgrade`. The service now owns the runtime machine the host is
+  installed on, so a strong back-reference would leak both. A host whose
+  service was dropped answers every call with `RuntimeDriverError::Destroyed`.
+  `meerkat_session::PersistentSessionService` adds
+  `with_canonical_runtime_adapter` and `canonical_runtime_adapter`; the
+  runtime-backed surface composition binds the machine it returns. Behaviour:
+  a mob on a persistent service built by that composition runs on the
+  surface's machine (with its LLM reconfigure host) instead of a private
+  second machine, so per-turn LLM overrides and host `stop_run` work without
+  `MobBuilder::with_runtime_adapter` (#1435). A directly constructed service
+  owns a machine of its own, created on first use; the global pointer-keyed
+  cache is gone.
+- Behaviour-only (not measured by the gate): a mob Stop or Shutdown no longer
+  answers `MobError::AutonomousStopInterruptsPending` while its members'
+  exact interrupts are in flight. It waits for them off the actor loop and
+  completes once they settle, so `MobHandle::stop`/`shutdown` no longer retry
+  that variant on a timer. A stop whose interrupts do not all settle within
+  the lifecycle budget reports a typed `LifecycleOperationProgressStalled`.
+  The placed-cleanup barriers (`PlacedKickoffCleanupPending`,
+  `PlacedCompletionCleanupPending`) are unchanged (#1413).
+- `meerkat_mcp::McpRouter::set_inflight_calls_for_testing` (feature
+  `test-support`) now returns `Result<(), McpError>`. It fails when the
+  server is not installed or the surface owner rejects the call transition,
+  instead of silently leaving the shell's count and the owner's apart.
+- Behaviour-only (not measured by the gate): rkat-rpc callback routing is
+  owned per connection (#1451). Over TCP, a session's callback tools route
+  only to the connection that created it, and `tools/register` changes only
+  that connection's registry.
+  - When that connection is gone, its sessions' callbacks fail with
+    `tool_unavailable` (`NotCurrentlyCallable`), not `execution_failed`.
+  - Sessions with no owning connection (for example mob member sessions over
+    TCP, where no process-default channel is initialized) get no callback
+    tools. They previously used the most recently connected client's tools.
+    Binding mob callback tools to the creating connection is tracked in #1459.
+  - Stdio and embedded servers that pre-create the channel with
+    `SessionRuntime::init_callback_channel` are unchanged.
+- Keyed WorkGraph admission (#1496, see Added) adds the create identity to the
+  generated `WorkGraphLifecycleMachine` vocabulary. Struct literals and
+  exhaustive matches must handle the new members:
+  - `meerkat_machine_schema` `WorkGraphLifecycleInput::CreateOpen` and
+    `WorkGraphLifecycleInput::CreateBlocked` gain
+    `admission_key: Option<WorkAdmissionKeyRef>` and
+    `admission_request_digest: Option<WorkAdmissionDigestRef>` (`None` for an
+    unkeyed create); the matching `meerkat_machine_kernels` `CreateOpen` and
+    `CreateBlocked` input structs gain the same fields.
+  - `WorkGraphLifecycleEffect::Created` changes from a unit variant to
+    `Created { admission_key, admission_request_digest }`; the
+    `meerkat_machine_kernels` `Created` effect struct gains `admission_key` and
+    `admission_request_digest`.
+  - `WorkGraphLifecycleEffect` and `WorkGraphLifecycleEffectVariant` gain the
+    variant `UnpairedAdmissionIdentityRejected`; in `meerkat_machine_kernels`
+    the work-graph lifecycle `Effect` and `EffectKind` gain it too, and
+    `TransitionId` gains `CreateOpenRejectedUnpairedAdmission` and
+    `CreateBlockedRejectedUnpairedAdmission` (appended, so existing
+    discriminants are unchanged).
+  - `meerkat_workgraph::WorkGraphError` gains the variants
+    `UnpairedAdmissionIdentity { admission_key_present, request_digest_present }`
+    and `SchemaMismatch { version, missing_objects, unexpected_objects,
+    changed_objects }`; the generated `WorkGraphErrorKind` gains
+    `UnpairedAdmissionIdentity` (classified `invalid_arguments`) and
+    `SchemaMismatch` (classified `store_error`), both appended.
+- `meerkat_sqlite::SqliteStoreError` gains `CurrentSchemaMismatch { domain,
+  version, missing_objects, unexpected_objects, changed_objects }`. A file
+  whose ledger row stamps a domain's CURRENT version but whose owned catalog is
+  not that schema is now reported with it, naming the missing, unexpected and
+  changed objects, instead of `SchemaFingerprintMismatch` (which remains for
+  released predecessors and post-migration self-checks). Exhaustive matches
+  must handle the new variant.
+- Typed tool choice (see Added). Struct literals and exhaustive matches must
+  handle the new members:
+  - `meerkat_llm_core::LlmRequest` gains `tool_choice: ToolChoice` (serde
+    default `Auto`, omitted when `Auto`).
+  - `meerkat_core::service::TurnToolOverlay` and `PublicTurnToolOverlay`
+    gain `tool_choice_plan: Vec<ToolChoice>` (omitted when empty).
+  - `meerkat_core::lifecycle::run_primitive::ProviderParamsOverride` gains
+    the request-local `tool_choice: Option<ToolChoice>`. It is never
+    serialized, so a params override cannot carry or persist one.
+  - `meerkat_core::model_profile::capabilities::ModelCapabilities` gains
+    `supports_forced_tool_choice: bool`.
+  - `meerkat_llm_core::LlmError` gains `ToolChoiceUnsupported { provider,
+    choice, reason }`.
+  - `meerkat_core::service::TurnToolOverlayComposeError` and
+    `meerkat::surface::WorkGraphAttentionTurnOverlayError` gain
+    `ConflictingToolChoicePlan`.
+  - `meerkat_core::model_fallback::ModelFallbackSkipReason` gains
+    `ToolChoiceUnsupported` (wire value `tool_choice_unsupported`).
+- Behaviour-only (not measured by the gate): MCP stdio servers are killed
+  immediately after their stdin closes. rmcp gave established servers up to
+  3 s after EOF, and we now terminate immediately after EOF, so a server that
+  needs to flush state on EOF must not rely on it. This applies to
+  `McpConnection::close`, `McpProtocol::close`, `McpRouter::shutdown`, and to
+  server remove, reload and replace. On Unix the whole process group of the
+  server is killed (see Fixed).
+- `meerkat_core::TranscriptEditError` gains the variant
+  `TranscriptRevisionRetired { revision, oldest_retained_revision,
+  retired_rewrites }`, the typed refusal for a revision older than the
+  transcript-history retention window (see Fixed). Exhaustive matches must
+  handle it.
+- `meerkat_core::CompactionConfig` and
+  `meerkat_core::config::CompactionRuntimeConfig` gain the public field
+  `history_retained_rewrites: usize` (default 4). Struct literals must set it
+  or use `..Default::default()`.
+- `meerkat_core::TranscriptHistoryState::commits` returns the named iterator
+  `TranscriptRewriteCommits` (`ExactSizeIterator + DoubleEndedIterator`)
+  instead of an opaque `impl ExactSizeIterator`.
+- Behaviour-only (not measured by the gate): a session's transcript graph is
+  re-anchored after each compaction. On a re-anchored
+  `TranscriptHistoryState`, `anchor()` is the oldest retained rewrite child,
+  not the pre-rewrite transcript. `edges()` and `materialize_revision_bodies()`
+  cover the retained occurrences only, and `materialize_revision` of a retired
+  revision returns `TranscriptRevisionRetired`. `commits()`, `commit_count()`,
+  `commit(i)`, `rewrite_prefix()` and `graph_prefix()` are unchanged.
+  Code that walks `commits()` and projects a commit's parent
+  (`Session::with_validated_transcript_rewrite_parent_projection`) now gets
+  `TranscriptRevisionRetired` for every commit before the cut, where it used
+  to get the parent: it must skip such a commit (it has no body to prove
+  against) rather than fail. A host admission that walked every commit
+  failed its store write here until it skipped them.
+- The SQLite session store's schema domain moves to v5 (table
+  `session_transcript_retirements`). Opening a store migrates it forward.
+  Binaries from before this release refuse a v5 file, as they refuse any
+  newer schema.
+- `meerkat_mob::MobError` gains `RuntimeOwnerConflict` (#1550). An explicit
+  `MobBuilder::with_runtime_adapter` must now be the session service's actual
+  runtime owner (a clone of its `MeerkatMachine`), not merely another machine
+  over the same runtime store. A different live owner is refused with
+  `RuntimeOwnerConflict` before anything is provisioned, so a mob's sessions
+  and the service's archive path always resolve the same owner.
+- MCP OAuth login is host-driven (security batch). The native authority no
+  longer binds a listener or opens a browser:
+  - `meerkat_auth_core::BrowserOpener`, `meerkat_auth_core::SystemBrowserOpener`
+    and `McpOAuthAuthority::interactive_login` are removed. Use
+    `McpOAuthAuthority::login_start` / `login_complete` / `login_cancel`, or
+    `meerkat::HostAuthService::mcp_login_start` / `mcp_login_complete` /
+    `mcp_login_cancel`.
+  - `McpOAuthAuthority::new` is now `new(persistence, auth_lease)` and
+    `McpOAuthAuthority::with_http` is now `with_http(persistence, http,
+    auth_lease)`; the browser parameter is gone.
+  - `McpOAuthError::Browser` and `McpOAuthError::InteractiveRequiresTty` are
+    removed; `McpOAuthError` gains `HumanAuthorizationRequired { server_name }`
+    and `Callback { server_name, reason }`.
+  - `meerkat_mcp::McpError` gains `AuthorizationRequired { target }`.
+  - Behaviour-only (not measured by the gate): the `McpAuthResolver` impl for
+    `McpOAuthAuthority` returns `HumanAuthorizationRequired` from
+    `interactive_login` instead of opening a browser.
+  - `meerkat::AgentBuildConfig` gains the public field `mcp_auth_resolver`
+    (feature `mcp`, native only); struct literals must set it (`None` keeps
+    today's behaviour).
+  - `meerkat::HostAuthError` gains `McpOAuth(McpOAuthError)` and
+    `McpTarget(HostMcpTargetRefusal)`.
+- `auth/login/start`, `auth/login/complete` and `auth/status/get` accept an MCP
+  server target, and `auth/login/cancel` (RPC and `POST /auth/login/cancel`)
+  is new. Provider JSON is unchanged, but the Rust and SDK types change:
+  - `meerkat_contracts::LoginStartParams` replaces `provider`, `realm_id`,
+    `binding_id` and `profile_id` with `target: WireLoginTarget`.
+  - `meerkat_contracts::LoginCompleteParams` replaces the same fields with
+    `target: WireLoginTarget`; its `Debug` now redacts `code` and `state`. An
+    MCP completion carries only `code`, `state` and `redirect_uri`: issuer,
+    client and resource come from the admitted attempt.
+  - `meerkat_contracts::WireLoginStart` replaces `provider` with
+    `target: WireLoginStartTarget`; its `Debug` now redacts `authorize_url` and
+    `state`.
+  - `meerkat_contracts::WireLoginReady` replaces `identity`, `profile_id` and
+    `provider` with `target: WireLoginReadyTarget`.
+  - `auth/status/get` is catalogued as `AuthStatusParams` ->
+    `WireAuthStatusResult` (was `BindingIdParams` -> `WireAuthStatusDetail`).
+  - Generated Python and TypeScript `LoginStartParams`, `LoginCompleteParams`,
+    `WireLoginStart`, `WireLoginReady`, `AuthStatusParams` and
+    `WireAuthStatusResult` are unions of a provider and an MCP variant. The
+    Python generated types are no longer constructible dataclasses; the client
+    wrappers build the request dicts.
+  - Behaviour-only: a request mixing provider fields with `mcp` is refused.
+  - Behaviour-only: provider `auth/login/start` and `auth/login/complete`
+    params now refuse unknown fields (they were ignored), and
+    `auth/status/get` refuses a case-variant `mcp` key instead of falling back
+    to a binding status. The `auth/status/get` binding arm (`BindingIdParams`)
+    deliberately keeps tolerating other unknown fields for compatibility; only
+    the MCP target arms deny unknown fields.
+- Runtime delivery acknowledgement (#1507, fixing #1497) extends the
+  generated RuntimeDelivery machine. In `meerkat_machine_schema`:
+  `RuntimeDeliveryMachineState` gains the public field
+  `acknowledged_sequences`; `RuntimeDeliveryInput` and
+  `RuntimeDeliveryInputVariant` gain `AcknowledgeDelivery` and
+  `AdvanceAcknowledgedPrefix`; `RuntimeDeliveryEffect` and
+  `RuntimeDeliveryEffectVariant` gain `DeliveryAcknowledged`,
+  `AcknowledgedPrefixAdvanced` and `AcknowledgedPrefixAtRest`. In the
+  generated kernel `meerkat_machine_kernels::generated::runtime_delivery`:
+  `State` gains `acknowledged_sequences`; `Input` and `InputKind` gain
+  `AcknowledgeDelivery` and `AdvanceAcknowledgedPrefix`; `Effect` and
+  `EffectKind` gain `DeliveryAcknowledged`, `AcknowledgedPrefixAdvanced` and
+  `AcknowledgedPrefixAtRest`; `TransitionId` gains `AcknowledgeNextDelivery`,
+  `AcknowledgeAheadOfCursor`, `ObserveAlreadyAppliedAcknowledgement`,
+  `AdvanceOverAcknowledgedDelivery` and
+  `AdvanceAcknowledgedPrefixNothingParked`. Struct literals and exhaustive
+  matches must handle them.
+- Owner drain feedback is bound to obligation members (#1481):
+  - `meerkat_machine_schema::FeedbackFieldSource` gains `ObligationMember`.
+    Exhaustive matches must handle it.
+  - `meerkat_runtime::protocol_auth_release_oauth_flow_drain::submit_expire_o_auth_browser_flow`
+    and `submit_expire_o_auth_device_flow` take the drained `flow_id` and now
+    return `Result<AuthMachineTransition,
+    ObligationMemberFeedbackError<AuthMachineTransitionError>>` (was
+    `Result<AuthMachineTransition, AuthMachineTransitionError>`). A flow id
+    outside the obligation is refused with
+    `ObligationMemberFeedbackError::NotObligationMember`.
+- `meerkat_live::LiveAdapterHost::reserve_channel_close_observation` takes the
+  close's `meerkat_core::LiveChannelCloseReason`: the path that reserves a close
+  names why it closes, and the committed close publishes that reason.
+- `meerkat_contracts::WireLiveAdapterStatus::Closed` is now a struct variant,
+  `Closed { reason: Option<WireLiveCloseReason>, reopen_recommended: bool }`:
+  patterns must become `Closed { .. }` (or use `is_closed()`), and
+  constructors use `WireLiveAdapterStatus::closed()`. The JSON of a plain
+  close is unchanged (`{"status":"closed"}`); `reason` and
+  `reopen_recommended` appear only for a typed close (a media fault).
+  `meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority` gains the
+  public field `media_fault_reopen_recommended: Option<bool>` (struct
+  literals must name it). MeerkatMachine live media health: new inputs
+  `RequestLiveMediaHealth` and `ObserveLiveChannelMediaHealth`, new effects
+  `LiveMediaHealthRequested` and `LiveChannelMediaHealthJudged`,
+  `LiveChannelStatusResolved` gains `media_fault_reopen_recommended`, and
+  `MeerkatMachineState` (schema and runtime) and kernel `State` gain
+  `live_media_health_requested_output_by_channel`,
+  `live_media_health_judged_channels`,
+  `live_media_fault_reopen_recommended_by_channel` and
+  `live_media_fault_reopens_by_session` (media health is per session lifetime:
+  a channel's request and judgement clear when it closes, its verdict stays as
+  the close tombstone, and all four clear when the session unregisters or a
+  stopped session resumes). New kernel transitions:
+  `RequestLiveMediaHealthAttached`, `RequestLiveMediaHealthRunning`,
+  `ObserveLiveChannelMediaHealthAudibleAttached`,
+  `ObserveLiveChannelMediaHealthAudibleRunning`,
+  `ObserveLiveChannelMediaHealthSilentReopenAttached`,
+  `ObserveLiveChannelMediaHealthSilentReopenRunning`,
+  `ObserveLiveChannelMediaHealthSilentExhaustedAttached` and
+  `ObserveLiveChannelMediaHealthSilentExhaustedRunning` (a live channel serves
+  an attached runtime, so these edges have no Idle variant); later discriminants
+  and ordering move in the generated `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*`, `MeerkatMachineEffect::*`,
+  `MeerkatMachineEffectVariant::*` and kernel `Input::*`, `InputKind::*`,
+  `Effect::*`, `EffectKind::*`, `TransitionId::*`. Exhaustive matches must
+  handle the new variants.
+- Per-profile tool deny list (see Added). Struct literals and exhaustive
+  matches must handle the new members:
+  - `meerkat_tools::builtin::{SHELL_TOOL_NAMES, COMMS_TOOL_NAMES,
+    UTILITY_TOOL_NAMES, SKILL_TOOL_NAMES, WEB_SEARCH_TOOL_NAMES,
+    BRAIN_SWAP_TOOL_NAMES}`, `ShellToolSet::tool_names`,
+    `builtin::tasks::tool_names`, `builtin::image_generation::{TOOL_NAMES,
+    tool_names}`, `meerkat_memory::MemorySearchDispatcher::tool_names`,
+    `meerkat_workgraph::workgraph_tool_names`,
+    `meerkat_schedule::schedule_tool_names` and
+    `meerkat_mob::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names}` are new
+    (additive): each family owns its tool names, pinned by a test to its
+    tool definitions.
+  - `meerkat_mob::ToolConfig` gains `deny: Vec<String>` (omitted when empty).
+  - `meerkat_contracts::PortableToolConfig`, `WireMobToolConfig` and
+    `MobToolConfigInput` gain `deny: Vec<String>` (omitted when empty).
+  - `meerkat_mob::DiagnosticCode` gains `MalformedToolDeny`.
+  - `meerkat::BuildAgentError` gains
+    `DeclaredToolUnknown(Box<meerkat_core::error::DeclaredToolUnknown>)`, where
+    the new `DeclaredToolUnknown` struct carries `declared_by`, `tool`,
+    `enabled_families` and `vocabulary`. (`meerkat_core::error::AgentError`
+    gains the same boxed variant; it is `#[non_exhaustive]`, so that is
+    additive. The payload is boxed so `AgentError` and `SessionError` stay
+    small.)
+  - `meerkat::AgentBuildConfig` and `meerkat_core::service::SessionBuildOptions`
+    gain `declared_tool_restriction: Option<DeclaredToolRestriction>`; the new
+    `meerkat_core::ops::DeclaredToolRestriction` carries it, including its
+    `vocabulary` keyed by the new `meerkat_core::ToolVocabularySource` and its
+    `deferred_mcp_servers`. The new
+    types are re-exported at the `meerkat_core` root.
+  - `meerkat_core::SessionTooling` gains `spawn_tool_access_policy:
+    Option<SpawnToolAccessPolicy>` (omitted when absent); the new
+    `meerkat_core::ops::SpawnToolAccessPolicy` (`Unrestricted` or
+    `Restricted { policy }`) records the launch part.
+- Behaviour-only (not measured by the gate): a mob profile's `read_only`
+  declaration no longer enters `AgentBuildConfig::tool_access_policy` from
+  `meerkat_mob` build helpers. It travels as `declared_tool_restriction` and
+  the factory conjoins it, so the effective gate is unchanged but code that
+  read `tool_access_policy` off a built config no longer sees it.
+- Owned member retirement (OB3, see Added and Fixed). Exhaustive matches
+  must handle the new `meerkat_mob::MobError` variants
+  `MemberRetirementStuck { member_id, stage, cause }` and
+  `RetirementInterrupted { member_id, stage }`. Behaviour-only (not measured
+  by the gate):
+  - A retirement that durably started and then failed is no longer dropped:
+    the first caller receives `MemberRetirementStuck` (its typed cause is
+    preserved, see `MobError::retirement_root_cause`), and a later plain
+    `MobHandle::retire` answers `MemberRetirementStuck` instead of re-driving
+    it implicitly. `MobHandle::redrive_retirement` (or a mob resume) drives it.
+  - `MemberRetirementInProgress.stage` names the retirement stage in flight
+    instead of `actor_retirement_saga`.
+  - `MobHandle::shutdown` no longer answers `LifecycleOperationPending
+    { intent: "shutdown_runtime_unregister" }` while a runtime unregister is
+    pending: it awaits each session's unregister within its budget and
+    completes, reporting an unfinished one as `UnregisterPending`. It no longer
+    defers behind in-flight retirements: it interrupts them cooperatively.
+  - Shutdown cancels members' in-flight runs immediately instead of waiting
+    for their next boundary; use Stop to let them finish. The cancelled run
+    ends through its typed cancelled terminal, and
+    `MobShutdownReport::runs` reports it as
+    `MemberStopRun::CancelledByShutdown`.
+    The report reads the run's recorded terminal: a run that ended on its own
+    before the cancel landed is `RunEndedBeforeCancel`, and a dispatched
+    cancel whose run has no recorded terminal by the deadline is the new
+    `MemberStopRun::CancelDispatched`.
+  - Shutdown holds the run starts of the members the mob hosts before its
+    interrupts, as Stop does (#1500), so an input admitted before the
+    Shutdown cannot start a run afterwards. MobMachine's `ShutdownRunning`,
+    `ShutdownStopped` and `ShutdownCompleted` emit `HoldMemberRunStarts`.
+    Remote members keep the previous Shutdown behaviour: Shutdown does not
+    contact their host for a hold. A remote member the Shutdown stops is held
+    through its host; any other is reported in the new
+    `MobShutdownReport::run_starts` as `MemberRunStarts::DelegatedToHost`.
+    Run-start releases owed to remote members are dropped.
+  - A member's Stop (and Shutdown's member stop) completes only once the
+    runtime has recorded the interrupted run's end, not when the member's
+    session reports its turn inactive; a run still unrecorded when the hang
+    guard passes is reported at stage `runtime_run_settlement`.
+  - While Shutdown drains and joins its actor-owned work, the actor keeps
+    answering commands: a second Shutdown joins it, and every other command
+    (status queries such as member status projection included) is refused
+    with `MobError::ActorCommandChannelClosed`, the answer it gets once the
+    actor exits. Treat it as "mob shutting down". A task the Shutdown joins
+    can therefore never wait on the actor that joins it.
+- `meerkat_core::types::MemoryIndexExclusion` gains `EmptyText`: a message
+  whose text projection is empty or whitespace-only (for example a
+  tool-call-only assistant turn) is now `Excluded(EmptyText)` rather than
+  `Indexable("")`. Exhaustive matches must handle it. New:
+  `MemoryIndexableContent::from_text` and `MemoryIndexableContent::normalized`
+  (see Fixed).
+- The memory store's schema domain moves to v3, a data-only step that purges
+  empty-text rows (see Fixed). Opening a store migrates it forward once.
+  Binaries from before this release refuse a v3 file, as they refuse any
+  newer schema.
+- Barge-in playback hint (#1638, see Added): new enum variants
+  `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::UserSpeechOverAssistant`,
+  `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::AssistantPlaybackRestorable`,
+  `meerkat_live::LiveSidebandObservationKind::UserSpeechOverAssistant` and
+  `meerkat_live::LiveSidebandObservationKind::AssistantPlaybackRestorable`;
+  exhaustive matches must handle them. Later discriminants move in
+  `GptLiveBrokerObservation::*` and `LiveSidebandObservationKind::*`.
+- Causal-tail batch (see Fixed): new MeerkatMachine input
+  `AuthorizeLiveContextCausalTailBatch { channel_id, runtime_id, fence_token,
+  generation, append_id, previous_cursor, next_cursor, tail_cursors }` and
+  kernel transitions `AuthorizeLiveContextCausalTailBatchIdle`,
+  `AuthorizeLiveContextCausalTailBatchAttached` and
+  `AuthorizeLiveContextCausalTailBatchRunning`; later discriminants and
+  ordering move in the generated `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*` and kernel `Input::*`, `InputKind::*`,
+  `TransitionId::*`. `meerkat_machine_dsl_core::ast::UpdateDef` gains
+  `ForEach { binding, over, updates }`. Exhaustive matches must handle the new
+  variants.
+
+### Security
+
+- The BuildBuddy launchers no longer send the caller's environment to
+  BuildBuddy. Bazel records every client environment variable
+  (`--client_env=NAME=value`) and its command line in the build event stream.
+  `scripts/buildbuddy-bazel-poc`, through which `scripts/buildbuddy-dev`, the
+  CI lane scripts and the release workflow all reach bb, ran the client with
+  the whole shell environment, including every exported secret. The client
+  now runs under `env -i` with an explicit allowlist:
+  - process basics;
+  - toolchain and cache locations;
+  - the non-secret e2e test-selection names the lanes forward;
+  - CI metadata.
+
+  Provider keys for the live lanes (`e2e-live-rbe`, `e2e-auth-rbe`,
+  `e2e-smoke-remote-rbe`, `e2e-smoke-turbo-s-rbe`) travel only through
+  BuildBuddy's secret-env-overrides header. That header, and any explicit
+  `MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES[_BASE64]`, is now written into the
+  same 0600 temp bazelrc as the API key instead of argv. A live lane on the
+  `gcp-local` backend, and a provider value the header cannot carry exactly,
+  are refused rather than forwarded. `make path-classifier-selftest` runs
+  `scripts/tests/buildbuddy_launcher_env_test.sh`, which checks this against a
+  fake `bb` with no BuildBuddy.
+- Agent mob tools no longer accept host-only configuration from model
+  arguments. The agent `mob_create` deserialized the internal
+  `MobDefinition`, so a member with create authority could put
+  `tools.mcp_servers` (MCP server configs, including a stdio `command`, its
+  `args` and `env`) and `rust_bundles` into a profile, and child members
+  built from it would launch those servers on the host. The public paths
+  already decoded through the public contract. Now every model-facing input
+  does:
+  - `mob_create` decodes `MobDefinitionInput` through
+    `decode_public_mob_definition`.
+  - `mob_profile_create` and `mob_profile_update` decode `MobProfileInput`
+    (new `meerkat_mob_mcp::decode_public_profile`), which also closes the
+    indirect route of storing MCP server configs in a realm profile and
+    referencing it from a later `mob_create`.
+  - The `tooling` of `mob_spawn_member` and `delegate` takes an inline
+    profile as `MobProfileInput`.
+  - `mob_spawn_member`'s `initial_message`, and the `MobMcpDispatcher` spawn
+    and respawn messages, take `WireContentInput`.
+  - Two refusals apply on the agent surface only (host-facing surfaces are
+    unchanged): a definition's skill source may not be a host filesystem
+    `path` (inline skill content still works), and an image may not
+    reference a stored blob by `blob_id` (inline image bytes still work),
+    because the blob store has no fact showing the calling session may read
+    it, and a video may not reference a `uri`, which the provider would fetch
+    with the host's credentials (inline video bytes still work) (#1543).
+  Behaviour change: a model-supplied definition or profile that names an
+  internal-only field (`mcp_servers`, `rust_bundles`, `is_implicit`,
+  `session_cleanup_policy`, ...), a host-path skill source, a blob image
+  reference or a video URI is now refused with `InvalidArguments` before anything is
+  created; previously such input was accepted.
+- Child mobs created by an agent no longer run without the host's
+  application tool policy on managed hosts (#1531; see Breaking).
+
+### Added
+
+- Machine DSL: `for binding in <set-or-seq> { updates }` in transition update
+  blocks, lowered to the schema IR's existing `Update::ForEach` (already
+  supported by the kernel runtime and TLA generation).
+- `meerkat::experimental_gpt_live::LivePostCloseWorkSource`: host source of
+  delegated work that outlived its voice channel, bound on a public Live open
+  authority with `ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source`;
+  a reopened channel's startup instructions then say the work is still
+  finishing (`LIVE_POST_CLOSE_WORK_PENDING`).
+- Barge-in playback hint for Public Live (#1638). When the user's speech and
+  audible assistant audio overlap (the user speaking over the assistant, or
+  the assistant starting while the user keeps talking; a reply after the user
+  has stopped never ducks), the broker's floor guard
+  publishes the RPC notification `live/assistant_playback_hint` with
+  `{channel_id, hint: "duck"}`, and `{hint: "restore"}` once the user's input
+  goes quiet or the assistant output does. The gpt-live protocol has no
+  client command that cancels or clears provider output, so the duck is the
+  client's local playback gate. The hint is purely additive: a client that
+  ignores it behaves as before. New wire types
+  `meerkat_contracts::LiveAssistantPlaybackHint` and
+  `LiveAssistantPlaybackHintParams`; hosts receive hints through the new
+  defaulted method
+  `meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher::publish_playback_hint`
+  (with `ExperimentalLivePlaybackHint`), which drops them unless overridden,
+  so a publisher that forwards every observation as a playback handle never
+  sees one. In the TypeScript SDK, `applyLiveAssistantPlaybackHint(gainNode,
+  hint, currentTime, options?)` (`LiveAssistantPlaybackGateOptions.duckedGain`
+  for partial attenuation instead of silence) with the gain constants
+  `LIVE_ASSISTANT_PLAYBACK_DUCKED_GAIN`, `LIVE_ASSISTANT_PLAYBACK_UNITY_GAIN`
+  and `LIVE_ASSISTANT_PLAYBACK_GAIN_TIME_CONSTANT_S`.
+- The TypeScript and Python SDKs deliver `live/*` notifications
+  (`live/assistant_output_available`, `live/media_health_requested`,
+  `live/assistant_playback_hint`) to application code:
+  `MeerkatClient.onLiveNotification(listener)` (TypeScript, typed
+  `LiveNotification` union, `parseLiveNotification`) and
+  `MeerkatClient.on_live_notification(callback)` (Python, `LiveNotification`,
+  `parse_live_notification`), each returning an unsubscribe function. Before,
+  both SDKs routed every notification by `session_id` and silently dropped the
+  channel-scoped `live/*` ones, so a client could answer
+  `live/media_health_requested` but never receive it. The generated SDK types
+  gain `LiveAssistantOutputAvailableParams`.
+- Pull requests that touch the live stack run the GPT Live scenarios before
+  merge. A new `Live gate` check (`.github/workflows/live-gate.yml`)
+  classifies each PR (`scripts/live-gate-changed`: live-stack paths, or Rust
+  changes naming live state) and runs Turbo S S97-S107 against the real
+  provider on BuildBuddy, once each. Its verdict (`scripts/live-gate-verdict`)
+  is GREEN, RED, or VOID when the only failures carry the scenarios' typed
+  provider-degraded verdict; VOID is not green. PRs outside the live stack
+  pass the check without a run, so it can be required in branch protection.
+  The release Turbo S workflow reports the same typed verdict (#1544).
+- `meerkat_runtime::MeerkatMachine::is_same_runtime_owner`: whether two
+  handles are the same live runtime owner (clones share it; a separately
+  constructed machine over the same store does not).
+- `MobStopReport` (`meerkat_mob::{MobStopReport, MemberStopOutcome,
+  MemberStopRun, MemberRunStarts, NotHoldableReason}`): what a mob Stop did to
+  each member's run (`NoRun`, `CancelledAtBoundary`, `RunEndedBeforeCancel`,
+  `LeftRunning`, `Interrupted`) and whether its run starts are held (`Held`,
+  `NotHoldable` with the reason, or `NotBound` for a member the mob cannot
+  reach right now: a placed member whose host carrier is dormant, or an
+  unbound remote peer, which is held on its next bind).
+- Run-start holds per reason (#1500): `meerkat_runtime::RunStartHoldReason`
+  (`MobStop`, `ToolsNotPublished`); a runtime starts no run while any reason
+  holds it. `meerkat_runtime::MeerkatMachine::hold_run_starts(&sid, reason)`
+  (returns `RunStartsHold { current_run }`), `release_run_starts(&sid, reason)`
+  and `stage_registration_run_start_hold(&sid, reason)`, a hold the session's
+  registration applies before its runtime loop can start a run. Releasing a
+  reason that does not hold, or releasing before registration, is a no-op
+  for that reason.
+- A host's holds on restored members (#1500):
+  `meerkat_mob::MobBuilder::hold_restored_member_run_starts(reason,
+  identities)` holds exactly the listed restored members whose runtime this
+  process hosts, and `meerkat_mob::MobHandle::release_member_run_starts(
+  &AgentIdentity, reason)` releases one (Ok for a member that does not hold
+  it, `MemberNotFound` for a non-member). The reason is a
+  `meerkat_mob::HostRunStartHoldReason` (`ToolsNotPublished`): a mob Stop's
+  hold is not one, and only Resume releases it.
+- Supervisor bridge: `BridgeCommand::HoldRunStarts` /
+  `BridgeCommand::ReleaseRunStarts`, `BridgeReply::RunStartsHeld`, and the
+  `BridgeCapabilities::run_start_hold` capability bit.
+- `MobProvisioner::stop_member_runtime` and `release_member_run_starts`
+  (which takes the `RunStartHoldReason` it releases), with defaults that
+  interrupt as before and report the member as not holdable, and
+  `stage_member_registration_run_start_hold`.
+- One runtime delivery inbox per persistence bundle, with an in-process
+  commit signal (#1497):
+  - `meerkat::PersistenceBundle::runtime_delivery_inbox()` returns a clone of
+    the single inbox the bundle owns. RPC and the shared runtime-backed
+    builder now use it instead of each constructing their own.
+  - `RuntimeDeliveryInbox::subscribe_commits()` is a watch whose generation
+    advances once per newly committed row; exact replays do not advance it.
+  - `RuntimeDeliveryInbox::shares_commit_signal_with()`.
+- `meerkat::session_runtime::live_orchestration::LIVE_PLAYBACK_TERMINAL_SETTLEMENT_BOUND`
+  names the 30 s an accepted playback terminal may wait for its provider
+  acknowledgement before it is treated as ambiguous (previously an unnamed
+  literal). It is a failure bound on the provider: every other settlement
+  path (channel close, failed playback waiters, pump terminal) resolves it
+  through a typed signal.
+- `meerkat_mob::MobHandle::explicit_resume_member_work_settled`, a
+  level-triggered wait for a member's explicit-resume lifecycle operation
+  (the operation a `LifecycleOperationPending { "explicit_resume member ..." }`
+  names) to end.
+- Host-driven MCP OAuth. `McpOAuthAuthority::login_start` admits an attempt
+  through the AuthMachine OAuth flow owner (PKCE and one-time state) and
+  returns the host-only `McpOAuthLoginStart`. `login_complete` verifies the
+  host's `McpOAuthCallback` against the admitted attempt, exchanges the code
+  and persists the credential, returning the secret-free
+  `McpOAuthLoginComplete`. `login_cancel` retires an abandoned attempt. Login
+  start, callback and completion types redact secrets in `Debug`.
+  - A start for a target that already has a pending attempt returns that
+    attempt's projection with `McpOAuthLoginDisposition::Joined`; no second
+    attempt is admitted. The flow owner answers through the read-only
+    `OAuthFlowAuthority::pending_connector_browser_attempt` (default `None`).
+  - `McpOAuthAuthority::begin_loopback_login` binds the host's loopback
+    callback and returns `McpOAuthLoopbackBegin::Started(McpOAuthPendingLogin)`
+    or `Joined`. `McpOAuthPendingLogin::cancel` (and drop) retire the callback
+    binding and the attempt; `complete` waits for the callback;
+    `launch_browser` / `launch_system_browser` open the browser on the
+    blocking pool and return the advisory `McpOAuthBrowserLaunch`, which never
+    retries or cancels the attempt.
+  - `PkceChallenge::s256_for_verifier`.
+  - Completion is anchored on the admitted attempt: the flow owner must name a
+    live attempt for `state` (the new read-only
+    `OAuthFlowAuthority::admitted_connector_browser_attempt`, default `None`)
+    before any network I/O, and only the recorded issuer's metadata is then
+    fetched. Every non-success exit retires the attempt; dropping an
+    unfinished `McpOAuthPendingLogin::complete` retires the binding and the
+    attempt. `McpOAuthAuthority::cancel_attempt` retires an attempt by
+    `state`; `McpOAuthLoginStart::remaining` bounds the callback wait by the
+    attempt's own expiry.
+  - Start-or-join is serialized per target, the redirect URI must be an http
+    loopback address (RFC 8252), `McpOAuthAuthority::new` uses an HTTP client
+    that follows no redirects, and a 3xx answer to discovery or registration
+    is refused. `McpOAuthError::Callback` reports loopback bind, callback and
+    timeout failures.
+  - `open_system_browser` launches the platform opener without logging the
+    URL; `launch_system_browser` uses it instead of the `webbrowser` crate,
+    which logged the command line at debug.
+  - `McpOAuthAuthority::stored_only`. The `McpAuthResolver` impl and the CLI
+    resolver keep stored-only semantics for servers without `oauth_account`,
+    so servers that need no OAuth connect as before. Interactive login for
+    such a server is refused with `AccountSelectionRequired`.
+- `meerkat_auth_core::OidcUserInfoAccountStrategy`: the production MCP
+  account strategy. It requests `openid`, calls the issuer's UserInfo
+  endpoint with the new access token and binds `sub` to the server's
+  `oauth_account`.
+- `meerkat::HostAuthService::mcp_begin_loopback_login`, `mcp_login_start`,
+  `mcp_login_complete`, `mcp_login_cancel_by_state`,
+  `mcp_login_cancel`, `mcp_status`, `mcp_oauth_authority` and
+  `with_mcp_account_strategy`; `meerkat::HostMcpAuthStatus` and
+  `HostMcpAuthPhase`; `meerkat::resolve_configured_mcp_target` and
+  `HostMcpTargetRefusal`; `mcp_auth_target_to_wire` and
+  `mcp_login_disposition_to_wire`. RPC and REST MCP login and status resolve
+  the requested server against the configured MCP servers: an unknown name, a
+  different URL or account, or a server without OAuth login is refused
+  (invalid params / 400) before any discovery, registration or credential
+  write. The facade re-exports the MCP OAuth host types.
+  The `host_auth` docs state the host obligation: the browser context must be
+  unobservable by agent tools.
+- `meerkat::AgentFactory::mcp_auth_resolver` installs the default MCP
+  credential source for factory builds.
+- Runtime-backed hosts (RPC, REST, MCP server) get interactive MCP auth by
+  default. Once the runtime's AuthMachine flow owner exists,
+  `build_runtime_backed_service_with_capacities` installs the native MCP
+  OAuth authority as the factory's MCP credential source (a host-supplied
+  `AgentFactory::mcp_auth_resolver` wins), and RPC and REST live `mcp/add`
+  routers use it too. A missing credential is the typed
+  `AuthorizationRequired` host status, never a browser. New:
+  `meerkat::default_mcp_auth_resolver`, `AgentFactory::has_mcp_auth_resolver`,
+  `FactoryAgentBuilder::with_mcp_auth_resolver`,
+  `meerkat_rpc::session_runtime::SessionRuntime::default_mcp_auth_resolver`. The facade re-exports `McpAuthResolver` and
+  `McpAuthMode`.
+- Typed host status for MCP servers awaiting human authorization:
+  `McpRouter::servers_awaiting_authorization` and
+  `McpRouterAdapter::servers_awaiting_authorization`. This is not an agent
+  event.
+- `McpOAuthError::is_refusal` classifies MCP OAuth errors for surfaces.
+- Wire: `LoginCancelParams`, `WireLoginCancelled`, `WireMcpAuthTarget`,
+  `WireMcpAuthStatus`, `WireMcpAuthPhase`,
+  `WireMcpLoginDisposition` (`started` / `joined` on the MCP login start) and
+  the target enums above. A joined start returns the pending attempt's URL
+  and state: wire callers are host-privileged by contract. Python: `auth_mcp_login_start`,
+  `auth_mcp_login_complete`, `auth_mcp_login_cancel`, `auth_mcp_status`.
+  TypeScript: `authLoginCancel`, `authMcpStatus`. Web: `Auth.loginCancel`,
+  `Auth.mcpStatus`.
+- `rkat mcp login` and `rkat run --mcp-auth interactive` drive the host split
+  (the CLI owns the loopback callback and the browser). They require the
+  server's `oauth_account`. `rkat mcp login` refuses to run without a terminal
+  unless `--allow-headless` is given.
+- `meerkat` feature `test-mcp-oauth-fixtures`:
+  `meerkat::test_fixtures::mcp_oauth`, an OAuth-protected MCP fixture server
+  for the MCP OAuth canaries (test-support only).
+- `meerkat_machine_schema::SymbolRef::parse` is a public constructor for a
+  coverage anchor path, so a crate outside Meerkat can build a coverage
+  manifest for its own machines. The check is lexical and never touches the
+  filesystem: the path must be non-empty, repository-relative and
+  `/`-separated, with no control characters, no drive or stream `:`, no
+  empty/`.`/`..` component, and no component that Windows cannot hold
+  (trailing dot or space, `< > " | ? *`, or a device name such as `CON` or
+  `LPT1`). Each refusal is a typed `SymbolRefError` (with
+  `NonPortableComponentKind` for the portability rules). It does not prove
+  that the file exists or realizes the anchored semantics; the owning
+  coverage validator checks that. The built-in catalogs now construct their
+  anchors through the same parser.
+- Member-level safe-boundary instruction activation, so a host can change a
+  restored member's standing instructions (resume inherits persisted prompt
+  state, so build-time instructions cannot reach it):
+  - `MobHandle::activate_member_instruction(identity, request)` holds the
+    member session's runtime turn-finalization boundary (and, with
+    `openai-live`, the live-open lifecycle lease), applies the shared runtime
+    admission, and appends one keyed `InstructionActivationRequest` through
+    the session owner. It returns the native `InstructionActivationReceipt`:
+    `Applied`, or `Duplicate` for a re-apply of the effective activation (no
+    second record, no accreting System row). Refusals are the typed
+    `MemberInstructionActivationError::Admission { code, .. }`
+    (`TargetNotMaterialized`, `SessionBusy`, `LiveChannelOpen`,
+    `UnsupportedCurrentLowering`, `DurabilityUnavailable`, fence conflict or
+    backoff); nothing is appended. No new journal.
+  - `MobHandle::read_member_instruction_activations(identity, query)` reads
+    the member session's durable activation records.
+  - `MobSessionService::activate_instruction_under_runtime_turn_boundary`,
+    with a default that returns the typed `SessionError::Unsupported`
+    (classified `DurabilityUnavailable`), never a silent success. The
+    `PersistentSessionService` implementation forwards it; every production
+    decorator over a durable owner must forward it explicitly.
+  - `meerkat_runtime::instruction_activation_runtime_admission` and
+    `instruction_activation_admission_for_session_error` are the one owner of
+    the runtime-side admission policy (live channel, transcript-edit
+    admission, mid-conversation System lowering) and of the session-error
+    classes. The facade session runtime's `activate_instruction` now calls
+    them too, with unchanged behaviour.
+- `meerkat_machine_codegen` renders a composition against a caller-supplied
+  machine catalog: `render_composition_semantic_model_with_catalog`,
+  `render_composition_ci_cfg_with_catalog`,
+  `render_composition_witness_cfg_with_catalog` and
+  `render_composition_driver_with_catalog`, for compositions whose machines
+  live outside Meerkat's catalog. The supplied catalog is validated first and
+  every problem is a typed `CompositionTlaError`: a machine that fails its own
+  validation, a duplicate machine id, a machine that reuses a canonical
+  Meerkat machine id with a different schema (a canonical machine may be
+  included unchanged, never shadowed), machines of one composition binding a
+  shared named type with different domain shapes, and a composition that does
+  not validate against the catalog. The canonical entry points are unchanged
+  and render byte-identically through the same implementation.
+- `McpRouterAdapter::spawn_removal_drain` drives draining (Removing) MCP
+  servers to finalization in one background task per adapter. It is woken by
+  typed progress (a finished tool call, or the earliest removal timeout),
+  never a timer poll. meerkat-rpc and meerkat-rest use it in place of their
+  copies of a 100 ms poll loop. With `test-support`,
+  `McpRouterAdapter::wait_connect_results_delivered` and
+  `McpRouterAdapter::wait_removals_finalized` are typed waits for tests.
+- Machine schemas can declare the TLC payload domain of an unsigned input
+  field (`MachineSchema::input_field_domains`, built with
+  `MachineSchemaMetadata::with_input_field_domain`). An
+  `InputFieldDomainKind::AdditionalValues` set is explored on top of the
+  default `0..2`; an `InputFieldDomainKind::StateField` binding explores
+  exactly the current value of a same-typed state field. The declaration is
+  rendered into the generated model, so `machine-check-drift` and the TLC
+  lane check exactly what it declares; the generated Rust machine is
+  unchanged. Validation refuses an unknown or non-unsigned field, a field no
+  transition binds, a duplicate, an empty or out-of-range value set
+  (`TLC_MAX_UNSIGNED_INPUT_SAMPLE`), an unknown or differently typed state
+  field, and a TLC representative input, each as a typed
+  `InputFieldDomainError`. This replaces the codegen's hard-coded rule that
+  bound any `expected_revision` input to a `revision` state field: WorkGraph
+  and WorkAttention now declare it with
+  `MachineSchemaMetadata::with_state_bound_input_field`, and every generated
+  model is byte-identical.
+- `meerkat_machine_schema` exposes the semantic coverage validator that
+  `xtask` used privately, so a catalog outside Meerkat validates its coverage
+  manifests with the same rules: `validate_coverage_catalog`,
+  `validate_machine_coverage`, `validate_composition_coverage`,
+  `validate_machine_anchor_target`, `validate_composition_anchor_target` and
+  `validate_semantic_entries`, each returning a typed
+  `CoverageValidationError`. The checks are pure (no filesystem access, so
+  anchor file existence stays with the catalog owner). The mode is always
+  explicit and has no default: `CoverageValidationMode::RequireEntries` is
+  today's rule (every element has an entry; an honestly unclaimed entry is
+  permitted) and is what Meerkat's own catalog uses;
+  `CoverageValidationMode::RequireClaims` additionally requires every entry to
+  name a code anchor and a scenario. `xtask` now calls the library, and every
+  refusal keeps its previous message.
+- `[compaction] history_retained_rewrites` (realm config, default 4;
+  `CompactionConfig::history_retained_rewrites` in Rust) bounds how many
+  recent transcript rewrites keep their bodies in the session document. The
+  pieces behind it:
+  - `Session::retire_transcript_history`;
+  - `TranscriptHistoryRetention`;
+  - `RetiredTranscriptPrefix`;
+  - `TranscriptHistoryState::{retired_count, retired_prefix,
+    oldest_retained_revision, is_retired_revision, retired_revision_refusal}`;
+  - the defaulted `Compactor::transcript_history_retention`, which
+    `DefaultCompactor` reads from its config.
+- Head-canonical stores can bound their rows to the same retention cut:
+  - `PreparedHeadCanonicalRewriteMutation::transcript_retired_count`;
+  - `RetiredTranscriptGraphBase`;
+  - `ValidatedTranscriptHistory::{retired_through,
+    from_store_replayed_retired_graph}`;
+  - `VerifiedHeadCanonicalTranscriptHistory::history`;
+  - the defaulted `IncrementalSessionStore::transcript_row_retention`
+    (`TranscriptRowRetention::{RetiresToCut, KeepsAll}`). A `KeepsAll` store
+    stays correct but unbounded, and `PersistentSessionService` warns about
+    it once at construction.
+- Exact keyed WorkGraph item admission (#1496):
+  `meerkat_workgraph::WorkGraphService::create_idempotent(admission_key, request)`
+  returns `WorkAdmissionOutcome::{Created, Replayed, Conflict { admission_key,
+  existing_item_id }}`.
+  - Within a realm and namespace a `WorkAdmissionKey` admits one item.
+  - The same key with the same request returns the existing item unchanged,
+    in any phase, terminal included, and writes nothing.
+  - The same key with a different request is a typed conflict and writes
+    nothing.
+  - The owner computes a domain-separated SHA-256 digest of the exact request
+    (with scope resolved). The new `WorkItemAdmissionMachine` owns the item's
+    admission identity and decides replay versus conflict
+    (`ClassifyAdmissionReplay`). It is bound to `WorkGraphLifecycleMachine` in
+    the `workgraph_attention_bundle` composition: every lifecycle `Created`
+    routes to the admission `Bind`, and `Bind` originates only from that
+    route, so no keyed item exists without its admission and no admission
+    without its item. The lifecycle machine's state space is unchanged.
+  - A create with a half-present identity (a key without a digest, or the
+    reverse) is a typed machine refusal (`UnpairedAdmissionIdentityRejected`),
+    surfaced as the new `WorkGraphError::UnpairedAdmissionIdentity`
+    (public class `invalid_arguments`), never a guard failure.
+  - Item JSON is unchanged; existing items load as unkeyed.
+  - A file stamped workgraph schema version 4 whose catalog is not this v4
+    (for example a development file from an unreleased build that used v4 for
+    a different admissions table) is refused with
+    `WorkGraphError::SchemaMismatch` naming the missing or changed objects, on
+    open and on every operation; it is never treated as current. Recreate such
+    files.
+  - SQLite indexes the key in the new `workgraph_item_admissions` table
+    (workgraph schema version 4; version 3 files migrate on open), in the
+    same transaction as the item and its event: a failure between the writes
+    leaves none of them. Concurrent admissions of one key create exactly once.
+  - New store capability `WorkGraphStore::insert_item_admitted` returns
+    `WorkItemAdmissionInsert::{Inserted, Existing}`. It defaults to
+    unsupported; the memory and SQLite stores implement it.
+  - `ExternalWorkRef` stays provenance only and is never a dedupe key.
+- `meerkat_session::PersistentSessionService::live_authority_advanced`: a
+  typed wakeup for callers refused with `SessionError::Busy` because the live
+  transcript is ahead of the store. It completes when a runtime turn's
+  boundary commit is acknowledged, a full persist lands, or the live actor is
+  synchronized from or discarded for durable authority.
+- `meerkat_mob_mcp::live_delegation::LIVE_DELEGATION_SPEECH_TRANSCRIPT_NOTE`
+  is public, so live end-to-end checks can strip the speech-transcript note
+  exactly instead of copying its wording.
+- `meerkat_runtime::MeerkatMachine::begin_live_channel_close` (returning
+  `LiveChannelCloseInFlightGuard`), `live_channel_close_in_flight` and
+  `live_channel_close_ended`: every live channel close path is registered
+  from its first step to its last, so another owner can wait on a close that
+  is executing instead of colliding with it.
+- `ExperimentalLiveBoundChannelActivator::await_pump_retirement_retry`, a
+  provided method (default: never retry) that waits for the typed signal a
+  retryable pump-exit retirement refusal names.
+- `meerkat_live::LiveAdapterHost::retire_session_close_tombstones` and the
+  provided `LiveChannelCloseEventPublisher::retire_live_session_close_tombstones`
+  (default no-op). The runtime calls the hook exactly once per committed
+  unregister, after its durability transaction, and never on a resume or a
+  rolled-back unregister. The surface's publisher releases the session's
+  host tombstones there.
+- Host tool bundles for child mobs: `MobMcpState::with_child_tool_bundles`
+  takes a `ChildToolBundles` set in which each host bundle is
+  `ChildToolBundleAvailability::HostOnly` (the default) or `ChildAvailable`.
+  The host alone decides what child members get: when a child mob is created
+  (agent `mob_create`, or the implicit mob `delegate` helpers run in), every
+  child-available bundle id is supplied to each inline profile of its
+  definition and persisted with it. Callers never name bundles: the public
+  profile input has no `rust_bundles` field, so naming one is refused, and
+  host-only bundles never reach child mobs. Mobs the host creates are
+  untouched. An agent can still narrow per profile with the profile's deny
+  list, which reads the resolved bundles. The supplied ids persist with the
+  definition, like the child application tool policy persists with its
+  members, so a bundle the host later withdraws is neither silently dropped
+  nor granted: resuming the member refuses with
+  `MobError::ToolBundleUnavailable { bundle }`.
+- A profile's `tools.deny` may name the tools of its own registered
+  `rust_bundles`: each resolved bundle is a `ToolVocabularySource::Bundle`
+  vocabulary on the declared restriction, so a bundle tool the member does not
+  mount is inert and the gate refuses a mounted one by name.
+- `meerkat_runtime::MeerkatMachine::observe_materialization_claim_settlement`
+  and `meerkat_runtime::MaterializationClaimObservation` (`Released`,
+  `RetainedUnattached { registration }`). The call waits only while a
+  session's actor-materialization claim is in flight, and reports an actor
+  retained without an executor attachment instead of waiting on it.
+- `meerkat_rpc::callback_dispatcher::CallbackRoute` (one connection's
+  callback channel, id space and tool registry), with
+  `CallbackToolDispatcher::from_route` and `from_route_with_job_runtime`.
+- `SessionRuntime::{default_callback_route, callback_tool_dispatcher_for_route,
+  bind_session_callback_route, session_callback_route}` and
+  `MethodRouter::{with_callback_route, callback_route}`.
+- Route-aware handlers: `handlers::session::{handle_create_on_route,
+  create_session_with_params_on_route}` and
+  `handlers::jobs::{handle_cancel_on_route, handle_retry_on_route}`. The
+  existing handlers keep their signatures and use the process-default route.
+- Typed tool choice on provider calls: `meerkat_core::ToolChoice` with
+  `Auto` (the default, today's behaviour), `Required`, `None` and
+  `Tool { name }`, lowered to each provider's native field:
+  - **OpenAI Responses:** `tool_choice` `"required"` / `"none"` /
+    `{type: "function", name}`. The ChatGPT backend keeps its fixed `"auto"`
+    and refuses other choices.
+  - **Chat Completions** (self-hosted and compatible): `"required"` / `"none"`
+    / `{type: "function", function: {name}}`.
+  - **Gemini:** `toolConfig.functionCallingConfig` `ANY` / `NONE` / `ANY` with
+    `allowedFunctionNames: [name]`, merged with the server-side tool flag.
+  - **Anthropic:** `tool_choice` `{type: "any" | "none" | "tool", name}`. A
+    forced call (`any` or a named tool) is refused locally in two cases:
+    - on models proven to reject one: Claude Opus 5.5 answers 400 "not
+      supported for this model" with or without thinking (catalog field
+      `supports_forced_tool_choice`);
+    - under explicit thinking, which is never switched off implicitly.
+
+    Elsewhere the forced choice is sent (live: `claude-sonnet-5` and
+    `claude-haiku-4-5-20251001` accept it), and Anthropic's own 400 rejection
+    maps to the same typed refusal.
+
+  A choice the provider, model or request cannot honour is the typed,
+  non-retryable `LlmError::ToolChoiceUnsupported` with a `ToolChoiceRefusal`
+  reason, never a silent downgrade to `Auto`. Other refusals: a named tool
+  that is not offered, a forcing choice with no tools, and the OpenAI
+  realtime text adapter.
+
+  Per turn, `tool_choice_plan` on the turn tool overlay (RPC `turn/start`
+  `turn_tool_overlay`, REST, mob flow steps, the supervisor bridge) sets the
+  choice for each model request of the run in order. Entry `k` applies to the
+  run's `k`-th provider call, and every call after the plan is exhausted is
+  `Auto`, so a script can force several steps and then let the model
+  complete. The plan is run-local: it is set and cleared with the overlay,
+  never written into session defaults or later turns, and stripped from the
+  model-fallback switch policy. Model-fallback admission probes each target
+  with the failed request's own tool choice through that target's adapter
+  lowering, so a target that cannot honour a forced choice (Claude Opus 5.5,
+  or explicit thinking) is skipped before any provider call. The
+  `ModelFallbackSkipped` event carries the reason `tool_choice_unsupported`.
+  Structured-output extraction carries no choice. Composing two different non-empty plans is a typed conflict. The
+  generated schemas and SDK types gain the `ToolChoice` union and the
+  `tool_choice_plan` field. The TypeScript SDK's public `TurnToolOverlay`
+  gains `toolChoicePlan` (typed with the generated `ToolChoice`, also
+  exported). It is serialized on the normal, streaming and mob turn paths
+  through one shared projection, so no path drops it. The Python SDK already
+  passes the generated overlay through on all three paths, now pinned by
+  payload tests.
+- `meerkat_runtime::MeerkatMachine::wait_input_admitted_by_idempotency_key`
+  waits until a live session's runtime has admitted an input for an
+  idempotency key and returns its id. The driver signals every accepted
+  input, so the wait is woken by the admission rather than re-reading on a
+  timer. It returns `Ok(None)` for a session without a live registration.
+- GPT Live media health (`live/media_health`): at the typed end of a public
+  Live WebRTC channel's first assistant output (unmeasured playback), the
+  runtime sends `live/media_health_requested { channel_id, output_id }`, and
+  the client answers `live/media_health { channel_id, output_id,
+  decoded_frames, audible_frames, max_rms }` with raw decoded-audio counters
+  from the channel's media start. The runtime judges them and returns
+  `LiveMediaHealthResult { verdict: audible | media_fault, reopen_recommended }`.
+  New wire types `LiveMediaHealthRequestedParams`, `LiveMediaHealthParams`,
+  `LiveMediaHealthResult`, `LiveMediaHealthVerdict` and
+  `WireLiveCloseReason`; the catalog now lists the
+  `live/assistant_output_available` and `live/media_health_requested`
+  notifications. SDKs: TypeScript `liveMediaHealth`, Python
+  `live_media_health`. Facade: `ServiceMemberLiveHost::report_experimental_live_media_health`,
+  `ExperimentalLiveMediaHealthError`, `ExperimentalLivePublicObservationKind`
+  (with `ExperimentalLivePublicObservation::kind()`), and runtime
+  `MeerkatMachine::request_live_media_health`,
+  `observe_live_media_health`, `live_media_health_requested_output` with
+  `LiveMediaHealthJudgement`.
+- `meerkat_core::AgentEvent::LiveChannelClosed { session_id, channel_id,
+  reason, reopen_recommended }`, published on the owning session's event stream
+  after every committed live channel close, so observers learn every close and
+  its cause without polling `live/status`. `meerkat_core::LiveChannelCloseReason`
+  is `client_requested`, `client_disconnected`, `provider_closed`, `error`,
+  `media_fault`, `replaced` or `open_abandoned`. Typed in the
+  Python (`LiveChannelClosed`) and TypeScript (`LiveChannelClosedEvent`,
+  `LiveChannelCloseReason`) SDKs; event-inventory parity covers it.
+  `AgentEvent` is `#[non_exhaustive]`. Runtime:
+  `meerkat_runtime::live_execution::LiveChannelCloseEventPublisher` and
+  `MeerkatMachine::set_live_channel_close_publisher` (installed by
+  `ServiceMemberLiveHost::new`). Facade: `close_live_channel_for` and
+  `close_experimental_live_channel_for` name a close's reason;
+  `meerkat_live::LiveChannelCloseObservation::reason()`.
+  A close never waits on the session: a member session busy in a long turn
+  receives the event after the turn, in close order. Session API:
+  `EphemeralSessionService::enqueue_live_channel_closed` and
+  `PersistentSessionService::enqueue_live_channel_closed`, plus
+  `meerkat_session::LiveChannelClosedNotPublished` (`SessionNotRunning`,
+  `ActorExited`, `ActorDraining`). When a close is not published, the reason
+  is logged.
+- Per-profile tool deny list for mob members: `[profiles.<name>.tools]
+  deny = ["mob_wire", "mob_unwire"]`. Members of the profile cannot execute
+  the named tools although their families stay enabled. Denied tools stay
+  listed to the model (the cache prefix does not change) and every call to
+  one is refused with `access_denied` by the list-preserving execution gate,
+  exactly like `read_only` and the per-spawn deny. It
+  conjoins with `read_only` and the per-spawn tool access policy, so a spawn
+  cannot widen it, and children inherit it through the persisted effective
+  policy. It is carried by portable specs, RPC/MCP mob definitions and
+  `mob.toml`.
+  - Each name must be a tool the member's build composed or a name in a tool
+    vocabulary: the built-in families' tools (shell, tasks, utility, comms,
+    skills, web search, brain swap, image generation, memory, workgraph,
+    schedule; whether compiled or enabled or not), the mob operator tools
+    (`spawn_member`, `spawn_many_members`, `wire_members`, ...), the agent mob
+    tools (`mob_spawn_member`, `mob_wire`, `mob_create`, ...), the exposed
+    tool names the profile's declared MCP servers map, and the tools of its
+    registered `rust_bundles`. A known name the member
+    does not mount is inert, so one deny set works on every composition and
+    build. While the profile declares an MCP server that maps no tool names,
+    any other name is deferred to the execution gate and logged at build
+    ("deny name X deferred to runtime (server Y declares no tool list)"); map
+    the tool in the server's `tool_names` to validate it at build. Without
+    such a server, any other name (stale or mistyped, or an undeclared external
+    tool) fails the member's build with the typed `DeclaredToolUnknown` error
+    naming the profile, the tool, the vocabularies and the enabled families. Empty or
+    whitespace entries are a `malformed_tool_deny` definition diagnostic.
+  - The declaration is recomputed from the current definition on every build,
+    including a resume, so adding or removing a deny entry or toggling
+    `read_only` takes effect when the member resumes. Sessions now persist the
+    launch (spawn-site) policy separately as
+    `SessionTooling::spawn_tool_access_policy`, beside the effective policy.
+  - Limitation: a session persisted before this release records only its
+    effective policy, which may include its profile's `read_only` at the time.
+    It resumes with that policy as its launch policy, so the old restriction
+    stays in force (contained, possibly narrower) until the member is
+    respawned. The same applies to a member session recovered through a
+    generic surface path with no profile (for example `rkat resume`).
+- `release-workflow-dispatch --mode assets --assets-run-id RUN_ID` (workflow
+  input `assets_run_id`, or `ASSETS_RUN_ID=RUN_ID make release-assets`)
+  publishes the archives an earlier asset recovery run built, instead of
+  rebuilding them. The build jobs are skipped; the publisher downloads that
+  run's archives and requires the run to be a `release.yml` dispatch on main
+  at a commit in main's history with a successful `Release binary build gate`,
+  every archive attested by `release.yml` at that commit on `refs/heads/main`,
+  and the source stamps to name the tag commit. A run from before the stamps
+  (v0.8.50 run 36988090176) is accepted only when the tag is an ancestor of
+  its commit and every path changed between them is under `.github/` or
+  `CHANGELOG.md`. Every publish also checks again that each binary in each
+  archive embeds the release version.
+- `meerkat_contracts::wire` now re-exports `WireImageData` and
+  `WireVideoData`, the inline media types the agent mob tools decode
+  (#1538, see Security).
+- Owned member retirement and an accountable mob Shutdown (OB3):
+  - A durably started retirement is owned by the mob actor until it settles.
+    The caller's 30 s budget only bounds the caller's wait; the stages run on
+    their own typed signals, with the member lifecycle hang guard (600 s) as
+    the failure bound for a stage whose signal never arrives. A stage failure
+    leaves it `Stuck` in an owned registry, re-driven by
+    `MobHandle::redrive_retirement` or on mob resume (including cold start,
+    which now issues one typed re-drive and awaits its settlement instead of
+    re-issuing `retire` on a timer).
+  - `MobHandle::retirement_settlement(identity)` returns a
+    `RetirementSettlementWatch` (per incarnation, `generation()`), whose
+    `settled()` resolves to `RetirementSettlement::{Retired, Stuck,
+    NotStarted}`; `InProgress { stage }` names the stage in flight.
+  - `MobHandle::shutdown_with_report(ShutdownOptions)` returns a per-member
+    `MobShutdownReport` (`MemberShutdownOutcome::{Unregistered,
+    RetirementInterrupted, RetirementStuck, UnregisterPending,
+    EffectCustodyRetained}`). `ShutdownOptions::with_deadline` bounds every
+    Shutdown wait by the caller's own deadline (for example below a k8s
+    termination grace period); members still waited on are reported. Each
+    member's outcome is logged as it settles.
+  - Shutdown's runtime teardown runs off the actor loop: every session's
+    registration transaction and unregister are admitted and awaited
+    concurrently within the Shutdown's budget, so one slow session cannot
+    freeze the actor or the others; it also unregisters Retiring members'
+    sessions, which it used to skip.
+  - Diagnostics: each retirement stage start/settle and each Shutdown step
+    are logged at info with elapsed times.
+- `meerkat_runtime::MeerkatMachine::{current_run, wait_run_settled,
+  wait_current_run_settled}`: the run the machine records for a session, and
+  a typed wait until a run is no longer current. The runtime loop that
+  executes the run signals after recording its end, and the wait re-reads
+  machine truth on every signal, so it never misses one between its read and
+  its wait.
+- `MobProvisioner::stop_member_runtime_now` (defaulted): the Shutdown member
+  stop, holding run starts and cancelling the current run immediately.
+
+### Deprecated
+
+- `SessionRuntime::set_callback_channel`. It replaced the route shared by
+  every connection on the runtime. Connection-owned servers keep their route
+  on their own router; use `init_callback_channel` for the single-client
+  default route.
+
 ### Fixed
 
+- Python and TypeScript SDKs: the automatic `rkat-rpc` download fetches the
+  asset the release actually publishes. Both SDKs requested
+  `rkat-rpc-v<version>-<target>.<ext>`, but every release names it
+  `rkat-rpc-<version>-<target>.<ext>` (the `v` belongs only to the tag), so
+  the download was a 404. Without `rkat-rpc` on `PATH` and without
+  `MEERKAT_BIN_PATH`, `connect()` failed with `BINARY_NOT_FOUND` or fell back
+  to a legacy `rkat` on `PATH`. Intel macOS now maps to the published
+  `x86_64-apple-darwin` asset instead of refusing with `UNSUPPORTED_PLATFORM`.
+  Unit tests pin the exact asset name and URL for every published target;
+  `MEERKAT_SDK_NETWORK_TESTS=1` also checks a published asset over the
+  network.
+- Python SDK packaging: the PyPI page for `meerkat-sdk` shows the SDK README
+  and project links (homepage, documentation, repository, changelog,
+  issues). `pyproject.toml` declared neither `readme` nor `[project.urls]`, so
+  published releases had an empty description.
+- TypeScript SDK packaging: `require("@rkat/sdk")` resolves. The exports map's
+  `require` condition named `dist/index.cjs`, which the ESM-only `tsc` build
+  never produced, so CommonJS consumers failed with `MODULE_NOT_FOUND`. The
+  map now lists `types`, `import` and `default` (all shipped files), so Node
+  versions that can `require()` an ES module load the package that way. A
+  test checks that `npm pack` contains every file the entry points name.
+  `package.json` now declares `repository` (with `directory`), `homepage`
+  and `bugs`, so the npm page links back to the docs, source and issues.
+- The `meerkat` facade compiles when another crate in the build turns on
+  `meerkat-store/jsonl` while the facade's own `jsonl-store` is off (E0004,
+  `RealmBackend::Jsonl` not covered in the disk store set). `session-store`
+  now always compiles the Jsonl variant, as it already does Memory and
+  SQLite, and without `jsonl-store` the facade refuses a Jsonl realm with the
+  typed `StoreError::UnsupportedRealmBackend`. `make test-feature-matrix-lib`
+  checks that combination.
+- GPT Live Turbo S S103 no longer reports a duplicate readout when a later
+  correction result prompts the voice to re-read the brief it updates
+  (#1705, control 0375acca R3: the corrections came back diff-only,
+  "Updated the kickoff to Friday", and the voice read the whole brief again
+  with Friday). A response opened by a later result delivery's commentary
+  acknowledgement, a delivery that does not itself carry the sentence and
+  whose job was created after the original delivery on the same channel, may
+  re-voice that channel's earlier-delivered sentences in one response.
+  Re-reads opened by a narration, a cue or the user's speech, a second
+  re-read for the same delivery, and deliveries from another channel or a
+  parallel job are still duplicate readouts.
+- GPT Live Turbo S S97 and S99 journals now carry the browser timeline
+  (`fixture_start` with `speech_ms`, `input_final` with `t_ms`), one record
+  per channel, written whether the scenario passed or failed. The lag rule
+  that voids provider-degraded runs could not be computed for them before,
+  so a failing S97 or S99 run could not be classified as void or valid.
+- The documented agent event catalog (`meerkat_contracts::KNOWN_AGENT_EVENT_TYPES`,
+  the emitted `known_event_types` and the Python, TypeScript and Web SDK
+  inventories) now lists `live_channel_closed`, which the core event schema
+  has carried since it was added. The `rkat storage doctor` and `storage
+  migrate` integration tests no longer expect session-store ledger v4,
+  which went stale when session-store migration 5 (#1541) landed: the
+  doctor test asserts the HeadCanonical crossing floor (v4 or later), and
+  the migrate test pins the stamped version to 5 so the next bump fails
+  loudly.
+- Turbo S S99: after a late summary, the replay of speech the call had
+  already heard (the causal tail) went to the provider as one quiet append per
+  row, and gpt-live-1 answered the replayed rows one by one ("level nine", "I
+  don't know yet", "Cobalt"). That pushed a delegation result's readout into
+  the user's next question, which then got the rest of the result as its
+  answer. The contiguous run of queued heard-speech replays at the outbox head
+  now goes out as ONE append (the replay framing once, the rows in order)
+  through the generated edge `AuthorizeLiveContextCausalTailBatch`, under the
+  same binding, bootstrap, recovery and turn-boundary guards as one row. Its
+  single pending append is resolved by the ordinary resolve edges, which now
+  pin the cursor range by the pending append (`next > previous`) instead of
+  `next == previous + 1`. Every other row keeps one-row appends, and a run the
+  generated state refuses as one append falls back to them. A rejected batch
+  is re-queued row by row under the original cursors. `EnqueueLiveContextRow`
+  gains the guard `canonical_cursor_is_above_the_pending_append`: a row is
+  never queued at or below the next cursor of the channel's in-flight append,
+  so a row a batch carries cannot be queued again and delivered twice (the
+  runtime already classifies new rows past every carried row). The TLA
+  lowering of a DSL `for` update now reads every field's pre-loop value, as
+  the Rust kernel does; it fed one field's post-loop fold into the others
+  (latent until this edge, the first `for` on the release). The bounded audit
+  `live_context_causal_tail_batch_audit` (24 steps, with four mutants) runs
+  in the TLC lane. The S99 echo checks
+  now inspect whole reassembled thinking appends row by row: a wire fragment
+  that held a typed assistant row ("Marigold") and the later spoken
+  correction ("Cobalt") no longer reads as re-sent current-facts speech.
+- A voice delegation's result that was merged into the session after its call
+  closed now replays on a reopened channel as the result of that request:
+  "Finished voice request: "<the user's own words>". It finished after the
+  call closed, so the user has not heard this result. The result follows.
+  If the user asked to have it read back, read it back word for word.",
+  still as quiet context at the same release point (the end of the user's
+  turn), so it adds no unprompted speech. Turbo S S104 R3/R4 on 10f4f053c:
+  the ode reached the reopened voice only as unattributed background work,
+  the executor's answer to "what happened while I was gone" claimed it had
+  been "read back", and the voice relayed that recap instead of reading the
+  ode. The link is typed. The live delegation coordinator records the
+  request's title under the delegation's interaction when it merges the
+  result (`MeerkatMachine::record_post_close_result_title`), the merge reply
+  commits under that interaction, and the runtime frames a runtime-work
+  replay whose row carries it (`live_execution::post_close_result_context`).
+- TypeScript SDK callback replies stay bound to the subprocess that requested
+  them. A delayed success or error after reconnect cannot answer a reused
+  callback ID on the replacement process; stale reader frames are ignored.
+  Closing a retired child cannot reject work admitted by its replacement.
+- A durable voice job delegated just before its call closed could be lost
+  (Turbo S S104, about 1 run in 10): the worker accepted its turn after the
+  close, and publishing its start was refused because the closed channel's
+  runtime binding was gone. The job never ran, and the cleanup retried the
+  refused start forever, so the session never settled. The generated
+  `ResolveLiveDelegationWorkerStart` guards (and the runtime's pre-check)
+  now also admit a start once the operation's own channel carries no
+  runtime, fence, or generation binding, on the exact worker authority; every
+  open mints a fresh channel id, so a retired channel never aliases a later
+  one. The worker then runs and settles through the revoked-worker
+  reconciliation like a worker already running at the close. A cleanup step
+  the generated state refuses outright now ends with a typed refusal instead
+  of retrying.
+- A provider response that ends before its terminal event is retried instead
+  of failing the turn (Turbo S S103 R1 on 850a38699: the executor's OpenAI
+  stream ended without `Done` and the delegated turn failed).
+  `meerkat_llm_core::LlmError::IncompleteResponse` is now retryable
+  (`is_retryable()` and its `LlmProviderError` retry metadata), so the agent
+  loop's bounded retry policy replays the turn under the same assistant
+  message id. Nothing of the truncated attempt is committed: the adapter
+  returns the error before assembling a result, and it now also fails
+  closed itself (a retryable `IncompleteResponse`) when a client's stream
+  ends without `Done`, rather than assembling the partial blocks. Its live
+  deltas carry the retried id and are discarded on `Retrying`, as for any
+  retried attempt.
+- SQLite sessions no longer report `Corrupted` on a cold load after a
+  compaction rewrite that rotated the row-lineage anchor. A rotated anchor
+  sealed the whole head, including the live tail the rotating rewrite
+  persisted after its last edge's result. The graph bases the next rewrite
+  on that result, below the anchor's end, and cold row replay can only
+  advance from its anchor. The anchor rotates every 32 rewrites, and in this
+  release also whenever the history retention cut passes it. The rotated
+  anchor now seals the last edge's result, and the live tail stays
+  post-anchor rows.
+
+  Data note: 0.8.50 and earlier SQLite sessions with more than 32 compaction
+  rewrites could already be in this state, failing to load with
+  `Corrupted`. No rows were lost. Cold load now replays such a session from
+  the edge its anchor sealed (the core accepts that origin only when the
+  edge's result witness, extended by the anchor's own tail rows, reproduces
+  the anchor exactly), and the session's next rewrite re-mints the anchor.
+  `SessionHead::begin_row_lineage_replay_from_released_rotated_anchor` is
+  the new, hidden, store-facing entry point.
+- A GPT Live typed update that later speech corrected only in part keeps
+  its other values (Turbo S S99, #1629: after a typed "code word Violet,
+  favorite flower Marigold" and a spoken "code word Cobalt", the voice
+  answered the pre-typed flower, Daffodil). The superseded typed row's
+  framing now leads with the row staying the current source for everything
+  the later speech does not change, and the append ends by restating that
+  after the correction instead of ending on the correction. Only a typed
+  user input is still told that an unreplaced request needs a response; a
+  typed turn's reply, which is never a request, no longer is (the voice
+  answered that clause aloud with only the corrected value, "Got it:
+  Cobalt.", then dropped the rest of the typed update).
+- GPT Live Turbo S S103 no longer fails a correct run on its readout rule or
+  its close.
+  - A readout the user cut off and the model then read again from the top
+    (S103 R5 on 7b17b1c85: "Wait, stop. Make it Thursday" after the brief's
+    first line) is one reading. A response resumes the interrupted readout
+    when the user's speech closed the earlier response, every response
+    since was opened by the user's speech, and no broker append that can
+    prompt speech (commentary, thinking, instructions) was sent in between.
+    A re-read after a cue or a narration is still a duplicate readout.
+  - The scenario's settle step waits until every completed delegation's
+    result delivery has resolved, and restarts its quiet window at every
+    delegation state change. It closed 0.5 s after the correction's result
+    was released (S103 R6 on b187df1e0, provider
+    `context_injection_incomplete`), so the result was never read.
+  - The barge-in lands on assistant speech when the assistant was audible
+    while the user spoke, or when an audible assistant burst was still
+    current at the onset (started by then, last active within the peer's
+    600 ms end hysteresis). Since #1651 the duck mutes the assistant within
+    its own latency, so the audible overlap can be 0 for a real barge-in
+    (soak 65b7a5c3 R3: audible at 51279, onset 51285, duck at 51491).
+  - The browser peer's `first_assistant_audio` anchor fires on an
+    already-speaking assistant only while it is voicing (an active window
+    within the last 100 ms). Otherwise it waits for the next burst start,
+    instead of barging in during the end hysteresis of a finished burst
+    (R6: armed 681 ms after the last active window).
+  - A planted monologue token that reaches none of the executor inputs is
+    classified from the provider's own evidence for the monologue (#1706).
+    When the provider never transcribed it and its reflected input caught up
+    on more than one 200 ms frame of audio in a single block that it
+    transcribed none of (control R6 on 555200d37: "Copenhagen" fell in a
+    5.8 s block reflected after a 6 s stall), the run is provider-degraded
+    and void (`ProviderDegradationCause::InputTranscriptOmission`). A token
+    the provider transcribed that no executor input carries is still a
+    failure, and so is a token it transcribed as something else with no
+    ingest stall, because that can come from our own prompt.
+- Shell tool commands and background jobs no longer inherit the host's
+  stdin. In a stdio JSON-RPC host (`rkat-rpc`) stdin is the protocol
+  transport, so a command that read stdin (`cat`, `head`, a prompt) could
+  consume protocol frames. Every tool-spawned child now gets `/dev/null` as
+  stdin and reads EOF at once.
+- Public Live talk-over (#1638): assistant audio that kept playing after the
+  user started speaking (a provider tail of up to several seconds), or that
+  started while the user was still talking, now ducks as soon as it overlaps
+  the user's speech in clients that apply `live/assistant_playback_hint`,
+  including the e2e browser peer.
+- A barge-in playback duck no longer restores in the middle of the
+  assistant's burst (Turbo S S103: a ducked response the provider kept
+  voicing for 3.6 s resumed after 1.6 s of the user's input silence, and its
+  tail played over the user). gpt-live-1 exposes no response id and no done
+  or cancel event, so the restore waits for provider output silence: an
+  input-quiet restore now happens only once the output has been silent for
+  one burst gap (`OUTPUT_BURST_GAP_MS`, 600 ms, the browser peer's end
+  hysteresis), and otherwise fires on the output side at that gap while the
+  user is quiet. The 1600 ms output-silence restore and the duck trigger are
+  unchanged. Known trade-off: a reply that starts into the user's last words,
+  or a user backchannel over a readout, stays ducked until the assistant's
+  next burst gap, bounded by the 1600 ms output-silence restore. In the
+  re-soak, the motivating S103 correction's talk-over fell from 4102 ms to
+  100-496 ms (#1709).
+- GPT Live provider-stream recordings (`test-realtime-fixtures`) now keep
+  delegation commentary that was held behind the user's unanswered
+  utterance and released later. The release path sent it without
+  recording it, so a held result was missing from the recording and the
+  Turbo S S101 result-timing oracle reported a correct readout as spoken
+  before its result (93b6aaec S101 R2). For recordings made before this
+  fix, the oracle anchors such a result on the first acknowledgement of an
+  unrecorded append after the delegation was created.
+- A GPT Live call no longer ends when the provider emits a delegation that
+  has nothing to act on (Turbo S S104 R1: a reopened channel delegated from
+  its seeded history 1.35 s in, before any user speech, and the call was
+  muted and closed). Such a delegation (no user request on the channel to
+  re-present, or a non-client target) is refused and ignored: nothing runs
+  for it, it is never named as still running, and the channel stays up for
+  the user's next utterance. Other unsupported provider events still end
+  the call.
+- GPT Live runtime work replayed on a reopened channel (a job that finished
+  while the channel was closed) is now framed as the answer to questions
+  about that work or about what happened while the user was away, to be
+  given from it directly and read back when the user asks or asked for it,
+  and still never read out unprompted (Turbo S S104 R1: "what happened while
+  I was gone" was delegated and the finished work never read back).
+  - A channel opened while delegated work from an earlier channel of the
+    same session is still finishing (its worker outlived the channel, or its
+    result is being merged and has not committed) now says so in its startup
+    session instructions: "Work started before this call is still
+    finishing, and its result will arrive here as context data. Do not say
+    it is done until it arrives." The model decides how to answer before the
+    finished work's replay reaches it, which waits for the user's turn to
+    end. Released at the first words instead, the replay made the model talk
+    over the user. The source is new
+    `meerkat::experimental_gpt_live::LivePostCloseWorkSource`, bound with
+    `ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source` (a
+    defaulted method). The JSON-RPC router binds its live delegation
+    coordinator, which tracks owned workers running at their channel's close
+    until their custody ends and post-close merges until their turn reaches
+    its terminal. Opens with no such work are unchanged.
+  - The "Finished voice request" narration that travels with a result now
+    adds "If the user asked to have it read back, read it back word for
+    word." It precedes the result text in the same event, so it is in
+    context before the model's own readout. In S104 R1 the result carried
+    the requested ode, and the voice summarized it away.
+- GPT Live no longer gives the voice a "Finished voice request: ... The
+  result follows." announcement without the result behind it. The Completed
+  narration was its own provider event, acknowledged before the result was
+  released, so for that round trip (550-700 ms) the provider held the
+  announcement alone and the voice answered in the gap with an invented
+  outcome (Turbo S S101: "Two." and "3" for a "0" result). The narration is
+  still machine-authorized, but it now travels inside the result's release
+  and reaches the provider in the result's own commentary event, ahead of
+  the result text.
+- A GPT Live result cue no longer carries delegation framing into the user's
+  next question (Turbo S S99: recall questions were delegated after a cue)
+  (#1630).
+  - The cue is a thinking append, still bound to its delegation. Cues went
+    on the instructions lane, which persists as standing session
+    instructions, so a cue's delegation framing stayed in force for the next
+    question.
+  - Every cue ends with a scope sentence that keeps questions about the
+    conversation native: "Only this result: answer questions about this
+    conversation yourself." A cue that does not fit one 500-byte append (an
+    outcome cue with an open request) is split before that sentence.
+  - The "if the user's latest request is still unanswered, answer it first"
+    clause is sent only while a request is open: one that neither the
+    model's output nor a delegation has answered, a typed broker fact that
+    reflected-input silence does not clear (S103 r2).
+  - A deferred cue is no longer released into the user's next question by
+    the model's own lagging transcript. An output transcript delta that
+    started before the user's utterance is the tail of the previous reply
+    and clears neither the user's floor nor the open request, and a deferred
+    cue waits while reflected input still carries the user's speech (S99).
+  - A result the model has already read out gets no cue after it (S100 r2:
+    the model read the result out in full, the deferred cue still
+    followed, and the model read it out again over the user's next turn).
+    The cue is skipped when the model's first output after the end of the
+    result's insertion starts before any user utterance that took the floor
+    after that insertion: the model's own continuation, which in every
+    recorded readout voiced the result before any cue (S97: 10 of 10). When
+    the user's utterance came first, that output answered the user, so the
+    cue is still owed. Both are provider-timeline starts. The cue has one
+    wording per kind, with no "unless you have already told the user"
+    exception. Output that starts inside the result's insertion span also
+    counts when it opens a new response (the previous output ended at least
+    1600 ms earlier): the model often begins answering exactly as the
+    result lands (S100 r1: a fresh " Done." over the insertion's own span,
+    then the user's "skip the details, just say done", then a cue that made
+    the model read the details out). A cue owed because the user spoke
+    first adds "The user has spoken since this result arrived: if they said
+    how to report it, do that."
+  - A new response whose first transcript delta arrives after the result
+    was sent, before any user utterance takes the floor, also counts as the
+    readout, even when its quantized provider start precedes the result's
+    acknowledgement (Turbo S S97 R2: "It's empty." at 24400 ms, the
+    acknowledgement at 24600-24800 ms, then a cue and a second readout).
+  - Every in-progress notice and every result cue names the other
+    delegations still running, by the user's words for them: "Still
+    running: "X". Do not say it is done until its result arrives." (S101:
+    the voice claimed a job done 10-14 s before its result existed, right
+    after the cues of the jobs that had finished, in 5 of 5 runs.) A
+    delegation is running from `session.delegation.created` until its
+    result is acknowledged or a Failed narration ends it; the narration
+    authority carries that as a typed flag (`ends_delegation`) to the
+    provider session.
+- The LLM reconfigure host's turn-finalization boundary now keeps its session
+  service alive. The host holds the service weakly and upgraded it only to
+  acquire the boundary, so a caller that dropped its last service handle while
+  holding the boundary left the later hydrate, live and persist steps of the
+  same transaction unable to reach the service (`Destroyed`). The boundary now
+  retains the service and releases before it. No current caller hit this; they
+  keep the service alive for the whole transaction.
+- A GPT Live delegation's "Started voice request" and "Finished voice
+  request" narrations now quote only the user's last turn before the
+  delegation, not every user word since the previous delegation (Turbo S S106
+  r2). The label carried turns the model had already answered natively, so
+  "the venue for the launch is Lisbon" read as part of the lighthouse request
+  handed to the executor, and "which venue did I mention earlier" was then
+  delegated instead of answered. The executor request itself is unchanged:
+  the provider marks no difference between a model backchannel and a
+  substantive answer, so a request the user split around a backchannel must
+  still reach the executor whole, with the assistant's own words as
+  labelled context.
+- The GPT Live voice instructions now give call endings an owner: when the
+  user says goodbye or asks to end or close the call, the voice layer says a
+  brief goodbye itself and the app ends the call (Turbo S S106 r4). The voice
+  model cannot end a call, and the instructions route work it cannot do to
+  the executor, so "Close the call" was delegated.
+- GPT Live no longer replays its own "let me check" speech after a late
+  summary as if it were a fact (Turbo S S99 r1: after the summary had
+  answered the vault-phrase question, the quiet replay re-showed the model
+  its earlier "I'll confirm once I can retrieve that earlier text", and it
+  delegated the same question again). Assistant speech opened between a
+  user turn's client delegation and that delegation's result acknowledgement
+  (or the user speaking again) gets no reassertion ordinal; the result is
+  recognised by its own append attempt. A readout after the result, and all
+  speech outside a delegation, still reassert.
+- A GPT Live open whose summary is still pending but whose newest turns are
+  seeded verbatim no longer says the older part of the conversation "is being
+  prepared and is not yet available" (Turbo S S99 control: asked about the
+  newest seeded turn first, the model answered "I don't know" or delegated).
+  The notice claims the seeded turns as known; the late summary arrives with
+  its own framing.
+- GPT Live no longer voices text chat typed during a call (Turbo S S105 R3:
+  a typed correction mirrored into the channel made the voice read it aloud
+  and replay stale results, "the number is forty-seven ... and forty-two",
+  over the user's next question). A host-typed turn (`turn/start`, a
+  session's initial prompt) stamps `TranscriptTurnInput::TypedText` on its
+  rows; the live mirror delivers them on the quiet thinking lane as text-chat
+  context ("the user typed it and read the reply there"), never as voiced
+  commentary. Spoken rows and peer-driven replies (such as the executor's
+  answer to a delegated question) are still voiced. A text-chat row stays a
+  typed row to the generated machine (the `TextChat` source, queued as
+  `ReplayTextChat`): one held behind a late summary while the user said
+  something newer aloud is still delivered with the superseded-typed framing,
+  so the later speech stays current (Turbo S S99: framed as current text
+  chat, a typed "Violet and Marigold" outranked the later spoken "Cobalt").
+- `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` no longer
+  fail with `Internal("... Runtime not ready: attached")` on a member whose
+  runtime is attached but has no run. Both now cancel the member's current
+  run, exactly that run, at its next boundary, and succeed when there is
+  nothing left to cancel (no run, or the run ended first). They no longer
+  queue an ambient cancel on an idle member that its next run could pick up.
+  `MobProvisioner` gains `cancel_member_admitted_work`, whose default
+  interrupts the member as before.
+- `MobHandle::force_cancel_member` and `MobHandle::cancel_all_work` (and the
+  `force_cancel_member` mob tool) now also cancel work the member admitted
+  before the cancel but has not started, such as the run a fork admits for
+  its child. Previously a force cancel that arrived before that run started
+  returned `Ok` and the run then went ahead. Both verbs take one cancel point
+  under the session gate that stages runs: every input queued there is
+  abandoned, and the run current there is cancelled exactly, at its next
+  boundary. Input admitted after the cancel is untouched. `MeerkatMachine`
+  gains `abandon_queued_inputs_at_cancel_point`, returning the new
+  `AdmittedWork`.
+- GPT Live voice session instructions and bridge descriptions no longer name
+  the product. Words in the model-facing instructions bias the provider's
+  input transcription: in Turbo S S103 a planted "Marigold" was transcribed
+  as "meerkat". The voice layer is now "the low-latency voice layer for an
+  executor agent", with the same meaning.
+- Mob member-kickoff status notices (`mob.kickoff_pending`, `_starting`,
+  `_started`, `_callback_pending`, `_failed`, `_cancelled`) no longer leave an
+  unanswered inbound peer request on every wired receiver (#1608). They were
+  sent as peer requests, so each one recorded a request nobody would answer
+  and told the receiving agent to call `send_response`. They are now one-way
+  `PeerLifecycle` notices: the receiver still sees each one (a `lifecycle`
+  comms notice naming the kind, waking it as before), no inbound request is
+  recorded, and the notice asks for no reply. A notice from an older sender
+  still arrives as a request. Topology notices (`mob.peer_*`) are unchanged.
+- GPT Live no longer announces "Finished voice request ... The result follows."
+  for a result whose work is still waiting on another member's answer
+  (Turbo S combined5 S102 R3: the voice answered that announcement with an
+  invented reply, "They said they don't know", before the pending-answer
+  notice and the result were sent). Such a result now reaches the provider
+  as the pending-answer notice followed by the result, with nothing ahead of
+  them promising an answer; other results keep their Completed narration.
+- A delegation result that lands while the GPT Live model is still speaking
+  is now read out once the response ends, instead of being lost (Turbo S S97
+  r3). The result's speak cue was sent the moment the result was
+  acknowledged. A result inserted exactly at the end of the output so far
+  (gap 0) counted as silence, so the cue went into a response that was still
+  being voiced and already committed to other content, and nothing re-armed
+  it. A result landing while output ran past it got no cue at all. Now a
+  result acknowledged while the model's response is in progress defers its
+  one cue until the response ends: 1600 ms of output silence measured on the
+  provider's own output audio frames (`OUTPUT_SILENCE_RELEASE_MS`, derived
+  like the user-floor release), never a wall-clock timer. A deferred cue
+  holds nothing a close waits on. A deferred cue also waits while the user
+  holds the floor: the model's output is silent while the user speaks, so
+  output silence alone released the cue into the middle of the user's next
+  question, and the model then delegated that question (S99). No cue offers
+  an "unless you have already reported it" exception any more, which the
+  model took a greeting for (S97 v3 r4); since #1635 a result the model has
+  already read out gets no cue at all. The tail of a reply already under way
+  when the result landed does not count as output since the result, even
+  when its transcript frame arrives after the result's acknowledgement (S97
+  r3: " ready." spanning the insertion itself).
+- GPT Live Turbo S S102 no longer fails a run whose member answered
+  correctly. The oracle looked for the text "Peer response from" in the
+  executor's history, which appears only when `send_response` carries no
+  blocks. With blocks, the row's content is the response itself (combined5
+  S102 R3, and S102 r2 before it). The check now reads the typed comms row:
+  `response_terminal` for the exact request id, from the member, with status
+  `completed`.
+- GPT Live answers questions about text chat turns typed during a call
+  itself (Turbo S S105 r5: after a typed correction committed mid-call, "So
+  what are the two numbers now" was delegated). The session instructions
+  claimed only "the earlier text chat"; they now claim the text chat before
+  or during the call.
+- GPT Live no longer voices an invented answer from another member while a
+  request to that member is still pending (Turbo S S102 r2: "Pemberton said
+  it feels like it's around mid-afternoon" the moment the "I asked Analyst
+  Pemberton" result landed, 6.7 s before Pemberton's real answer).
+  - When a delegation result is released while the worker's own turn has a
+    peer request with no committed terminal response (read from the worker
+    session's typed rows: a `PeerRequestSent` receipt for a call of that turn,
+    no `ResponseTerminal` notice for its request id), the provider first gets
+    a notice bound to the delegation, ordered ahead of the result: the
+    result reports asking that member, their answer has not arrived, tell
+    the user only that you asked. The result's cue then asks for exactly
+    that instead of "the actual outcome".
+  - The in-progress notice sent at every client delegation also says a
+    result reporting someone was asked does not carry their answer, to be
+    reported (correcting anything said before) once it arrives; the result
+    cue reports only what the result itself says.
+- A text `turn/start` (or external event) that arrives while another run on
+  the same session is between its apply and its boundary acknowledgement no
+  longer destroys that run and the session. Typical case: the user types
+  while a live voice delegation's ExistingMember worker runs on its source
+  session.
+  - Before, the pre-admission staleness check saw the live actor's
+    uncommitted rows (`LiveUncommittedTranscript`), read the missing live
+    export as an absent actor, and discarded the actor and unregistered the
+    session. The worker's turn then failed finalization with "promoted
+    WholeBlob boundary has no exact live checkpointer", and the live channel
+    closed.
+  - `PersistentSessionService::live_session_export` now answers with a typed
+    `LiveSessionExport` (`Live`, `NoLive` or `DurableAuthoritative { reason
+    }`).
+  - An uncommitted live transcript is stale per
+    `PersistentSessionService::uncommitted_live_transcript_is_stale` and a
+    `LiveStalenessPosition` (`TurnBoundaryHeld` or `OutsideTurnBoundary`).
+    Holding the turn-finalization boundary it always is. Outside it, it is
+    stale only when its run ended without a commit
+    (`live_transcript_awaits_no_boundary_commit`), so a run between its apply
+    and its boundary commit keeps its actor and checkpoint receipt, while a
+    stopped or failed run's image is still discarded as before.
+- Generated TLA+ models applied a set insert or remove to only one branch of a
+  field that a conditional update had already changed in the same transition.
+  The pending value `IF c THEN a ELSE b` was spliced unparenthesized as the
+  left operand of `\cup`/`\`, so the ELSE branch captured the operator and the
+  THEN path lost the second update. The Rust kernels were correct; the models
+  diverged on MobMachine's topology convergence (`pending_respawn_topology`
+  kept the second absent identity) and MeerkatMachine's live recovery
+  cancellation (`live_cancelled_recovery_channels` lost one channel when both
+  replacements were present), and on the mob compositions that embed them. The
+  set updates now delimit the pending value, as field reads already did
+  (#1513).
+- Closing a live channel never waits on a delegation result that has not been
+  dispatched. A result waiting to be released (on the bootstrap barrier or the
+  delegation lane) used to be awaited by the close, while that wait could end
+  only once the close committed, so the close stalled until its bounded local
+  retirement (Turbo S S99: 5 s and more). The release now ends as closed
+  before dispatch and the result merges into the source member, as an
+  interrupted-by-close result does. Every outcome of a release attempt is
+  typed and handled, so a result can no longer end a release silently.
+- A refused live delegation result release no longer retries in a hot loop.
+  The release waits for the session machine's commit signal, which advanced
+  after every applied transition, including observations that change no
+  state. The delivery authorization applies such an observation on each
+  attempt, so a refused attempt woke its own retry (Turbo S S99: 405 refused
+  attempts in 350 ms). The commit signal now advances only when a transition
+  changes the machine state. The live delegation channel loop also logs why
+  it ended (cancelled, stream ended, stream failed, or binding mismatch);
+  before, it could end and close the channel without a trace.
+- GPT Live no longer primes the voice model to delegate questions about the
+  conversation itself (Turbo S S99: after the summary release, a run
+  delegated "now tell me my historical vault phrase" instead of answering it
+  from the context it had just received). #1588's summary-pending notice told
+  the model to answer "without lookup, tool, or delegate", and a measured rule
+  already recorded that naming delegation as something to avoid primes
+  exactly that.
+  - The public client-context session instructions now scope the executor
+    positively, to work the voice layer cannot do itself (tools, files,
+    current information, extended reasoning). They state that everything said
+    in this conversation (this call, the earlier text chat and its summary)
+    is already known and answered directly. "Do not delegate yet" became "do
+    not act yet".
+  - The summary-pending notice and the bootstrap framing drop the
+    delegate-naming phrase.
+  - A unit test keeps every startup and context text free of
+    delegation-as-avoidance wording.
+  - The public protocol offers no structural lever: client delegation has no
+    configurable description and carries no task text or kind.
+- A delegation result on a GPT Live channel is no longer held for as long as
+  the user keeps speaking (S99).
+  - The result waited behind the channel's bootstrap barrier, which required
+    the late summary's acknowledgement and an empty context outbox. Under
+    continuous speech new replay rows kept arriving and each waited for a
+    provider turn boundary, and the wait also joined the outbox drain, so the
+    result was never released before close.
+  - Results now follow the summary's provider acknowledgement only.
+    `ObserveLiveContextDeliveryReadiness` and the
+    `AuthorizeLiveDelegationResultDelivery` and
+    `AuthorizeLiveBridgeSubmission` guards state that one rule, so readiness
+    and authorization cannot disagree. Queued context rows (the user's own
+    speech the provider already heard, replayed with earlier-speech framing,
+    plus typed and runtime-work rows) still drain in order after the summary
+    on the channel's owned drain worker, which close joins; the result wait
+    requests that drain and never joins it.
+  - A barrier revoked by a channel close now returns the typed
+    `RuntimeDriverError::LiveContextBarrierRevoked` instead of a validation
+    error, so close paths can match on it.
+  - A new bounded TLC audit
+    (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
+    runs in the machine-verify lane: a result is authorized only after the
+    summary acknowledgement, and is authorized while a replay is still
+    queued.
+- A GPT Live open whose summary is still being prepared tells the model that
+  the newest turns of the earlier text conversation it carries are known and
+  only the older part of that conversation is summarized and still pending.
+  The startup notice used to say just that a summary "is being prepared and is
+  not yet available", and gpt-live-1 answered "I don't know that yet" about a
+  fact in those very turns, including when asked about "our text chat" (Turbo
+  S S99's positive control).
+- GPT Live: the narration and other spoken context that follow a client
+  delegation no longer arrive about 8 s late. Spoken context waits while the
+  provider reports an open user turn, so the assistant does not talk over the
+  user. That turn is closed by its finish, or by the client delegation joined
+  to it, because the delegation is the user turn's terminal observation and no
+  finish follows it. The delegation never closed it, so every delegated
+  request's "Started voice request" narration waited out the full
+  `SPOKEN_CONTEXT_USER_TURN_BOUND`.
+  - Any user speech after the delegation reopens the turn until that turn's
+    own finish. This covers a new utterance, which the provider reports as more
+    input deltas of the delegated turn rather than as a new turn start. It also
+    covers a late tail continuing the delegation's utterance. So an earlier
+    delegation's narration is never spoken over the user's next request.
+  - The 8 s bound remains only as the failure bound for a user turn the
+    provider never closes.
+  - The observation pump now follows the user turn in provider order, before
+    adapter fan-out.
+- `meerkat` builds without a dead-code warning when `live` is on but
+  `openai-live` is off (for example default features with clippy
+  `-D warnings`): `meerkat::surface::live_media_health_rms_micros` is now
+  compiled only with its users, under `live-webrtc` and `openai-live`.
+- `MobHandle::shutdown` no longer fails when its immediate cancel of a
+  member's run reports `InterruptDispatchOutcomeUnknown` (the executor saw
+  the run end while machine authority still bound it, or its callback
+  outlasted the acknowledgement bound). The runtime owns that cancel's
+  outcome: the Shutdown waits for the run's recorded end, as for any
+  cancelled run, and reports the run from its recorded terminal.
+- Archiving a mob member's session (RPC `session/archive`, REST
+  `DELETE /sessions/{id}`, MCP `meerkat_archive`) whose retirement is stuck
+  re-drives that retirement once per archive request, as the archive
+  re-drove it before owned retirement. A cause that still fails is
+  surfaced as `MemberRetirementStuck`, never looped and never masked.
+- `MobHandle::stop`, `shutdown` and `shutdown_with_report` no longer poll
+  a refused Stop or Shutdown with sleep-and-resend (25 ms doubling to
+  250 ms) (#1494). Each refusal now waits on the mob machine-state watch:
+  - placed completion or kickoff cleanup still settling: until those
+    custody sets drain;
+  - another lifecycle operation: one immediate re-evaluation, then the next
+    committed transition.
+  Each wait then re-issues the command once. The existing 600 s bound (or
+  the caller's shutdown deadline) is only a hang guard; past it the
+  refusal is returned.
+- The release semver gate (`make semver-breaks`) fails closed on any
+  cargo-semver-checks finding whose message shape it cannot read in full.
+  Such a finding is now an error naming the lint, not a NOTE. Before, it fell
+  back to PascalCase symbols, which cannot see field, method or constant
+  names, so a break of that kind could pass without being declared.
+  - The gate learned the v0.50.0 shapes of `enum_unit_variant_changed_kind`,
+    `trait_missing`, `type_method_marked_deprecated` and
+    `pub_module_level_const_missing`. The fail-closed check caught the last
+    one on the 0.8.51 tip.
+  - A `*_marked_deprecated` finding is a deprecation, not a break: it is
+    satisfied by a name under `### Deprecated`. Real breaks still need
+    `### Breaking`.
+- A short shell timeout is no longer consumed by one-time setup. A
+  foreground shell call's dispatch deadline was exactly its `timeout_secs`,
+  measured from dispatch, so first-call setup (resolving the shell, which
+  falls back from an absent `nu`, plus the first custodied spawn) could use
+  up a model-chosen 1 s timeout before the command ran (Turbo S S101: a
+  quick `ls` was cut off and retried). The shell path is now resolved when
+  the tool is built, the command's timeout runs from its spawn as before,
+  and the declared dispatch deadline is that timeout plus
+  `SHELL_SETUP_FAILURE_BOUND` (30 s), a failure bound for a hanging setup
+  (#1575).
+- A busy delegation worker no longer stalls the live channel. Steering a
+  continuation into a running delegation waited, inside the channel's
+  observation loop, for that worker's next model boundary, which a running
+  tool call (a long shell command) holds for its whole duration; every later
+  delegation request on the channel queued behind it (Turbo S S101: a quick
+  question waited 16.6 s behind a 25 s job). The steer is authorized in order
+  and its delivery runs per delegation (FIFO), with a typed outcome
+  (`Delivered`, `MissedRun`, `Failed`) joined at the worker's terminal
+  (#1563).
+- Reading a session whose turn is in flight no longer waits for the turn to
+  end.
+  - `PersistentSessionService::read` and `has_live_session` checked the live
+    actor's transcript authority by sending its session task a command. A
+    session task serves no commands while a turn runs, so a session read (for
+    example REST `GET /sessions/{id}`, mob run accounting, or a host status
+    check) waited for the whole turn.
+  - The session task now publishes its transcript authority between commands
+    and turns. Observation-only reads use the new
+    `EphemeralSessionService::observe_published_session_transcript_authority`
+    and never wait on the task. Callers that need an observation ordered after
+    their own commands keep `observe_session_transcript_authority`.
+  - A REST test also pins that stopping an in-flight run
+    (`POST /sessions/{id}/runs/{run_id}/stop`) reaches the interrupt without
+    waiting for the run to end on its own.
+- A Stopped or Completed mob no longer moves back to Running when a flow,
+  frame or loop bookkeeping input or a destroy-cleanup admission reaches it.
+  Forty-eight MobMachine transitions (the `AuthorizeFlowRunReducerCommand*`,
+  `AuthorizeFlowFrameReducerCommand*` and
+  `AuthorizeLoopIterationReducerCommand*` authorizations, the four
+  `RecordLoop*` records and `AdmitDestroyCleanup`) shared one arm guarded on
+  Running, Stopped or Completed with a Running target. A late flow step after
+  a Stop or Shutdown therefore silently undid the Stop, and since the member
+  run-start hold, it left every member held with nothing to release them. The
+  Running arms keep their names; new Stopped and Completed arms stay in their
+  own phase. No input that was accepted before is refused now (whether a
+  stopped mob should refuse new flow work is tracked separately). `Reset`
+  still restarts the mob, and now emits `ReleaseMemberRunStarts` so a Stop's
+  holds are released. A schema contract test refuses any new multi-source
+  transition that moves its other source phases to its target without an
+  allowlisted reason. The Completed to Stopped cleanup arms
+  (`BeginCleanupCompleted`, `FinishCleanupCompleted`) now hold member run
+  starts too. MobMachine records the hold in `member_run_starts_held`, the
+  Stop commit requires it, and the invariant
+  `stopped_mob_holds_member_run_starts` (checked by TLC) says a Stopped mob
+  always holds member run starts. Contract tests check, over every arm, that
+  the field follows the hold and release effects, that every arm entering
+  Stopped holds or requires the hold, and that every Shutdown holds, Completed
+  included.
+- A mob Stop no longer lets input that was admitted to a member before the
+  stop start a run while the mob is Stopped (#1500). The stop's cancel had no
+  run to reach, the stop saw the member idle and completed, and the queued
+  input then started a run anyway; the cancel was silently dropped. Stop now
+  pauses each member:
+  - MeerkatMachine owns a run-start hold. While it is set, no transition
+    establishes a new run (Prepare, the retired drain, or a direct turn
+    start): each takes a no-op Held arm, the runtime loop parks with the input
+    still queued, and releasing the hold wakes it. The current run, its turn,
+    cancels and terminals are unaffected.
+  - Stop holds every member before any stop interrupt, and cancels exactly the
+    run an autonomous member had (`CancelAfterBoundaryForRun`). Resume
+    releases the holds; a resume that fails re-holds them.
+  - Remote members are held through their host when it advertises
+    `run_start_hold`; an older host is interrupted as before and reported as
+    not holdable.
+  - Stop no longer sends the orchestrator a "Mob is stopping." lifecycle
+    notice, which a held orchestrator could only read after Resume; the
+    existing resume notice tells it the mob resumed.
+  - A remote member that was not bound when a Stop held or a Resume
+    released its run starts gets the matching command on its next bind, also
+    after a supervisor restart. Every bind delivers the run-start posture
+    MobMachine state records (held while its member run starts are held,
+    released otherwise); the in-memory owed commands a restart lost are
+    gone. A placed member whose host carrier is dormant (for example after a
+    cleanup-backed host revoke) is reported `NotBound` instead of failing the
+    Stop, and gets the posture when its carrier is re-activated; MobMachine
+    re-activates a placed carrier only while Running. A host that advertises
+    the hold but rejects it as unsupported is reported not holdable on every
+    Stop.
+  - A spawn that completes into a Stopped mob leaves it Stopped and holds
+    its members, the new one included. Before, MobMachine's spawn completion
+    moved a Stopped mob back to Running. Only Resume leaves Stopped.
+- The rkat full-tools spawn fits its 2 MiB production worker-stack budget
+  again (`tools_full_with_explicit_auth_binding_can_spawn_within_production_stack_budget`
+  overflowed after #1436). The agent's LLM retry loop builds its
+  failure-recovery step (machine verdict, model fallback, retry wait) in its
+  own boxed frame, and its fallback-origin resume check runs out of line.
+  Before, both recovery paths sat inline in one poll frame. The deepest
+  debug path now fits in about 1.5 MiB.
+- Public GPT Live holds delegation commentary (a result or a narration)
+  that arrives while the user's latest utterance is unanswered. A held
+  narration that a close leaves unsent is dropped, since it is ephemeral
+  progress speech.
+- Public GPT Live releases held delegation commentary once the user stops
+  holding the floor, even if the model never answers. Before, only the model's
+  next output or a delegation released it, so a user who kept talking past
+  the delegation to a silent model left the result unsent for good (Turbo S
+  S103).
+  - The floor is a real user turn: an input transcript delta whose speech
+    began after the model's last output ended and after the last delegation.
+    A backchannel over the model's speech takes no floor, and audio energy
+    alone (noise) never opens one.
+  - The floor ends after `USER_FLOOR_SILENCE_RELEASE_MS` (1600 ms) of
+    reflected-input silence on the provider's audio clock, below
+    `USER_FLOOR_SPEECH_DBFS` (-50 dBFS). There is no wall-clock timer, and
+    both constants document their derivation from Turbo S provider streams
+    and fixtures.
+- Public GPT Live logs each broker-owned append's receipt under its own
+  name: "in-progress notice acknowledged" and "result cue acknowledged" (and
+  the matching rejection). Before, the in-progress notice's receipts were
+  logged as a result cue's.
+- Public GPT Live no longer lets the model claim a delegated request is done
+  before its result exists (S103: "I've updated it to Friday afternoon"
+  3.6 s early, then silence once the result arrived).
+  - Every client delegation now gets a broker-owned in-progress notice on the
+    instructions lane, bound to it. It says not to describe the request as done
+    or state its outcome until the result arrives.
+  - The result cue now says that anything said about the request before the
+    result arrived came before it was done. If the user's latest request is
+    still unanswered, the model answers it first, then confirms the actual
+    outcome.
+- Public GPT Live holds a delegation result that arrives while the user's
+  latest utterance is unanswered. Appending it then diverted the model into
+  answering the result instead of the user, and the request was never
+  delegated (S100, S101). The result is released in order when provider
+  ordering answers the utterance: the model's next output, or the
+  utterance's `session.delegation.created`. A close or teardown first leaves
+  it unsent, and it settles as interrupted by close. Utterance positions come
+  from the session timeline, so a transcription tail that arrives late is
+  not a new utterance.
+- A result's speak cue is no longer sent while the model speaks past the
+  result's insertion point (output observed ending after the result's
+  acknowledgement position). An instructions append during output could
+  stop the answer mid-sentence: 5 of 44 such cues did in the final soak.
+- A live delegation result interrupted by its channel's close (held,
+  in flight, or refused) is merged into the source member as runtime work.
+  Before, it was retired without the post-close merge and lost.
+- Public GPT Live no longer drops a delegation result's speak cue when the
+  result lands soon after the model's last word. Previously a cue was
+  suppressed when the gap was under 1000 ms. A result that landed 400 ms
+  after the last word was never read out (S106), while voiced results land
+  from -200 to +400 ms after it, so no gap can separate the two cases.
+  Every acknowledged result now gets at most one cue, bound to the result's
+  `delegation_id`: a thinking append since #1630, and skipped since #1635
+  when the model has already read the result out.
+- Opening or refreshing a live channel on a member whose turn is in flight no
+  longer waits for the turn to end.
+  - The realtime open and refresh projections took the session's turn
+    boundary and asked the busy session task for its visible tool
+    definitions, so a live open or `live/refresh` on a member mid-turn (and
+    config propagation to every live channel after it) stalled for the whole
+    turn.
+  - The session task now publishes its visible tool definitions between
+    commands and turns (`PersistentSessionService::published_live_visible_tool_defs`).
+  - A strict experimental channel without a summary policy, whose provider
+    receives committed rows through the live-context mirror, opens mid-turn
+    from the committed boundary and the published tools; the turn's rows
+    reach it through the mirror once they commit, exactly once. A pending
+    realtime image anchor still needs the boundary, so that case is refused
+    with `SessionError::Busy`. Other channels open as before.
+  - `live/refresh` and config propagation build the refresh mid-turn from the
+    committed boundary and the published tools. The durable resync the
+    refresh performed before reading is deferred to the turn boundary as a
+    typed `PendingLiveResync`, released as `LiveResyncRelease::Synchronized`
+    there, or as `ChannelClosed` when the refreshing channel closes first.
+  - With no turn in flight every open and refresh projects exactly what it
+    did before.
+- The runtime store test `contended_unregister_finalization_does_not_starve_runtime_worker`
+  no longer fails on a loaded host. Its two 1 s wall-clock waits are replaced
+  by typed handoffs. The heartbeat now fires on a test-only signal sent when
+  finalization starts waiting for the write lock, so the test still catches a
+  finalization that blocks the Tokio worker.
+- Three meerkat-mob actor tests no longer fail under high test parallelism
+  (#1546). `test_queued_steer_during_running_turn_does_not_block_actor_commands`,
+  `test_internal_turn_completed_reply_does_not_block_actor_operations` and
+  `test_late_kickoff_failure_outcome_after_retire_is_benign` held their busy
+  turn with a timed delay and checked 100 ms and 250 ms budgets. Now the
+  mock executor's typed hold keeps the turn running, and a typed held-turn
+  count replaces polling. The checks assert that operations complete while
+  the turn is still held. The late-kickoff test joins the retirement saga to
+  its terminal reply instead of failing when `retire` runs out of its wait
+  budget.
+- SQLite stores refuse a database path that SQLite cannot safely address by
+  one name, instead of opening and mutating it (#1551). SQLite names a
+  database's journal, WAL and SHM files after the path it opened, so a hard
+  link to another store's file gave the same database a second set of
+  sidecars and broke coordinated access and crash recovery.
+  - Every open goes through `meerkat_sqlite::open_with`, which validates the
+    file before any connection: it must be a regular file with exactly one
+    hard link where the platform reports link counts.
+  - The file is checked again once the connection holds it, before any
+    pragma or schema work, so a file replaced in between is refused.
+  - The maintenance-fence guard and the runtime repair constructor's
+    read-only preflight run the same check.
+  - The runtime store maps the refusal to `RuntimeStoreError::Unsupported`,
+    and the session store to `StoreError::UnsupportedDatabaseFile`. Refused
+    opens leave every database, WAL, SHM and journal file byte-identical.
+  - The check keeps a cooperating owner's namespace honest. It is not a
+    defense against an adversary replacing paths concurrently.
+- GPT Live Turbo S S105 no longer races its voice recall against executor
+  result delivery. Results are released one at a time per channel, so a
+  result can still be waiting for the previous one's provider
+  acknowledgement when the scenario speaks. The scenario now waits until
+  every live delegation's result is acknowledged `Delivered` and its
+  commentary reached the peer, both before the typed correction and again
+  before the recall (covering the correction's own result).
+- A live delegation result that has to wait for the channel's result slot
+  (the previous result's provider acknowledgement) is released as soon as
+  that acknowledgement commits. Previously it retried on a doubling timer of
+  up to 1 s per queued result. The release waits on the session machine's
+  commit signal and re-checks after each committed transition. The release
+  guards change only through committed transitions, so no timer is needed.
+  New: `meerkat_runtime::MeerkatMachine::subscribe_session_machine_commits`.
+- Three meerkat-mob-mcp tests no longer fail on a loaded host (#1509). They
+  now assert ordering with events instead of wall-clock margins.
+  `relink_past_max_run_retires_a_child_still_running` relies on the child's
+  still-closed gate. `a_status_read_held_past_max_run_still_retires_the_child_at_the_deadline`
+  observes the moment the re-link abandons the held status read.
+  `the_deadline_yields_a_typed_partial_outcome_and_still_cleans_up` expires
+  the deadline on the coordinator clock once the round's turn is held.
+  Under a pinned load repro (60 copies on one core) the old tests passed
+  9/60, 0/30 and 18/60; the new ones pass every run. To support the last
+  one, the temporary council's deadline waits re-arm when the coordinator
+  clock offset changes, driven by its setter's notification. Without an
+  offset change (production) each wait is the same single timer as before.
+- A detached completion whose owner member is still being revived by the
+  mob's resume no longer waits on an exponential timer (100 ms doubling to
+  5 s) before retrying delivery (#1495). It now waits for that member's
+  explicit-resume work to leave the actor-published machine state, and
+  retries the moment it does. This covers the live delivery
+  (`deliver_detached_completion_to_member_when_revivable`) and the
+  post-restore council and fork re-link sweeps.
+- A refused OAuth token refresh no longer copies the token endpoint's
+  response body into error text. `OAuthError::TokenEndpoint` used to render
+  `status=.. body=..`, and on the MCP refresh path that text became
+  `McpError::ConnectionFailed` and the agent-visible connection notice
+  (`ExternalToolDelta` detail), so a non-conforming authorization server that
+  echoed the refresh grant in its error body leaked it to the agent. Its
+  `Display` now shows only the status and a well-formed RFC 6749 `error` code,
+  and its `Debug` reports the body by length. The raw body stays in the field
+  for host code that reads it deliberately. The MCP refresh path logs status
+  and body size at debug level, never the body. This also covers the
+  authorization-code and device-code grants, which share the error type.
 - An asset recovery dispatched from main (`release-workflow-dispatch --mode
   assets`) can publish its release archives. It runs main's workflow against
   the tag, so its build attestations name main's commit, and the exact-tag
@@ -47,16 +2195,689 @@ them.
   release.yml at the run's commit on `refs/heads/main` and requires the stamp
   to name the tag commit. Tag pushes and dispatches on the tag ref keep the
   exact-tag check.
+- A session document no longer grows without bound. The transcript rewrite
+  graph in session metadata kept one full pre-rewrite transcript plus every
+  message appended between rewrites, forever. Compaction shrank the live
+  transcript, but the document kept every message the session ever produced.
+  A blob-persisted session writes that whole document at every turn boundary,
+  so cost per turn grew with lifetime history: one OB3 coordinator reached
+  286 MB and was rewritten in full at each boundary.
+  - After each compaction the graph now re-anchors at the oldest of the most
+    recent `history_retained_rewrites` rewrites. The new anchor is that
+    rewrite's re-proved child plus its row-lineage token.
+  - Every commit stays, together with the rewrite- and graph-prefix
+    accumulators at the cut. The rolling graph identity is byte-identical, so
+    physical heads and save guards that bind it still verify.
+  - Documents written before this change load unchanged and re-anchor on
+    their next compaction.
+  - Reads of a retired revision (fork, rewind, restore, revision reads,
+    projections, and suffix proofs that would start before the cut) fail with
+    the typed `TranscriptRevisionRetired` naming the oldest retained revision.
+    They never return a wrong anchor.
+  - A head-canonical store that keeps all rows (`TranscriptRowRetention::
+    KeepsAll`) can still serve retired revisions from its rewrite records.
+    A re-anchored graph cannot be laid out as head-canonical strands
+    (blob-to-SQLite conversion), which is refused typed.
+  - The SQLite store bounds its rows to the same cut. In a rewrite
+    mutation's transaction it:
+    - replays its stored graph and re-anchors it through the graph owner;
+    - persists the retired base;
+    - deletes the `session_rewrites` rows below the cut;
+    - collects strands that only retired history could reach.
+  - Cold loads replay the retained rows from that base, with the same rolling
+    identity. A head's row-lineage anchor rotates once the retention cut
+    passes it, so cold row replay never needs a retired row. Proofs that
+    would need rows below the cut refuse typed.
+  - Measured over 40 compaction cycles, keeping 3: 3 rewrite rows and 17
+    strand rows from cycle 20 on, with stored bytes growing only by the
+    retained commit list.
+  - Residual: each retained commit is about 640 B, so the document still
+    grows by about 640 KB per 1,000 compactions. Missing-receipt repair
+    writes those commit values, so they stay; folding them below an
+    audit-coverage watermark is tracked in #1534.
+- The mob actor keeps serving commands while a spawn's supervisor
+  private-trust install waits on a slow member runtime or comms.
+  - The install used to run inside `finalize_spawn_admit` on the actor, so
+    one parked install held every other command behind it. A host saw a
+    mob-phase query and five spawns go unserved for 70 s.
+  - The install now runs off the actor, with the spawn's endpoint
+    observation, through the actor's member-effect lane (ticket-fenced
+    commit). `finalize_spawn_admit` consumes the outcome at the same point in
+    its ladder, so failure handling is unchanged. An install that finalize
+    never reached (an earlier failure) is revoked.
+- A member spawn no longer waits for another member's turn to end.
+  - Many `EphemeralSessionService` operations (also used inside
+    `PersistentSessionService`) held the service-wide session map while
+    waiting for a session task's reply. A session task serves no commands
+    while its turn runs. Examples: `update_session_mob_authority_context`,
+    `set_session_tool_visibility_state`, the session client and tool-filter
+    updates, the identity hot swap, and the live transcript commits.
+  - One such call aimed at a busy session therefore pinned the map for that
+    whole turn. Because the lock is fair, the next session create (a spawned
+    member's session) and every later session read of any session queued
+    behind it.
+  - Seen in a host whose coordinator spawned review workers from a tool call:
+    the spawns completed only after the coordinator's turn released.
+  - The session map is now a type whose only access is a synchronous
+    closure (or a cloned handle fact), so no guard can be held across an
+    `.await`. Every session-task round trip takes the task's command sender
+    and sends and waits with the map released.
+- A member retirement whose stage outlived the caller's 30 s budget was
+  dropped after its durable start: the member stayed `Retiring` with no
+  owner, its session was never unregistered, and graceful Shutdown never
+  touched it and could hang behind its teardown (OB3). The retirement is now
+  owned until it settles, and Shutdown progresses past any member it cannot
+  settle and reports it.
+- A retirement's quiesce stage now re-issues its exact-run boundary cancel
+  when an earlier cancel that was blocked behind an undeliverable control path
+  settles while the same run is still current, instead of relying on its first
+  cancel converging.
+- A joined mob Shutdown no longer interrupts a member again (pre-existing,
+  reproduced on 0.8.51 at about 1 in 14 iterations on two cores). Shutdown
+  interrupted autonomous members without holding their run starts, so an
+  admitted kickoff could start a run after the interrupt, and the runtime
+  unregister then hard-cancelled that run. Shutdown now holds run starts
+  first, cancels the current run itself, and completes each member's stop
+  only once the runtime has recorded the run's end.
+- Work submitted to a member whose retirement is durably started is refused
+  at once by the Retiring fence instead of waiting for the retirement to
+  settle.
+- A mob Shutdown could wedge the mob actor until the process was killed: its
+  lifecycle drains and final joins ran inline on the actor, so a joined task
+  waiting on the actor's reply to a command it had sent could never finish
+  (OB3's twin run: every runtime session unregistered within 10 s, then the
+  actor answered nothing more until SIGKILL at about 330 s).
+- The machine TLA generator parenthesizes a field's pending value when a
+  later expression in the same update block reads it. A conditionally
+  updated field was spliced bare as `IF c THEN a ELSE b`, so TLA+ precedence
+  captured the surrounding operator. The shipped `meerkat_mob_seam` model
+  unwrapped `TurnRunFailed.terminal_cause_kind` with `["value"]` bound to one
+  branch only, emitting the Option record on the other; a read in an
+  equality would have aborted TLC with a non-boolean IF condition. The Rust
+  kernels were unaffected, and every existing invariant, audit and witness
+  result is unchanged on the regenerated models.
+- Out-of-order acknowledgement no longer wedges a session's runtime delivery
+  cursor (#1497).
+  - The cursor wedged in two ways:
+    - The shell acknowledged a job terminal while an earlier row (a monitor
+      notification, or another job's terminal that completed later) was still
+      pending. `mark_applied` refused it as out of order, the failure was only
+      logged, and every later delivery for that session stayed blocked.
+    - The same happened when two concurrent shell jobs completed out of order.
+  - `RuntimeDeliveryInbox::acknowledge` now records an out-of-band
+    acknowledgement ahead of the cursor in generated `RuntimeDeliveryMachine`
+    authority (new `AcknowledgeDelivery` / `AdvanceAcknowledgedPrefix`
+    inputs). The cursor still moves strictly in order and advances over the
+    contiguous acknowledged prefix. `AdvanceAcknowledgedPrefix` is total: with
+    nothing parked at the cursor the machine reports the prefix at rest
+    (`AcknowledgedPrefixAtRest`), so the shell never decides when to stop.
+  - The job applier marks acknowledged rows applied without re-running their
+    sinks. `RuntimeDeliveryInbox::acknowledged_pending_sequences` and
+    `RuntimeDeliveryAcknowledgement` are new.
+  - Delivering an off-RPC monitor notification itself still needs the library
+    applier, which is held with the ingress work.
+- `rkat auth login`'s browser step for provider OAuth no longer writes the
+  authorize URL, with its one-time `state` and PKCE challenge, to debug
+  logs. It opened the URL through `webbrowser::open`, which logs the
+  spawned command (URL included) at debug level, and the CLI forwards
+  `log` records into its tracing output under `RUST_LOG=debug`. It now uses
+  the same non-logging `open_system_browser` as the MCP login.
+- Turning a mob profile's `read_only` off now takes effect when its members
+  resume. The declaration used to be folded into the persisted tool access
+  policy, which a resume restored, so the old restriction stayed in force.
+- A prompt admitted to a session while its executor attachment was still
+  being prepared could stay queued forever. The attachment read its queue to
+  decide whether to wake its runtime loop, then handed the session mutation
+  gate to the loop for startup recovery and reacquired it afterwards. An input
+  admitted in that gap found no wake sender, so nothing ran it. This hit
+  detached council completions delivered while a mob resume was reviving the
+  convener (#1482). The attachment now re-reads the queue once it holds the
+  gate again through commit.
+- The post-restore temporary council sweep no longer ends with an outcome
+  still owed when its first pass runs before the host registers the
+  convener's mob (a host may insert restored mob handles after constructing
+  the state). The sweep now also waits for the managed-mob set to change and
+  delivers once the mob is registered and running.
+- A repeated `council` call that arrived just as the original run finished no
+  longer joins the finished execution and reports `replayed: false`. The
+  owned task now releases its in-flight reservation before publishing the
+  sealed outcome, so a late caller replays the durable record.
+- MeerkatMachine unregister no longer wedges after a normal live channel
+  close (follow-up to #1476). The unregister guard added in #1476 required
+  every field a close removes to be empty. But the production close order
+  (custody revoke, then the recorded close) deliberately keeps its tombstone
+  for closed replays, so a session whose staged live channel was closed
+  normally could never unregister (`GuardRejected` on `UnregisterSession`).
+  The tombstone is the pending and activation receipts, the execution
+  mode and profile, and the two capability sets.
+  - `UnregisterSession*` now requires the 32 binding and in-flight fields
+    to be empty.
+  - The six tombstone fields may remain only for channels whose close is
+    recorded. Every forward recovery a closed channel still owes must be
+    settled first (cancelled, or its replacement bound).
+  - Unregister clears the tombstone. `RevokeLiveChannelCloseCustodyClosedReplay`
+    now requires a registered session.
+  - `live_channel_state_requires_registered_session` also requires no
+    tombstone and no owed forward recovery once unregistered.
+  - A classification test fails if a field a close removes is not
+    classified as binding or tombstone.
+  - A regression test replays the production close-then-unregister sequence
+    against the generated authority.
+  - `live_unregister_cleanup_audit` gains close-first starts in every phase
+    (Idle, Attached, Running, Retired, Stopped, and Retired and Stopped with
+    a recovery owed) with abandoned admission banned. A state-graph check
+    proves every reachable state can still unregister.
+- MCP server removal and readiness waits are event-driven (#1461).
+  - The removal drain in meerkat-rpc and meerkat-rest slept 100 ms between
+    passes. `McpRouterAdapter::wait_until_ready` polled every 100 ms. Both now
+    wait on a router progress signal: a finished call, a delivered connect
+    result or a finalized removal. The drain also wakes at the earliest
+    removal timeout.
+  - The drain queues its lifecycle actions before releasing the router lock.
+    Whoever observes a removal finalized also finds its action queued for the
+    next boundary.
+  - A removal staged just as the drain exited saw the running flag still set,
+    and nothing drained it. The drain now reclaims the flag for it.
+  - Three meerkat-rpc MCP lifecycle tests are no longer ignored. They staged
+    a remove or set an in-flight call right after an asynchronous add turn,
+    before the server was installed. A remove staged during a pending add is
+    deferred to a later boundary, and the in-flight hook silently did nothing.
+    They now wait for the server with `wait_until_ready`, and wait for the
+    drain with typed waits instead of fixed sleeps. Each passes 30/30 at 10
+    copies on two pinned cores.
+- A deferred live close settlement no longer retries on a timer. When it won
+  the member turn's boundary while that turn's commit was still landing in
+  the store, it slept 250 ms and tried again, at most six times, then gave up
+  with the deferral recorded. It now waits for
+  `PersistentSessionService::live_authority_advanced`, which fires when the
+  commit is acknowledged, a persist lands, or the live actor is resynced or
+  discarded, and retries then. The whole settlement is bounded once by
+  `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`. When the member turn ended with an
+  error, so no boundary commit is coming, the settlement stops at once with
+  the deferral recorded instead of retrying. A deferred transcript projection
+  refused because a close released the channel from the held boundary
+  re-arms the boundary wait and waits on the boundary itself.
+- An experimental GPT Live WebRTC activation no longer fails on a timer. The
+  commit used to give the three sideband actors (observation reader, control
+  consumer, adapter pump) two seconds to start and reported a failed
+  activation when a loaded scheduler took longer. It now waits for them with
+  no deadline: each actor owns a start lease from spawn, and an actor that
+  ends before it starts (aborted, panicked or dropped) cancels the activation
+  gate, so the commit fails typed instead of hanging. A start or cancel that
+  landed between the wait's checks and its registration could also be missed;
+  the wait now re-reads both after registering.
+- An experimental GPT Live pump-exit retirement no longer retries on a timer.
+  Every close failure used to retry with exponential backoff (25 ms to 2 s),
+  with no attempt cap. Each failure is now typed where the close error is
+  produced: another close executing on the channel is `CloseInFlight`, a
+  terminal projection refused with `SessionBusy` is `SessionBusy`, and
+  everything else is `Permanent`. An in-flight close is retried once that
+  close ends, and a busy refusal once the member turn frees the boundary. A
+  permanent failure stops and is recorded for the channel, and the binding
+  stays held until an explicit close or rollback retires it. The
+  string-only `ExperimentalLiveChannelCloseError::LifecycleAuthority` sources
+  carry no typed kind yet and are treated as permanent.
+- rkat-rpc's durable job delivery drain now visits every session that holds
+  undrained runtime deliveries for its realm (#1497). It used to read sessions
+  from a bounded job-row window (`list_all(10_000)`, ordered by job id), so a
+  session whose jobs aged out of that window kept its pending rows forever.
+  The population now comes from the runtime delivery authority:
+  - New `RuntimeDeliveryInbox::runtimes_with_pending_deliveries`.
+  - New `JobOutboxProjector::sessions_with_pending_deliveries`, scoped to the
+    projector realm by each runtime's first pending row.
+- A delivery whose caller left while it was parked behind a member's
+  in-flight admission no longer runs as a ghost turn. The admission lane
+  skips such a delivery by checking its reply channel, but `SubmitWork` ran
+  on a stack-relief task that held the reply receiver until its asynchronous
+  abort landed, so the lane could pop the entry while the caller still looked
+  alive. `SubmitWork` is now routed inline, so the receiver closes the moment
+  the caller drops (3/30 failures at 10 copies on two cores before, 60/60
+  after).
+- The tag release's BuildBuddy Native test-unit lane runs nextest's `ci-unit`
+  profile instead of the default one, which has no slow-timeout. On v0.8.50
+  (run 36941270028) a lib test kept that lane running past 2680 s remote
+  until the 3000 s SLO watchdog killed the batch without naming anything,
+  while the same command finishes its 12,164 tests in 356 s locally. A hung
+  test now fails after four slow periods as a named TIMEOUT in the submitter
+  log, and the lane prints its slow tests. The integration-fast lane gets the
+  same bound through a new `ci-integration` profile (fast's selection, 240 s,
+  480 s for four nested-Cargo or whole-workspace tests measured at 132-162 s).
+  nextest's `inherits` carries neither `default-filter` nor a parent's own
+  overrides, so the profile restates fast's filter and every fast override is
+  mirrored in the default profile, whose overrides apply to all profiles; that
+  also gives the existing `ci-pr` profile the overrides it was missing.
+- MeerkatMachine `UnregisterSession*` no longer leaves a session's live
+  channel state behind (#1476).
+  - Each variant is now guarded on every live channel being closed and its
+    close custody settled. Every field a channel close removes must be empty,
+    so the close transitions stay the single authority that settles live
+    obligations (result deliveries, bridge operations, staged or bound
+    execution custody). The shell already closes the session's channel
+    before unregistering.
+  - Unregister then clears the session's terminal context-preparation
+    records and any runtime stop deferred for its lifetime. Revocation
+    tombstones stay: they are durable executor evidence in the live bridge
+    recovery image.
+  - A new generated invariant, `live_channel_state_requires_registered_session`,
+    requires live channel bindings to name the registered session and leaves
+    no binding, custody or preparation state once it is unregistered.
+  - `specs/machines/meerkat_machine/live_unregister_cleanup_audit.{tla,sh}`
+    (run in the canonical TLC lane) proves unregister stays reachable through
+    the close transitions from an admitted, staged and bound channel, and
+    from a session running a turn or retired during one.
+- The GitHub-hosted Linux release binary jobs no longer fail in their first
+  minute with "detected dubious ownership": the release container marks the
+  workspace safe for Git before setup-rust-ci asks Git for the repository
+  root (it did so only afterwards since 2026-08-28), so the GitHub-hosted
+  release path builds Linux binaries without a BuildBuddy assets dispatch.
+  The same jobs also ran out of memory on the 16 GB runners: the release
+  build of `meerkat-machine-schema` (8.7 GB peak) overlapped `meerkat-mob`
+  (9.0 GB) and was SIGKILLed on aarch64. The catalog crate now builds at
+  `opt-level = 1` in release (6.3 GB; it is not on a hot path) and the
+  Linux build runs two jobs.
+- Composition owner feedback can no longer discharge a handoff obligation by
+  naming a value the obligation does not carry. The OAuth release drain bound
+  each expired flow id with an owner-context source drawn from the whole string
+  domain, and one feedback cleared the entire obligation, so a feedback naming
+  an unrelated flow "discharged" the drain while the flow stayed outstanding and
+  Release could never commit. The new `FeedbackFieldSource::ObligationMember`
+  source names one member of a set-valued obligation field: the generated
+  model quantifies it over that set and removes only that member (the
+  obligation stays open while any member-bearing field is non-empty), and the
+  generated Rust submitter rejects a non-member with
+  `ObligationMemberFeedbackError::NotObligationMember`. The drain's browser and
+  device flow bindings use it, and two new `auth_lease_bundle` witnesses prove
+  a release drains its flow and reaches Released under every owner choice.
+  `NoOpenObligationsOnTerminal_*` is now generated only for `AckRequired`
+  protocols: a `PublicationOnly` protocol has no feedback to close its
+  obligations, so the invariant could only fail once its producer reached a
+  terminal phase (25 such invariants are dropped; state counts are unchanged).
+- The canonical TLC lane no longer lets a composition pass with zero TLC
+  coverage. `auth_lease_bundle` had no witness and its main sweep reaches only
+  its initial state (compositions move only on queued inputs), so TLC checked
+  nothing in it. It gains two scripted witnesses that drive the embedded
+  AuthMachine through Acquire, the freshness classifications
+  (`ObserveCredentialFreshnessValid`, `ExpiredFromValid`, `ExpiringFromValid`)
+  and a refresh round trip (6 and 8 distinct states). `xtask machine-verify`
+  now fails closed, naming the composition, when a composition has neither a
+  witness whose completion TLC proved nor a main sweep that explores past its
+  initial state, and fails closed, naming each one, on any declared route that
+  no completed witness or coverage hit exercised.
+- Tests that need the `mcp-test-server` fixture binary no longer pass
+  without running when it is missing. Each test hand-rolled a
+  `target/debug/mcp-test-server` lookup and returned early when nothing was
+  there. That path does not exist under the repo-cargo target layout, and PR
+  CI never set `MEERKAT_MCP_TEST_SERVER`, so the meerkat-mcp stdio tests and
+  the meerkat-rpc MCP boundary tests passed in CI without running.
+  - They now share `mcp_test_server::fixture_binary()`: `MEERKAT_MCP_TEST_SERVER`,
+    else the path `scripts/mcp-test-server-fixture` builds it to. When neither
+    resolves, the test fails with a message naming that script.
+  - The fixture-only `integration-real` tests are no longer ignored.
+  - `ci.yml`, the nightly meerkat-rpc lane and `make test-unit` export the
+    variable whenever a tested crate dev-depends on the fixture. Archived lanes
+    ship the binary (`archive.include`).
+  - Bazel gives every test target of such a crate the fixture, keyed on the
+    dev-dependency. Generation fails if one lacks it.
+  - Three meerkat-rpc MCP lifecycle tests this exposed as failing under load
+    are fixed and run again (#1461, above).
+- Explicit mob resume no longer waits forever on a member whose session
+  claim settled as an actor without an executor. If another in-process owner
+  materializes that actor after the resume's preparation step and never
+  attaches an executor, the member used to wait on
+  `materialization_claim_released`, which only resolves when the claim is
+  vacant, so the member and the mob-wide resume never completed. The member
+  now reclaims the unattached actor through the same preparation path
+  (discard the actor, release its exact registration) and re-attempts. It
+  still waits on in-flight claims. The competitor's old bindings and
+  registration witness are refused typed afterwards.
+- `MeerkatMachine::wait_input_terminal_receipt` resolves a directed
+  (peer-request) batch's input when its receipt is finalized, not only once
+  its interaction terminals publish. The runtime finalizes a directed
+  receipt, then publishes, then resolves completion waiters, so while a
+  transient publication failure was retried the receipt was already readable
+  but the wait stayed parked. Finalization now wakes the per-input receipt
+  observers. The Mob delivery-identity wait therefore drops its 1 s
+  defensive re-read (`REREAD_INTERVAL`) and awaits the typed wait for its
+  whole budget.
+- The Mob delivery-identity terminal wait no longer re-reads on a sleep
+  backoff while a delivery is not yet admitted on a live session. It awaits
+  the runtime's admission signal; only a session without a live registration
+  (durable evidence only) is still re-read. The
+  `host_human_input::delivery_terminal_wait` tests waited for admission by
+  repeating 200 ms delivery waits and treated the documented
+  `Unknown { NotObservedByDeadline }` (a window that ends before its first
+  evidence read) as impossible. That failed
+  `batched_autonomous_deliveries_report_one_shared_run_and_their_batch` 26/90
+  times at 30 copies per core. They now await the admission itself.
+- MCP stdio server processes are owned until their exit is observed (#1439).
+  The process is deposited in a typed custody before the handshake, so no
+  connect future exclusively owns it. `McpConnection::close`,
+  `McpProtocol::close` and a failed connect return after the server has
+  exited, and `McpRouter::shutdown` terminates the server of every connect
+  attempt it aborted and joins every close it started for remove, reload,
+  replace and rejected completions (previously detached tasks), so every
+  server has exited when shutdown returns. On Unix servers start in their own
+  process group and the whole group is killed, so a server launched through a
+  wrapper (`sh -c`, `npx`, `uvx`) no longer leaves its real server running as
+  an orphaned grandchild; EOF on the server's stdout confirms every process
+  holding it has exited, behind a 10 s hang guard for a process that left the
+  group. Elsewhere only the direct child is killed. A close that fails or
+  panics is reported through `tracing`. `meerkat-mcp` depends on `nix` on
+  Unix.
+- rkat-rpc over TCP: a new connection no longer overwrites the shared
+  runtime's callback channel, id counter and tool registry (#1451). Before,
+  callbacks for an older connection's new sessions went to the newest
+  connection, its registered tools were cleared, and callback ids restarted
+  in another connection's id space. On connection close the server now fails
+  pending callbacks before its graceful request shutdown, so a session waiting
+  on a gone client gets the typed failure immediately.
+- A dropped `EphemeralSessionService`'s runtime machine is never handed to a
+  new service (#1450). `MobSessionService::runtime_adapter` answered from a
+  process-global cache keyed by the service's address, so a new service
+  allocated at a freed address while the old machine was still held got that
+  machine. The service now owns its machine in a per-instance slot created on
+  first use, and the global cache is gone. `meerkat-session`'s optional
+  `meerkat-runtime` dependency moves behind a new `runtime-machine` feature on
+  every target (`session-store` implies it), so wasm mobs get the same typed
+  slot (#1457).
+- Pushes to `release/**` integration branches run the same push-only CI lanes
+  as `main` (workspace unit tests in eight shards, wasm-check, sdk-host and
+  the other push-gated lanes), so reverse-dependency suites run before the
+  final merge to `main`. Attestation stays `main`-only (#1560).
+- Push CI on `release/**` integration branches is never superseded by a
+  later push, so every merge commit on the branch gets a complete run
+  (#1581).
+- PR CI runs the generated-kernel test-oracle tests (#1621).
+- PR and push CI run the facade store and cold-restart suites (#1677), and
+  the canonical TLC lane runs as three parallel parts (#1692). A failed
+  nextest archive partition can be re-run: the archive artifact is keyed by
+  run (#1676). The BuildBuddy feature-matrix submitter runs its two lanes in
+  parallel (#1698), and the Rust lane doctor passes on the release tree
+  (#1702).
+- The CI gate's 2700 s runaway ceiling no longer counts runner queue: it
+  applies to each lane's terminal minus the queue on its path, so a pull
+  request whose lanes all pass is not failed while hosted runners are
+  saturated. Queue is still reported (#1548).
+- Test and build hygiene with no product change:
+  - the facade's pre-ledger bridge tests derive their target versions from
+    each domain instead of a literal (#1559);
+  - the queued-steer mob test waits for the steer's admission receipt
+    instead of a 50 ms sleep (#1554);
+  - the barge-in recovered fixture registers the session its live channel
+    is bound to (#1510);
+  - the `meerkat-machine-schema` Bazel BUILD file is regenerated (#1515);
+  - the GPT Live Turbo S S102, S104 and S106 checks assert typed delivery
+    contracts instead of wording, with the S102 harness now wiring its
+    extra member (#1539), and S102 prints its executor and member comms rows
+    on every run (#1594);
+  - the live end-to-end lane can record real GPT Live provider streams
+    (`test-realtime-fixtures`, test-only) (#1545), and PR CI replays S104
+    and S106 from recorded streams (#1557);
+  - the result-barrier TLA audit registers with an empty run-start hold set
+    (#1611), and the remaining test and kernel-level `RegisterSession`
+    literals set no initial run-start holds, restoring the workspace
+    all-targets build (#1617, #1619);
+  - a test pins that a mob Stop cancels a member run staged before its
+    agent claimed the turn (#1616, for #1471);
+  - the successor-claim sentinel test waits on the runtime loop's park
+    instead of a state poll (#1628);
+  - a mob retirement test waits for the retirement slot's own publication
+    before reading its check counter (#1653);
+  - two meerkat-rpc lib tests that #1623 left red are fixed: the router's
+    store-committed context test and the session runtime mock client
+    (#1657);
+  - the brain-swap parity test finds the workspace root under plain
+    `cargo test` (#1672);
+  - the RPC runtime health test waits for the spawned runtime loop to park
+    before forcing the durability fault (#1697);
+  - mob test fixes: mock keep-alive turns honour an exact-run boundary
+    cancel delivered before they park (#1678), the stalled member status
+    test uses turn-driven members (#1680), and `SupervisorTrustInstaller`'s
+    runtime adapter is gated like the actor's for the minimal build (#1693);
+  - the mob-mcp held-result fixture and its tests are gated on the gate0
+    harness (#1694);
+  - the web SDK's exhaustive event switch test covers
+    `live_channel_closed` (#1686), and the `live_channel_closed` session
+    event is documented in the session contracts and both SDK references
+    (#1688).
+- A GPT Live WebRTC session whose media track carries silence while the model
+  speaks (transcripts present, decoded audio silent; about 1 in 30-40 public
+  opens) no longer leaves the user in a silent call. The runtime judges the
+  channel's first assistant output from the client's decoded counters; a
+  silent output with a non-empty transcript closes the channel on a typed
+  media fault (ordinary close, retained summary custody included) and
+  recommends one reopen per session lifetime (a resumed session earns it
+  again), so a broken media path never loops. The
+  Turbo S harness answers every request with real decoded counters (a media
+  fault on an audible channel fails the run) and retries an exchange only
+  after a journaled media-fault close and reopen.
+- `live/status` for a closed channel keeps answering `Closed { reason }`
+  (including `media_fault`) for as long as the machine keeps the channel's
+  Closed record, that is until finalized unregister removes the session's
+  runtime entry. It used to switch to `ChannelNotFound` 60 s after the
+  close, when `LiveAdapterHost` reaped its closed-channel state on a timer.
+  The host now keeps a typed closed tombstone with no TTL, and the runtime
+  releases a session's tombstones from the point the entry is removed
+  (#1519).
+- `memory_search` no longer returns only empty hits. Compaction indexed one
+  empty-text entry per discarded message with no text (a tool call, a tool
+  result, or reasoning only), and an empty text embeds to the zero vector,
+  which cosine distance scores as a perfect match for every query, so empty
+  entries filled the top results. A production 0.8.50 store had 50% empty
+  rows (89% in its most recent month).
+  - Empty or whitespace-only text is never indexed. `Message::indexable_content`
+    classifies it as `Excluded(EmptyText)`, and the HNSW and in-memory stores
+    apply `MemoryIndexableContent::normalized` at their indexing seam, so a
+    decision built directly as `Indexable("")` is skipped too.
+  - A zero-norm embedding never enters the HNSW index (live inserts and
+    rebuilds from durable rows), whatever produced it, and a query whose
+    embedding has no direction (an empty or whitespace-only query) returns
+    no hits.
+  - Existing stores are purged once on open by the memory schema's v3
+    migration: empty-text rows are deleted, and staged compaction batches
+    are rewritten without their empty entries, with digest and count
+    recomputed so a retried stage still compares equal.
+- Retiring a member whose autonomous kickoff is still in flight now always
+  records the kickoff as cancelled (`mob.kickoff_cancelled`). Previously the
+  cancellation was recorded only after the retirement had begun tearing the
+  member's runtime down. If that teardown ended the kickoff input first, the
+  kickoff waiter's runtime terminal was recorded as a kickoff failure ("member
+  retire"), with a `mob.kickoff_failed` notice to peers. Retirement now
+  records the cancellation as soon as its Retire transition commits, so a
+  later teardown outcome is a late-arrival no-op.
 
-- The GitHub-hosted Linux release binary jobs work again. The release
-  container marked the workspace safe for Git only after setup-rust-ci had
-  already asked Git for the repository root ("detected dubious ownership",
-  every run since 2026-08-28), and on the 16 GB runners the release build of
-  `meerkat-machine-schema` (8.7 GB peak) overlapping `meerkat-mob` (9.0 GB)
-  was OOM-killed on aarch64. The workspace is now trusted right after
-  Checkout, and the Linux build runs two jobs with the schema crate at
-  `opt-level = 1` (6.3 GB) through `--config`, so asset recovery dispatches
-  can build older tags too.
+### Changed
+
+- GPT Live Turbo S oracles assert typed contracts only. Tolerant, record-only
+  and advisory checks are gone; measurements are journaled as metrics, and
+  `make turbo-s-oracle-gate` (run in CI) rejects soft check shapes in the
+  scenario code.
+  - Talk-over: every barge-in that lands on assistant speech (S100's, and
+    S103's barge-in and correction) must leave the user's onset to the last
+    audible assistant frame within `TALK_OVER_BOUND_MS` (3000 ms). The ingest
+    segment (onset to the provider's first voiced input frame, taken at the
+    reflected input stream's cadence slot so sideband jitter is excluded,
+    500 ms) and the playout segment (the provider's last voiced output frame
+    to last audible, 900 ms) are bounded on their own, and the provider's
+    turn-taking segment is journaled on every yield. A reply already in
+    flight when the provider hears the user is measured as the yield.
+    Assistant speech that starts after the provider could react, while the
+    user is still speaking, fails unless it is a classified backchannel or
+    the duck held it to one provider frame (audible for at most 200 ms, the
+    duck's reaction time; journaled, #1710), and a wordless burst there must
+    end within the talk-over bound. The bounds are frozen: each is the maximum of a stated
+    healthy population (73 yields of the 0.8.51 soak) plus the browser's
+    100 ms energy window, and an exceedance is a finding to attribute, never
+    a reason to raise the number. The old rule, that the audio ends before
+    the user's utterance does, tied the bound to the fixture's length.
+  - Readouts: every delegation result is delivered into the provider
+    conversation exactly once and voiced inside one response, in every
+    scenario. A result delivered before the session's close request (the
+    user's sign-off or the close) must be followed by assistant speech; one
+    delivered after it is journaled. A repeat inside one response is a
+    stutter, journaled as a metric. The browser peer records responses; it no longer raises
+    `duplicate_readout` itself, and missing or malformed records fail the
+    scenario. A result announced with its title ("Finished voice request:
+    ...") in the same append is matched on the text after the announcement.
+  - S101 anchors job 2's play on the quick question's delegation instead of a
+    fixed offset (with the longer quick question the two utterances ran
+    together and the provider joined them), and a number right after
+    "marker" ("the marker one file") is not a file count.
+  - S97's executor is told to say whether the directory it inspects is empty
+    and to name any files, so the result always states the fact the readout
+    oracle checks; the oracle stays as strict. The readout is speech the
+    provider produced after the result was sent (it can start before the
+    provider's acknowledgement arrives), and "no files", "zero files", "not
+    any files" and "aren't any files" state the empty workspace as well as
+    "empty" does.
+  - S100 judges the barge-in reply by what the user hears: the assistant says
+    "done" in speech that started after the user's barge-in speech, whether
+    or not the provider closed the user's input final first. Talk-over is
+    still checked separately. The barge-in speech is located after the last
+    provider event logged before its onset (the peer records its first
+    input delta once per session).
+  - S101 fails when the voice declares a slow job complete (its marker file
+    or ordinal with a completion word, not a promise or a status) or states
+    the quick job's file count ("there are N files", "count is N") before the
+    provider learned that job was complete: its "Finished" narration or its
+    result, on the sideband clock, timed at the claim's words. The quick
+    question now asks for "there are N files", and once its result is in, a
+    stated count other than the result's fails, unless a result already
+    delivered states that count (the voice reading job 2's "There are 1
+    files." is that result, not the quick answer). That holds before the
+    quick result too: reading another delivered result's count is not a
+    premature quick answer (bargesoak2 R1).
+  - S102 fails when the voice attributes an answer to the peer before the
+    peer's reply reached the provider conversation (a premature claim), by the
+    provider's transcript timing: the peer's name or a pronoun standing for it
+    with an attribution verb ("They said they don't know"), or "according to"
+    the peer. When the reply never arrives, the whole call counts as before
+    it.
+  - S98 asks for the code word after the background update with an
+    unambiguous question ("What is the code word now?"); the earlier recall
+    asked for the word the user asked to remember, which stays the old one.
+  - S99 tests the summary gate against the create-time seed: the vault phrase
+    is followed by enough text turns to fall outside the seed window of a
+    summary-pending open (derived from `LIVE_STARTUP_RECENT_TURNS` and
+    `LIVE_STARTUP_VERBATIM_ITEMS_MAX`), so it is unknown until the summary is
+    released, and a fact inside the window is recalled at once as a positive
+    control. The phrase used to sit inside the seed, so the old "unknown
+    before release" probe only passed while the model ignored history it had.
+  - S99's generated vault phrase never repeats a word back to back. The
+    recall is graded on the model's own transcript of its speech, where a
+    spoken "maple maple" is ambiguous; exact recall of all five words is
+    still required.
+  - S105 asks its recall, and S98 its updated-code-word recall, only after
+    the typed turn's rows (its prompt and the assistant's reply) are
+    acknowledged on the quiet lane (`session.thinking.append`, every fragment
+    of the row's token acknowledged); a typed row on the commentary lane
+    fails (#1614). Asked earlier, the recall raced the rows.
+  - S97 and S98 are recorded like every other GPT Live Turbo S scenario
+    (evidence journal, browser evidence, provider stream). The JSON-RPC host
+    opens channels on its own request tasks, so S97's open installs the
+    provider-stream recorder as a process-wide fallback (test-realtime-fixtures
+    only) around `live/open` and the answer.
+  - S97's result readout is anchored on the provider's acknowledgement of
+    the result append as the browser saw it: the peer journals every
+    `session.*.appended` with its media counters, and decoded speech plus an
+    output transcript delta must follow that row. The old baseline was taken
+    after the harness noticed the worker retire, so a prompt readout could
+    finish before it and fail a correct run.
+  - The browser peer attaches overlap facts to every fixture end, so a
+    barge-in that lands just after the assistant went quiet still gets its
+    talk-over-start check; S106 counts the reopen's append lanes from the old
+    channel's close; S97 keeps its scratch workspace alive for the whole run.
+  - Waiting for the assistant to finish follows its output to the end: each
+    assistant output event restarts the 3 s quiet window, with no ceiling
+    while output keeps arriving, so a long legitimate readout is not a
+    failure. The scenario's overall deadline still bounds the wait.
+  - A failed scenario (an error or a panic) closes its live channel through
+    the exact close before teardown, so the provider's `session.closed`
+    drains the sideband and the provider stream records every frame sent
+    before the failure. Before, the teardown aborted the server and could lose
+    frames the browser had already acted on (a delegation the sideband had
+    not yet read).
+- Model calls and shell rounds are attributable in debug logs. The agent loop
+  logs each model call's session, turn, attempt, elapsed time and outcome
+  ("model call settled"); shell tool calls log their tool call id at start and
+  their exit code, timeout and duration at completion (never the command or
+  its output) (#1563).
+- Turbo S no longer retries a failed scenario. The BuildBuddy Turbo S lane ran
+  each failed shard a second time (`--flaky_test_attempts=2`), so a scenario
+  that failed and then passed reported green. Every scenario now runs exactly
+  once; a failure is classified (product bug, oracle or fixture brittleness,
+  or provider-degraded void), never absorbed by a retry (#1544).
+- Generated machine TLA models lead each quantified `Next` disjunct with its
+  transition's source-phase guard. The meaning is unchanged (the guard is also
+  the first conjunct of the action), but TLC no longer enumerates every
+  parameter tuple of every transition in every state: work_graph_lifecycle's
+  ci sweep drops from 276 s to 161 s and occurrence_lifecycle's from 143 s to
+  90 s, with identical generated and distinct state counts on every machine.
+- The GitHub-hosted release builds each surface binary in its own job (16
+  jobs: 4 targets x rkat, rkat-rpc, rkat-rest, rkat-mcp) instead of four
+  sequential `cargo build -p` runs per target, so a target takes the slowest
+  single package instead of the sum (the v0.8.50 asset run spent 3-4+ hours
+  per target). x86_64 macOS now builds natively on the free `macos-15-intel`
+  label instead of the billed `macos-15-large` runner (257 billed minutes per
+  release on v0.8.50). The binaries are unchanged: one `cargo build` for all
+  four would unify features across them, and the unit graphs show every
+  binary would link different code (rkat-mcp would gain live/mcp, native
+  keyring and OAuth), so each package still builds alone.
+- Supervisor rotation no longer polls a member for convergence. A member
+  advertising `rotation_observe_hold` answers a held
+  `ObserveSupervisorRotation` when the operation is terminal, waking on a
+  per-session rotation-progress signal; the supervisor's observation window is
+  then only a hang guard that returns the durably pending observation.
+  - The supervisor records each member's capability from its bind reply.
+  - A member whose capability is unknown (for example after a restart) is
+    offered the hold. A member that predates it rejects the unknown field with
+    the typed `Unsupported` cause, and the supervisor falls back to single-shot
+    observation.
+  - Members known not to support it keep the single-shot observation loop
+    unchanged, as the compatibility path.
+  - `test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_restart`
+    failed 16/30 under load because one 1 s polling window raced the member's
+    completion. It now converges in one call.
+- Debug worker-stack headroom (#1446): the unregister teardown saga and the
+  session registration chain no longer reserve every section's temporaries
+  in one poll frame. Their numbered phases and sections now run in boxed
+  async blocks, and the registration path's large child futures are built in
+  their own frames, with bodies unchanged. Measured on the 2 MiB stack canary
+  (debug), at the deepest machine apply:
+  - the teardown chain went from 1,487,592 B to 597,784 B (the saga's own
+    poll frame from 787,560 B to 58,584 B);
+  - the registration chain went from 1,490,216 B to 697,224 B.
+
+  The canary now also passes at 1536 KiB and 1280 KiB. No behaviour change.
+- Debug worker-stack headroom (#1462): four more chains no longer reserve
+  their callees' futures and every section's temporaries in one poll frame.
+  Large child futures are built in their own boxed frames
+  (`box_in_own_frame` / the actor's `boxed_arm_future`), and the comms-drain
+  dispatchers box each command arm, with bodies unchanged:
+  - the mob spawn-provisioning chain;
+  - the mob actor loop (`run`, `wait_for_actor_wake`, `finalize_spawn_admit`);
+  - `execute_meerkat_machine_drain_command`;
+  - the comms drain task's `try_handle_supervisor_bridge_command`.
+
+  Measured on the stack canary (debug), the spawn-provisioning chain went
+  from 913,880 B to 530,824 B, and the canary now passes at 1024 KiB. The
+  next bound is the `SetPeerIngressContext` drain arm (#1466). No behaviour
+  change.
+- Debug worker-stack headroom (#1466): the comms-drain
+  `SetPeerIngressContext` arm runs each DSL staging statement and each
+  `recover_from_state` preview proof in its own boxed frame. Each of these
+  carries ~9 KiB authority snapshots by value, and the arm's poll frame held
+  about fifty such copies (465 KB). Bodies are unchanged. The comms-drain
+  chain went from 927,960 B to 550,984 B, and the stack canary (debug) now
+  passes at 896 KiB. The registration chain (702,184 B) is the next bound.
+  No behaviour change.
+- Debug worker-stack headroom (#1474): session registration
+  (`register_session_inner_impl`) stages its discarded existing-session
+  executor-exit transitions (~18 KiB each) in boxed frames, and keeps the
+  recovered authority and the prepared session entry boxed until the call
+  that consumes them, instead of copying them through two poll frames. The
+  registration chain went from 702,184 B to 410,600 B, and the stack canary
+  (debug) now passes at 768 KiB. No behaviour change.
 
 ## [0.8.50] - 2026-10-01
 
@@ -375,7 +3196,7 @@ them.
   constructors keep their default handler. Host factories receive the exact
   selected server configuration; authentication remains with the auth resolver.
   Other callbacks are not enabled by this first profile. AgentFactory, SDK and
-  Toolkit configuration of this optional service remain separate follow-ups.
+  host configuration of this optional service remain separate follow-ups.
 - `ServiceMemberLiveHost::forget_live_context_summary`,
   `ServiceMemberLiveHost::retained_live_context_summary` (read-only
   provenance) and `ServiceMemberLiveHost::prune_retained_live_context_summaries`

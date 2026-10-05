@@ -344,6 +344,7 @@ mod tests {
             mm_dsl::MeerkatMachineInput::RegisterSession {
                 session_id: mm_dsl::SessionId("session-fallback".to_string()),
                 runtime_epoch_id: None,
+                initial_run_start_holds: std::collections::BTreeSet::new(),
             },
         )
         .expect("register session");

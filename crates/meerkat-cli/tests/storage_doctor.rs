@@ -15,6 +15,11 @@ use meerkat_core::{BlobId, ContentBlock, ImageData, Message, Session, UserMessag
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+/// Session-store migration 4 (`head-canonical-v2-authority`) completes the
+/// supported HeadCanonical v1-to-v2 authority crossing: the floor a healthy
+/// realm's session-store ledger stamp must reach.
+const SESSION_STORE_HEAD_CANONICAL_CROSSING: i64 = 4;
+
 const SESSIONS_DDL: &str = "CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
     created_at_ms INTEGER NOT NULL,
@@ -144,12 +149,18 @@ fn healthy_sqlite_realm_is_clean_and_exits_zero() {
     let domains = inventory[0]["databases"][0]["domains"]
         .as_array()
         .expect("domains array");
+    // A floor, not the current version: a healthy realm has completed the
+    // HeadCanonical v1-to-v2 authority crossing (session-store migration 4,
+    // "head-canonical-v2-authority"); later migrations (5,
+    // "transcript-retirements", #1541) keep it healthy.
     assert!(
-        domains
-            .iter()
-            .any(|pair| pair[0] == "session-store" && pair[1] == 4),
-        "session-store domain must be ledger-stamped at v4 (v4 completes the \
-         supported HeadCanonical v1-to-v2 authority crossing): {domains:?}"
+        domains.iter().any(|pair| pair[0] == "session-store"
+            && pair[1]
+                .as_i64()
+                .is_some_and(|version| version >= SESSION_STORE_HEAD_CANONICAL_CROSSING)),
+        "session-store domain must be ledger-stamped at v{SESSION_STORE_HEAD_CANONICAL_CROSSING} \
+         or later (v{SESSION_STORE_HEAD_CANONICAL_CROSSING} completes the supported HeadCanonical \
+         v1-to-v2 authority crossing): {domains:?}"
     );
     let errors: Vec<_> = report["findings"]
         .as_array()

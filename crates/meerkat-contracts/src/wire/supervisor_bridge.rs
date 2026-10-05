@@ -431,6 +431,11 @@ pub enum BridgeCommand {
     /// `hard_cancel_member` fact (same immediate-interrupt authority class);
     /// a peer that predates the command rejects it at decode.
     StopMemberRun(BridgeStopMemberRunPayload),
+    /// Hold the member's run starts for a mob Stop (#1500). A peer without
+    /// [`BridgeCapabilities::run_start_hold`] rejects it at decode.
+    HoldRunStarts(BridgeRunStartHoldPayload),
+    /// Release a run-start hold (mob Resume).
+    ReleaseRunStarts(BridgeRunStartReleasePayload),
     RetireMember(BridgeRetirePayload),
     DestroyMember(BridgeSupervisorPayload),
     WireMember(BridgePeerWiringPayload),
@@ -482,6 +487,8 @@ impl BridgeCommand {
             Self::HardCancelMember(payload) => payload.protocol_version,
             Self::CancelTrackedMemberInput(payload) => payload.protocol_version,
             Self::StopMemberRun(payload) => payload.protocol_version,
+            Self::HoldRunStarts(payload) => payload.protocol_version,
+            Self::ReleaseRunStarts(payload) => payload.protocol_version,
             Self::DeliverMemberInput(payload) => payload.protocol_version,
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
             Self::DeclareMemberOutboundTaint(payload) => payload.protocol_version,
@@ -1838,6 +1845,8 @@ pub enum BridgeReply {
     Delivery(BridgeDeliveryResponse),
     TrackedInputCancelled(BridgeTrackedInputCancelResponse),
     MemberRunStopped(BridgeMemberRunStopResponse),
+    /// Reply to [`BridgeCommand::HoldRunStarts`].
+    RunStartsHeld(BridgeRunStartHoldResponse),
     Retire(BridgeRetireResponse),
     Destroy(BridgeDestroyResponse),
     /// Observation of a previously submitted supervisor-rotation operation.
@@ -2898,6 +2907,21 @@ pub struct BridgeSupervisorRotationObserve {
     pub observer: BridgePeerSpec,
     pub observer_epoch: u64,
     pub protocol_version: BridgeProtocolVersion,
+    /// Hold the reply until the operation is terminal (completed or
+    /// rejected) as visible to this observer, for at most this many
+    /// milliseconds. When the hold elapses the member replies with the
+    /// observation it has then (not found or pending). Absent: a single-shot
+    /// observation. A completed receipt is visible to the next supervisor, so
+    /// supervisors hold their attempted-authority read.
+    ///
+    /// An extension independent of the protocol version, like
+    /// `tracked_input_cancel`: members advertise it with
+    /// [`BridgeCapabilities::rotation_observe_hold`]. A member that does not
+    /// implement it rejects the field (this payload denies unknown fields)
+    /// with the typed `Unsupported` cause, and the supervisor falls back to
+    /// single-shot observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_until_terminal_ms: Option<u64>,
 }
 
 /// Durable phase exposed while a supervisor rotation is incomplete.
@@ -3111,6 +3135,61 @@ pub struct BridgeInterruptPayload {
     pub expected_member: Option<BridgeMemberIncarnation>,
 }
 
+/// Hold a member's run starts for a mob Stop (#1500): until a matching
+/// [`BridgeCommand::ReleaseRunStarts`], the member starts no new run, so input
+/// admitted before the stop stays queued. Optionally cancels exactly the run
+/// the hold found current. Gated on [`BridgeCapabilities::run_start_hold`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRunStartHoldPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_member: Option<BridgeMemberIncarnation>,
+    /// Cancel, at its next boundary, exactly the run the hold found current.
+    #[serde(default)]
+    pub cancel_current_run: bool,
+}
+
+/// Release a hold taken by [`BridgeCommand::HoldRunStarts`] (mob Resume).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRunStartReleasePayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_member: Option<BridgeMemberIncarnation>,
+}
+
+/// What a [`BridgeCommand::HoldRunStarts`] did to the member's run.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "run", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum BridgeHeldRun {
+    /// The member had no run.
+    NoRun,
+    /// The current run was cancelled at its next boundary.
+    CancelledAtBoundary { run_id: meerkat_core::RunId },
+    /// The current run ended on its own between the hold and the cancel.
+    RunEndedBeforeCancel { run_id: meerkat_core::RunId },
+    /// The current run continues; no cancel was requested.
+    LeftRunning { run_id: meerkat_core::RunId },
+}
+
+/// Response to [`BridgeCommand::HoldRunStarts`]: the member's run starts are
+/// held, and this is what happened to its run.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRunStartHoldResponse {
+    pub run: BridgeHeldRun,
+}
+
 /// One-time bootstrap proof exchanged between a mob supervisor and a
 /// member runtime on initial bind.
 ///
@@ -3217,6 +3296,17 @@ pub struct BridgeCapabilities {
     /// implement the command.
     #[serde(default, skip_serializing_if = "bool_is_false")]
     pub tracked_input_cancel: bool,
+    /// Held supervisor-rotation observation
+    /// ([`BridgeSupervisorRotationObserve::hold_until_terminal_ms`]). Like
+    /// `tracked_input_cancel`, independent of the protocol version, because
+    /// earlier members of the same version do not implement it.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub rotation_observe_hold: bool,
+    /// Run-start hold for mob Stop ([`BridgeCommand::HoldRunStarts`] and
+    /// [`BridgeCommand::ReleaseRunStarts`], #1500). Independent of the
+    /// protocol version, like `rotation_observe_hold`.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub run_start_hold: bool,
     #[serde(default)]
     pub retire_member: bool,
     #[serde(default)]
@@ -3267,6 +3357,8 @@ impl Default for BridgeCapabilities {
             interrupt_member: false,
             hard_cancel_member: false,
             tracked_input_cancel: false,
+            rotation_observe_hold: false,
+            run_start_hold: false,
             retire_member: false,
             destroy_member: false,
             wire_member: false,
@@ -3902,6 +3994,7 @@ mod tests {
             observer: sample_peer_spec(),
             observer_epoch: 42,
             protocol_version: BridgeProtocolVersion::V4,
+            hold_until_terminal_ms: None,
         });
         let observe_value = serde_json::to_value(observe).expect("serialize observe command");
         assert!(
@@ -3930,6 +4023,7 @@ mod tests {
             observer: sample_peer_spec(),
             observer_epoch: 42,
             protocol_version: BridgeProtocolVersion::V4,
+            hold_until_terminal_ms: None,
         });
         assert_eq!(command.protocol_version(), BridgeProtocolVersion::V4);
         assert_command_round_trip(&command);
@@ -3938,6 +4032,60 @@ mod tests {
         assert_eq!(value["command"], json!("observe_supervisor_rotation"));
         assert_eq!(value["observer_epoch"], json!(42));
         assert_eq!(value["protocol_version"], json!(4));
+    }
+
+    #[test]
+    fn supervisor_rotation_observe_hold_is_an_optional_extension() {
+        let held = BridgeCommand::ObserveSupervisorRotation(BridgeSupervisorRotationObserve {
+            operation_id: sample_supervisor_rotation_operation_id(),
+            observer: sample_peer_spec(),
+            observer_epoch: 42,
+            protocol_version: BridgeProtocolVersion::V4,
+            hold_until_terminal_ms: Some(1_500),
+        });
+        assert_command_round_trip(&held);
+        let value = serde_json::to_value(&held).expect("serialize held observe");
+        assert_eq!(value["hold_until_terminal_ms"], json!(1_500));
+        // The protocol version is unchanged: the hold is an extension.
+        assert_eq!(value["protocol_version"], json!(4));
+
+        // Single-shot observes keep the historic shape (no field at all), so
+        // members that predate the extension decode them unchanged.
+        let single = BridgeSupervisorRotationObserve {
+            hold_until_terminal_ms: None,
+            ..match held {
+                BridgeCommand::ObserveSupervisorRotation(payload) => payload,
+                _ => unreachable!(),
+            }
+        };
+        let value = serde_json::to_value(BridgeCommand::ObserveSupervisorRotation(single))
+            .expect("serialize single-shot observe");
+        assert!(value.get("hold_until_terminal_ms").is_none());
+        let decoded = decode_bridge_command(value).expect("historic observe shape decodes");
+        assert!(matches!(
+            decoded,
+            BridgeCommand::ObserveSupervisorRotation(BridgeSupervisorRotationObserve {
+                hold_until_terminal_ms: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rotation_observe_hold_capability_defaults_off_and_is_omitted_when_off() {
+        let capabilities = BridgeCapabilities::default();
+        assert!(!capabilities.rotation_observe_hold);
+        let value = serde_json::to_value(&capabilities).expect("serialize capabilities");
+        assert!(value.get("rotation_observe_hold").is_none());
+        let advertised = BridgeCapabilities {
+            rotation_observe_hold: true,
+            ..BridgeCapabilities::default()
+        };
+        let value = serde_json::to_value(&advertised).expect("serialize capabilities");
+        assert_eq!(value["rotation_observe_hold"], json!(true));
+        let decoded: BridgeCapabilities =
+            serde_json::from_value(value).expect("decode advertised capabilities");
+        assert!(decoded.rotation_observe_hold);
     }
 
     #[test]
@@ -6404,6 +6552,7 @@ mod tests {
                     step_id: "draft".to_string(),
                 },
                 tool_overlay: Some(meerkat_core::service::PublicTurnToolOverlay {
+                    tool_choice_plan: Vec::new(),
                     allowed_tools: None,
                     blocked_tools: None,
                 }),

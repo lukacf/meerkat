@@ -51,6 +51,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -92,6 +93,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -143,6 +145,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -186,6 +189,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -235,6 +239,7 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -297,6 +302,7 @@ rust_test(
     crate_root = "tests/ephemeral_contract.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -359,6 +365,7 @@ rust_test(
     crate_root = "tests/persistence_compat.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -421,6 +428,7 @@ rust_test(
     crate_root = "tests/planned_identity_fork.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -483,6 +491,7 @@ rust_test(
     crate_root = "tests/regression_lifecycle.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],
@@ -545,6 +554,7 @@ rust_test(
     crate_root = "tests/session_store_append_only_trybuild.rs",
     crate_features = [
         "live",
+        "runtime-machine",
         "session-compaction",
         "session-store",
     ],

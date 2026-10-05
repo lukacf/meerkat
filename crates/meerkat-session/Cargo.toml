@@ -25,6 +25,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 sha2 = { workspace = true }
+# Optional on every target: `runtime-machine` gives sessions services a typed
+# per-instance runtime machine, which wasm mobs need as much as native ones.
+meerkat-runtime = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
@@ -33,7 +36,6 @@ inventory = { workspace = true }
 
 # Optional dependencies (gated by features, not available on wasm32)
 meerkat-store = { workspace = true, optional = true }
-meerkat-runtime = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
@@ -47,7 +49,9 @@ meerkat-runtime = { workspace = true, features = ["sqlite-store", "test-support"
 
 [features]
 default = []
-session-store = ["dep:meerkat-store", "dep:meerkat-runtime"]
+# A service owns the runtime machine that hosts its session runtimes.
+runtime-machine = ["dep:meerkat-runtime"]
+session-store = ["dep:meerkat-store", "runtime-machine"]
 live = ["session-store", "meerkat-runtime/live"]
 session-compaction = []
 

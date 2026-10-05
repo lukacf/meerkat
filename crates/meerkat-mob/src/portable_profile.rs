@@ -103,6 +103,7 @@ pub(crate) fn project_portable_profile(
             schedule: profile.tools.schedule,
             image_generation: profile.tools.image_generation,
             read_only: profile.tools.read_only,
+            deny: profile.tools.deny.clone(),
             mcp_servers,
             non_portable_disabled,
         },
@@ -232,6 +233,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
             schedule: portable.tools.schedule,
             image_generation: portable.tools.image_generation,
             read_only: portable.tools.read_only,
+            deny: portable.tools.deny.clone(),
             mcp: Vec::new(),
             mcp_servers,
             rust_bundles: Vec::new(),
@@ -335,6 +337,7 @@ mod tests {
                 schedule: false,
                 image_generation: true,
                 read_only: false,
+                deny: vec!["mob_wire".to_string()],
                 mcp: Vec::new(),
                 mcp_servers: vec![stdio, sse, selected.clone()],
                 rust_bundles: Vec::new(),
@@ -383,6 +386,8 @@ mod tests {
             rehydrated.tools.mcp_servers.len(),
             profile.tools.mcp_servers.len()
         );
+        assert_eq!(portable.tools.deny, profile.tools.deny);
+        assert_eq!(rehydrated.tools.deny, profile.tools.deny);
         assert_eq!(rehydrated.backend, None);
         assert!(rehydrated.tools.mcp.is_empty());
         assert!(rehydrated.tools.rust_bundles.is_empty());

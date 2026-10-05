@@ -199,6 +199,7 @@ impl LivePlaybackTerminalSettlement {
 pub struct LiveChannelCloseObservation {
     channel_id: String,
     close_sequence: u64,
+    reason: meerkat_core::LiveChannelCloseReason,
 }
 
 impl LiveChannelCloseObservation {
@@ -212,9 +213,16 @@ impl LiveChannelCloseObservation {
         self.close_sequence
     }
 
+    /// Why the channel is closing, named by the path that reserved the close.
+    #[must_use]
+    pub fn reason(&self) -> meerkat_core::LiveChannelCloseReason {
+        self.reason
+    }
+
     fn from_host_close_observation(
         channel_id: impl Into<String>,
         close_sequence: u64,
+        reason: meerkat_core::LiveChannelCloseReason,
     ) -> Option<Self> {
         let channel_id = channel_id.into();
         if channel_id.is_empty() || close_sequence == 0 {
@@ -223,6 +231,7 @@ impl LiveChannelCloseObservation {
         Some(Self {
             channel_id,
             close_sequence,
+            reason,
         })
     }
 }
@@ -1218,10 +1227,19 @@ impl LiveProjectionSink for NoOpProjectionSink {
 // Per-channel state
 // ---------------------------------------------------------------------------
 
-/// Closed channels are retained for [`CLOSED_CHANNEL_TTL`] after
-/// `close_channel` so post-close `live/status` can report `Closed { reason }`
-/// instead of `ChannelNotFound` (G42).
-const CLOSED_CHANNEL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// How a closed channel's host state retires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelRetirement {
+    /// A committed close keeps the channel as a tombstone, so post-close
+    /// `live/status` reports `Closed { reason }` instead of `ChannelNotFound`
+    /// (G42) for exactly as long as the machine keeps the channel's Closed
+    /// record: until finalized unregister removes the session's runtime entry
+    /// ([`LiveAdapterHost::retire_session_close_tombstones`]). Time never
+    /// reaps it.
+    Tombstone,
+    /// Released: the next sweep reaps it once no close projection retains it.
+    Reap,
+}
 
 /// Per-channel transport state tracked by the host.
 struct ChannelState {
@@ -1244,13 +1262,13 @@ struct ChannelState {
     /// successful adapter `close()` restores it. Generated close authority is
     /// forbidden from committing until this is true.
     physical_close_confirmed: bool,
-    /// Transport-retention deadline for a channel the generated owner has
-    /// already closed/terminalized. This is a resource-cache timer: public
+    /// Retirement of a channel the generated owner has already
+    /// closed/terminalized (see [`ChannelRetirement`]). Public
     /// lifecycle/admission surfaces must route through generated authority
-    /// before they interpret the channel as open, closed, or reusable.
-    /// Reads are still serviced during the grace window; adapter handoffs are
+    /// before they interpret the channel as open, closed, or reusable. Reads
+    /// are still serviced while it is a tombstone; adapter handoffs are
     /// rejected because the transport handle has been released.
-    retire_at: Option<std::time::Instant>,
+    retirement: Option<ChannelRetirement>,
     /// CC1 (R11 wire-signal): one-shot synthetic observation to deliver to
     /// the next [`LiveAdapterHost::next_observation_raw`] caller before any
     /// adapter poll happens.
@@ -1334,7 +1352,7 @@ impl LiveChannelCloseCommitTarget {
         }
         authority.consume_once()?;
         channel.status = LiveAdapterStatus::Closed;
-        channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
+        channel.retirement = Some(ChannelRetirement::Tombstone);
         for (_, waiter) in channel.playback_terminal_waiters.drain() {
             let _ = waiter.settlement_tx.send(Err(
                 LiveAdapterHostError::PlaybackTerminalSettlementFailed(
@@ -1389,6 +1407,7 @@ fn generated_test_machine_for_registered_session(
         MeerkatMachineInput::RegisterSession {
             session_id: DslSessionId(session_id.to_string()),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("register session in generated MeerkatMachine authority");
@@ -2035,7 +2054,7 @@ impl LiveAdapterHost {
         // that contradicts the generated handoff.
         if let Some(existing) = inner.by_session.get(&session_id).cloned()
             && let Some(channel) = inner.channels.get(&existing)
-            && channel.retire_at.is_none()
+            && channel.retirement.is_none()
         {
             return Err(LiveAdapterHostError::SessionAlreadyBound(session_id));
         }
@@ -2052,7 +2071,7 @@ impl LiveAdapterHost {
                 close_observation_sequence: 0,
                 adapter: None,
                 physical_close_confirmed: true,
-                retire_at: None,
+                retirement: None,
                 pending_synthetic_obs: None,
                 close_projection_retention: Arc::new(()),
                 terminal_error_projection: Arc::new(Mutex::new(None)),
@@ -2081,7 +2100,7 @@ impl LiveAdapterHost {
             .channels
             .get_mut(channel_id)
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        if channel.retire_at.is_some() {
+        if channel.retirement.is_some() {
             return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
         }
         channel.adapter = Some(adapter);
@@ -2983,7 +3002,7 @@ impl LiveAdapterHost {
             // `LiveInputChunk::Image` against an audio-only model),
             // and the next valid command should land on the same
             // channel. We deliberately do NOT touch host channel
-            // state (status, retire_at, adapter) and do NOT call
+            // state (status, retirement, adapter) and do NOT call
             // `signal_terminal_error` on the projection sink — those
             // are the terminal-only obligations.
             (
@@ -3220,7 +3239,7 @@ impl LiveAdapterHost {
             .channels
             .get(channel_id)
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        if channel.retire_at.is_some() {
+        if channel.retirement.is_some() {
             // Channel is in post-close grace: status reads still work, but
             // commands/observations target a removed adapter.
             return Err(LiveAdapterHostError::ChannelNotReady(
@@ -3328,12 +3347,17 @@ impl LiveAdapterHost {
             // covers that case.
             let _ = adapter.inject_observation(synthetic).await;
         }
-        self.reserve_channel_close_observation(channel_id).await
+        self.reserve_channel_close_observation(
+            channel_id,
+            meerkat_core::LiveChannelCloseReason::Error,
+        )
+        .await
     }
 
     pub async fn reserve_channel_close_observation(
         &self,
         channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
     ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
         Self::reap_retired_locked(&mut inner);
@@ -3345,6 +3369,7 @@ impl LiveAdapterHost {
         LiveChannelCloseObservation::from_host_close_observation(
             channel_id.as_str().to_owned(),
             channel.close_observation_sequence,
+            reason,
         )
         .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
@@ -3448,7 +3473,7 @@ impl LiveAdapterHost {
         if !channel.status.is_terminal() {
             return Err(LiveAdapterHostError::CloseNotAuthorized);
         }
-        channel.retire_at = Some(std::time::Instant::now());
+        channel.retirement = Some(ChannelRetirement::Reap);
         Self::reap_retired_locked(&mut inner);
         Ok(())
     }
@@ -3551,7 +3576,12 @@ impl LiveAdapterHost {
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
-        let observation = self.reserve_channel_close_observation(channel_id).await?;
+        let observation = self
+            .reserve_channel_close_observation(
+                channel_id,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
+            .await?;
         self.prepare_channel_physical_close(&observation).await?;
         let authority = self
             .close_commit_authority_from_generated_test_machine(&observation)
@@ -3692,7 +3722,7 @@ impl LiveAdapterHost {
         if let Some(channel) = inner
             .channels
             .get_mut(channel_id)
-            .filter(|channel| channel.retire_at.is_none())
+            .filter(|channel| channel.retirement.is_none())
         {
             channel.provider_input_latency = Some(latency);
         }
@@ -3725,7 +3755,7 @@ impl LiveAdapterHost {
             .channels
             .get_mut(channel_id)
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        if channel.retire_at.is_some() {
+        if channel.retirement.is_some() {
             return Err(LiveAdapterHostError::ChannelNotReady(
                 channel_id.clone(),
                 channel.status.clone(),
@@ -3764,7 +3794,7 @@ impl LiveAdapterHost {
             .channels
             .get_mut(&channel_id)
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        if channel.retire_at.is_some() {
+        if channel.retirement.is_some() {
             return Err(LiveAdapterHostError::ChannelNotReady(
                 channel_id,
                 channel.status.clone(),
@@ -3962,21 +3992,36 @@ impl LiveAdapterHost {
         inner
             .channels
             .iter()
-            .filter(|(_, ch)| ch.retire_at.is_none())
+            .filter(|(_, ch)| ch.retirement.is_none())
             .map(|(id, _)| id.clone())
             .collect()
     }
 
-    /// Reap channels whose post-close TTL has elapsed.
+    /// Release every closed tombstone of `session_id`. Called when finalized
+    /// unregister removed the session's runtime entry: the machine no longer
+    /// holds a Closed record for any of its channels. Channels still open are
+    /// untouched; a tombstone a close projection still retains is reaped by
+    /// the first sweep after that retention ends.
+    pub async fn retire_session_close_tombstones(&self, session_id: &SessionId) {
+        let mut inner = self.inner.lock().await;
+        for channel in inner.channels.values_mut() {
+            if channel.session_id == *session_id
+                && channel.retirement == Some(ChannelRetirement::Tombstone)
+            {
+                channel.retirement = Some(ChannelRetirement::Reap);
+            }
+        }
+        Self::reap_retired_locked(&mut inner);
+    }
+
+    /// Reap released channels that no close projection retains.
     fn reap_retired_locked(inner: &mut HostInner) {
-        let now = std::time::Instant::now();
         let to_drop: Vec<LiveChannelId> = inner
             .channels
             .iter()
-            .filter_map(|(id, ch)| match ch.retire_at {
-                Some(deadline)
-                    if deadline <= now
-                        && Arc::strong_count(&ch.close_projection_retention) == 1 =>
+            .filter_map(|(id, ch)| match ch.retirement {
+                Some(ChannelRetirement::Reap)
+                    if Arc::strong_count(&ch.close_projection_retention) == 1 =>
                 {
                     Some(id.clone())
                 }
@@ -4268,7 +4313,13 @@ mod tests {
         host.attach_adapter(&ch, Arc::new(FailOnceCloseAdapter::default()))
             .await
             .unwrap();
-        let observation = host.reserve_channel_close_observation(&ch).await.unwrap();
+        let observation = host
+            .reserve_channel_close_observation(
+                &ch,
+                meerkat_core::LiveChannelCloseReason::ClientRequested,
+            )
+            .await
+            .unwrap();
 
         assert!(matches!(
             host.prepare_channel_physical_close(&observation).await,
@@ -4371,13 +4422,12 @@ mod tests {
             .unwrap();
         assert_ne!(ch_a, ch_b);
 
-        // Force-expire A's retire window so the reaper drops A on the next
-        // sweep. B remains active (no `retire_at` set).
+        // Release A so the reaper drops A on the next sweep. B remains
+        // active (no `retirement` set).
         {
             let mut inner = host.inner.lock().await;
             if let Some(channel) = inner.channels.get_mut(&ch_a) {
-                channel.retire_at =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+                channel.retirement = Some(ChannelRetirement::Reap);
             }
         }
 
@@ -4416,8 +4466,65 @@ mod tests {
         assert_eq!(host.active_channels().await.len(), 1);
     }
 
-    /// G7 (P2) regression: a channel inside its post-close TTL retention
-    /// window must not appear in `active_channels()`. Closed-but-retained
+    /// A closed channel stays a tombstone however much time passes (no TTL):
+    /// it is released only when its session's close tombstones are retired
+    /// (finalized unregister), and that retires nothing of another session
+    /// and no open channel.
+    #[tokio::test(start_paused = true)]
+    async fn closed_tombstones_live_until_their_session_retires_them() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let retiring = test_session_id();
+        let other = test_session_id();
+        let retired_closed = host
+            .open_channel_with_generated_test_machine_authority(retiring.clone())
+            .await
+            .unwrap();
+        host.close_channel_with_generated_test_machine_authority(&retired_closed)
+            .await
+            .unwrap();
+        let reopened = host
+            .open_channel_with_generated_test_machine_authority(retiring.clone())
+            .await
+            .unwrap();
+        let other_closed = host
+            .open_channel_with_generated_test_machine_authority(other.clone())
+            .await
+            .unwrap();
+        host.close_channel_with_generated_test_machine_authority(&other_closed)
+            .await
+            .unwrap();
+
+        // Far past the old 60 s retention: every sweep keeps the tombstones.
+        tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        let _ = host.active_channels().await;
+        assert_eq!(
+            host.channel_status(&retired_closed).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
+        assert_eq!(
+            host.channel_status(&other_closed).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
+
+        host.retire_session_close_tombstones(&retiring).await;
+        assert!(matches!(
+            host.channel_status(&retired_closed).await,
+            Err(LiveAdapterHostError::ChannelNotFound(_))
+        ));
+        assert_eq!(
+            host.channel_status(&other_closed).await.unwrap(),
+            LiveAdapterStatus::Closed,
+            "another session's tombstone stays"
+        );
+        assert_eq!(
+            host.active_channels().await,
+            vec![reopened],
+            "the session's open channel is untouched"
+        );
+    }
+
+    /// G7 (P2) regression: a closed channel kept as a tombstone must not
+    /// appear in `active_channels()`. Closed-but-retained
     /// entries stay in the underlying map (so the reaper and post-close
     /// status reads keep working) but the public `active_channels()`
     /// accessor must not advertise them — callers like
@@ -4445,9 +4552,9 @@ mod tests {
         assert!(active_pre.contains(&closing));
         assert_eq!(active_pre.len(), 2);
 
-        // Close one. It enters the TTL retention window
-        // (`retire_at = Some(now + CLOSED_CHANNEL_TTL)`); the reaper
-        // does NOT drop it yet.
+        // Close one. It becomes a closed tombstone
+        // (`ChannelRetirement::Tombstone`); the reaper never drops it on
+        // its own.
         host.close_channel_with_generated_test_machine_authority(&closing)
             .await
             .unwrap();
@@ -4467,14 +4574,13 @@ mod tests {
             LiveAdapterStatus::Closed,
         );
 
-        // Force-expire the TTL and drive the reap; the closed channel
+        // Release the tombstone and drive the reap; the closed channel
         // is dropped from the map. Still must not appear in
         // `active_channels()`.
         {
             let mut inner = host.inner.lock().await;
             if let Some(channel) = inner.channels.get_mut(&closing) {
-                channel.retire_at =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+                channel.retirement = Some(ChannelRetirement::Reap);
             }
         }
         let active_post_reap = host.active_channels().await;
@@ -5075,8 +5181,8 @@ mod tests {
                 .get(&ch)
                 .expect("channel remains present before close authority");
             assert!(
-                channel.retire_at.is_none(),
-                "adapter Err must not set retire_at before generated close authority"
+                channel.retirement.is_none(),
+                "adapter Err must not set retirement before generated close authority"
             );
             assert!(
                 channel.adapter.is_some(),
@@ -5103,8 +5209,8 @@ mod tests {
                 .get(&ch)
                 .expect("channel preserved for live/status until TTL elapses");
             assert!(
-                channel.retire_at.is_some(),
-                "generated close authority must set retire_at"
+                channel.retirement.is_some(),
+                "generated close authority must set retirement"
             );
             assert!(
                 channel.adapter.is_none(),
@@ -5117,7 +5223,7 @@ mod tests {
     /// through `apply_observation` produces a typed
     /// `ObservationOutcome::CommandRejected` — NOT
     /// `ObservationOutcome::Terminal`. The channel state must remain
-    /// untouched (status, retire_at, adapter all preserved) so a
+    /// untouched (status, retirement, adapter all preserved) so a
     /// follow-up command can be sent on the same channel.
     #[tokio::test]
     async fn command_rejected_routes_non_terminally_and_preserves_channel() {
@@ -5156,7 +5262,7 @@ mod tests {
             }
         }
 
-        // Channel remains live — status untouched, retire_at not set,
+        // Channel remains live — status untouched, retirement not set,
         // adapter still attached.
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Ready);
@@ -5164,7 +5270,7 @@ mod tests {
             let inner = host.inner.lock().await;
             let channel = inner.channels.get(&ch).expect("channel present");
             assert!(
-                channel.retire_at.is_none(),
+                channel.retirement.is_none(),
                 "CommandRejected must not retire the channel"
             );
             assert!(
@@ -5177,7 +5283,7 @@ mod tests {
     /// R5-8: after the adapter pump errors, the channel is fully
     /// retired and `open_channel` for the same session id succeeds
     /// after the previous binding's retire reaper sweeps. Without
-    /// `retire_at` being set on adapter Err, the legacy code path
+    /// `retirement` being set on adapter Err, the legacy code path
     /// stranded the session — `open_channel` rejected the rebind with
     /// `SessionAlreadyBound` indefinitely.
     #[tokio::test]
@@ -5198,13 +5304,12 @@ mod tests {
         // Trigger the adapter error (and the host's R5-8 cleanup).
         let _ = host.next_observation_raw(&ch1).await.unwrap();
 
-        // Force-expire the retire window so the reaper accepts the
-        // rebind without sleeping for `CLOSED_CHANNEL_TTL` seconds.
+        // Release the closed channel so the reaper drops it before the
+        // rebind.
         {
             let mut inner = host.inner.lock().await;
             if let Some(channel) = inner.channels.get_mut(&ch1) {
-                channel.retire_at =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+                channel.retirement = Some(ChannelRetirement::Reap);
             }
         }
 
@@ -6153,7 +6258,7 @@ mod tests {
             .channels
             .get_mut(&channel)
             .unwrap()
-            .retire_at = Some(std::time::Instant::now());
+            .retirement = Some(ChannelRetirement::Reap);
         assert_eq!(
             host.channel_status(&channel).await.unwrap(),
             LiveAdapterStatus::Closed

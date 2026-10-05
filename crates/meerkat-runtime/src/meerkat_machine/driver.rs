@@ -4343,6 +4343,15 @@ impl DriverEntry {
         }
     }
 
+    /// Input admissions of this driver; see
+    /// [`EphemeralRuntimeDriver::subscribe_admissions`].
+    pub(crate) fn subscribe_admissions(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.subscribe_admissions(),
+            DriverEntry::Persistent(d) => d.inner_ref().subscribe_admissions(),
+        }
+    }
+
     /// Machine-owned per-run boundary counter — the single producer of the
     /// run-boundary receipt sequence (dogma K10).
     pub(crate) fn run_boundary_sequence(&self, run_id: &RunId) -> u64 {
@@ -5851,13 +5860,31 @@ fn canonical_completion_input_ids(input_ids: &[InputId]) -> Vec<InputId> {
     canonical
 }
 
+/// Whether [`machine_begin_run`] established the run or found run starts held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BeginRunOutcome {
+    Started,
+    /// The member's run starts are held (#1500): nothing changed, and the
+    /// selected input is still queued.
+    RunStartsHeld,
+}
+
+fn effects_hold_run_start(effects: &[crate::meerkat_machine::dsl::MeerkatMachineEffect]) -> bool {
+    effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::meerkat_machine::dsl::MeerkatMachineEffect::RunStartHeld
+        )
+    })
+}
+
 pub(crate) fn machine_begin_run(
     driver: &mut DriverEntry,
     run_id: RunId,
-) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+) -> Result<BeginRunOutcome, crate::runtime_state::RuntimeStateTransitionError> {
     let from = driver.runtime_state();
     if from == RuntimeState::Running && driver.current_run_id().as_ref() == Some(&run_id) {
-        return Ok(());
+        return Ok(BeginRunOutcome::Started);
     }
 
     // DSL is authoritative for `lifecycle_phase` + `current_run_id`
@@ -5893,7 +5920,7 @@ pub(crate) fn machine_begin_run(
                         run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
                     },
                 )
-                .map(|_| ())
+                .map(|transition| effects_hold_run_start(transition.effects()))
             } else {
                 let Some(dsl_session_id) = auth.state().session_id.clone() else {
                     return Err(crate::runtime_state::RuntimeStateTransitionError {
@@ -5908,13 +5935,17 @@ pub(crate) fn machine_begin_run(
                         run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
                     },
                 )
-                .map(|_| ())
+                .map(|transition| effects_hold_run_start(transition.effects()))
             };
-            if apply_result.is_err() {
-                return Err(crate::runtime_state::RuntimeStateTransitionError {
-                    from,
-                    to: RuntimeState::Running,
-                });
+            match apply_result {
+                Ok(true) => return Ok(BeginRunOutcome::RunStartsHeld),
+                Ok(false) => {}
+                Err(_) => {
+                    return Err(crate::runtime_state::RuntimeStateTransitionError {
+                        from,
+                        to: RuntimeState::Running,
+                    });
+                }
             }
         }
         RuntimeLifecycleProjection::from_authority(&auth)
@@ -5925,7 +5956,7 @@ pub(crate) fn machine_begin_run(
         projection.current_run_id,
         projection.pre_run_phase,
     );
-    Ok(())
+    Ok(BeginRunOutcome::Started)
 }
 
 /// Disposition the runtime-loop apply produced. `Failed` is only used after the
@@ -8911,6 +8942,10 @@ pub(crate) async fn machine_recycle_preserving_work(
 #[derive(Debug)]
 pub(crate) enum RuntimeLoopBatchStart {
     Started,
+    /// Run starts are held (#1500): no run was established and nothing was
+    /// staged, so the batch's inputs are still queued. The loop parks until
+    /// the hold is released.
+    RunStartsHeld,
     StageRefused {
         reason: String,
         abandoned_input_ids: Vec<InputId>,
@@ -8925,9 +8960,12 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
     let mut driver = Arc::clone(driver).lock_owned().await;
     let staged_ids = batch.input_ids().to_vec();
     let stage_source = batch.source();
-    machine_begin_run(&mut driver, run_id.clone()).map_err(|err| {
+    let begun = machine_begin_run(&mut driver, run_id.clone()).map_err(|err| {
         RuntimeDriverError::Internal(format!("failed to start runtime run: {err}"))
     })?;
+    if begun == BeginRunOutcome::RunStartsHeld {
+        return Ok(RuntimeLoopBatchStart::RunStartsHeld);
+    }
 
     let stage_authority = match machine_authorize_stage_for_run(
         &driver,

@@ -70,28 +70,29 @@ pub enum OwnerRevivalDeferral {
     /// mob runs.
     #[error("its mob is {phase}, not running")]
     MobNotRunning { phase: meerkat_mob::MobState },
-    /// A lifecycle operation on the member is still in progress, such as
-    /// the mob's resume reviving it.
-    #[error("a lifecycle operation on it is still in progress: {intent}")]
-    LifecycleOperationPending { intent: String },
+    /// A lifecycle operation on the member is still in progress: the mob's
+    /// resume is still reviving `member` (its explicit-resume work).
+    #[error("a lifecycle operation on {member} is still in progress: {intent}")]
+    LifecycleOperationPending {
+        intent: String,
+        member: meerkat_mob::AgentIdentity,
+    },
 }
-
-/// Longest pause before another delivery to an owner whose lifecycle
-/// operation was still in progress.
-const PENDING_OPERATION_MAX_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl OwnerRevivalDeferral {
     /// Wait until an owner deferred for this reason may be revivable in
     /// `handle`'s mob. `false` when it never will be: the mob completed, was
-    /// destroyed or its actor is gone. `attempt` counts the earlier waits and
-    /// paces the wait for an operation in progress, which has no completion
-    /// signal of its own.
-    pub(crate) async fn cleared(&self, handle: &meerkat_mob::MobHandle, attempt: u32) -> bool {
-        if let Self::LifecycleOperationPending { .. } = self {
-            let pause = std::time::Duration::from_millis(100)
-                .saturating_mul(2_u32.saturating_pow(attempt.min(16)))
-                .min(PENDING_OPERATION_MAX_PAUSE);
-            tokio::time::sleep(pause).await;
+    /// destroyed or its actor is gone.
+    ///
+    /// An operation in progress is waited out on its own typed completion:
+    /// the member's explicit-resume work leaving the actor-published machine
+    /// state. That is the only lifecycle operation that defers a member
+    /// revival. No timer paces the wait.
+    pub(crate) async fn cleared(&self, handle: &meerkat_mob::MobHandle) -> bool {
+        if let Self::LifecycleOperationPending { member, .. } = self
+            && !handle.explicit_resume_member_work_settled(member).await
+        {
+            return false;
         }
         mob_runs(handle).await
     }
@@ -283,7 +284,10 @@ pub async fn deliver_detached_completion_to_member(
                         DetachedCompletionError::OwnerRevivalDeferred {
                             tool,
                             mob_id: owner.mob_id().clone(),
-                            reason: OwnerRevivalDeferral::LifecycleOperationPending { intent },
+                            reason: OwnerRevivalDeferral::LifecycleOperationPending {
+                                intent,
+                                member: owner_identity.clone(),
+                            },
                         }
                     }
                     error => DetachedCompletionError::Runtime {
@@ -335,7 +339,7 @@ pub async fn deliver_detached_completion_to_member_when_revivable(
         let Err(DetachedCompletionError::OwnerRevivalDeferred { reason, .. }) = &result else {
             return result;
         };
-        if attempt >= MAX_LIVE_OWNER_REVIVAL_WAITS || !reason.cleared(owner, attempt).await {
+        if attempt >= MAX_LIVE_OWNER_REVIVAL_WAITS || !reason.cleared(owner).await {
             return result;
         }
         attempt = attempt.saturating_add(1);

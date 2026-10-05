@@ -1106,6 +1106,20 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
                 quote! { if #cond { #(#then_stmts)* } else { #(#else_stmts)* } }
             }
         }
+        UpdateDef::ForEach {
+            binding,
+            over,
+            updates,
+        } => {
+            // Collect first: the body mutates state the collection may borrow.
+            let over_e = gen_expr(over, prefix);
+            let stmts: Vec<_> = updates.iter().map(|u| gen_update(u, prefix)).collect();
+            quote! {
+                for #binding in #over_e.iter().cloned().collect::<::std::vec::Vec<_>>() {
+                    #(#stmts)*
+                }
+            }
+        }
     }
 }
 

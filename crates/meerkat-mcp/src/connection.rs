@@ -12,9 +12,9 @@ use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::types::ContentBlock;
+use rmcp::model::CallToolRequestParams;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::{model::CallToolRequestParams, transport::TokioChildProcess};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,8 +24,171 @@ use tokio::process::Command;
 pub struct McpConnection {
     config: McpServerConfig,
     service: ConnectedClient,
+    /// The stdio server's process, owned until `close` observes its exit.
+    stdio_child: Option<StdioChildCustody>,
 }
 
+/// After the process group is killed, how long [`StdioChildCustody::terminate`]
+/// waits for the server's stdout to reach EOF. The EOF is the signal that every
+/// process holding the pipe has exited; this bound only guards against a
+/// process that escaped the group (for example via `setsid`) and still holds
+/// it, which would otherwise wedge shutdown.
+#[cfg(unix)]
+const STDIO_GROUP_EXIT_BACKSTOP: Duration = Duration::from_secs(10);
+
+/// Typed owner of a stdio MCP server's process.
+///
+/// The router (or a direct connection) holds this from the moment the process
+/// is spawned, before the handshake, so no connect future exclusively owns the
+/// process. [`Self::terminate`] ends it and returns only once it has exited:
+/// on Unix the server runs in its own process group, which is killed as a
+/// whole (wrappers such as `sh -c`, `npx` or `uvx` make the real server a
+/// grandchild), the direct child is reaped, and EOF on a duplicate of its
+/// stdout proves every process holding the pipe has exited. Elsewhere only the
+/// direct child is killed and reaped.
+#[derive(Clone, Default)]
+pub(crate) struct StdioChildCustody {
+    slot: Arc<std::sync::Mutex<Option<StdioChild>>>,
+    #[cfg(test)]
+    spawned: Arc<tokio::sync::watch::Sender<Option<u32>>>,
+}
+
+struct StdioChild {
+    child: tokio::process::Child,
+    /// The server's process group, while it may still need killing. Cleared
+    /// before the leader is reaped, so a reused id is never signalled.
+    #[cfg(unix)]
+    process_group: Option<nix::unistd::Pid>,
+    #[cfg(unix)]
+    stdout_witness: Option<tokio::net::unix::pipe::Receiver>,
+}
+
+impl Drop for StdioChild {
+    /// Fallback only, for a custody dropped without `terminate`: kill the
+    /// whole group without waiting (`kill_on_drop` covers the direct child).
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(group) = self.process_group.take() {
+            let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+}
+
+impl StdioChildCustody {
+    /// Spawn the server and take custody of it; returns its stdout and stdin
+    /// for the MCP transport.
+    fn spawn(
+        &self,
+        stdio: &meerkat_core::mcp_config::McpStdioConfig,
+    ) -> Result<(tokio::process::ChildStdout, tokio::process::ChildStdin), McpError> {
+        let mut cmd = Command::new(&stdio.command);
+        cmd.args(&stdio.args);
+        for (key, value) in &stdio.env {
+            cmd.env(key, value);
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            // Fallback only: the owner path is `terminate`.
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn().map_err(|e| McpError::ConnectionFailed {
+            reason: format!("Failed to spawn process: {e}"),
+        })?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(McpError::ConnectionFailed {
+                reason: "spawned MCP server has no piped stdin/stdout".to_string(),
+            });
+        };
+        #[cfg(unix)]
+        let stdout_witness = {
+            use std::os::fd::AsFd as _;
+            stdout
+                .as_fd()
+                .try_clone_to_owned()
+                .ok()
+                .and_then(|fd| tokio::net::unix::pipe::Receiver::from_owned_fd(fd).ok())
+        };
+        #[cfg(unix)]
+        let process_group = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .map(nix::unistd::Pid::from_raw);
+        #[cfg(test)]
+        self.spawned.send_replace(child.id());
+        let replaced = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(StdioChild {
+                child,
+                #[cfg(unix)]
+                process_group,
+                #[cfg(unix)]
+                stdout_witness,
+            });
+        // One custody holds one process; a replaced one is killed by its drop.
+        drop(replaced);
+        Ok((stdout, stdin))
+    }
+
+    /// Kill the server (its whole process group on Unix) and return once it
+    /// has exited. `None` when nothing is in custody (never spawned, or
+    /// already terminated).
+    pub(crate) async fn terminate(&self) -> Option<std::io::Result<std::process::ExitStatus>> {
+        let mut held = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        #[cfg(unix)]
+        if let Some(group) = held.process_group.take() {
+            let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        }
+        // The direct child (the only kill there is off Unix); a no-op error
+        // once it has already exited.
+        let _ = held.child.start_kill();
+        let status = held.child.wait().await;
+        #[cfg(unix)]
+        if let Some(mut witness) = held.stdout_witness.take() {
+            use tokio::io::AsyncReadExt as _;
+            let mut discard = [0u8; 4096];
+            let all_writers_exited =
+                async { while matches!(witness.read(&mut discard).await, Ok(read) if read > 0) {} };
+            if tokio::time::timeout(STDIO_GROUP_EXIT_BACKSTOP, all_writers_exited)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "a process outside the MCP stdio server's process group still holds its stdout after the group was killed"
+                );
+            }
+        }
+        Some(status)
+    }
+
+    /// The spawned process id, once spawned.
+    #[cfg(test)]
+    #[allow(clippy::expect_used)]
+    pub(crate) async fn spawned_pid(&self) -> u32 {
+        let mut spawned = self.spawned.subscribe();
+        let pid = spawned
+            .wait_for(Option::is_some)
+            .await
+            .expect("custody owns its spawn signal");
+        pid.expect("waited for a spawned pid")
+    }
+}
+
+/// Credential source for OAuth-protected MCP servers.
+///
+/// `interactive_login` is only reached in [`McpAuthMode::Interactive`]. A
+/// resolver without a host browser channel returns
+/// [`McpOAuthError::HumanAuthorizationRequired`], which the connection
+/// reports as the typed [`McpError::AuthorizationRequired`] host status. A
+/// host that owns an unobservable browser context drives
+/// `McpOAuthAuthority::login_start`/`login_complete` itself.
 #[async_trait]
 pub trait McpAuthResolver: Send + Sync {
     async fn stored_bearer_token(
@@ -42,19 +205,32 @@ pub trait McpAuthResolver: Send + Sync {
 
 #[async_trait]
 impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
+    /// Unselected targets (no `oauth_account`) keep their stored-only
+    /// semantics, so servers that need no OAuth connect as before.
     async fn stored_bearer_token(
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
+        if target.expected_account().is_none() {
+            return self.stored_only().stored_bearer_token(target).await;
+        }
         self.stored_bearer_token(target).await
     }
 
+    /// The native authority has no browser: human authorization is a host
+    /// obligation, reported as typed status instead of opening anything.
+    /// Interactive login needs a selected account.
     async fn interactive_login(
         &self,
         target: &McpServerIdentity,
-        www_authenticate: Option<&str>,
+        _www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
-        self.interactive_login(target, www_authenticate).await
+        if target.expected_account().is_none() {
+            return Err(McpOAuthError::AccountSelectionRequired);
+        }
+        Err(McpOAuthError::HumanAuthorizationRequired {
+            server_name: target.server_name().to_owned(),
+        })
     }
 }
 
@@ -81,6 +257,19 @@ impl McpConnection {
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
         client_factory: Option<Arc<dyn McpClientServiceFactory>>,
     ) -> Result<Self, McpError> {
+        Self::connect_with_custody(config, auth_mode, auth_resolver, client_factory, None).await
+    }
+
+    /// [`Self::connect_with_services`] with the custody a stdio server's
+    /// process is deposited into before the handshake (a fresh one when
+    /// `None`). On failure the process is terminated before returning.
+    pub(crate) async fn connect_with_custody(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+        client_factory: Option<Arc<dyn McpClientServiceFactory>>,
+        stdio_custody: Option<StdioChildCustody>,
+    ) -> Result<Self, McpError> {
         if matches!(config.transport, McpTransportConfig::Http(_)) {
             let target = McpServerIdentity::from_config(config)
                 .map_err(mcp_auth_error_to_connection_failed)?;
@@ -92,30 +281,24 @@ impl McpConnection {
         }
         // Refusal precedes process spawn, SSE startup and HTTP transport effects.
         let client = ClientServiceSelection::select(config, client_factory.as_deref())?;
+        let mut stdio_child = None;
         let service = match &config.transport {
             McpTransportConfig::Stdio(stdio) => {
-                let mut cmd = Command::new(&stdio.command);
-                // Fallback kill: rmcp kills the child from a spawned task when the
-                // transport is dropped, but a stopping runtime may never run that
-                // task. kill-on-drop makes dropping the child itself send SIGKILL,
-                // so the process still ends; its exit is asynchronous either way.
-                cmd.kill_on_drop(true);
-                cmd.args(&stdio.args);
-                for (key, value) in &stdio.env {
-                    cmd.env(key, value);
+                // We own the process; rmcp only gets its stdout/stdin.
+                let custody = stdio_custody.unwrap_or_default();
+                let (stdout, stdin) = custody.spawn(stdio)?;
+                match client.serve((stdout, stdin)).await {
+                    Ok(service) => {
+                        stdio_child = Some(custody);
+                        service
+                    }
+                    Err(e) => {
+                        custody.terminate().await;
+                        return Err(McpError::ConnectionFailed {
+                            reason: format!("Failed to establish MCP connection: {e}"),
+                        });
+                    }
                 }
-
-                let transport =
-                    TokioChildProcess::new(cmd).map_err(|e| McpError::ConnectionFailed {
-                        reason: format!("Failed to spawn process: {e}"),
-                    })?;
-
-                client
-                    .serve(transport)
-                    .await
-                    .map_err(|e| McpError::ConnectionFailed {
-                        reason: format!("Failed to establish MCP connection: {e}"),
-                    })?
             }
             McpTransportConfig::Http(http) => {
                 let headers = headers_from_map(&http.headers)
@@ -160,6 +343,7 @@ impl McpConnection {
         Ok(Self {
             config: config.clone(),
             service,
+            stdio_child,
         })
     }
 
@@ -217,7 +401,7 @@ impl McpConnection {
             let token = resolver
                 .interactive_login(&target, None)
                 .await
-                .map_err(mcp_auth_error_to_connection_failed)?;
+                .map_err(|error| mcp_interactive_error(&target, error))?;
             return Self::connect_streamable_http_once(
                 config,
                 headers,
@@ -257,7 +441,7 @@ impl McpConnection {
                     (Some(_), McpAuthMode::Interactive) => resolver
                         .interactive_login(&target, challenge.as_deref())
                         .await
-                        .map_err(mcp_auth_error_to_connection_failed)?,
+                        .map_err(|error| mcp_interactive_error(&target, error))?,
                     (None, McpAuthMode::Stored) => {
                         return Err(McpError::ConnectionFailed {
                             reason: McpOAuthError::MissingStoredToken {
@@ -269,7 +453,7 @@ impl McpConnection {
                     (None, McpAuthMode::Interactive) => resolver
                         .interactive_login(&target, challenge.as_deref())
                         .await
-                        .map_err(mcp_auth_error_to_connection_failed)?,
+                        .map_err(|error| mcp_interactive_error(&target, error))?,
                 };
                 // The first attempt consumed its service. A retry selects a
                 // fresh owner for the same config before touching transport.
@@ -316,6 +500,7 @@ impl McpConnection {
         Ok(Self {
             config: config.clone(),
             service,
+            stdio_child: None,
         })
     }
 
@@ -358,6 +543,29 @@ impl McpConnection {
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
         client_factory: Option<Arc<dyn McpClientServiceFactory>>,
     ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
+        let stdio_custody = matches!(config.transport, McpTransportConfig::Stdio(_))
+            .then(StdioChildCustody::default);
+        Self::connect_and_enumerate_with_custody(
+            config,
+            auth_mode,
+            auth_resolver,
+            client_factory,
+            stdio_custody,
+        )
+        .await
+    }
+
+    /// [`Self::connect_and_enumerate_with_services`] with a caller-held custody
+    /// for a stdio server's process, so the caller can also terminate it while
+    /// the attempt is still in flight. On failure or timeout the process has
+    /// exited when this returns.
+    pub(crate) async fn connect_and_enumerate_with_custody(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+        client_factory: Option<Arc<dyn McpClientServiceFactory>>,
+        stdio_custody: Option<StdioChildCustody>,
+    ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
         let timeout_secs = config
             .connect_timeout_secs
             .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_SECS);
@@ -367,10 +575,15 @@ impl McpConnection {
         }
 
         let server_name = config.name.clone();
-        tokio::time::timeout(timeout, async {
-            let conn =
-                Self::connect_with_services(config, auth_mode, auth_resolver, client_factory)
-                    .await?;
+        let attempt = tokio::time::timeout(timeout, async {
+            let conn = Self::connect_with_custody(
+                config,
+                auth_mode,
+                auth_resolver,
+                client_factory,
+                stdio_custody.clone(),
+            )
+            .await?;
             let tools = conn
                 .list_tools(&server_name)
                 .await?
@@ -385,13 +598,22 @@ impl McpConnection {
                 "Timed out connecting to '{}' ({timeout_secs}s)",
                 config.name
             ),
-        })?
+        })
+        .flatten();
+        if attempt.is_err()
+            && let Some(custody) = &stdio_custody
+        {
+            // The attempt future (and any connection it held) is gone; the
+            // process it spawned is not until its owner observes the exit.
+            custody.terminate().await;
+        }
+        attempt
     }
 
     /// Transfer this exact connected owner into the protocol wrapper without
     /// another handshake or host-service selection.
     pub fn into_protocol(self) -> crate::McpProtocol {
-        crate::McpProtocol::from_client(self.service)
+        crate::McpProtocol::from_client(self.service, self.stdio_child)
     }
 
     /// Get the config used to create this connection.
@@ -448,16 +670,31 @@ impl McpConnection {
         Ok(meerkat_core::types::text_content(&blocks))
     }
 
-    /// Close the connection
+    /// Close the connection. A stdio server's process is killed once its
+    /// stdin is closed (its whole process group on Unix) and has exited when
+    /// this returns.
     pub async fn close(self) -> Result<(), McpError> {
-        self.service
-            .cancel()
-            .await
-            .map_err(|e| McpError::ConnectionFailed {
-                reason: format!("Failed to close connection: {e:?}"),
-            })?;
-        Ok(())
+        close_connected(self.service, self.stdio_child).await
     }
+}
+
+/// Cancel the client service (closing a stdio server's stdin), then terminate
+/// the server's process and observe its exit. The process is terminated even
+/// when the cancel fails.
+pub(crate) async fn close_connected(
+    service: ConnectedClient,
+    stdio_child: Option<StdioChildCustody>,
+) -> Result<(), McpError> {
+    let cancelled = service.cancel().await;
+    if let Some(custody) = stdio_child
+        && let Some(Err(error)) = custody.terminate().await
+    {
+        tracing::warn!(%error, "failed to reap MCP stdio server process");
+    }
+    cancelled.map_err(|e| McpError::ConnectionFailed {
+        reason: format!("Failed to close connection: {e:?}"),
+    })?;
+    Ok(())
 }
 
 struct StreamableConnectError {
@@ -482,6 +719,15 @@ impl StreamableConnectError {
 
 fn auth_failure_suggests_oauth(error: &StreamableConnectError) -> bool {
     error.auth.challenge().is_some() || error.auth.status().is_some()
+}
+
+fn mcp_interactive_error(target: &McpServerIdentity, error: McpOAuthError) -> McpError {
+    match error {
+        McpOAuthError::HumanAuthorizationRequired { .. } => McpError::AuthorizationRequired {
+            target: Box::new(target.clone()),
+        },
+        other => mcp_auth_error_to_connection_failed(other),
+    }
 }
 
 fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
@@ -511,7 +757,6 @@ pub mod tests {
     use axum::{Json, Router};
     use rmcp::model::Content;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
@@ -670,43 +915,10 @@ pub mod tests {
         assert_eq!(reason, "tool returned error with no content");
     }
 
-    /// Get path to the test server binary
-    fn test_server_path() -> PathBuf {
-        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-            return PathBuf::from(target_dir).join("debug/mcp-test-server");
-        }
-
-        // Build path relative to workspace root
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let workspace_root = PathBuf::from(manifest_dir)
-            .parent()
-            .and_then(Path::parent)
-            .unwrap()
-            .to_path_buf();
-        workspace_root
-            .join("target")
-            .join("debug")
-            .join("mcp-test-server")
-    }
-
-    fn skip_if_no_test_server() -> Option<PathBuf> {
-        let path = test_server_path();
-        if path.exists() {
-            Some(path)
-        } else {
-            eprintln!(
-                "Skipping: mcp-test-server not built. Run `cargo build -p mcp-test-server` first."
-            );
-            None
-        }
-    }
-
     /// RCT: Verify MCP initialize handshake works
     #[tokio::test]
     async fn test_mcp_initialize_handshake() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let config = McpServerConfig::stdio(
             "test-server",
@@ -733,9 +945,7 @@ pub mod tests {
     /// RCT: Verify tools/list schema parsing
     #[tokio::test]
     async fn test_mcp_tools_list_schema_parse() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let config = McpServerConfig::stdio(
             "test-server",
@@ -798,9 +1008,7 @@ pub mod tests {
     /// RCT: Verify tools/call round-trip (returns Vec<ContentBlock>)
     #[tokio::test]
     async fn test_mcp_tools_call_round_trip() {
-        let Some(server_path) = skip_if_no_test_server() else {
-            return;
-        };
+        let server_path = mcp_test_server::fixture_binary();
 
         let config = McpServerConfig::stdio(
             "test-server",
@@ -836,12 +1044,12 @@ pub mod tests {
         conn.close().await.expect("Failed to close connection");
     }
 
-    struct HttpMcpTestState {
+    pub(crate) struct HttpMcpTestState {
         accepted_token: &'static str,
         seen_authorizations: Mutex<Vec<Option<String>>>,
     }
 
-    async fn spawn_http_mcp_server(
+    pub(crate) async fn spawn_http_mcp_server(
         accepted_token: &'static str,
     ) -> (String, Arc<HttpMcpTestState>) {
         let state = Arc::new(HttpMcpTestState {
@@ -929,17 +1137,18 @@ pub mod tests {
         (StatusCode::OK, Json(response)).into_response()
     }
 
-    struct FakeMcpAuthResolver {
+    pub(crate) struct FakeMcpAuthResolver {
         stored_token: Option<String>,
         stored_reauth_required: bool,
         interactive_token: String,
         interactive_delay: Option<Duration>,
         interactive_calls: AtomicUsize,
         challenges: Mutex<Vec<Option<String>>>,
+        human_authorization_required: bool,
     }
 
     impl FakeMcpAuthResolver {
-        fn new(stored_token: Option<&str>, interactive_token: &str) -> Self {
+        pub(crate) fn new(stored_token: Option<&str>, interactive_token: &str) -> Self {
             Self {
                 stored_token: stored_token.map(ToOwned::to_owned),
                 stored_reauth_required: false,
@@ -947,6 +1156,7 @@ pub mod tests {
                 interactive_delay: None,
                 interactive_calls: AtomicUsize::new(0),
                 challenges: Mutex::new(Vec::new()),
+                human_authorization_required: false,
             }
         }
 
@@ -957,6 +1167,11 @@ pub mod tests {
 
         fn with_stored_reauth_required(mut self) -> Self {
             self.stored_reauth_required = true;
+            self
+        }
+
+        pub(crate) fn with_human_authorization_required(mut self) -> Self {
+            self.human_authorization_required = true;
             self
         }
     }
@@ -988,8 +1203,50 @@ pub mod tests {
                 .lock()
                 .unwrap()
                 .push(www_authenticate.map(ToOwned::to_owned));
+            if self.human_authorization_required {
+                return Err(McpOAuthError::HumanAuthorizationRequired {
+                    server_name: _target.server_name().to_owned(),
+                });
+            }
             Ok(self.interactive_token.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_human_authorization_is_typed_with_target_and_carries_no_secret() {
+        let (url, state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("glean", url, HashMap::new());
+        let resolver =
+            Arc::new(FakeMcpAuthResolver::new(None, "unused").with_human_authorization_required());
+
+        let error = match McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Interactive,
+            Some(resolver.clone()),
+        )
+        .await
+        {
+            Ok(_) => panic!("unauthorized server must not connect"),
+            Err(error) => error,
+        };
+        let McpError::AuthorizationRequired { target } = &error else {
+            panic!("expected typed authorization-required, got {error:?}");
+        };
+        assert_eq!(**target, McpServerIdentity::from_config(&config).unwrap());
+        let rendered = format!("{error} {error:?}");
+        for secret in ["authorize", "state=", "code=", "resource_metadata"] {
+            assert!(!rendered.contains(secret), "{secret:?} leaked: {rendered}");
+        }
+        assert_eq!(resolver.interactive_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            state
+                .seen_authorizations
+                .lock()
+                .unwrap()
+                .iter()
+                .all(Option::is_none),
+            "no credential may be sent without completed host authorization"
+        );
     }
 
     #[tokio::test]
@@ -1153,6 +1410,77 @@ pub mod tests {
             "reauth retry should use the interactive token"
         );
         conn.close().await.expect("Failed to close connection");
+    }
+
+    /// `close` owns the stdio server's exit: the server is killed with its
+    /// whole process group right after its stdin closes, even when it keeps
+    /// running past EOF, and has exited when `close` returns. (Fails-old:
+    /// rmcp gave the server up to 3 s after EOF, then killed only the direct
+    /// child, so a wrapped server's grandchild outlived `close`.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn close_returns_after_the_stdio_servers_process_group_exits() {
+        use crate::stdio_test_fixture::{PidReport, process_exited, sh_mcp_server_args};
+        let mut report = PidReport::new("close-group");
+        let config = McpServerConfig::stdio(
+            "eof-ignoring",
+            "/bin/sh",
+            sh_mcp_server_args(Some(report.path())),
+            HashMap::new(),
+        );
+        let (conn, tools) = McpConnection::connect_and_enumerate(&config)
+            .await
+            .expect("fixture server completes the handshake");
+        assert!(tools.is_empty());
+        let pids = report.pids().await;
+        let (wrapper, server) = (pids[0], pids[1]);
+
+        conn.close().await.expect("close");
+
+        assert!(
+            process_exited(wrapper),
+            "stdio server {wrapper} outlived close"
+        );
+        assert!(
+            process_exited(server),
+            "stdio server's grandchild {server} outlived close"
+        );
+    }
+
+    /// A failed handshake terminates the spawned server before the error is
+    /// returned. (Fails-old: the transport drop only scheduled the kill.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_handshake_returns_after_the_stdio_server_exits() {
+        use crate::stdio_test_fixture::process_exited;
+        // Closes its stdout (the handshake fails on EOF) but keeps running.
+        let config = McpServerConfig::stdio(
+            "closes-stdout",
+            "/bin/sh",
+            vec!["-c".to_string(), "exec >&-; exec sleep 60".to_string()],
+            HashMap::new(),
+        );
+        let custody = StdioChildCustody::default();
+
+        let result = McpConnection::connect_and_enumerate_with_custody(
+            &config,
+            McpAuthMode::Stored,
+            None,
+            None,
+            Some(custody.clone()),
+        )
+        .await;
+
+        assert!(result.is_err(), "a server without stdout cannot connect");
+        let pid = custody.spawned_pid().await;
+        assert!(
+            process_exited(pid),
+            "stdio server {pid} of a failed handshake outlived the error"
+        );
+        assert!(
+            custody.terminate().await.is_none(),
+            "the failed attempt already terminated and reaped the server"
+        );
     }
 }
 

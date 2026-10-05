@@ -20,8 +20,10 @@ use axum::response::IntoResponse;
 use meerkat_contracts::{
     WireAuthProfile, WireAuthProfileCleared, WireAuthProfileCreated, WireAuthProfileDetail,
     WireAuthProfilesList, WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity,
-    WireDeviceStart, WireLoginReady, WireLoginStart, WireOAuthProvider, WireProviderBinding,
-    WireRealmConnectionSet, WireRealmList, WireRealmSummary,
+    WireDeviceStart, WireLoginReady, WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget,
+    WireLoginTarget, WireMcpLoginReady, WireMcpLoginStart, WireMcpLoginTarget, WireOAuthProvider,
+    WireProviderBinding, WireProviderLoginReady, WireProviderLoginStart, WireRealmConnectionSet,
+    WireRealmList, WireRealmSummary,
 };
 use meerkat_core::connection::{
     BindingId, ConnectionTargetError, ProfileId, RealmId, WriteOwnerError,
@@ -225,6 +227,12 @@ fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Re
         | meerkat::HostAuthError::PersistenceUnavailable
         | meerkat::HostAuthError::Lifecycle(_)
         | meerkat::HostAuthError::StatusRehydrate(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        meerkat::HostAuthError::McpOAuth(mcp) if mcp.is_refusal() => StatusCode::BAD_REQUEST,
+        meerkat::HostAuthError::McpOAuth(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        meerkat::HostAuthError::McpTarget(refusal) if refusal.is_refusal() => {
+            StatusCode::BAD_REQUEST
+        }
+        meerkat::HostAuthError::McpTarget(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
         status,
@@ -1249,26 +1257,64 @@ fn parse_auth_identity_triple(
 /// the RPC `auth/login/start` method).
 pub use meerkat_contracts::wire::LoginStartParams as LoginStartBody;
 
+fn bad_request(message: impl std::fmt::Display) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": message.to_string() })),
+    )
+        .into_response()
+}
+
 pub async fn start_login(
     State(state): State<AppState>,
     Json(body): Json<LoginStartBody>,
 ) -> impl IntoResponse {
-    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
-        &body.realm_id,
-        &body.binding_id,
-        body.profile_id.as_deref(),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
+    let provider_target = match body.target {
+        WireLoginTarget::Provider(target) => target,
+        WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
+            let target = match meerkat::resolve_configured_mcp_target(
+                &mcp,
+                state.context_root.as_deref(),
+                state.user_config_root.as_deref(),
             )
-                .into_response();
+            .await
+            {
+                Ok(target) => target,
+                Err(error) => return host_auth_error_response(error),
+            };
+            return match host_auth_service(&state)
+                .mcp_login_start(&target, &body.redirect_uri, None)
+                .await
+            {
+                Ok(started) => (
+                    StatusCode::OK,
+                    Json(WireLoginStart {
+                        authorize_url: started.authorize_url,
+                        state: started.state,
+                        redirect_uri: started.redirect_uri,
+                        target: WireLoginStartTarget::Mcp(WireMcpLoginStart {
+                            mcp,
+                            disposition: meerkat::mcp_login_disposition_to_wire(
+                                started.disposition,
+                            ),
+                        }),
+                    }),
+                )
+                    .into_response(),
+                Err(error) => host_auth_error_response(error),
+            };
         }
     };
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &provider_target.realm_id,
+        &provider_target.binding_id,
+        provider_target.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return bad_request(e),
+    };
     let target = meerkat::HostAuthTarget {
-        provider: body.provider.identity(),
+        provider: provider_target.provider.identity(),
         realm_id,
         binding_id,
         profile_id,
@@ -1289,7 +1335,9 @@ pub async fn start_login(
                 authorize_url: started.authorize_url,
                 state: started.state,
                 redirect_uri: started.redirect_uri,
-                provider: body.provider,
+                target: WireLoginStartTarget::Provider(WireProviderLoginStart {
+                    provider: provider_target.provider,
+                }),
             }),
         )
             .into_response(),
@@ -1304,22 +1352,67 @@ pub async fn complete_login(
     State(state): State<AppState>,
     Json(body): Json<LoginCompleteBody>,
 ) -> impl IntoResponse {
-    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
-        &body.realm_id,
-        &body.binding_id,
-        body.profile_id.as_deref(),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
+    let provider_target = match body.target {
+        WireLoginTarget::Provider(target) => target,
+        WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }) => {
+            let target = match meerkat::resolve_configured_mcp_target(
+                &mcp,
+                state.context_root.as_deref(),
+                state.user_config_root.as_deref(),
             )
-                .into_response();
+            .await
+            {
+                Ok(target) => target,
+                Err(error) => return host_auth_error_response(error),
+            };
+            return match host_auth_service(&state)
+                .mcp_login_complete(
+                    &target,
+                    meerkat::McpOAuthCallback {
+                        redirect_uri: body.redirect_uri,
+                        state: body.state,
+                        code: body.code,
+                    },
+                )
+                .await
+            {
+                Ok(completed) => {
+                    tracing::info!(
+                        target: "meerkat::auth::audit",
+                        mcp_server = %mcp.server_name,
+                        action = "login_mcp_oauth_complete",
+                        has_refresh_token = %completed.has_refresh_token,
+                        "MCP OAuth login completed via REST"
+                    );
+                    (
+                        StatusCode::OK,
+                        Json(WireLoginReady {
+                            state: None,
+                            target: WireLoginReadyTarget::Mcp(WireMcpLoginReady {
+                                mcp,
+                                account_id: completed.account_id,
+                            }),
+                            expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
+                            has_refresh_token: completed.has_refresh_token,
+                            scopes: completed.scopes,
+                        }),
+                    )
+                        .into_response()
+                }
+                Err(error) => host_auth_error_response(error),
+            };
         }
     };
+    let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
+        &provider_target.realm_id,
+        &provider_target.binding_id,
+        provider_target.profile_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return bad_request(e),
+    };
     let target = meerkat::HostAuthTarget {
-        provider: body.provider.identity(),
+        provider: provider_target.provider.identity(),
         realm_id,
         binding_id,
         profile_id,
@@ -1339,7 +1432,7 @@ pub async fn complete_login(
                 target: "meerkat::auth::audit",
                 binding_key = ?completed.auth_binding,
                 action = "login_oauth_complete",
-                provider = %body.provider,
+                provider = %provider_target.provider,
                 has_refresh_token = %completed.has_refresh_token,
                 "OAuth login completed via REST"
             );
@@ -1347,9 +1440,11 @@ pub async fn complete_login(
                 StatusCode::OK,
                 Json(WireLoginReady {
                     state: None,
-                    identity: WireBindingIdentity::from(&completed.auth_binding),
-                    profile_id: completed.profile_id,
-                    provider: body.provider,
+                    target: WireLoginReadyTarget::Provider(WireProviderLoginReady {
+                        identity: WireBindingIdentity::from(&completed.auth_binding),
+                        profile_id: completed.profile_id,
+                        provider: provider_target.provider,
+                    }),
                     expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
                     has_refresh_token: completed.has_refresh_token,
                     scopes: completed.scopes,
@@ -1357,6 +1452,39 @@ pub async fn complete_login(
             )
                 .into_response()
         }
+        Err(error) => host_auth_error_response(error),
+    }
+}
+
+/// Canonical wire contract for `POST /auth/login/cancel` (shared with the
+/// RPC `auth/login/cancel` method).
+pub use meerkat_contracts::wire::LoginCancelParams as LoginCancelBody;
+
+/// Retire the pending MCP attempt admitted under `state` for a configured
+/// server. Local only; an unknown state is refused.
+pub async fn cancel_login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginCancelBody>,
+) -> impl IntoResponse {
+    let target = match meerkat::resolve_configured_mcp_target(
+        &body.mcp,
+        state.context_root.as_deref(),
+        state.user_config_root.as_deref(),
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(error) => return host_auth_error_response(error),
+    };
+    match host_auth_service(&state).mcp_login_cancel_by_state(&target, &body.state) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(meerkat_contracts::WireLoginCancelled {
+                mcp: body.mcp,
+                cancelled: true,
+            }),
+        )
+            .into_response(),
         Err(error) => host_auth_error_response(error),
     }
 }
@@ -1493,9 +1621,11 @@ pub async fn complete_device_login(
                 StatusCode::OK,
                 Json(WireLoginReady {
                     state: Some("ready".to_string()),
-                    identity: WireBindingIdentity::from(&completed.auth_binding),
-                    profile_id: completed.profile_id,
-                    provider: body.provider,
+                    target: WireLoginReadyTarget::Provider(WireProviderLoginReady {
+                        identity: WireBindingIdentity::from(&completed.auth_binding),
+                        profile_id: completed.profile_id,
+                        provider: body.provider,
+                    }),
                     expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
                     has_refresh_token: completed.has_refresh_token,
                     scopes: completed.scopes,
@@ -2427,11 +2557,13 @@ mod tests {
         let response = start_login(
             State(state.clone()),
             Json(LoginStartBody {
-                provider: WireOAuthProvider::OpenAi,
+                target: WireLoginTarget::Provider(meerkat_contracts::WireProviderLoginTarget {
+                    provider: WireOAuthProvider::OpenAi,
+                    realm_id: "dev".to_string(),
+                    binding_id: "default_openai".to_string(),
+                    profile_id: None,
+                }),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: "dev".to_string(),
-                binding_id: "default_openai".to_string(),
-                profile_id: None,
             }),
         )
         .await
@@ -2488,11 +2620,13 @@ mod tests {
         let response = start_login(
             State(state.clone()),
             Json(LoginStartBody {
-                provider: WireOAuthProvider::OpenAi,
+                target: WireLoginTarget::Provider(meerkat_contracts::WireProviderLoginTarget {
+                    provider: WireOAuthProvider::OpenAi,
+                    realm_id: "dev".to_string(),
+                    binding_id: "default_openai".to_string(),
+                    profile_id: None,
+                }),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: "dev".to_string(),
-                binding_id: "default_openai".to_string(),
-                profile_id: None,
             }),
         )
         .await
@@ -2532,11 +2666,13 @@ mod tests {
         let response = start_login(
             State(state.clone()),
             Json(LoginStartBody {
-                provider: WireOAuthProvider::OpenAi,
+                target: WireLoginTarget::Provider(meerkat_contracts::WireProviderLoginTarget {
+                    provider: WireOAuthProvider::OpenAi,
+                    realm_id: "dev".to_string(),
+                    binding_id: "default_openai".to_string(),
+                    profile_id: None,
+                }),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: "dev".to_string(),
-                binding_id: "default_openai".to_string(),
-                profile_id: None,
             }),
         )
         .await
@@ -2577,11 +2713,13 @@ mod tests {
         let response = start_login(
             State(state.clone()),
             Json(LoginStartBody {
-                provider: WireOAuthProvider::OpenAi,
+                target: WireLoginTarget::Provider(meerkat_contracts::WireProviderLoginTarget {
+                    provider: WireOAuthProvider::OpenAi,
+                    realm_id: "dev".to_string(),
+                    binding_id: "default_openai".to_string(),
+                    profile_id: None,
+                }),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: "dev".to_string(),
-                binding_id: "default_openai".to_string(),
-                profile_id: None,
             }),
         )
         .await
@@ -2617,11 +2755,13 @@ mod tests {
         let response = start_login(
             State(state.clone()),
             Json(LoginStartBody {
-                provider: WireOAuthProvider::OpenAi,
+                target: WireLoginTarget::Provider(meerkat_contracts::WireProviderLoginTarget {
+                    provider: WireOAuthProvider::OpenAi,
+                    realm_id: "dev".to_string(),
+                    binding_id: "default_openai".to_string(),
+                    profile_id: None,
+                }),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: "dev".to_string(),
-                binding_id: "default_openai".to_string(),
-                profile_id: None,
             }),
         )
         .await
@@ -2735,13 +2875,15 @@ mod tests {
         let response = complete_login(
             State(state),
             Json(LoginCompleteBody {
-                provider: WireOAuthProvider::OpenAi,
+                target: WireLoginTarget::Provider(meerkat_contracts::WireProviderLoginTarget {
+                    provider: WireOAuthProvider::OpenAi,
+                    realm_id: "dev".to_string(),
+                    binding_id: "default_openai".to_string(),
+                    profile_id: None,
+                }),
                 code: "provider-code".to_string(),
                 state: "missing-state".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: "dev".to_string(),
-                binding_id: "default_openai".to_string(),
-                profile_id: None,
             }),
         )
         .await
@@ -2755,6 +2897,275 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("auth_method 'api_key'")
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct CanaryLogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CanaryLogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn rest_json(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// REST entry point of the MCP OAuth canary (ADR-001 secret-canary requirement):
+    /// login, a failed completion and a cancel over `/auth/login/*`, with
+    /// every `tracing` event and `log` record captured. Responses are the
+    /// host channel; logs must hold none of the attempts' secrets.
+    #[tokio::test]
+    async fn mcp_oauth_rest_entry_points_keep_secrets_out_of_logs() {
+        use meerkat::test_fixtures::mcp_oauth::{
+            ISSUED_SECRET_CANARIES, McpOAuthFixture, SUBJECT, follow_authorize_url,
+        };
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".rkat")).unwrap();
+        std::fs::write(
+            project.path().join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"canary\"\nurl = \"{}\"\noauth_account = \"{SUBJECT}\"\n",
+                fixture.mcp_url()
+            ),
+        )
+        .unwrap();
+        state.context_root = Some(project.path().to_path_buf());
+        let mcp = meerkat_contracts::WireMcpAuthTarget {
+            server_name: "canary".to_string(),
+            server_url: fixture.mcp_url(),
+            oauth_account: Some(SUBJECT.to_string()),
+        };
+        let target = meerkat::McpServerIdentity::from_server_config("canary", fixture.mcp_url())
+            .with_expected_account(SUBJECT)
+            .unwrap();
+        let identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref().unwrap().into();
+        let mut canaries: Vec<String> = ISSUED_SECRET_CANARIES
+            .iter()
+            .map(|canary| (*canary).to_owned())
+            .collect();
+        let admit = |start: &serde_json::Value| {
+            let url = start["authorize_url"].as_str().unwrap().to_owned();
+            let attempt_state = start["state"].as_str().unwrap().to_owned();
+            let challenge = url
+                .split("code_challenge=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .unwrap()
+                .to_owned();
+            let verifier = state
+                .runtime_adapter
+                .provider_auth_runtime_authority()
+                .oauth_flow_authority()
+                .admitted_connector_browser_attempt(&attempt_state, &identity)
+                .unwrap()
+                .expect("admitted")
+                .pkce_verifier;
+            let secrets = vec![url.clone(), attempt_state.clone(), challenge, verifier];
+            (url, attempt_state, secrets)
+        };
+
+        // Cancel path.
+        let (status, start) = rest_json(
+            start_login(
+                State(state.clone()),
+                Json(LoginStartBody {
+                    target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                    redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".to_string(),
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{start}");
+        let (_, attempt_state, secrets) = admit(&start);
+        canaries.extend(secrets);
+        let (status, cancelled) = rest_json(
+            cancel_login(
+                State(state.clone()),
+                Json(LoginCancelBody {
+                    mcp: mcp.clone(),
+                    state: attempt_state,
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["cancelled"], true);
+
+        // Error path, then success, both through the host's loopback.
+        for fail in [true, false] {
+            let binding = meerkat_providers::auth_oauth::bind_loopback_callback(
+                meerkat::MCP_OAUTH_CALLBACK_PATH,
+            )
+            .await
+            .unwrap();
+            let (status, start) = rest_json(
+                start_login(
+                    State(state.clone()),
+                    Json(LoginStartBody {
+                        target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                        redirect_uri: binding.redirect_url.clone(),
+                    }),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{start}");
+            let (url, attempt_state, secrets) = admit(&start);
+            canaries.extend(secrets);
+            let callback = binding.expect_state(attempt_state);
+            follow_authorize_url(&url).await.unwrap();
+            let outcome = callback
+                .wait(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT)
+                .await
+                .unwrap();
+            fixture.fail_token_exchange(fail);
+            let (status, completed) = rest_json(
+                complete_login(
+                    State(state.clone()),
+                    Json(LoginCompleteBody {
+                        target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                        code: outcome.code,
+                        state: outcome.state,
+                        redirect_uri: start["redirect_uri"].as_str().unwrap().to_string(),
+                    }),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            if fail {
+                assert_ne!(status, StatusCode::OK);
+                let rendered = completed.to_string();
+                assert!(
+                    canaries
+                        .iter()
+                        .all(|canary| !rendered.contains(canary.as_str())),
+                    "a REST error leaked an OAuth secret canary"
+                );
+            } else {
+                assert_eq!(status, StatusCode::OK, "{completed}");
+                assert_eq!(
+                    completed["account_id"], SUBJECT,
+                    "positive control: the login landed"
+                );
+            }
+        }
+
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("MCP OAuth login completed via REST"),
+            "positive control: tracing events are captured"
+        );
+        assert!(
+            captured.contains("reqwest"),
+            "positive control: log-crate records are captured through the bridge"
+        );
+        for canary in &canaries {
+            assert!(
+                !captured.contains(canary.as_str()),
+                "REST logs leaked an OAuth secret canary"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rest_mcp_login_refuses_unconfigured_or_mismatched_targets_without_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".rkat")).unwrap();
+        std::fs::write(
+            project.path().join(".rkat/mcp.toml"),
+            "[[servers]]\nname = \"glean\"\nurl = \"https://glean.example/mcp\"\noauth_account = \"subject-7\"\n",
+        )
+        .unwrap();
+        state.context_root = Some(project.path().to_path_buf());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let recorder_url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((_stream, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        for (name, expected) in [("unknown", "is not configured"), ("glean", "different URL")] {
+            let mcp = meerkat_contracts::WireMcpAuthTarget {
+                server_name: name.to_string(),
+                server_url: recorder_url.clone(),
+                oauth_account: Some("subject-7".to_string()),
+            };
+            let start = start_login(
+                State(state.clone()),
+                Json(LoginStartBody {
+                    target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                    redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".to_string(),
+                }),
+            )
+            .await
+            .into_response();
+            let complete = complete_login(
+                State(state.clone()),
+                Json(LoginCompleteBody {
+                    target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp }),
+                    code: "code".to_string(),
+                    state: "state".to_string(),
+                    redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".to_string(),
+                }),
+            )
+            .await
+            .into_response();
+            for response in [start, complete] {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert!(
+                    error["error"].as_str().unwrap().contains(expected),
+                    "expected `{expected}`, got {error}"
+                );
+            }
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a refused target must cause no discovery, registration or exchange"
         );
     }
 
@@ -2773,13 +3184,15 @@ mod tests {
         let response = complete_login(
             State(state),
             Json(LoginCompleteBody {
-                provider: WireOAuthProvider::OpenAi,
+                target: WireLoginTarget::Provider(meerkat_contracts::WireProviderLoginTarget {
+                    provider: WireOAuthProvider::OpenAi,
+                    realm_id: "dev".to_string(),
+                    binding_id: "default_openai".to_string(),
+                    profile_id: None,
+                }),
                 code: "provider-code".to_string(),
                 state: "missing-state".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: "dev".to_string(),
-                binding_id: "default_openai".to_string(),
-                profile_id: None,
             }),
         )
         .await

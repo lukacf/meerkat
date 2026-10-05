@@ -3000,6 +3000,12 @@ enum McpCommands {
         /// Scope to read from
         #[arg(long, value_enum)]
         scope: Option<CliMcpScope>,
+
+        /// Allow login without an interactive terminal. If the browser cannot
+        /// be opened, the authorize URL is printed to stderr, so do not use
+        /// this where output is captured or logged.
+        #[arg(long)]
+        allow_headless: bool,
     },
 
     /// Remove an MCP server
@@ -4736,7 +4742,10 @@ struct RuntimeScope {
     context_root: Option<PathBuf>,
     user_config_root: Option<PathBuf>,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
-    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[cfg(any(
+        all(feature = "anthropic", feature = "openai", feature = "gemini"),
+        feature = "mcp"
+    ))]
     provider_auth_authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
 }
 
@@ -4746,7 +4755,10 @@ impl RuntimeScope {
     }
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+#[cfg(any(
+    all(feature = "anthropic", feature = "openai", feature = "gemini"),
+    feature = "mcp"
+))]
 fn new_cli_auth_handles() -> (
     meerkat_core::handles::GeneratedAuthLeaseHandle,
     meerkat_runtime::ProviderAuthRuntimeAuthority,
@@ -4756,7 +4768,10 @@ fn new_cli_auth_handles() -> (
     (authority.generated_auth_lease_handle(), authority)
 }
 
-#[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+#[cfg(not(any(
+    all(feature = "anthropic", feature = "openai", feature = "gemini"),
+    feature = "mcp"
+)))]
 fn new_cli_auth_lease() -> meerkat_core::handles::GeneratedAuthLeaseHandle {
     let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
     meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
@@ -4823,9 +4838,15 @@ fn resolve_runtime_scope_with_realm(
         );
     }
     let user_config_root = cli.user_config_root.clone().or_else(dirs::home_dir);
-    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[cfg(any(
+        all(feature = "anthropic", feature = "openai", feature = "gemini"),
+        feature = "mcp"
+    ))]
     let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
-    #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+    #[cfg(not(any(
+        all(feature = "anthropic", feature = "openai", feature = "gemini"),
+        feature = "mcp"
+    )))]
     let auth_lease = new_cli_auth_lease();
     Ok(RuntimeScope {
         locator,
@@ -4839,7 +4860,10 @@ fn resolve_runtime_scope_with_realm(
         context_root: Some(context_root),
         user_config_root,
         auth_lease,
-        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        #[cfg(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        ))]
         provider_auth_authority,
     })
 }
@@ -7668,7 +7692,8 @@ async fn interactive_login(
 
     // --- Step 2: open browser --------------------------------------
     print_step(2, 4, "Opening your browser to the provider's sign-in page");
-    let browser_ok = webbrowser::open(&login_start.authorize_url).is_ok();
+    let browser_ok =
+        launch_provider_authorize_url(&login_start.authorize_url, meerkat::open_system_browser);
     if browser_ok {
         print_ok("Browser launched. Complete the sign-in there.");
     } else {
@@ -9592,66 +9617,160 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     }
 }
 
+/// CLI host resolver for OAuth-protected MCP servers.
+///
+/// Stored credentials come from the native authority. In interactive mode
+/// on a terminal, the CLI is the host: it owns the loopback listener and the
+/// user's desktop browser and drives `mcp_login_start`/`mcp_login_complete`.
+/// Elsewhere a missing credential is the typed human-authorization status.
 #[cfg(feature = "mcp")]
-struct CliMcpBrowserOpener {
+struct CliMcpHostAuthResolver {
+    service: meerkat::HostAuthService,
+    authority: meerkat::McpOAuthAuthority,
     mode: CliMcpAuthMode,
 }
 
 #[cfg(feature = "mcp")]
 #[async_trait::async_trait]
-impl meerkat_auth_core::BrowserOpener for CliMcpBrowserOpener {
-    async fn open(&self, url: &str) -> Result<(), meerkat_auth_core::McpOAuthError> {
-        if self.mode == CliMcpAuthMode::Interactive {
-            use std::io::IsTerminal;
-            if !std::io::stderr().is_terminal() {
-                return Err(meerkat_auth_core::McpOAuthError::InteractiveRequiresTty);
-            }
+impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
+    async fn stored_bearer_token(
+        &self,
+        target: &meerkat::McpServerIdentity,
+    ) -> Result<Option<String>, meerkat::McpOAuthError> {
+        // The native resolver keeps stored-only semantics for unselected
+        // targets, so servers that need no OAuth connect as before.
+        meerkat_mcp::McpAuthResolver::stored_bearer_token(&self.authority, target).await
+    }
+
+    async fn interactive_login(
+        &self,
+        target: &meerkat::McpServerIdentity,
+        www_authenticate: Option<&str>,
+    ) -> Result<String, meerkat::McpOAuthError> {
+        use std::io::IsTerminal;
+        if target.expected_account().is_none() {
+            return Err(meerkat::McpOAuthError::AccountSelectionRequired);
         }
-        webbrowser::open(url)
-            .map_err(|error| meerkat_auth_core::McpOAuthError::Browser(error.to_string()))?;
-        Ok(())
+        if self.mode != CliMcpAuthMode::Interactive || !std::io::stderr().is_terminal() {
+            return Err(meerkat::McpOAuthError::HumanAuthorizationRequired {
+                server_name: target.server_name().to_owned(),
+            });
+        }
+        cli_mcp_browser_login(&self.service, target, www_authenticate)
+            .await
+            .map_err(|error| match error {
+                meerkat::HostAuthError::McpOAuth(error) => error,
+                other => meerkat::McpOAuthError::TokenExchangeFailed {
+                    server_name: target.server_name().to_owned(),
+                    reason: other.to_string(),
+                },
+            })?;
+        self.authority.require_stored_bearer_token(target).await
     }
 }
 
+/// The CLI's host role for one MCP OAuth attempt: bind the loopback
+/// callback, admit, launch the user's browser off the async runtime and
+/// complete from the callback. The launch is advisory: on failure the URL is
+/// shown on the terminal and the attempt keeps waiting until completion or
+/// expiry. An attempt already pending for the server is not duplicated.
 #[cfg(feature = "mcp")]
-fn open_mcp_auth_resolver(
-    mode: CliMcpAuthMode,
-) -> anyhow::Result<Option<Arc<dyn meerkat_mcp::McpAuthResolver>>> {
-    Ok(Some(Arc::new(open_mcp_oauth_authority(mode)?)))
+async fn cli_mcp_browser_login(
+    service: &meerkat::HostAuthService,
+    target: &meerkat::McpServerIdentity,
+    www_authenticate: Option<&str>,
+) -> Result<meerkat::McpOAuthLoginComplete, meerkat::HostAuthError> {
+    cli_mcp_browser_login_with(service, target, www_authenticate, |url| {
+        meerkat::open_system_browser(&url)
+    })
+    .await
 }
 
-/// Mint a certified `AuthMachine` lease handle for the `mcp-oauth` realm.
-///
-/// `meerkat-auth-core` sits below `meerkat-runtime` in the dep graph, so the
-/// MCP-OAuth authority cannot mint its own generated lease — the CLI (which
-/// owns the runtime) injects one, exactly as the provider-auth path does via
-/// `new_cli_auth_lease`. The lease realm is independent of the LLM provider
-/// auth bindings.
-#[cfg(feature = "mcp")]
-fn new_cli_mcp_oauth_auth_lease() -> anyhow::Result<meerkat_core::handles::GeneratedAuthLeaseHandle>
+/// Open a provider's authorize URL in the user's browser through `launch`.
+/// Production passes [`meerkat::open_system_browser`], which never logs: the
+/// URL carries the one-time `state` and the PKCE challenge, and
+/// `webbrowser::open` logged the spawned command (URL included) at debug.
+/// The launcher runs on the caller's thread, so a test capturing this
+/// thread's logs sees everything it emits.
+#[cfg(any(
+    test,
+    all(feature = "anthropic", feature = "openai", feature = "gemini")
+))]
+fn launch_provider_authorize_url<F>(authorize_url: &str, launch: F) -> bool
+where
+    F: FnOnce(&str) -> std::io::Result<()>,
 {
-    let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
-    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
-        auth_lease,
-    )
-    .map_err(|reason| anyhow::anyhow!("MCP-OAuth auth lease certification failed: {reason}"))
+    launch(authorize_url).is_ok()
+}
+
+/// [`cli_mcp_browser_login`] with an explicit browser launcher.
+#[cfg(feature = "mcp")]
+async fn cli_mcp_browser_login_with<F>(
+    service: &meerkat::HostAuthService,
+    target: &meerkat::McpServerIdentity,
+    www_authenticate: Option<&str>,
+    launch: F,
+) -> Result<meerkat::McpOAuthLoginComplete, meerkat::HostAuthError>
+where
+    F: FnOnce(String) -> std::io::Result<()> + Send + 'static,
+{
+    let pending = match service
+        .mcp_begin_loopback_login(target, www_authenticate)
+        .await?
+    {
+        meerkat::McpOAuthLoopbackBegin::Started(pending) => pending,
+        meerkat::McpOAuthLoopbackBegin::Joined(_) => {
+            eprintln!(
+                "An authorization for MCP server '{}' is already pending; finish it in the browser window already opened, or wait for it to expire.",
+                target.server_name()
+            );
+            return Err(meerkat::McpOAuthError::HumanAuthorizationRequired {
+                server_name: target.server_name().to_owned(),
+            }
+            .into());
+        }
+    };
+    eprintln!(
+        "Authorize MCP server '{}' in your browser. Waiting for the callback...",
+        target.server_name()
+    );
+    if pending.launch_browser(launch).await == meerkat::McpOAuthBrowserLaunch::Failed {
+        eprintln!(
+            "Could not open a browser. Open this URL to continue:\n  {}",
+            pending.start().authorize_url
+        );
+    }
+    Ok(pending
+        .complete(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT)
+        .await?)
 }
 
 #[cfg(feature = "mcp")]
-fn open_mcp_oauth_authority(
-    mode: CliMcpAuthMode,
-) -> anyhow::Result<meerkat_auth_core::McpOAuthAuthority> {
+fn open_cli_mcp_host_auth_service(
+    scope: &RuntimeScope,
+) -> anyhow::Result<meerkat::HostAuthService> {
     let persistence = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
         .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?
         .open_with_refresh_authority()
         .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
-    let browser: Arc<dyn meerkat_auth_core::BrowserOpener> = Arc::new(CliMcpBrowserOpener { mode });
-    let auth_lease = new_cli_mcp_oauth_auth_lease()?;
-    Ok(meerkat_auth_core::McpOAuthAuthority::new(
+    Ok(meerkat::HostAuthService::new(
         persistence,
-        browser,
-        auth_lease,
+        scope.provider_auth_authority.clone(),
     ))
+}
+
+#[cfg(feature = "mcp")]
+fn open_mcp_auth_resolver(
+    scope: &RuntimeScope,
+    mode: CliMcpAuthMode,
+) -> anyhow::Result<Option<Arc<dyn meerkat_mcp::McpAuthResolver>>> {
+    let service = open_cli_mcp_host_auth_service(scope)?;
+    let authority = service.mcp_oauth_authority()?;
+    Ok(Some(Arc::new(CliMcpHostAuthResolver {
+        service,
+        authority,
+        mode,
+    })))
 }
 
 #[cfg(feature = "mcp")]
@@ -9739,7 +9858,7 @@ async fn create_mcp_tools(
         .iter()
         .any(|server| mcp_server_may_need_oauth(&server.server));
     let mcp_auth_resolver = if has_oauth_candidate {
-        open_mcp_auth_resolver(mcp_auth)?
+        open_mcp_auth_resolver(scope, mcp_auth)?
     } else {
         None
     };
@@ -11756,6 +11875,7 @@ fn build_turn_tool_overlay(
         return None;
     }
     Some(TurnToolOverlay {
+        tool_choice_plan: Vec::new(),
         allowed_tools: if allow_tools.is_empty() {
             None
         } else {
@@ -12073,6 +12193,7 @@ async fn run_agent(
         let mut build = SessionBuildOptions {
             model_fallback: None,
             tool_access_policy: None,
+            declared_tool_restriction: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
@@ -15924,12 +16045,16 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
             )
             .await
         }
-        McpCommands::Login { name, scope } => {
+        McpCommands::Login {
+            name,
+            scope,
+            allow_headless,
+        } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            login_mcp_server(name, scope, cli_scope).await
+            login_mcp_server(name, scope, cli_scope, allow_headless).await
         }
         McpCommands::Remove { name, scope } => {
             let scope = scope.map(|s| match s {
@@ -16007,12 +16132,29 @@ async fn load_mcp_login_servers(
     Ok(servers)
 }
 
+/// `rkat mcp login` refuses to run headless unless explicitly allowed: a
+/// headless run would print the authorize URL and state into captured output.
+#[cfg(feature = "mcp")]
+fn require_mcp_login_terminal(allow_headless: bool, is_terminal: bool) -> anyhow::Result<()> {
+    if allow_headless || is_terminal {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "rkat mcp login needs an interactive terminal; pass --allow-headless to log in without one (the authorize URL may then be printed to stderr)"
+    )
+}
+
 #[cfg(feature = "mcp")]
 async fn login_mcp_server(
     name: String,
     scope: Option<McpScope>,
     cli_scope: &RuntimeScope,
+    allow_headless: bool,
 ) -> anyhow::Result<()> {
+    require_mcp_login_terminal(allow_headless, {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
+    })?;
     let servers = load_mcp_login_servers(&name, scope, cli_scope).await?;
     if servers.is_empty() {
         anyhow::bail!("MCP server '{name}' not found");
@@ -16044,15 +16186,22 @@ async fn login_mcp_server(
         );
     }
 
-    let authority = open_mcp_oauth_authority(CliMcpAuthMode::Interactive)?;
-    let target = meerkat_auth_core::McpServerIdentity::from_config(&server)?;
-    authority.validate_interactive_selection(&target)?;
+    let service = open_cli_mcp_host_auth_service(cli_scope)?;
+    let target = meerkat::McpServerIdentity::from_config(&server)?;
+    service
+        .mcp_oauth_authority()?
+        .validate_interactive_selection(&target)?;
     let www_authenticate = preflight_mcp_auth_challenge(&http.url).await;
-    authority
-        .interactive_login(&target, www_authenticate.as_deref())
+    let completed = cli_mcp_browser_login(&service, &target, www_authenticate.as_deref())
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    println!("Logged in MCP server '{}' ({})", server.name, http.url);
+    match completed.account_id.as_deref() {
+        Some(account) => println!(
+            "Logged in MCP server '{}' ({}) as {account}",
+            server.name, http.url
+        ),
+        None => println!("Logged in MCP server '{}' ({})", server.name, http.url),
+    }
     Ok(())
 }
 
@@ -19770,9 +19919,15 @@ mod tests {
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {
-        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        #[cfg(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        ))]
         let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
-        #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+        #[cfg(not(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        )))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
             root_choice: meerkat_core::RealmRootChoice::Explicit,
@@ -19796,7 +19951,10 @@ mod tests {
             // developer's real `~/.rkat/config.toml`.
             user_config_root: Some(state_root),
             auth_lease,
-            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+            #[cfg(any(
+                all(feature = "anthropic", feature = "openai", feature = "gemini"),
+                feature = "mcp"
+            ))]
             provider_auth_authority,
         }
     }
@@ -23012,6 +23170,7 @@ default_model = "gemma"
             image_generation: meerkat_core::ToolCategoryOverride::Disable,
             web_search: meerkat_core::ToolCategoryOverride::Disable,
             tool_access_policy: None,
+            spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
         };
@@ -25197,13 +25356,218 @@ default_model = "gemma"
             .expect("mcp login should parse");
         match login.command.expect("test invocation parses a subcommand") {
             Commands::Mcp {
-                command: McpCommands::Login { name, scope },
+                command:
+                    McpCommands::Login {
+                        name,
+                        scope,
+                        allow_headless,
+                    },
             } => {
                 assert_eq!(name, "remote");
                 assert!(matches!(scope, Some(CliMcpScope::Project)));
+                assert!(!allow_headless, "headless login is opt-in");
             }
             _ => unreachable!("expected mcp login"),
         }
+        let headless = Cli::try_parse_from(["rkat", "mcp", "login", "remote", "--allow-headless"])
+            .expect("mcp login --allow-headless should parse");
+        assert!(matches!(
+            headless.command,
+            Some(Commands::Mcp {
+                command: McpCommands::Login {
+                    allow_headless: true,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[derive(Clone, Default)]
+    struct CanaryLogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CanaryLogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// CLI entry point of the MCP OAuth canary (ADR-001 secret-canary requirement):
+    /// the CLI host login (loopback, advisory launch, completion), a launch
+    /// that reports failure but navigated, a refused exchange, and the
+    /// non-terminal resolver path, with every `tracing` event and `log`
+    /// record captured on this single-threaded runtime.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn mcp_oauth_cli_entry_points_keep_secrets_out_of_logs() {
+        use meerkat::test_fixtures::mcp_oauth::{
+            ISSUED_SECRET_CANARIES, McpOAuthFixture, SUBJECT, follow_authorize_url,
+        };
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let service = meerkat::HostAuthService::new(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+            runtime.provider_auth_runtime_authority(),
+        );
+        let target = meerkat::McpServerIdentity::from_server_config("canary", fixture.mcp_url())
+            .with_expected_account(SUBJECT)
+            .unwrap();
+        let launched = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        // Each launcher records the authorize URL (a canary) and lets the
+        // fixture browser navigate on the runtime; `report_failure` models an
+        // opener that navigated but reported failure.
+        let launcher = |report_failure: bool| {
+            let launched = Arc::clone(&launched);
+            move |url: String| {
+                launched.lock().unwrap().push(url.clone());
+                tokio::runtime::Handle::current().spawn(async move {
+                    let _ = follow_authorize_url(&url).await;
+                });
+                if report_failure {
+                    Err(std::io::Error::other("opener reported failure"))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+
+        // Refused exchange.
+        fixture.fail_token_exchange(true);
+        let refused = cli_mcp_browser_login_with(&service, &target, None, launcher(false))
+            .await
+            .expect_err("the provider refused the exchange")
+            .to_string();
+        fixture.fail_token_exchange(false);
+        // Advisory launch failure: the login still completes.
+        let completed = cli_mcp_browser_login_with(&service, &target, None, launcher(true))
+            .await
+            .expect("a failed launch is advisory");
+        assert_eq!(completed.account_id.as_deref(), Some(SUBJECT));
+
+        // Non-terminal resolver path: typed status, no attempt admitted.
+        let resolver = CliMcpHostAuthResolver {
+            authority: service.mcp_oauth_authority().unwrap(),
+            service: service.clone(),
+            mode: CliMcpAuthMode::Stored,
+        };
+        let stored_only =
+            meerkat_mcp::McpAuthResolver::interactive_login(&resolver, &target, None).await;
+        assert!(matches!(
+            stored_only,
+            Err(meerkat::McpOAuthError::HumanAuthorizationRequired { .. })
+        ));
+
+        let launched = launched.lock().unwrap().clone();
+        assert_eq!(launched.len(), 2, "positive control: both launches ran");
+        let mut canaries: Vec<String> = ISSUED_SECRET_CANARIES
+            .iter()
+            .map(|canary| (*canary).to_owned())
+            .collect();
+        for url in &launched {
+            canaries.push(url.clone());
+            let query: std::collections::HashMap<String, String> = url::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .into_owned()
+                .collect();
+            canaries.push(query["state"].clone());
+            canaries.push(query["code_challenge"].clone());
+        }
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("reqwest"),
+            "positive control: log-crate records are captured through the bridge"
+        );
+        for (surface, observed) in [("CLI error", &refused), ("CLI logs", &captured)] {
+            for canary in &canaries {
+                assert!(
+                    !observed.contains(canary.as_str()),
+                    "{surface} leaked an OAuth secret canary"
+                );
+            }
+        }
+    }
+
+    /// The provider (non-MCP) login opens its authorize URL without writing
+    /// it, its `state` or its PKCE challenge to any log. Positive control: a
+    /// launcher that logs the URL, as `webbrowser::open` did with the spawned
+    /// command, is caught by the same capture. The production launcher is
+    /// `meerkat::open_system_browser`, a plain `std::process::Command` with
+    /// null stdio and no logging, so no `log`-crate record exists to bridge.
+    #[test]
+    fn provider_login_browser_launch_keeps_the_authorize_url_out_of_logs() {
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        const STATE: &str = "provider-login-state-canary";
+        const CHALLENGE: &str = "provider-login-challenge-canary";
+        let authorize_url = format!(
+            "https://auth.example.test/authorize?client_id=c&state={STATE}&code_challenge={CHALLENGE}&code_challenge_method=S256"
+        );
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+        let captured = || String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+
+        // Positive control: an opener that logs what it spawns is caught.
+        assert!(launch_provider_authorize_url(&authorize_url, |url| {
+            tracing::debug!("background spawn: {url}");
+            Ok(())
+        }));
+        assert!(
+            captured().contains(STATE),
+            "positive control: a logging opener's record is captured"
+        );
+        logs.0.lock().unwrap().clear();
+
+        // The login's launch path itself writes nothing about the URL.
+        let launched = std::cell::RefCell::new(None);
+        assert!(launch_provider_authorize_url(&authorize_url, |url| {
+            *launched.borrow_mut() = Some(url.to_owned());
+            Ok(())
+        }));
+        assert_eq!(launched.borrow().as_deref(), Some(authorize_url.as_str()));
+        assert!(!launch_provider_authorize_url(&authorize_url, |_| Err(
+            std::io::Error::other("no browser")
+        )));
+        let after = captured();
+        for canary in [authorize_url.as_str(), STATE, CHALLENGE] {
+            assert!(
+                !after.contains(canary),
+                "provider login logged `{canary}`: {after}"
+            );
+        }
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_login_refuses_headless_unless_explicitly_allowed() {
+        assert!(require_mcp_login_terminal(false, false).is_err());
+        assert!(require_mcp_login_terminal(true, false).is_ok());
+        assert!(require_mcp_login_terminal(false, true).is_ok());
     }
 
     #[cfg(feature = "mcp")]
@@ -29756,9 +30120,15 @@ supports_reasoning = true
     }
 
     fn test_scope_with_context(root: PathBuf) -> RuntimeScope {
-        #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+        #[cfg(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        ))]
         let (auth_lease, provider_auth_authority) = new_cli_auth_handles();
-        #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+        #[cfg(not(any(
+            all(feature = "anthropic", feature = "openai", feature = "gemini"),
+            feature = "mcp"
+        )))]
         let auth_lease = new_cli_auth_lease();
         RuntimeScope {
             root_choice: meerkat_core::RealmRootChoice::Explicit,
@@ -29779,7 +30149,10 @@ supports_reasoning = true
             context_root: Some(root),
             user_config_root: None,
             auth_lease,
-            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+            #[cfg(any(
+                all(feature = "anthropic", feature = "openai", feature = "gemini"),
+                feature = "mcp"
+            ))]
             provider_auth_authority,
         }
     }

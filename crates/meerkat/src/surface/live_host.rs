@@ -445,6 +445,96 @@ pub enum ExperimentalLiveChannelCloseError {
     Semantic(#[from] LiveChannelVerbError),
 }
 
+/// Session event publication for every committed live channel close: the
+/// runtime reports each close here, and the owning session's actor publishes
+/// `AgentEvent::LiveChannelClosed` on its event stream. That stream is not
+/// under the closed channel's binding, so it is never stale. A session with no
+/// running actor has no stream observers.
+struct ServiceLiveChannelClosePublisher<B: SessionAgentBuilder + 'static> {
+    service: std::sync::Weak<PersistentSessionService<B>>,
+    host: std::sync::Weak<LiveAdapterHost>,
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static>
+    meerkat_runtime::live_execution::LiveChannelCloseEventPublisher
+    for ServiceLiveChannelClosePublisher<B>
+{
+    async fn publish_live_channel_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    ) {
+        let Some(service) = self.service.upgrade() else {
+            tracing::info!(
+                %session_id,
+                channel = %channel_id,
+                ?reason,
+                not_published = ?meerkat_session::LiveChannelClosedNotPublished::SessionNotRunning,
+                "a committed live channel close has no session service to publish on"
+            );
+            return;
+        };
+        // The runtime calls this inside the committed close. The session
+        // publishes through its own command loop, which a running member
+        // turn holds for the turn's whole duration, so the close only
+        // enqueues: the session's close outbox carries the event onto its
+        // command queue in close order and the actor publishes it after the
+        // turn. Close settlement never depends on that publication.
+        if let Err(not_published) = service
+            .enqueue_live_channel_closed(session_id, channel_id.clone(), reason, reopen_recommended)
+            .await
+        {
+            tracing::info!(
+                %session_id,
+                channel = %channel_id,
+                ?reason,
+                ?not_published,
+                "a committed live channel close has no session event stream to publish on"
+            );
+        }
+    }
+
+    async fn retire_live_session_close_tombstones(&self, session_id: &SessionId) {
+        if let Some(host) = self.host.upgrade() {
+            host.retire_session_close_tombstones(session_id).await;
+        }
+    }
+}
+
+/// A reported linear RMS (0.0 to 1.0) in the machine's millionths; anything
+/// non-finite or non-positive is silence. Built with its only users, the
+/// experimental live media-health report paths.
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+#[must_use]
+pub fn live_media_health_rms_micros(max_rms: f64) -> u64 {
+    if max_rms.is_finite() && max_rms > 0.0 {
+        // Bounded to 0..=1_000_000 before the cast, so it cannot truncate.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let micros = (max_rms.min(1.0) * 1_000_000.0).round() as u64;
+        micros
+    } else {
+        0
+    }
+}
+
+/// A `live/media_health` report that could not be judged or acted on.
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExperimentalLiveMediaHealthError {
+    /// The runtime refused the report: the channel is not active, or the
+    /// report names an output the runtime did not request, or one already
+    /// judged.
+    #[error("live media health report refused: {0}")]
+    Refused(String),
+    /// The report was judged a media fault, but the channel's close failed.
+    #[error(transparent)]
+    Close(#[from] ExperimentalLiveChannelCloseError),
+}
+
 #[cfg(feature = "live-webrtc")]
 fn live_webrtc_answer_rejection_reason(
     error: &LiveWebrtcError,
@@ -966,6 +1056,39 @@ impl<B: SessionAgentBuilder + 'static> ExperimentalGptLiveContextMirrorHost<B> {
     }
 }
 
+/// Type a failed pump-exit close by how it may be retried, from typed error
+/// variants and machine state, never from message text.
+///
+/// - Another close of the channel executing right now is `CloseInFlight`.
+/// - A terminal projection refused with `SessionBusy` is `SessionBusy`.
+/// - Everything else is `Permanent`, including the string-only
+///   `LifecycleAuthority` sources, which carry no typed retry kind.
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+fn classify_pump_retirement_failure(
+    runtime: &MeerkatMachine,
+    channel_id: &LiveChannelId,
+    error: ExperimentalLiveChannelCloseError,
+) -> crate::experimental_gpt_live::ExperimentalLivePumpRetirementError {
+    use crate::experimental_gpt_live::ExperimentalLivePumpRetirementError;
+    if runtime.live_channel_close_in_flight(channel_id) {
+        return ExperimentalLivePumpRetirementError::CloseInFlight(error.to_string());
+    }
+    match &error {
+        ExperimentalLiveChannelCloseError::TerminalProjection(
+            meerkat_live::LiveAdapterHostError::ProjectionError(
+                meerkat_live::LiveProjectionError::SessionBusy(_),
+            ),
+        ) => ExperimentalLivePumpRetirementError::SessionBusy(error.to_string()),
+        ExperimentalLiveChannelCloseError::BindingMismatch
+        | ExperimentalLiveChannelCloseError::LifecycleAuthority(_)
+        | ExperimentalLiveChannelCloseError::PhysicalAuthority(_)
+        | ExperimentalLiveChannelCloseError::TerminalProjection(_)
+        | ExperimentalLiveChannelCloseError::Semantic(_) => {
+            ExperimentalLivePumpRetirementError::Permanent(error.to_string())
+        }
+    }
+}
+
 #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static>
@@ -1082,7 +1205,11 @@ impl<B: SessionAgentBuilder + 'static>
     ) -> Result<(), crate::experimental_gpt_live::ExperimentalLivePumpRetirementError> {
         let close = self
             .member_host
-            .close_live_channel(Some(self.open_authority.as_ref()), binding.channel_id())
+            .close_live_channel_for(
+                Some(self.open_authority.as_ref()),
+                binding.channel_id(),
+                meerkat_core::LiveChannelCloseReason::ProviderClosed,
+            )
             .await;
         match close {
             Ok(_) => {}
@@ -1097,16 +1224,55 @@ impl<B: SessionAgentBuilder + 'static>
                 // this channel. Pump retirement is idempotently complete.
             }
             Err(error) => {
-                return Err(
-                    crate::experimental_gpt_live::ExperimentalLivePumpRetirementError::SemanticUncommitted(
-                        error.to_string(),
-                    ),
-                );
+                return Err(classify_pump_retirement_failure(
+                    &self.runtime,
+                    binding.channel_id(),
+                    error,
+                ));
             }
         }
         self.runtime
             .retire_live_assistant_output_handles(binding.session_id(), binding.channel_id());
         Ok(())
+    }
+
+    async fn await_pump_retirement_retry(
+        &self,
+        binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        error: &crate::experimental_gpt_live::ExperimentalLivePumpRetirementError,
+    ) -> bool {
+        use crate::experimental_gpt_live::ExperimentalLivePumpRetirementError;
+        match error {
+            ExperimentalLivePumpRetirementError::CloseInFlight(_) => {
+                // Wait for the other close to end, committed or failed; the
+                // retry then finds the channel unbound or runs its own close.
+                loop {
+                    let ended = self.runtime.live_channel_close_ended();
+                    tokio::pin!(ended);
+                    ended.as_mut().enable();
+                    if !self
+                        .runtime
+                        .live_channel_close_in_flight(binding.channel_id())
+                    {
+                        return true;
+                    }
+                    ended.await;
+                }
+            }
+            ExperimentalLivePumpRetirementError::SessionBusy(_) => {
+                // The terminal projection was refused because the close
+                // released the channel from the turn boundary the member
+                // turn still holds: wait for that turn to free the boundary.
+                drop(
+                    self.member_host
+                        .service
+                        .acquire_runtime_turn_finalization_guard(binding.session_id())
+                        .await,
+                );
+                true
+            }
+            ExperimentalLivePumpRetirementError::Permanent(_) => false,
+        }
     }
 
     async fn pending_replacement_required(
@@ -1303,6 +1469,15 @@ impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::Liv
 impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     #[must_use]
     pub fn new(config: ServiceMemberLiveHostConfig<B>) -> Self {
+        // Every committed live channel close reports on the owning session's
+        // event stream (`AgentEvent::LiveChannelClosed`). Held weakly: the
+        // runtime outlives no service it reports to.
+        config
+            .runtime_adapter
+            .set_live_channel_close_publisher(Arc::new(ServiceLiveChannelClosePublisher {
+                service: Arc::downgrade(&config.service),
+                host: Arc::downgrade(&config.host),
+            }));
         Self {
             service: config.service,
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
@@ -1416,7 +1591,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         Ok(())
     }
 
-    fn orchestrator(&self) -> LiveOrchestrator<'_, B> {
+    pub(crate) fn orchestrator(&self) -> LiveOrchestrator<'_, B> {
         let actor_witness_slots = Arc::clone(&self.actor_witness_slots);
         LiveOrchestrator {
             service: &self.service,
@@ -2013,7 +2188,12 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                     .await?, None)
             }
             None => {
-                (self.prepare_open_projection(session, RealtimeTurningMode::ProviderManaged, None)
+                (self.orchestrator()
+                    .realtime_session_open_projection_for_mirrored_channel(
+                        session,
+                        RealtimeTurningMode::ProviderManaged,
+                        None,
+                    )
                     .await?, None)
             }
         };
@@ -2217,10 +2397,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                     .await;
                 if let Err(cleanup) = self
                     .orchestrator()
-                    .close_live_channel(
+                    .close_live_channel_for(
                         &self.host,
                         &replacement_channel_id,
                         Some(recovery.session_id()),
+                        meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                     )
                     .await
                 {
@@ -2249,10 +2430,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await
         {
             self.orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::from)?;
@@ -2268,10 +2450,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             if let Err(cleanup) = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
             {
@@ -2288,10 +2471,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             let cleanup = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map(|_| ())
@@ -2396,10 +2580,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                     .await;
                 if let Err(cleanup) = self
                     .orchestrator()
-                    .close_live_channel(
+                    .close_live_channel_for(
                         &self.host,
                         &replacement_channel_id,
                         Some(recovery.session_id()),
+                        meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                     )
                     .await
                 {
@@ -2428,10 +2613,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await
         {
             self.orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::from)?;
@@ -2447,10 +2633,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             if let Err(cleanup) = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
             {
@@ -2467,10 +2654,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 .await;
             let cleanup = self
                 .orchestrator()
-                .close_live_channel(
+                .close_live_channel_for(
                     &self.host,
                     &replacement_channel_id,
                     Some(recovery.session_id()),
+                    meerkat_core::LiveChannelCloseReason::OpenAbandoned,
                 )
                 .await
                 .map(|_| ())
@@ -2512,12 +2700,29 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         authority: Option<&dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
         channel: &LiveChannelId,
     ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
+        self.close_live_channel_for(
+            authority,
+            channel,
+            meerkat_core::LiveChannelCloseReason::ClientRequested,
+        )
+        .await
+    }
+
+    /// [`Self::close_live_channel`] naming why the channel closes (carried
+    /// to the committed close's `AgentEvent::LiveChannelClosed`).
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    pub async fn close_live_channel_for(
+        &self,
+        authority: Option<&dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
+        channel: &LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+    ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
         if let Some(authority) = authority
             && let Some(result) = meerkat_live::traced_live_close_step(
                 Some(channel),
                 "close_experimental",
                 self.orchestrator()
-                    .close_experimental_live_channel(&self.host, authority, channel),
+                    .close_experimental_live_channel_for(&self.host, authority, channel, reason),
             )
             .await?
         {
@@ -2602,6 +2807,64 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             ),
         )
         .await
+    }
+
+    /// Judge the client's raw decoded-audio counters for the output the
+    /// runtime requested media health for (the channel's first assistant
+    /// output; `live/media_health`). A media fault closes the channel through
+    /// the strict active close before the verdict returns.
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    pub async fn report_experimental_live_media_health(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+        report: &meerkat_contracts::LiveMediaHealthParams,
+    ) -> Result<meerkat_contracts::LiveMediaHealthResult, ExperimentalLiveMediaHealthError> {
+        if report.channel_id != channel_id.as_str() {
+            return Err(ExperimentalLiveMediaHealthError::Refused(
+                "the report names another channel".to_string(),
+            ));
+        }
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await
+            .map_err(|error| ExperimentalLiveMediaHealthError::Refused(error.to_string()))?;
+        let judgement = self
+            .runtime_adapter
+            .observe_live_media_health(
+                &session_id,
+                channel_id,
+                &report.output_id,
+                report.decoded_frames,
+                report.audible_frames,
+                live_media_health_rms_micros(report.max_rms),
+            )
+            .await
+            .map_err(|error| ExperimentalLiveMediaHealthError::Refused(error.to_string()))?;
+        if !judgement.media_faulted() {
+            return Ok(meerkat_contracts::LiveMediaHealthResult {
+                verdict: meerkat_contracts::LiveMediaHealthVerdict::Audible,
+                reopen_recommended: false,
+            });
+        }
+        tracing::warn!(
+            %session_id,
+            channel = %channel_id,
+            decoded_frames = report.decoded_frames,
+            audible_frames = report.audible_frames,
+            reopen_recommended = judgement.reopen_recommended(),
+            "the channel's first assistant output decoded silent; closing it on a media fault"
+        );
+        // The committed close reports `LiveChannelClosed` (reason
+        // `media_fault`) on the session event stream through the runtime's
+        // close publisher.
+        self.close_experimental_live_active_channel(authority, channel_id, activation_receipt)
+            .await?;
+        Ok(meerkat_contracts::LiveMediaHealthResult {
+            verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
+            reopen_recommended: judgement.reopen_recommended(),
+        })
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -2993,5 +3256,83 @@ impl meerkat_live::LiveToolDispatcher for ServiceLiveToolDispatcher {
             )
             .await
             .map_err(|err| meerkat_live::LiveToolDispatchError::from_session_error(session_id, err))
+    }
+}
+
+#[cfg(all(test, feature = "live-webrtc", feature = "openai-live"))]
+mod pump_retirement_classification_tests {
+    use super::*;
+    use crate::experimental_gpt_live::ExperimentalLivePumpRetirementError;
+
+    #[test]
+    fn a_close_executing_on_the_channel_makes_the_failure_in_flight() {
+        let runtime = MeerkatMachine::ephemeral();
+        let channel = LiveChannelId::new("pump-retirement-in-flight");
+        let outer = runtime.begin_live_channel_close(&channel);
+        let nested = runtime.begin_live_channel_close(&channel);
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::BindingMismatch,
+            ),
+            ExperimentalLivePumpRetirementError::CloseInFlight(_)
+        ));
+        drop(nested);
+        assert!(
+            runtime.live_channel_close_in_flight(&channel),
+            "a nested close path ending does not end the outer close"
+        );
+        drop(outer);
+        assert!(!runtime.live_channel_close_in_flight(&channel));
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::BindingMismatch,
+            ),
+            ExperimentalLivePumpRetirementError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn a_busy_terminal_projection_is_session_busy_and_other_failures_are_permanent() {
+        let runtime = MeerkatMachine::ephemeral();
+        let channel = LiveChannelId::new("pump-retirement-kinds");
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::TerminalProjection(
+                    meerkat_live::LiveAdapterHostError::ProjectionError(
+                        meerkat_live::LiveProjectionError::SessionBusy(SessionId::new()),
+                    ),
+                ),
+            ),
+            ExperimentalLivePumpRetirementError::SessionBusy(_)
+        ));
+        assert!(matches!(
+            classify_pump_retirement_failure(
+                &runtime,
+                &channel,
+                ExperimentalLiveChannelCloseError::LifecycleAuthority(
+                    "string-only lifecycle failure".to_string(),
+                ),
+            ),
+            ExperimentalLivePumpRetirementError::Permanent(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_close_ending_wakes_waiters_registered_before_it_ended() {
+        let runtime = MeerkatMachine::ephemeral();
+        let channel = LiveChannelId::new("pump-retirement-close-ended");
+        let close = runtime.begin_live_channel_close(&channel);
+        let ended = runtime.live_channel_close_ended();
+        tokio::pin!(ended);
+        ended.as_mut().enable();
+        assert!(futures::poll!(ended.as_mut()).is_pending());
+        drop(close);
+        assert!(futures::poll!(ended.as_mut()).is_ready());
     }
 }

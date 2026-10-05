@@ -2941,3 +2941,59 @@ mod tests {
         assert_eq!(machine.state().oauth_outstanding_flow_count, 0);
     }
 }
+
+#[cfg(test)]
+mod obligation_member_feedback_tests {
+    #![allow(clippy::expect_used)]
+    use crate::auth_machine::dsl::{AuthMachineAuthority, AuthMachineInput, AuthMachineMutator};
+    use crate::protocol_auth_release_oauth_flow_drain::{
+        ObligationMemberFeedbackError, extract_obligations, submit_expire_o_auth_browser_flow,
+    };
+
+    /// The generated drain submitter only accepts feedback naming a flow the
+    /// release obligation actually carries.
+    #[test]
+    fn drain_feedback_must_name_a_flow_the_obligation_carries() {
+        let mut authority = AuthMachineAuthority::new();
+        AuthMachineMutator::apply(
+            &mut authority,
+            AuthMachineInput::Acquire {
+                expires_at_ts: Some(2),
+                credential_published_at_millis: 1,
+            },
+        )
+        .expect("acquire");
+        AuthMachineMutator::apply(
+            &mut authority,
+            AuthMachineInput::AdmitOAuthBrowserFlow {
+                flow_id: "flow_1".into(),
+                provider: "provider_1".into(),
+                redirect_uri: "uri_1".into(),
+                expires_at_millis: 2,
+                max_outstanding_flows: 1,
+                observed_global_outstanding_flows: 0,
+            },
+        )
+        .expect("admit browser flow");
+        let transition = AuthMachineMutator::apply(&mut authority, AuthMachineInput::BeginRelease)
+            .expect("begin release");
+        let obligation = extract_obligations(&transition)
+            .into_iter()
+            .next()
+            .expect("drain obligation");
+
+        let rejected =
+            submit_expire_o_auth_browser_flow(&mut authority, obligation.clone(), "flow_2".into());
+        assert!(
+            matches!(
+                rejected,
+                Err(ObligationMemberFeedbackError::NotObligationMember {
+                    field: "browser_flow_ids"
+                })
+            ),
+            "{rejected:?}"
+        );
+        submit_expire_o_auth_browser_flow(&mut authority, obligation, "flow_1".into())
+            .expect("the obligation's own flow is accepted");
+    }
+}

@@ -482,17 +482,44 @@ for (const path of [
 // every suite; the github output carries the matrix rows.
 {
   const names = (plan) => plan.integration_suites.map((suite) => suite.packages[0]);
-  assert.deepEqual(names(planFor(["crates/meerkat-runtime/src/lib.rs"])), ["meerkat-runtime", "meerkat-machine-codegen"]);
+  assert.deepEqual(
+    names(planFor(["crates/meerkat-runtime/src/lib.rs"])),
+    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat", "meerkat-integration-tests"],
+  );
   assert.deepEqual(
     names(planFor(["crates/meerkat-machine-schema/src/lib.rs"])),
-    ["meerkat-runtime", "meerkat-machine-codegen"],
-    "a machine schema or DSL change runs both suites",
+    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat-machine-kernels"],
+    "a machine schema or DSL change runs the runtime, codegen parity and kernel oracle suites",
   );
-  assert.deepEqual(names(planFor(["crates/meerkat-mob/src/lib.rs"])), ["meerkat-machine-codegen"], "mob runs the codegen parity suite");
+  assert.deepEqual(
+    names(planFor(["crates/meerkat-mob/src/lib.rs"])),
+    ["meerkat-machine-codegen", "meerkat-integration-tests"],
+    "mob runs the codegen parity suite and the gpt-live replays",
+  );
   assert.deepEqual(names(planFor(["crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs"])), ["meerkat-machine-codegen"]);
-  assert.deepEqual(names(planFor(["crates/meerkat-sqlite/src/lib.rs"])), []);
+  // The store and cold-restart suites follow every store backend change.
+  assert.deepEqual(names(planFor(["crates/meerkat-sqlite/src/lib.rs"])), ["meerkat"]);
+  const store = planFor(["crates/meerkat-store/src/lib.rs"]);
+  assert.deepEqual(names(store), ["meerkat"]);
+  assert.equal(store.integration_suites[0].name, "meerkat-store-restart");
+  assert.match(store.integration_suites[0].package_flags, /^-p meerkat --features .*\bsession-store\b/);
+  assert.match(store.integration_suites[0].test_flags, /--test cold_restart_resume_after_compaction\b/);
+  assert.deepEqual(names(planFor(["crates/meerkat-tools/src/lib.rs"])), []);
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
-  assert.deepEqual(names(planFor(["Cargo.toml"])), ["meerkat-runtime", "meerkat-machine-codegen", "xtask"], "workspace mode runs every suite");
+  assert.deepEqual(
+    names(planFor(["Cargo.toml"])),
+    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat-integration-tests"],
+    "workspace mode runs every suite",
+  );
+  // The gpt-live replays: a public Live path package or a fixture change
+  // runs exactly the replay target with its feature.
+  const replay = planFor(["crates/meerkat-openai/src/public_live.rs"]);
+  assert.deepEqual(names(replay), ["meerkat-integration-tests"]);
+  assert.equal(replay.integration_suites[0].name, "gpt-live-replay");
+  assert.equal(replay.integration_suites[0].package_flags, "-p meerkat-integration-tests --features gpt-live-replay");
+  assert.equal(replay.integration_suites[0].test_flags, "--test gpt_live_replay");
+  const fixture = planFor(["tests/integration/fixtures/gpt_live_replay/s104.provider-stream.jsonl"]);
+  assert.deepEqual(names(fixture), ["meerkat-integration-tests"], "a fixture-only change runs the replays");
   // xtask's integration tests pin the workflows: an xtask change or a
   // workflow-only edit (a plan with no Rust change) runs them, with the
   // feature its machines_contracts target requires.
@@ -506,8 +533,20 @@ for (const path of [
   assert.equal(github.status, 0, github.stderr);
   const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   const rows = JSON.parse(lines.integration_matrix).include;
-  assert.equal(Number(lines.integration_count), 2);
-  assert.deepEqual(rows.map((row) => row.packages), ["-p meerkat-runtime", "-p meerkat-machine-codegen"]);
+  assert.equal(Number(lines.integration_count), 4);
+  assert.deepEqual(rows.map((row) => row.packages.split(" --features")[0]), [
+    "-p meerkat-runtime",
+    "-p meerkat-machine-codegen",
+    "-p meerkat",
+    "-p meerkat-integration-tests",
+  ]);
+  assert.equal(rows[3].packages, "-p meerkat-integration-tests --features gpt-live-replay");
+  assert.deepEqual(rows.map((row) => row.tests), [
+    undefined,
+    undefined,
+    "--test cold_restart_resume_after_compaction --test cold_restart_resume --test persistence_contract --test storage_provider_seam --test brain_swap_surface_parity",
+    "--test gpt_live_replay",
+  ]);
   const docsGithub = run(["--format", "github", "--", "docs/index.mdx"]);
   const docsLines = Object.fromEntries(docsGithub.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   assert.equal(docsLines.integration_count, "0");

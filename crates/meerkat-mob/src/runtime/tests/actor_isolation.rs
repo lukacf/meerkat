@@ -38,6 +38,8 @@ struct FaultInjectingRuntimeStore {
     parked_admissions: std::sync::Mutex<HashSet<LogicalRuntimeId>>,
     release_admissions: Notify,
     parked_admission_arrivals: std::sync::Mutex<HashMap<LogicalRuntimeId, usize>>,
+    /// Signalled on every admission write that enters the park.
+    admission_arrived: Notify,
     /// Sessions whose boundary commit parks (slow uplink) and then succeeds.
     parked_commits: std::sync::Mutex<HashSet<LogicalRuntimeId>>,
     release_commits: Notify,
@@ -55,6 +57,7 @@ impl FaultInjectingRuntimeStore {
             parked_admissions: std::sync::Mutex::new(HashSet::new()),
             release_admissions: Notify::new(),
             parked_admission_arrivals: std::sync::Mutex::new(HashMap::new()),
+            admission_arrived: Notify::new(),
             parked_commits: std::sync::Mutex::new(HashSet::new()),
             release_commits: Notify::new(),
             parked_commit_arrivals: std::sync::Mutex::new(HashMap::new()),
@@ -152,6 +155,22 @@ impl FaultInjectingRuntimeStore {
         self.release_admissions.notify_waiters();
     }
 
+    /// Resolve once `count` admission writes for `session_id` have entered
+    /// the park.
+    async fn wait_parked_admission_arrivals(&self, session_id: &SessionId, count: usize) {
+        loop {
+            // Enabled before the check, so an arrival between the check and
+            // the await still wakes this waiter.
+            let arrived = self.admission_arrived.notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+            if self.parked_admission_arrivals(session_id) >= count {
+                return;
+            }
+            arrived.await;
+        }
+    }
+
     /// Admission writes that entered the park for `session_id`.
     fn parked_admission_arrivals(&self, session_id: &SessionId) -> usize {
         self.parked_admission_arrivals
@@ -201,6 +220,7 @@ impl FaultInjectingRuntimeStore {
                     .expect("parked_admission_arrivals mutex")
                     .entry(runtime_id.clone())
                     .or_default() += 1;
+                self.admission_arrived.notify_waiters();
             }
             released.await;
         }
@@ -1045,65 +1065,61 @@ async fn degraded_member_is_rejected_typed_without_delaying_peers() {
 }
 
 /// A delivery whose caller left while it was parked behind the member's
-/// in-flight admission must never execute.
+/// in-flight admission must never execute. (Fails-old, 3/30 at 10 copies on
+/// two cores: SubmitWork ran on a stack-relief task whose reply receiver
+/// outlived the caller until the task's asynchronous abort landed, so the
+/// lane could pop the entry with its caller still looking alive.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn abandoned_delivery_behind_a_parked_lane_is_never_executed() {
     let mob = create_isolation_mob(2).await;
     mob.store.park_admissions(mob.session(1));
+    let identity = mob.member(1).clone();
+    // Hang guard only: every wait below resolves on a typed event.
+    let guard = Duration::from_secs(30);
 
     let first = send_task(&mob.handle, mob.member(1), "first".to_string());
-    let store = Arc::clone(&mob.store);
-    let session = mob.session(1).clone();
-    wait_until(
-        "first admission parked in the store",
-        Duration::from_secs(2),
-        || {
-            let store = Arc::clone(&store);
-            let session = session.clone();
-            async move { store.parked_admission_arrivals(&session) == 1 }
-        },
+    tokio::time::timeout(
+        guard,
+        mob.store.wait_parked_admission_arrivals(mob.session(1), 1),
     )
-    .await;
+    .await
+    .expect("first admission parked in the store");
 
     let abandoned = send_task(&mob.handle, mob.member(1), "abandoned".to_string());
-    let handle = mob.handle.clone();
-    let identity = mob.member(1).clone();
-    wait_until(
-        "second delivery parked in the lane",
-        Duration::from_secs(2),
-        || {
-            let handle = handle.clone();
-            let identity = identity.clone();
-            async move {
-                handle
-                    .member_admission_backlog()
-                    .parked
-                    .get(&identity)
-                    .copied()
-                    == Some(1)
-            }
-        },
+    tokio::time::timeout(
+        guard,
+        mob.handle
+            .member_admission_backlog
+            .wait_for_snapshot(|snapshot| snapshot.parked.get(&identity) == Some(&1)),
     )
-    .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // The caller gives up: dropping the future closes the reply channel.
+    .await
+    .expect("second delivery parked in the lane");
+    // The caller gives up: dropping its future closes the reply channel,
+    // synchronously, before the lane can reach the entry.
     abandoned.abort();
     let _ = abandoned.await;
 
     mob.store.release_admissions();
-    tokio::time::timeout(Duration::from_secs(2), first)
+    tokio::time::timeout(guard, first)
         .await
         .expect("first delivery completes after release")
         .expect("first delivery task")
         .expect("first delivery admitted");
+    // The lane reaches the abandoned entry after the first admission and
+    // skips it: a positive event, not a quiet period.
+    tokio::time::timeout(
+        guard,
+        mob.handle
+            .member_admission_backlog
+            .wait_for_snapshot(|snapshot| {
+                snapshot.skipped_abandoned.get(&identity) == Some(&1)
+                    && !snapshot.parked.contains_key(&identity)
+            }),
+    )
+    .await
+    .expect("the lane skips the abandoned delivery");
     mob.wait_for_executed_prompts(1, 1).await;
-    // Give a ghost turn every chance to appear before asserting it did not.
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(mob.executed_prompts(1).await, vec!["first".to_string()]);
-    assert!(
-        mob.handle.member_admission_backlog().parked.is_empty(),
-        "lane must be idle after the abandoned entry was skipped"
-    );
 }
 
 /// Deliveries to one member execute in submission order; interleaved
@@ -2422,5 +2438,75 @@ async fn bounded_submit_timeout_does_not_cancel_inflight_admission_but_skips_par
         mob.executed_prompts(1).await,
         vec!["bounded delivery", "settlement witness"],
         "the in-flight first delivery executes exactly once; the parked second never executes"
+    );
+}
+
+/// A member revival deferred by the mob's explicit resume
+/// (`LifecycleOperationPending { "explicit_resume member .." }`) settles on
+/// that operation's own typed completion: the member's explicit-resume work
+/// leaving the actor-published machine state. Nothing is timed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revival_deferred_by_explicit_resume_settles_on_its_typed_completion() {
+    use crate::machines::mob_machine as mob_dsl;
+    let mob = reconstructed_isolation_mob_with_definition(2, turn_driven_definition()).await;
+    let construction = mob
+        .service
+        .park_session_creation(mob.session(0).clone())
+        .await;
+    let release_construction = ReleaseConstructionGate(Arc::clone(&construction));
+    let resume = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.resume().await }
+    });
+    let member = mob.member(0).clone();
+    let dsl_member = mob_dsl::AgentIdentity::from_domain(&member);
+    let mut state = mob.handle.machine_state_watch_rx.clone();
+    state
+        .wait_for(|state| state.explicit_resume_member_work.contains_key(&dsl_member))
+        .await
+        .expect("the resume stages member zero's explicit-resume work");
+
+    // The held construction keeps the work pending: revival is deferred.
+    assert!(matches!(
+        mob.handle.ensure_member_live(&member).await,
+        Err(MobError::LifecycleOperationPending { intent })
+            if intent == format!("explicit_resume member {member}")
+    ));
+    let settled = tokio::spawn({
+        let handle = mob.handle.clone();
+        let member = member.clone();
+        async move { handle.explicit_resume_member_work_settled(&member).await }
+    });
+    assert!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .explicit_resume_member_work
+            .contains_key(&dsl_member),
+        "the work is still pending while the construction is held"
+    );
+
+    drop(release_construction);
+    assert!(
+        settled.await.expect("settled waiter joins"),
+        "the waiter completes when the explicit-resume work ends"
+    );
+    assert!(
+        !mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .explicit_resume_member_work
+            .contains_key(&dsl_member)
+    );
+    resume
+        .await
+        .expect("resume task joins")
+        .expect("resume completes once the construction is released");
+    // Level-triggered: a waiter that arrives after the operation ended
+    // returns at once.
+    assert!(
+        mob.handle
+            .explicit_resume_member_work_settled(&member)
+            .await
     );
 }

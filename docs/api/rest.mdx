@@ -114,6 +114,7 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/auth/bindings/{binding_id}/test` | Test a binding resolve path |
 | `POST` | `/auth/login/start` | Start interactive auth login |
 | `POST` | `/auth/login/complete` | Complete interactive auth login |
+| `POST` | `/auth/login/cancel` | Retire a pending MCP OAuth attempt by its state |
 | `POST` | `/auth/login/device/start` | Start device-code login |
 | `POST` | `/auth/login/device/complete` | Complete device-code login |
 | `GET` | `/auth/bindings/{binding_id}/status` | Read binding auth status |
@@ -1269,6 +1270,21 @@ binding-scoped `AuthBindingRef`.
   Optional explicit profile override for the binding.
 </ParamField>
 
+The same endpoints accept an MCP server target instead of a provider binding:
+`{"mcp": {"server_name", "server_url", "oauth_account"}, ...}`. See
+[Host-driven OAuth](/api/mcp#host-driven-oauth).
+
+### POST /auth/login/cancel
+
+Retire a pending MCP OAuth attempt by its state. The server must be configured.
+
+```json Request
+{
+  "mcp": {"server_name": "remote-oauth", "server_url": "https://mcp.example.com/api"},
+  "state": "state-from-start"
+}
+```
+
 ### POST /auth/login/device/start
 
 Begin a device-code OAuth login.
@@ -1413,9 +1429,13 @@ peer ID, never a display name.
   that recorded request to still be repliable.
 
 `peer_message` is the ordinary collaboration primitive. `peer_lifecycle`
-is a one-way topology notification: its `lifecycle_kind` is
-`"mob.peer_added"`, `"mob.peer_retired"`, `"mob.peer_unwired"`, or
-`"mob.dismiss"`. `mob.dismiss` is supervisor-directed; accepting that enum
+is a one-way notification: its `lifecycle_kind` is a topology kind
+(`"mob.peer_added"`, `"mob.peer_retired"`, `"mob.peer_unwired"`,
+`"mob.dismiss"`) or a member-kickoff status kind (`"mob.kickoff_pending"`,
+`"mob.kickoff_starting"`, `"mob.kickoff_started"`,
+`"mob.kickoff_callback_pending"`, `"mob.kickoff_failed"`,
+`"mob.kickoff_cancelled"`). Kickoff kinds reach the receiving agent as a
+visible `lifecycle` comms notice; none of them opens a request. `mob.dismiss` is supervisor-directed; accepting that enum
 value does not grant the caller dismissal authority. Its required
 `CommsPeerLifecycleParams` object contains `peer` (string) and optional
 `role`, `description`, and typed `peer_spec` (`BridgePeerSpec`).

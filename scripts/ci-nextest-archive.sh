@@ -112,6 +112,10 @@ fi
 case "${1:-}" in
   build)
     mkdir -p "$(dirname "$archive_file")"
+    # Tests of crates that dev-depend on mcp-test-server need its binary;
+    # built into the target directory, it rides in the archive
+    # (archive.include, .config/nextest.toml).
+    CARGO="$CARGO" "${ROOT}/scripts/mcp-test-server-fixture" --if-needed "${cargo_args[@]}" > /dev/null
     "$CARGO" nextest archive "${cargo_args[@]}" --archive-file "$archive_file"
     [[ -s "$archive_file" ]] || {
       echo "error: nextest archive was not created at ${archive_file}" >&2

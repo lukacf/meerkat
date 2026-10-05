@@ -334,6 +334,20 @@ pub(super) fn retirement_result_slot_removed_check_count(key: &RetirementOperati
         .unwrap_or_default()
 }
 
+/// The exact singleflight retirement slot's result publication, if the slot
+/// is still joinable. The slot task removes the slot and counts that check
+/// before it publishes, so a published result implies the check landed.
+#[cfg(test)]
+pub(super) fn pending_retirement_result_publication(
+    key: &RetirementOperationKey,
+) -> Option<tokio::sync::watch::Receiver<Option<Arc<Result<(), Arc<MobError>>>>>> {
+    pending_retirement_operations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .map(|pending| pending.result_rx.clone())
+}
+
 #[cfg(test)]
 fn assert_retirement_result_slot_removed_before_publication(
     key: &RetirementOperationKey,
@@ -1366,6 +1380,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             schedule: tools.schedule,
             image_generation: tools.image_generation,
             read_only: tools.read_only,
+            deny: tools.deny.clone(),
             mcp: tools.mcp.clone(),
         },
         peer_description: profile.peer_description.clone(),
@@ -2088,7 +2103,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::MobDefinitionProjectionMismatch { .. }
         | MobError::MobDefinitionAuthorityChanged { .. }
         | MobError::MemberSessionNotLive { .. }
-        | MobError::AgentEventCursorRejected { .. } => {
+        | MobError::AgentEventCursorRejected { .. }
+        | MobError::RuntimeOwnerConflict
+        | MobError::ToolBundleUnavailable { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         MobError::ProfileNotFound(_) => {
@@ -2306,7 +2323,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberRetirementInProgress { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
-        MobError::MemberRetirementAdmissionPending { .. } => {
+        MobError::MemberRetirementAdmissionPending { .. }
+        | MobError::MemberRetirementStuck { .. }
+        | MobError::RetirementInterrupted { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         MobError::SharedRetirementFailure(error) | MobError::SharedLifecycleFailure(error) => {
@@ -2993,6 +3012,9 @@ pub struct MemberAdmissionBacklogSnapshot {
     pub topology_parked_reloads: BTreeMap<AgentIdentity, usize>,
     #[cfg(test)]
     pub settled_reload_invocations: BTreeMap<AgentIdentity, usize>,
+    /// Parked deliveries the lane skipped because their caller had left.
+    #[cfg(test)]
+    pub skipped_abandoned: BTreeMap<AgentIdentity, usize>,
 }
 
 /// Maximum deliveries parked behind one member's in-flight admission before
@@ -3046,6 +3068,17 @@ impl MemberAdmissionBacklogGauge {
                 .await
                 .expect("the gauge owns its record signal");
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_abandoned_skip(&self, agent_identity: &AgentIdentity) {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .skipped_abandoned
+            .entry(agent_identity.clone())
+            .or_default() += 1;
     }
 
     #[cfg(test)]
@@ -5056,6 +5089,8 @@ pub struct MobHandle {
     pub(super) explicit_resume_operations: Arc<ResumeOperationRegistry>,
     /// Read-only view of the actor's per-member admission lanes (#1102).
     pub(super) member_admission_backlog: Arc<MemberAdmissionBacklogGauge>,
+    /// Read-only view of the actor's per-member retirement settlements.
+    pub(super) lifecycle_observations: Arc<super::MemberLifecycleObservations>,
     /// Read-only view of the actor's retained per-spawn tool overlays. The
     /// actor is the sole writer; a durable fork reads its source's overlay
     /// here to seat the child with the source's exact tool set.
@@ -6521,6 +6556,19 @@ impl MobHandle {
                                 stage: stage.clone(),
                             }
                         }
+                        MobError::MemberRetirementStuck {
+                            member_id,
+                            stage,
+                            cause,
+                        } => MobError::MemberRetirementStuck {
+                            member_id: member_id.clone(),
+                            stage: stage.clone(),
+                            cause: Arc::clone(cause),
+                        },
+                        // The actor already shares its typed cause.
+                        MobError::SharedRetirementFailure(cause) => {
+                            MobError::SharedRetirementFailure(Arc::clone(cause))
+                        }
                         _ => MobError::SharedRetirementFailure(Arc::clone(error)),
                     }),
                 };
@@ -6531,9 +6579,18 @@ impl MobHandle {
                 let admitted =
                     *pending.admission_rx.borrow() || self.retirement_exactly_durably_admitted(key);
                 return if admitted {
+                    // Owned and still running: name the stage it is in. The
+                    // caller can await its settlement through
+                    // `retirement_settlement`.
+                    let stage = match self.lifecycle_observations.current(&key.agent_identity) {
+                        Some(super::RetirementSettlement::InProgress { stage }) => {
+                            stage.as_str().to_string()
+                        }
+                        _ => "actor_retirement_saga".to_string(),
+                    };
                     Err(MobError::MemberRetirementInProgress {
                         member_id: key.agent_identity.clone(),
-                        stage: "actor_retirement_saga".to_string(),
+                        stage,
                     })
                 } else {
                     Err(MobError::MemberRetirementAdmissionPending {
@@ -6556,10 +6613,11 @@ impl MobHandle {
     async fn retire_exact_incarnation(
         &self,
         agent_identity: AgentIdentity,
+        redrive: bool,
     ) -> Result<(), MobError> {
         let operation_deadline = Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
         let Some((key, pending)) = self
-            .join_or_start_retirement_operation(agent_identity, operation_deadline, true)
+            .join_or_start_retirement_operation(agent_identity, operation_deadline, true, redrive)
             .await?
         else {
             return Ok(());
@@ -6586,6 +6644,7 @@ impl MobHandle {
                 .join_or_start_retirement_operation(
                     agent_identity.clone(),
                     operation_deadline,
+                    false,
                     false,
                 )
                 .await?
@@ -6621,6 +6680,7 @@ impl MobHandle {
         agent_identity: AgentIdentity,
         operation_deadline: Instant,
         bound_admission: bool,
+        redrive: bool,
     ) -> Result<Option<(RetirementOperationKey, Arc<PendingRetirementOperation>)>, MobError> {
         // Retire's absent-member convergence is still an operator action.
         // Enter the serialized scope gate before any roster observation so a
@@ -6699,6 +6759,7 @@ impl MobHandle {
                             MobCommand::Retire {
                                 agent_identity,
                                 expected_incarnation: expected,
+                                redrive,
                                 deadline,
                                 admission_tx,
                                 reply_tx,
@@ -6750,11 +6811,41 @@ impl MobHandle {
     // because some command arms re-enter this seam (ensure-member/reconcile
     // → retire/spawn), which would make opaque future types — and their
     // `Send` inference — mutually recursive.
+    //
+    // SubmitWork is the exception: it is routed inline. The actor skips a
+    // parked delivery whose caller has left by checking its reply channel,
+    // and a relieved task holds that receiver until its asynchronous abort
+    // lands, after the caller is already gone. A delivery popped in that
+    // window ran a ghost turn. Inline, the receiver lives in the caller's
+    // own future and closes the moment the caller drops. The arm is a thin
+    // forward, not the large routing frame the relief exists for.
     fn execute_machine_command(&self, command: MobMachineCommand) -> BoxedMachineCommandFuture {
         let handle = self.clone();
-        Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
-            move || async move { handle.execute_machine_command_inner(command).await },
-        ))
+        match command {
+            MobMachineCommand::SubmitWork(cmd) => {
+                Box::pin(async move { handle.submit_work_command(cmd).await })
+            }
+            command => Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
+                move || async move { handle.execute_machine_command_inner(command).await },
+            )),
+        }
+    }
+
+    async fn submit_work_command(
+        &self,
+        cmd: Box<crate::mob_machine::SubmitWorkCommand>,
+    ) -> Result<MobMachineCommandResult, MobError> {
+        // Shell dispatch is a thin forward: the mob actor owns work-origin
+        // legality via the MobMachine DSL. There is no origin re-decision
+        // here: `spec.origin` is forwarded verbatim and the DSL accepts or
+        // rejects.
+        let receipt_work_ref = cmd.work_ref.clone();
+        let payload = submit_work_payload(cmd)?;
+        self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
+            .await??;
+        Ok(MobMachineCommandResult::WorkReceipt {
+            work_ref: receipt_work_ref,
+        })
     }
 
     async fn execute_machine_command_inner(
@@ -6863,19 +6954,7 @@ impl MobHandle {
                     .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::SubmitWork(cmd) => {
-                // Shell dispatch is a thin forward: the mob actor owns
-                // work-origin legality via the MobMachine DSL. There is no
-                // origin re-decision here — `spec.origin` is forwarded
-                // verbatim and the DSL accepts or rejects.
-                let receipt_work_ref = cmd.work_ref.clone();
-                let payload = submit_work_payload(cmd)?;
-                self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
-                    .await??;
-                Ok(MobMachineCommandResult::WorkReceipt {
-                    work_ref: receipt_work_ref,
-                })
-            }
+            MobMachineCommand::SubmitWork(cmd) => self.submit_work_command(cmd).await,
             MobMachineCommand::CancelWork { work_ref } => {
                 // No work-tracking ledger backs per-unit cancellation, so
                 // there is no authority that can locate and cancel an
@@ -6905,9 +6984,10 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::Stop => {
-                self.send_actor_command(|reply_tx| MobCommand::Stop { reply_tx })
+                let report = self
+                    .send_actor_command(|reply_tx| MobCommand::Stop { reply_tx })
                     .await??;
-                Ok(MobMachineCommandResult::Unit)
+                Ok(MobMachineCommandResult::Stopped(report))
             }
             MobMachineCommand::Resume { deadline } => {
                 self.send_resume_actor_command_until(deadline).await?;
@@ -7256,8 +7336,8 @@ impl MobHandle {
                     .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::Shutdown => {
-                self.send_actor_command(|reply_tx| MobCommand::Shutdown { reply_tx })
+            MobMachineCommand::Shutdown { deadline } => {
+                self.send_actor_command(|reply_tx| MobCommand::Shutdown { deadline, reply_tx })
                     .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
@@ -7345,6 +7425,26 @@ impl MobHandle {
     /// out of a live phase and the actor exits, this may read the actor's
     /// terminal phase watch. A closed actor while the last published phase is
     /// still live is an actor failure, not lifecycle truth.
+    /// Release a host's run-start hold on a member (#1500), placed with
+    /// [`MobBuilder::hold_restored_member_run_starts`](crate::MobBuilder::hold_restored_member_run_starts).
+    /// The member starts runs again once nothing else holds it (a mob Stop
+    /// keeps holding it until Resume). Releasing before the member's runtime
+    /// has registered cancels the hold its registration would apply. A member
+    /// that does not hold `reason` is an Ok no-op; a non-member is
+    /// [`MobError::MemberNotFound`].
+    pub async fn release_member_run_starts(
+        &self,
+        agent_identity: &AgentIdentity,
+        reason: super::stop_report::HostRunStartHoldReason,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ReleaseMemberRunStarts {
+            agent_identity: agent_identity.clone(),
+            reason,
+            reply_tx,
+        })
+        .await?
+    }
+
     pub async fn status(&self) -> Result<MobState, MobError> {
         match self
             .send_actor_command(|reply_tx| MobCommand::QueryPhase { reply_tx })
@@ -7469,6 +7569,32 @@ impl MobHandle {
     pub fn machine_state_changes(&self) -> MobMachineStateChanges {
         MobMachineStateChanges {
             rx: self.machine_state_watch_rx.clone(),
+        }
+    }
+
+    /// Wait until no explicit-resume lifecycle operation is pending for
+    /// `identity`: the operation a `MobError::LifecycleOperationPending`
+    /// naming `explicit_resume member <identity>` refers to (the mob's resume
+    /// still reviving that member). `true` once none is pending, at once when
+    /// none is pending now; `false` when the actor is gone first.
+    ///
+    /// Level-triggered on the actor-published machine state, which carries
+    /// the per-member explicit-resume work and changes when it ends, so a
+    /// waiter subscribed after the operation ended cannot miss it.
+    pub async fn explicit_resume_member_work_settled(&self, identity: &AgentIdentity) -> bool {
+        let identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let mut state = self.machine_state_watch_rx.clone();
+        loop {
+            if !state
+                .borrow_and_update()
+                .explicit_resume_member_work
+                .contains_key(&identity)
+            {
+                return true;
+            }
+            if state.changed().await.is_err() {
+                return false;
+            }
         }
     }
 
@@ -10674,6 +10800,24 @@ impl MobHandle {
     /// admission or start-marker failures can return before such an anchor
     /// exists. This guarantee does not cover callers that hold and invoke the
     /// session store independently of the mob/session runtime.
+    /// Observe `identity`'s retirement settlement: its progress while owned,
+    /// then its terminal outcome. `None` when no retirement was ever
+    /// published for the identity in this actor's lifetime.
+    pub fn retirement_settlement(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<super::RetirementSettlementWatch> {
+        self.lifecycle_observations.subscribe(identity)
+    }
+
+    /// Drive a stuck retirement again (typed re-drive): the member's durably
+    /// started retirement resumes from its durable `Retiring` state. Bounded
+    /// like [`Self::retire`]: a re-drive still running when the budget
+    /// elapses answers `MemberRetirementInProgress` and stays owned.
+    pub async fn redrive_retirement(&self, identity: AgentIdentity) -> Result<(), MobError> {
+        self.retire_exact_incarnation(identity, true).await
+    }
+
     pub async fn retire(&self, identity: AgentIdentity) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Retire {
@@ -12792,7 +12936,13 @@ impl MobHandle {
 
     /// Cancel all in-flight work for a mob member.
     ///
-    /// The fence token is validated before cancellation proceeds.
+    /// The fence token is validated before cancellation proceeds. The cancel
+    /// covers the work the member had admitted when it was taken: its current
+    /// run is cancelled at its next boundary, exactly that run, and the input
+    /// it held queued is abandoned. Input admitted after the cancel is
+    /// untouched. `Ok(())` means the member has no admitted work left that
+    /// this cancel is responsible for. A member that is idle is not an error,
+    /// and no cancel is left behind for a later run.
     pub async fn cancel_all_work(
         &self,
         runtime_id: AgentRuntimeId,
@@ -12812,32 +12962,108 @@ impl MobHandle {
         }
     }
 
-    /// Transition Running -> Stopped. Mutation commands are rejected while stopped.
-    pub async fn stop(&self) -> Result<(), MobError> {
-        let deadline = Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
-        let mut retry_delay = Duration::from_millis(25);
+    /// Transition Running -> Stopped. Mutation commands are rejected while
+    /// stopped.
+    ///
+    /// Stop pauses the mob (#1500): every member's run starts are held, so
+    /// input admitted before the stop runs only after [`Self::resume`]. The
+    /// report says, per member, what happened to its run and whether its run
+    /// starts are held; a member that cannot be held is reported, never
+    /// hidden behind `Ok`.
+    pub async fn stop(&self) -> Result<super::stop_report::MobStopReport, MobError> {
+        let hang_guard = tokio::time::Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
+        let mut lifecycle_watch = None;
         loop {
             match self.execute_machine_command(MobMachineCommand::Stop).await {
-                Ok(MobMachineCommandResult::Unit) => return Ok(()),
+                Ok(MobMachineCommandResult::Stopped(report)) => return Ok(report),
                 Ok(_) => {
                     return Err(MobError::Internal(
                         "unexpected command result variant".into(),
                     ));
                 }
-                Err(
-                    error @ (MobError::PlacedCompletionCleanupPending { .. }
-                    | MobError::PlacedKickoffCleanupPending { .. }
-                    | MobError::AutonomousStopInterruptsPending { .. }
-                    | MobError::LifecycleOperationPending { .. }),
-                ) => {
-                    if Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_millis(250));
+                Err(error) => {
+                    self.await_lifecycle_blocker(error, hang_guard, &mut lifecycle_watch)
+                        .await?;
                 }
-                Err(error) => return Err(error),
             }
+        }
+    }
+
+    /// A Stop or Shutdown the actor refused because an operation it owns is
+    /// still settling waits for that operation's own completion, read from
+    /// the mob machine-state watch, then re-issues exactly once. There is no
+    /// retry cadence:
+    /// - placed completion or kickoff cleanup: the actor drains those custody
+    ///   sets as it applies the hosts' terminal outcomes, so this waits until
+    ///   the blocking sets are empty;
+    /// - another lifecycle operation: the first such refusal in a call is
+    ///   re-issued at once, because the state that lets it succeed (a member's
+    ///   new incarnation, a drained backlog) may already be committed; a
+    ///   repeat waits for the next committed machine transition after it.
+    ///
+    /// `hang_guard` is the failure bound, not a pacing timer: past it the
+    /// refusal is returned. Any other error is returned as is.
+    async fn await_lifecycle_blocker(
+        &self,
+        refusal: MobError,
+        hang_guard: tokio::time::Instant,
+        lifecycle_watch: &mut Option<tokio::sync::watch::Receiver<mob_dsl::MobMachineState>>,
+    ) -> Result<(), MobError> {
+        enum Blocker {
+            PlacedCompletionCleanup,
+            PlacedKickoffCleanup,
+        }
+        let blocker = match &refusal {
+            MobError::PlacedCompletionCleanupPending { .. } => Blocker::PlacedCompletionCleanup,
+            MobError::PlacedKickoffCleanupPending { .. } => Blocker::PlacedKickoffCleanup,
+            MobError::LifecycleOperationPending { .. } => {
+                return match lifecycle_watch {
+                    // First refusal: arm the receiver now, before the
+                    // immediate re-evaluation, so a commit that lands in
+                    // between still wakes the next wait.
+                    None => {
+                        let mut armed = self.machine_state_watch_rx.clone();
+                        armed.borrow_and_update();
+                        *lifecycle_watch = Some(armed);
+                        Ok(())
+                    }
+                    Some(armed) => {
+                        match tokio::time::timeout_at(hang_guard, armed.changed()).await {
+                            Ok(Ok(())) => Ok(()),
+                            Ok(Err(_)) | Err(_) => Err(refusal),
+                        }
+                    }
+                };
+            }
+            _ => return Err(refusal),
+        };
+        // The refusal was produced after the actor applied (and published)
+        // this attempt's own transitions, so only later commits count.
+        let mut state_rx = self.machine_state_watch_rx.clone();
+        state_rx.borrow_and_update();
+        let progress = async move {
+            match blocker {
+                Blocker::PlacedCompletionCleanup => state_rx
+                    .wait_for(|state| {
+                        state.pending_placed_completion_outcomes.is_empty()
+                            && state.resolved_placed_completion_outcomes.is_empty()
+                    })
+                    .await
+                    .map(|_| ()),
+                Blocker::PlacedKickoffCleanup => state_rx
+                    .wait_for(|state| {
+                        state.pending_placed_kickoff_outcomes.is_empty()
+                            && state.resolved_placed_kickoff_outcomes.is_empty()
+                    })
+                    .await
+                    .map(|_| ()),
+            }
+        };
+        match tokio::time::timeout_at(hang_guard, progress).await {
+            Ok(Ok(())) => Ok(()),
+            // The actor is gone (its state watch closed) or the hang guard
+            // elapsed: the refusal stands.
+            Ok(Err(_)) | Err(_) => Err(refusal),
         }
     }
 
@@ -13070,13 +13296,61 @@ impl MobHandle {
         }
     }
 
+    /// Shut down the actor and return the per-member account of what the
+    /// Shutdown did: which runtime bindings it unregistered, which in-flight
+    /// retirements it interrupted (they resume on the next start), which
+    /// retirements were already stuck, and which unregisters or effects remain
+    /// outstanding under their own owners.
+    ///
+    /// A Shutdown makes progress past a member it cannot settle; such a member
+    /// is reported, never waited on without bound.
+    ///
+    /// `options.deadline` is the caller's own bound (for example below a
+    /// process supervisor's termination grace period): when it elapses,
+    /// every member Shutdown is still waiting on is reported (an unfinished
+    /// runtime unregister as `UnregisterPending`) and Shutdown returns.
+    /// Without a deadline the member lifecycle hang guard is the failure
+    /// bound. Durable state stays re-drivable on the next start either way.
+    pub async fn shutdown_with_report(
+        &self,
+        options: super::ShutdownOptions,
+    ) -> Result<super::MobShutdownReport, MobError> {
+        self.shutdown_until(options.deadline).await?;
+        Ok(self
+            .lifecycle_observations
+            .last_shutdown_report()
+            .unwrap_or_default())
+    }
+
     /// Shut down the actor. After this, no more commands are accepted.
+    ///
+    /// Shutdown makes progress past members it cannot settle instead of
+    /// waiting on them:
+    /// - an in-flight member retirement is interrupted cooperatively;
+    /// - a runtime unregister the runtime has not completed is left to its own
+    ///   exact-registration coordinator and reported as `UnregisterPending`
+    ///   (it is never forced).
+    ///
+    /// Nothing durable is lost: a member whose retirement durably started
+    /// keeps its `Retiring` state and that retirement is driven again on the
+    /// mob's next start. Members the Shutdown could not settle are logged at
+    /// warn; use [`Self::shutdown_with_report`] for the per-member account.
     pub async fn shutdown(&self) -> Result<(), MobError> {
-        let deadline = Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
-        let mut retry_delay = Duration::from_millis(25);
+        self.shutdown_until(None).await
+    }
+
+    async fn shutdown_until(&self, caller_deadline: Option<Instant>) -> Result<(), MobError> {
+        let now = tokio::time::Instant::now();
+        let default_guard = now + DEFAULT_KICKOFF_WAIT_TIMEOUT;
+        let hang_guard = caller_deadline.map_or(default_guard, |caller| {
+            default_guard.min(now + caller.saturating_duration_since(Instant::now()))
+        });
+        let mut lifecycle_watch = None;
         loop {
             match self
-                .execute_machine_command(MobMachineCommand::Shutdown)
+                .execute_machine_command(MobMachineCommand::Shutdown {
+                    deadline: caller_deadline,
+                })
                 .await
             {
                 Ok(MobMachineCommandResult::Unit) => return Ok(()),
@@ -13085,27 +13359,21 @@ impl MobHandle {
                         "unexpected command result variant".into(),
                     ));
                 }
-                Err(
-                    error @ (MobError::PlacedCompletionCleanupPending { .. }
-                    | MobError::PlacedKickoffCleanupPending { .. }
-                    | MobError::AutonomousStopInterruptsPending { .. }
-                    | MobError::LifecycleOperationPending { .. }),
-                ) => {
-                    if Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_millis(250));
+                Err(error) => {
+                    self.await_lifecycle_blocker(error, hang_guard, &mut lifecycle_watch)
+                        .await?;
                 }
-                Err(error) => return Err(error),
             }
         }
     }
 
     #[cfg(test)]
     pub(super) async fn shutdown_once_for_test(&self) -> Result<(), MobError> {
-        self.send_actor_command(|reply_tx| MobCommand::Shutdown { reply_tx })
-            .await?
+        self.send_actor_command(|reply_tx| MobCommand::Shutdown {
+            deadline: None,
+            reply_tx,
+        })
+        .await?
     }
 
     /// Stop only volatile runtime tasks, preserving durable active-run and
@@ -13158,10 +13426,16 @@ impl MobHandle {
         self.command_tx.is_closed()
     }
 
-    /// Force-cancel a member's in-flight turn via the user interrupt path.
+    /// Force-cancel the work a member had admitted when the cancel was taken:
+    /// its current run is cancelled at its next boundary, exactly that run,
+    /// and the input it held queued (for example a run admitted by a fork that
+    /// has not started yet) is abandoned.
     ///
     /// Unlike [`retire`](Self::retire), this does not archive the session or
-    /// remove the member from the roster — it only cancels the current turn.
+    /// remove the member from the roster. Input admitted after the cancel is
+    /// untouched. `Ok(())` means the member has no admitted work left that
+    /// this cancel is responsible for. A member that is idle is not an error,
+    /// and no cancel is left behind for a later run.
     pub async fn force_cancel_member(&self, identity: AgentIdentity) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::ForceCancel {
@@ -15972,7 +16246,7 @@ impl MobHandle {
         let mut attempted = std::collections::BTreeSet::new();
         self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
             .await;
-        let own = self.retire_exact_incarnation(identity.clone()).await;
+        let own = self.retire_exact_incarnation(identity.clone(), false).await;
         if own.is_ok() {
             self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
                 .await;
@@ -16004,7 +16278,10 @@ impl MobHandle {
             }
             for descendant in pending {
                 attempted.insert(descendant.clone());
-                if let Err(error) = self.retire_exact_incarnation(descendant.clone()).await {
+                if let Err(error) = self
+                    .retire_exact_incarnation(descendant.clone(), false)
+                    .await
+                {
                     tracing::warn!(
                         member = %descendant,
                         ancestor = %ancestor,

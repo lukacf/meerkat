@@ -924,6 +924,11 @@ pub struct SessionBuildOptions {
     /// `Inherit` must be resolved by the spawn chain before build; an
     /// unresolved `Inherit` fails the build closed.
     pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    /// Tool restriction declared by the agent's configuration (a mob
+    /// profile), conjoined with `tool_access_policy` at the execution gate
+    /// and recomputed on every build rather than persisted into the launch
+    /// policy. Process-local like the build request itself.
+    pub declared_tool_restriction: Option<crate::ops::DeclaredToolRestriction>,
     /// Process-local authority awaited at the outermost actual tool-dispatch
     /// boundary. This carrier is intentionally absent from serialized
     /// contracts and durable metadata; its owner must reconstruct it from
@@ -1727,6 +1732,7 @@ impl Default for SessionBuildOptions {
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
             tool_access_policy: None,
+            declared_tool_restriction: None,
             tool_dispatch_admission: None,
             application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
@@ -2043,6 +2049,12 @@ pub struct TurnToolOverlay {
     /// Optional deny-list for this turn.
     #[serde(default)]
     pub blocked_tools: Option<Vec<crate::types::ToolName>>,
+    /// Tool choice for this turn's model requests, in order: entry `k`
+    /// applies to the run's `k`-th provider call, and every call after the
+    /// plan is exhausted is `Auto`. Run-local: it lives only as long as the
+    /// overlay and never reaches session defaults, later turns or fallback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_choice_plan: Vec<crate::lifecycle::run_primitive::ToolChoice>,
     /// Host/runtime-supplied tool-dispatch metadata visible only to
     /// dispatchers for this turn.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -2081,6 +2093,7 @@ impl TurnToolOverlay {
         Ok(PublicTurnToolOverlay {
             allowed_tools: self.allowed_tools,
             blocked_tools: self.blocked_tools,
+            tool_choice_plan: self.tool_choice_plan,
         })
     }
 
@@ -2102,9 +2115,15 @@ impl TurnToolOverlay {
         let blocked_tools = union_blocked_tools(existing.blocked_tools, overlay.blocked_tools);
         let dispatch_context =
             merge_turn_dispatch_context(existing.dispatch_context, overlay.dispatch_context)?;
+        let tool_choice_plan = match (existing.tool_choice_plan, overlay.tool_choice_plan) {
+            (existing, overlay) if overlay.is_empty() => existing,
+            (existing, overlay) if existing.is_empty() || existing == overlay => overlay,
+            _ => return Err(TurnToolOverlayComposeError::ConflictingToolChoicePlan),
+        };
         Ok(Self {
             allowed_tools,
             blocked_tools,
+            tool_choice_plan,
             dispatch_context,
         })
     }
@@ -2116,6 +2135,9 @@ pub enum TurnToolOverlayComposeError {
     /// Both overlays carry the same dispatch-context key with distinct values.
     #[error("conflicting turn tool overlay dispatch context for {key}")]
     ConflictingDispatchContext { key: String },
+    /// Both overlays carry a different non-empty tool-choice plan.
+    #[error("conflicting turn tool-choice plans")]
+    ConflictingToolChoicePlan,
 }
 
 /// Typed error projecting a runtime overlay to [`PublicTurnToolOverlay`].
@@ -2194,6 +2216,12 @@ pub struct PublicTurnToolOverlay {
     /// Optional deny-list for this turn.
     #[serde(default)]
     pub blocked_tools: Option<Vec<crate::types::ToolName>>,
+    /// Tool choice for this turn's model requests, in order: entry `k`
+    /// applies to the run's `k`-th provider call, and every call after the
+    /// plan is exhausted is `Auto`. Run-local: it lives only as long as the
+    /// overlay and never reaches session defaults, later turns or fallback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_choice_plan: Vec<crate::lifecycle::run_primitive::ToolChoice>,
 }
 
 impl From<PublicTurnToolOverlay> for TurnToolOverlay {
@@ -2201,6 +2229,7 @@ impl From<PublicTurnToolOverlay> for TurnToolOverlay {
         Self {
             allowed_tools: value.allowed_tools,
             blocked_tools: value.blocked_tools,
+            tool_choice_plan: value.tool_choice_plan,
             dispatch_context: BTreeMap::new(),
         }
     }
@@ -3420,6 +3449,7 @@ mod tests {
     #[test]
     fn turn_tool_overlay_compose_preserves_distinct_dispatch_context_keys() {
         let existing = TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: Some(vec![
                 crate::types::ToolName::from("workgraph_get"),
                 crate::types::ToolName::from("send_message"),
@@ -3431,6 +3461,7 @@ mod tests {
             )]),
         };
         let overlay = TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: None,
             blocked_tools: None,
             dispatch_context: BTreeMap::from([(
@@ -3467,6 +3498,7 @@ mod tests {
     #[test]
     fn turn_tool_overlay_compose_without_existing_returns_overlay() {
         let overlay = TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: None,
             blocked_tools: None,
             dispatch_context: BTreeMap::from([(
@@ -3483,6 +3515,7 @@ mod tests {
     #[test]
     fn turn_tool_overlay_compose_refuses_conflicting_dispatch_context_key() {
         let make = |value: serde_json::Value| TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
             allowed_tools: None,
             blocked_tools: None,
             dispatch_context: BTreeMap::from([(
@@ -3502,6 +3535,67 @@ mod tests {
                 key: crate::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
             }
         );
+    }
+
+    #[test]
+    fn tool_choice_plan_composes_without_silent_overwrite() {
+        use crate::lifecycle::run_primitive::ToolChoice;
+        let plan = |choices: Vec<ToolChoice>| TurnToolOverlay {
+            tool_choice_plan: choices,
+            ..Default::default()
+        };
+        let forced = vec![
+            ToolChoice::Tool {
+                name: "deny_probe".into(),
+            },
+            ToolChoice::Required,
+        ];
+        // Either side's plan survives a plan-less overlay.
+        let composed = TurnToolOverlay::compose(Some(plan(forced.clone())), plan(vec![])).unwrap();
+        assert_eq!(composed.tool_choice_plan, forced);
+        let composed = TurnToolOverlay::compose(Some(plan(vec![])), plan(forced.clone())).unwrap();
+        assert_eq!(composed.tool_choice_plan, forced);
+        let composed =
+            TurnToolOverlay::compose(Some(plan(forced.clone())), plan(forced.clone())).unwrap();
+        assert_eq!(composed.tool_choice_plan, forced);
+        assert_eq!(
+            TurnToolOverlay::compose(Some(plan(forced)), plan(vec![ToolChoice::None])),
+            Err(TurnToolOverlayComposeError::ConflictingToolChoicePlan)
+        );
+    }
+
+    #[test]
+    fn tool_choice_plan_round_trips_through_the_public_wire_overlay() {
+        use crate::lifecycle::run_primitive::ToolChoice;
+        let wire = serde_json::json!({
+            "tool_choice_plan": [
+                {"mode": "tool", "name": "delete_file"},
+                {"mode": "required"},
+                {"mode": "auto"}
+            ]
+        });
+        let public: PublicTurnToolOverlay = serde_json::from_value(wire.clone()).unwrap();
+        let overlay = TurnToolOverlay::from(public.clone());
+        assert_eq!(
+            overlay.tool_choice_plan,
+            vec![
+                ToolChoice::Tool {
+                    name: "delete_file".into()
+                },
+                ToolChoice::Required,
+                ToolChoice::Auto,
+            ]
+        );
+        assert_eq!(overlay.into_public().unwrap(), public);
+        let mut encoded = serde_json::to_value(&public).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .retain(|_, value| !value.is_null());
+        assert_eq!(encoded, wire);
+        // An empty plan is omitted, so existing overlays serialize unchanged.
+        let plain = serde_json::to_value(TurnToolOverlay::default()).unwrap();
+        assert!(plain.get("tool_choice_plan").is_none(), "{plain}");
     }
 
     struct UnsupportedSessionService;

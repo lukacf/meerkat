@@ -5,7 +5,10 @@
     clippy::redundant_clone
 )]
 
+mod agent_input;
 mod agent_tools;
+mod child_tool_bundles;
+mod child_tool_policy;
 pub mod council_relink;
 pub mod detached_delivery;
 pub mod fork_relink;
@@ -22,13 +25,15 @@ mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
 };
+pub use child_tool_bundles::{ChildToolBundleAvailability, ChildToolBundles};
+pub use child_tool_policy::ChildToolPolicyRefused;
 pub use detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
     DetachedOwnerError, DetachedOwnerHost, deliver_detached_completion,
     deliver_detached_completion_to_member, deliver_detached_completion_to_member_when_revivable,
     deliver_detached_completion_to_session, detached_completion_notice,
 };
-pub use public_definition::decode_public_mob_definition;
+pub use public_definition::{decode_public_mob_definition, decode_public_profile};
 pub use public_mcp::{
     handle_public_tools_call, public_tool_names, public_tools_list,
     public_tools_list_without_workgraph, wrap_public_tool_payload,
@@ -60,8 +65,9 @@ use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
-    MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireMemberRef,
-    WireMobLifecycleAction, WireMobLifecycleStatus, WireMobRespawnOutcome, WireMobWireAction,
+    MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireContentInput,
+    WireMemberRef, WireMobLifecycleAction, WireMobLifecycleStatus, WireMobRespawnOutcome,
+    WireMobWireAction,
 };
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
@@ -122,6 +128,15 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 struct ManagedMob {
     handle: MobHandle,
     storage_path: Option<PathBuf>,
+}
+
+/// Structured reports a lifecycle action returns: `destroy` its cleanup
+/// report, `stop` its per-member report (#1500).
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct MobLifecycleReports {
+    pub destroy_report: Option<meerkat_mob::MobDestroyReport>,
+    pub stop_report: Option<meerkat_mob::MobStopReport>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -415,6 +430,12 @@ pub struct MobMcpState {
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
+    /// Host bundles; only the child-available ones reach child mob builders.
+    child_tool_bundles: ChildToolBundles,
+    /// Host consequence-policy registry, forwarded to every child builder.
+    tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
+    /// The host's explicit application tool policy for child mob members.
+    child_application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     persistent_storage_root: Option<PathBuf>,
     /// Legacy infallible persistent-root construction records setup failure so
     /// every managed-mob operation fails closed rather than using ephemeral
@@ -467,6 +488,9 @@ pub struct MobMcpState {
     /// Signals every change of the offset above, so a sweep waiting for a
     /// claim lease re-reads the clock instead of sleeping past a moved one.
     temporary_council_clock_changes: tokio::sync::watch::Sender<i64>,
+    /// Bumped each time the post-restore council sweep finishes a pass, so
+    /// tests can order work after a pass without polling.
+    temporary_council_sweep_passes: tokio::sync::watch::Sender<u64>,
     /// Set once the automatic post-restore recovery sweep has been scheduled.
     /// Also what keeps the sweep from re-entering `ensure_restored`.
     temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
@@ -547,6 +571,9 @@ impl MobMcpState {
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
+            child_tool_bundles: ChildToolBundles::default(),
+            tool_consequence_policy_registry: None,
+            child_application_tool_policy: None,
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
             mobs: Arc::new(RwLock::new(BTreeMap::new())),
@@ -570,6 +597,7 @@ impl MobMcpState {
             coordinator_id: uuid::Uuid::new_v4().simple().to_string(),
             temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
             temporary_council_clock_changes: tokio::sync::watch::channel(0).0,
+            temporary_council_sweep_passes: tokio::sync::watch::channel(0).0,
             temporary_council_cleanup_budget_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(temporary_council::TEMPORARY_COUNCIL_CLEANUP_BUDGET.as_millis())
                     .unwrap_or(30_000),
@@ -884,6 +912,18 @@ impl MobMcpState {
     /// Wakes when the coordinator's clock offset changes.
     pub(crate) fn temporary_council_clock_changes(&self) -> tokio::sync::watch::Receiver<i64> {
         self.temporary_council_clock_changes.subscribe()
+    }
+
+    pub(crate) fn note_temporary_council_sweep_pass(&self) {
+        self.temporary_council_sweep_passes
+            .send_modify(|passes| *passes = passes.wrapping_add(1));
+    }
+
+    /// Passes the post-restore council sweep has finished. Test support:
+    /// order work after a sweep pass without polling.
+    #[doc(hidden)]
+    pub fn temporary_council_sweep_passes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.temporary_council_sweep_passes.subscribe()
     }
 
     /// Adjust the bounded cleanup budget on a live state.
@@ -1241,6 +1281,54 @@ impl MobMcpState {
         self
     }
 
+    /// Host Rust tool bundles for mobs created through the mob tools. Callers
+    /// may name only bundles registered as child-available; see
+    /// [`ChildToolBundles`]. The default offers none.
+    pub fn with_child_tool_bundles(mut self, bundles: ChildToolBundles) -> Self {
+        self.child_tool_bundles = bundles;
+        self
+    }
+
+    /// Install the host's tool consequence-policy registry. It is forwarded
+    /// to every child mob builder, and installing it makes the host managed:
+    /// child mob creation then requires
+    /// [`Self::with_child_application_tool_policy`].
+    pub fn with_tool_consequence_policy_registry(
+        mut self,
+        registry: Arc<meerkat_core::ToolConsequencePolicyRegistry>,
+    ) -> Self {
+        self.tool_consequence_policy_registry = Some(registry);
+        self
+    }
+
+    /// The application tool policy every member of a child mob is built
+    /// with. An explicit [`meerkat_core::ApplicationToolPolicyBinding::Unmanaged`]
+    /// is a valid choice; callers can never set or override it.
+    pub fn with_child_application_tool_policy(
+        mut self,
+        binding: meerkat_core::ApplicationToolPolicyBinding,
+    ) -> Self {
+        self.child_application_tool_policy = Some(binding);
+        self
+    }
+
+    /// Refuse child mob creation (the agent `mob_create` tool, and the
+    /// implicit mob `delegate` helpers run in) up front when the host's child
+    /// policy cannot be applied (a managed host without a child policy, a
+    /// provider policy without a registry, or `Inherit`).
+    pub fn admit_child_tool_policy(&self) -> Result<(), ChildToolPolicyRefused> {
+        self.child_tool_policy().map(|_| ())
+    }
+
+    fn child_tool_policy(
+        &self,
+    ) -> Result<meerkat_core::ApplicationToolPolicyBinding, ChildToolPolicyRefused> {
+        child_tool_policy::resolve_child_policy(
+            self.tool_consequence_policy_registry.as_ref(),
+            self.child_application_tool_policy.as_ref(),
+        )
+    }
+
     /// Seed skill source definitions available to realm-referenced profiles.
     pub fn with_realm_skill_sources(mut self, sources: BTreeMap<String, SkillSource>) -> Self {
         self.realm_skill_sources = sources;
@@ -1346,12 +1434,26 @@ impl MobMcpState {
         })
     }
 
-    fn configure_builder(&self, mut builder: MobBuilder) -> MobBuilder {
+    fn configure_builder(
+        &self,
+        mut builder: MobBuilder,
+        scope: child_tool_policy::ChildMobScope,
+    ) -> MobBuilder {
         builder = builder
             .with_session_service(self.session_service.clone())
             .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
             .with_default_external_tools_provider(self.external_tools_provider.clone())
             .with_workgraph_service(self.workgraph_service.clone());
+        builder = self.child_tool_bundles.configure(builder);
+        if let Some(registry) = &self.tool_consequence_policy_registry {
+            builder = builder.with_tool_consequence_policy_registry(Arc::clone(registry));
+        }
+        builder = builder.with_spawn_member_customizer(Arc::new(
+            child_tool_policy::ChildPolicyCustomizer {
+                policy: self.child_tool_policy(),
+                scope,
+            },
+        ));
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
         }
@@ -1534,10 +1636,19 @@ impl MobMcpState {
                     continue;
                 }
 
+                let scope = child_tool_policy::ChildMobScope::default();
                 let handle = self
-                    .configure_builder(MobBuilder::for_resume(storage))
+                    .configure_builder(MobBuilder::for_resume(storage), scope.clone())
                     .resume()
                     .await?;
+                if handle
+                    .owner_bridge_session_lifecycle_authority()
+                    .is_some_and(|authority| {
+                        child_tool_policy::is_child_mob(authority.destroy_on_owner_archive)
+                    })
+                {
+                    scope.mark_child();
+                }
                 let mob_id = handle.definition().id.clone();
                 match self.mobs.write().await.entry(mob_id.clone()) {
                     Entry::Vacant(entry) => {
@@ -1669,7 +1780,10 @@ impl MobMcpState {
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
         let handle = self
-            .configure_builder(MobBuilder::new(definition, storage))
+            .configure_builder(
+                MobBuilder::new(definition, storage),
+                child_tool_policy::ChildMobScope::default(),
+            )
             .create()
             .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
@@ -1734,7 +1848,18 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
-        let mut builder = self.configure_builder(MobBuilder::new(definition.clone(), storage));
+        let child = owner_bridge_session_authority.as_ref().is_some_and(
+            |(_, destroy_on_owner_archive, _)| {
+                child_tool_policy::is_child_mob(*destroy_on_owner_archive)
+            },
+        );
+        if child {
+            // Host tool bundles reach a child mob only through the host.
+            self.child_tool_bundles.supply(&mut definition);
+        }
+        let scope = child_tool_policy::ChildMobScope::new(child);
+        let mut builder =
+            self.configure_builder(MobBuilder::new(definition.clone(), storage), scope);
         if let Some((owner_bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)) =
             owner_bridge_session_authority
         {
@@ -1931,7 +2056,9 @@ impl MobMcpState {
         handle.status().await
     }
 
-    pub async fn mob_stop(&self, mob_id: &MobId) -> Result<(), MobError> {
+    /// Stop (pause) the mob, returning what the stop did to each member
+    /// (#1500).
+    pub async fn mob_stop(&self, mob_id: &MobId) -> Result<meerkat_mob::MobStopReport, MobError> {
         self.handle_for(mob_id).await?.stop().await
     }
 
@@ -1963,25 +2090,28 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         action: WireMobLifecycleAction,
-    ) -> Result<Option<meerkat_mob::MobDestroyReport>, MobMcpDestroyError> {
+    ) -> Result<MobLifecycleReports, MobMcpDestroyError> {
         match action {
-            WireMobLifecycleAction::Stop => {
-                self.mob_stop(mob_id).await?;
-                Ok(None)
-            }
+            WireMobLifecycleAction::Stop => Ok(MobLifecycleReports {
+                stop_report: Some(self.mob_stop(mob_id).await?),
+                ..MobLifecycleReports::default()
+            }),
             WireMobLifecycleAction::Resume => {
                 self.mob_resume(mob_id).await?;
-                Ok(None)
+                Ok(MobLifecycleReports::default())
             }
             WireMobLifecycleAction::Complete => {
                 self.mob_complete(mob_id).await?;
-                Ok(None)
+                Ok(MobLifecycleReports::default())
             }
             WireMobLifecycleAction::Reset => {
                 self.mob_reset(mob_id).await?;
-                Ok(None)
+                Ok(MobLifecycleReports::default())
             }
-            WireMobLifecycleAction::Destroy => self.mob_destroy(mob_id).await.map(Some),
+            WireMobLifecycleAction::Destroy => Ok(MobLifecycleReports {
+                destroy_report: Some(self.mob_destroy(mob_id).await?),
+                ..MobLifecycleReports::default()
+            }),
         }
     }
 
@@ -2305,7 +2435,24 @@ impl MobMcpState {
                 bridge_session_id: bridge_session_id.to_string(),
             });
         };
-        self.mob_retire(&mob_id, identity).await
+        // Archiving a member's session is an explicit retry of the member's
+        // retirement. A retirement an earlier attempt left stuck stays owned
+        // by the mob and a plain retire only reports it (meerkat 0.8.51), so
+        // the archive re-drives it once, then retires the rest of the tree if
+        // the stuck one was a descendant.
+        let retired = self.mob_retire(&mob_id, identity.clone()).await;
+        let Err(MobError::MemberRetirementStuck { member_id, .. }) = retired else {
+            return retired;
+        };
+        self.admitted_handle_for(&mob_id, ControlScope::Retire)
+            .await?
+            .redrive_retirement(member_id.clone())
+            .await?;
+        if member_id == identity {
+            Ok(())
+        } else {
+            self.mob_retire(&mob_id, identity).await
+        }
     }
 
     #[doc(hidden)]
@@ -5773,7 +5920,7 @@ struct MobSpawnMeerkatArgs {
     profile: String,
     agent_identity: String,
     #[serde(default)]
-    initial_message: Option<ContentInput>,
+    initial_message: Option<WireContentInput>,
     #[serde(default)]
     backend: Option<MobBackendKind>,
     #[serde(default)]
@@ -5954,7 +6101,7 @@ struct RespawnArgs {
     mob_id: String,
     agent_identity: String,
     #[serde(default)]
-    initial_message: Option<ContentInput>,
+    initial_message: Option<WireContentInput>,
 }
 #[derive(Deserialize)]
 struct ForceCancelArgs {
@@ -6010,7 +6157,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobCreateArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let definition = decode_public_mob_definition(args.definition)
+                let definition = agent_input::decode_agent_mob_definition(args.definition)
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 let mob_id = self
                     .state
@@ -6142,7 +6289,11 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .into_iter()
                     .map(|spec| {
                         let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity);
-                        s.initial_message = spec.initial_message;
+                        s.initial_message = spec
+                            .initial_message
+                            .map(agent_input::decode_agent_content_input)
+                            .transpose()
+                            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                         s.runtime_mode = spec.runtime_mode;
                         s.backend = spec.backend;
                         s.binding = spec
@@ -6244,12 +6395,17 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: RespawnArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let initial_message = args
+                    .initial_message
+                    .map(agent_input::decode_agent_content_input)
+                    .transpose()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 match self
                     .state
                     .mob_respawn(
                         &MobId::from(args.mob_id),
                         AgentIdentity::from(args.agent_identity.as_str()),
-                        args.initial_message,
+                        initial_message,
                     )
                     .await
                 {
@@ -6803,6 +6959,7 @@ mod tests {
                         "mob-mcp-local-comms-test",
                     ),
                     runtime_epoch_id: None,
+                    initial_run_start_holds: std::collections::BTreeSet::new(),
                 },
             )
             .expect("RegisterSession input");
@@ -7852,6 +8009,7 @@ mod tests {
                             tool_access_policy: build
                                 .as_ref()
                                 .and_then(|options| options.tool_access_policy.clone()),
+                            spawn_tool_access_policy: None,
                             application_tool_policy: build
                                 .as_ref()
                                 .map(|options| options.application_tool_policy.clone())
@@ -12255,6 +12413,89 @@ mod tests {
         assert!(
             !svc.session_exists(&bridge_session_id).await,
             "successful archive helper retry must archive the worker bridge session"
+        );
+    }
+
+    /// Archiving a member's session retries the member's retirement. A
+    /// retirement the first attempt left stuck is re-driven once per archive
+    /// request; while its cause still fails, the archive surfaces the typed
+    /// stuck retirement with that cause (never masked, never looped), and once
+    /// the cause clears the next archive completes it.
+    #[tokio::test]
+    async fn test_archive_of_a_member_session_redrives_its_stuck_retirement_and_surfaces_a_still_failing_cause()
+     {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(
+            svc.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
+        let mob_id = state
+            .mob_create_definition(explicit_definition("archive-redrive"))
+            .await
+            .expect("create mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let bridge_session_id = state
+            .handle_for(&mob_id)
+            .await
+            .expect("mob handle")
+            .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
+            .await
+            .expect("worker bridge session");
+        svc.fail_archive(bridge_session_id.clone(), "forced member archive failure")
+            .await;
+
+        let first = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &bridge_session_id,
+        )
+        .await
+        .expect_err("the member archive fails");
+        assert!(
+            first.to_string().contains("forced member archive failure"),
+            "the first archive surfaces the failure: {first}"
+        );
+
+        // The cause still fails: the archive re-drives the stuck retirement
+        // once and surfaces it, typed, with its cause.
+        let still_failing = crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &bridge_session_id,
+        )
+        .await
+        .expect_err("a re-driven retirement whose cause still fails surfaces it");
+        let text = still_failing.to_string();
+        assert!(
+            text.contains("is stuck at") && text.contains("forced member archive failure"),
+            "the archive surfaces the stuck retirement and its cause: {text}"
+        );
+        assert!(
+            svc.session_exists(&bridge_session_id).await,
+            "a failed re-drive keeps the member session for the next retry"
+        );
+
+        svc.clear_archive_failure(&bridge_session_id).await;
+        crate::agent_tools::archive_session_with_mob_cleanup(
+            svc.clone(),
+            state.clone(),
+            &bridge_session_id,
+        )
+        .await
+        .expect("the archive re-drives the stuck retirement to completion");
+        assert!(
+            !svc.session_exists(&bridge_session_id).await,
+            "the re-driven retirement archives the member session"
         );
     }
 

@@ -471,8 +471,10 @@ where
                 &deferred_authorities,
             )?;
             self.turn_tool_dispatch_metadata = dispatch_context;
+            self.turn_tool_choice_plan = overlay.tool_choice_plan;
         } else {
             self.turn_tool_dispatch_metadata.clear();
+            self.turn_tool_choice_plan.clear();
             handle.clear_turn_overlay()?;
         }
         Ok(())
@@ -1377,6 +1379,13 @@ where
     /// Snapshot the agent's live tool-scope state for diagnostics and mapping.
     pub fn tool_scope_snapshot(&self) -> Option<crate::ToolScopeSnapshot> {
         self.tool_scope.snapshot()
+    }
+
+    /// The provider-visible tool definitions as shared handles. Unchanged
+    /// tools keep their allocation across calls, so callers can detect a
+    /// change by pointer instead of comparing schemas.
+    pub fn visible_tool_defs_shared(&self) -> Arc<[Arc<crate::ToolDef>]> {
+        self.tool_scope.visible_tools()
     }
 
     /// Snapshot the provider-visible tool definitions for the active LLM model.
@@ -3069,6 +3078,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             live_bridge_tool_defs: Some(frozen_tool_defs),
             noncommitting_live_bridge_run: true,
             turn_tool_dispatch_metadata: Default::default(),
+            turn_tool_choice_plan: Vec::new(),
             tools_config: self.tools_config.clone(),
         };
 

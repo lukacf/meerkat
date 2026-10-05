@@ -230,6 +230,14 @@ already-committed turn. Clients that see live
 `stream_truncated` reconcile from `events/list_since`, a current snapshot, or
 ATIF export.
 
+Every committed close of one of the session's live channels publishes
+`live_channel_closed` on the session event stream, after the close commits:
+`session_id`, `channel_id`, a typed `reason` (`LiveChannelCloseReason`:
+`client_requested`, `client_disconnected`, `provider_closed`, `error`,
+`media_fault`, `replaced` or `open_abandoned`) and `reopen_recommended`, true
+only for a `media_fault` while the session's one reopen is still available.
+Observers learn the cause from the stream instead of polling `live/status`.
+
 ## Assistant message identity
 
 Every assistant message the agent loop commits carries a session-scoped

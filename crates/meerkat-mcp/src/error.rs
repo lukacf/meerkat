@@ -9,6 +9,13 @@ pub enum McpError {
     /// interactive retry or losing its typed cause in a connection string.
     #[error(transparent)]
     OAuthAccountRejected(meerkat_auth_core::McpOAuthError),
+    /// The server is waiting for a human to authorize it through the host's
+    /// browser channel. This is typed host status: it carries the target and
+    /// never an authorize URL, state or code.
+    #[error("MCP server '{}' is awaiting human authorization", .target.server_name())]
+    AuthorizationRequired {
+        target: Box<meerkat_auth_core::McpServerIdentity>,
+    },
     #[error("Connection failed: {reason}")]
     ConnectionFailed { reason: String },
 

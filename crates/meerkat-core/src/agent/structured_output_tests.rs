@@ -1297,3 +1297,184 @@ async fn gemini_cached_content_requests_are_not_projected() {
     }
     assert!(structured_output_slot(calls[1].provider_params.as_ref()).is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Tool choice through the real loop
+// ---------------------------------------------------------------------------
+
+fn tool_choice_of(call: &RecordedCall) -> Option<meerkat_core::ToolChoice> {
+    call.provider_params
+        .as_ref()
+        .and_then(|params| params.tool_choice.clone())
+}
+
+fn plan_overlay(plan: Vec<meerkat_core::ToolChoice>) -> crate::service::TurnToolOverlay {
+    crate::service::TurnToolOverlay {
+        tool_choice_plan: plan,
+        ..Default::default()
+    }
+}
+
+/// A builder whose tool visibility has the generated (test) authority that
+/// staging a turn overlay requires, as runtime-backed sessions have.
+fn overlay_builder() -> AgentBuilder {
+    let owner: Arc<dyn crate::ToolVisibilityOwner> =
+        Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+    base_builder().with_tool_visibility_owner(
+        crate::tool_scope::generated_test_tool_visibility_owner_from(owner),
+    )
+}
+
+fn named(name: &str) -> meerkat_core::ToolChoice {
+    meerkat_core::ToolChoice::Tool {
+        name: name.to_string(),
+    }
+}
+
+/// The ADR-001 A2 shape: three forced steps in one run, then Auto. Entry `k`
+/// of the turn's plan reaches the run's `k`-th provider request, in order;
+/// every request after the plan is exhausted is Auto.
+#[tokio::test]
+async fn tool_choice_plan_is_consumed_one_entry_per_provider_request_then_auto() {
+    let client = Arc::new(RecordingSchemaClient::new(
+        Provider::OpenAI,
+        vec![
+            tool_call("call-1"),
+            tool_call("call-2"),
+            tool_call("call-3"),
+            text("done"),
+        ],
+    ));
+    let mut agent = build(&client, overlay_builder()).await;
+    agent
+        .set_turn_tool_overlay(Some(plan_overlay(vec![
+            named("lookup"),
+            meerkat_core::ToolChoice::Required,
+            named("lookup"),
+        ])))
+        .expect("overlay");
+    agent.run("a2".to_string().into()).await.expect("run");
+
+    let calls = client.calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(tool_choice_of(&calls[0]), Some(named("lookup")));
+    assert_eq!(
+        tool_choice_of(&calls[1]),
+        Some(meerkat_core::ToolChoice::Required)
+    );
+    assert_eq!(tool_choice_of(&calls[2]), Some(named("lookup")));
+    assert_eq!(
+        tool_choice_of(&calls[3]),
+        None,
+        "plan exhausted: Auto completion"
+    );
+}
+
+/// The plan is request-local: it never carries into the next turn once the
+/// overlay is cleared (as the session service does after every run), and a
+/// tool choice arriving through session params is ignored, not persisted.
+#[tokio::test]
+async fn tool_choice_plan_never_leaks_into_later_turns_or_session_params() {
+    let client = Arc::new(RecordingSchemaClient::new(
+        Provider::OpenAI,
+        vec![
+            tool_call("call-1"),
+            text("first"),
+            tool_call("call-2"),
+            text("second"),
+        ],
+    ));
+    // An in-process session default carrying a choice must not apply: only
+    // the turn plan sets a request's choice.
+    let builder = overlay_builder().provider_params(ProviderParamsOverride {
+        temperature: Some(0.2),
+        tool_choice: Some(meerkat_core::ToolChoice::Required),
+        ..Default::default()
+    });
+    let mut agent = build(&client, builder).await;
+    agent
+        .set_turn_tool_overlay(Some(plan_overlay(vec![named("lookup")])))
+        .expect("overlay");
+    agent
+        .run("first".to_string().into())
+        .await
+        .expect("first run");
+    agent.set_turn_tool_overlay(None).expect("clear overlay");
+    agent
+        .run("second".to_string().into())
+        .await
+        .expect("second run");
+
+    let calls = client.calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(tool_choice_of(&calls[0]), Some(named("lookup")));
+    assert_eq!(tool_choice_of(&calls[1]), None);
+    assert_eq!(
+        tool_choice_of(&calls[2]),
+        None,
+        "no plan leaks into the next turn"
+    );
+    assert_eq!(tool_choice_of(&calls[3]), None);
+    for call in &calls {
+        assert_eq!(
+            call.provider_params
+                .as_ref()
+                .and_then(|params| params.temperature),
+            Some(0.2),
+            "session params still apply"
+        );
+    }
+    // Never serialized: no persisted params can carry a choice.
+    let encoded = serde_json::to_value(ProviderParamsOverride {
+        tool_choice: Some(named("lookup")),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(encoded, json!({}));
+    assert!(
+        serde_json::from_value::<ProviderParamsOverride>(
+            json!({"tool_choice": {"mode": "required"}})
+        )
+        .is_err(),
+        "a params override cannot be decoded with a tool choice"
+    );
+}
+
+/// Structured-output extraction, which offers no tools, carries no choice
+/// even while the plan still has entries.
+#[tokio::test]
+async fn extraction_carries_no_tool_choice_even_with_plan_entries_left() {
+    let client = Arc::new(RecordingSchemaClient::new(
+        Provider::OpenAI,
+        vec![
+            tool_call("call-1"),
+            text("prose answer"),
+            text(VALID_REVIEW),
+        ],
+    ));
+    let mut agent = build(&client, overlay_builder().output_schema(review_schema())).await;
+    agent
+        .set_turn_tool_overlay(Some(plan_overlay(vec![
+            named("lookup"),
+            meerkat_core::ToolChoice::None,
+            meerkat_core::ToolChoice::None,
+            meerkat_core::ToolChoice::None,
+        ])))
+        .expect("overlay");
+    let result = agent.run("review".to_string().into()).await.expect("run");
+    assert_eq!(result.structured_output, Some(expected_review()));
+
+    let calls = client.calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(tool_choice_of(&calls[0]), Some(named("lookup")));
+    assert_eq!(
+        tool_choice_of(&calls[1]),
+        Some(meerkat_core::ToolChoice::None)
+    );
+    assert!(calls[2].tool_names.is_empty(), "extraction offers no tools");
+    assert_eq!(
+        tool_choice_of(&calls[2]),
+        None,
+        "extraction carries no tool choice"
+    );
+}

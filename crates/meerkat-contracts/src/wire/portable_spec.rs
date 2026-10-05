@@ -144,6 +144,15 @@ pub struct PortableToolConfig {
     /// an ungated member.
     #[serde(default, skip_serializing_if = "read_only_is_false")]
     pub read_only: bool,
+    /// Profile-declared tool deny list, carried so a member materialized on
+    /// another host enforces the same execution gate.
+    ///
+    /// Omitted when empty for the same two reasons as `read_only`: a spec
+    /// without a deny list keeps its pre-existing digest-covered bytes, and a
+    /// restricted spec sent to a host too old to know the field is rejected
+    /// by `deny_unknown_fields` instead of materializing an ungated member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
     /// Declarative MCP servers keyed by server name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp_servers: BTreeMap<String, PortableMcpDecl>,
@@ -453,6 +462,7 @@ pub(crate) fn sample_portable_member_spec() -> PortableMemberSpec {
                 schedule: false,
                 image_generation: false,
                 read_only: false,
+                deny: Vec::new(),
                 mcp_servers: BTreeMap::from([(
                     "docs".to_string(),
                     PortableMcpDecl::Stdio {

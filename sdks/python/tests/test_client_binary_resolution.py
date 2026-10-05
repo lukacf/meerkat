@@ -1,5 +1,7 @@
 """Tests for MeerkatClient binary discovery and download fallback behavior."""
 
+import os
+import urllib.request
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -67,6 +69,58 @@ def test_unsupported_platform_rejected():
     ):
         with pytest.raises(MeerkatError):
             MeerkatClient._platform_target()
+
+
+RELEASE_BASE = "https://github.com/lukacf/meerkat/releases/download"
+
+
+def test_release_asset_matches_the_published_naming():
+    # Release assets carry no "v" before the version; the tag does.
+    artifact, url = MeerkatClient._rkat_rpc_release_asset(
+        "0.8.50", "x86_64-unknown-linux-gnu", "tar.gz"
+    )
+
+    assert artifact == "rkat-rpc-0.8.50-x86_64-unknown-linux-gnu.tar.gz"
+    assert url == f"{RELEASE_BASE}/v0.8.50/rkat-rpc-0.8.50-x86_64-unknown-linux-gnu.tar.gz"
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "expected"),
+    [
+        ("Linux", "x86_64", "rkat-rpc-0.8.50-x86_64-unknown-linux-gnu.tar.gz"),
+        ("Linux", "aarch64", "rkat-rpc-0.8.50-aarch64-unknown-linux-gnu.tar.gz"),
+        ("Darwin", "arm64", "rkat-rpc-0.8.50-aarch64-apple-darwin.tar.gz"),
+        ("Darwin", "x86_64", "rkat-rpc-0.8.50-x86_64-apple-darwin.tar.gz"),
+        ("Windows", "AMD64", "rkat-rpc-0.8.50-x86_64-pc-windows-msvc.zip"),
+    ],
+)
+def test_every_published_target_maps_to_its_release_asset(system, machine, expected):
+    target, archive_ext, _binary = MeerkatClient._platform_target(system, machine)
+    artifact, url = MeerkatClient._rkat_rpc_release_asset("0.8.50", target, archive_ext)
+
+    assert artifact == expected
+    assert url == f"{RELEASE_BASE}/v0.8.50/{expected}"
+
+
+def test_intel_macos_maps_to_the_x86_64_darwin_asset():
+    assert MeerkatClient._platform_target("Darwin", "x86_64") == (
+        "x86_64-apple-darwin",
+        "tar.gz",
+        "rkat-rpc",
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("MEERKAT_SDK_NETWORK_TESTS") != "1",
+    reason="set MEERKAT_SDK_NETWORK_TESTS=1 to check the published asset over the network",
+)
+def test_published_release_asset_exists():
+    _artifact, url = MeerkatClient._rkat_rpc_release_asset(
+        "0.8.50", "x86_64-unknown-linux-gnu", "tar.gz"
+    )
+    request = urllib.request.Request(url, method="HEAD")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.status == 200
 
 
 def test_default_connect_args_do_not_enable_live_transports():

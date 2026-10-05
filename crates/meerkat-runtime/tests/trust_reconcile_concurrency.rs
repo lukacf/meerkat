@@ -72,6 +72,7 @@ fn obligation(
         MeerkatMachineInput::RegisterSession {
             session_id: SessionId::from("trust-reconcile-concurrency-test"),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("RegisterSession input");
@@ -291,6 +292,7 @@ async fn lower_epoch_overlay_is_rejected_by_generated_machine() {
         MeerkatMachineInput::RegisterSession {
             session_id: SessionId::from("trust-reconcile-lower-epoch-test"),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("RegisterSession input");

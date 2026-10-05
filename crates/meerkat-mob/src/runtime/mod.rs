@@ -284,7 +284,11 @@ mod member_history_proxy;
 // Controlling-side live-channel bridge proxy (phase 6b, DEC-P6B-C6). NOTE
 // for the lead's consolidated gate edit (ADJ-P6B-17): this module is a
 // `BridgeReply` consumer by construction and joins BRIDGE_CLASSIFIER_FILES.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod member_instruction;
 mod member_live_proxy;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub use member_instruction::MemberInstructionActivationError;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) mod member_operator_forwarder;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -308,6 +312,7 @@ mod placed_kickoff_reconciler;
 pub mod recovery;
 mod remote_flow_ticket;
 mod remote_turn_reconciler;
+mod retirement_settlement;
 mod roster_authority;
 pub(crate) mod scope_gate;
 mod session_service;
@@ -315,10 +320,13 @@ mod spawn_policy;
 mod spawn_profile_authority;
 pub mod spec_compiler;
 pub mod state;
+pub mod stop_report;
 mod supervisor;
 mod supervisor_bridge;
 mod terminalization;
 mod tools;
+pub(crate) use tools::mob_operator_tool_names;
+pub use tools::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
 pub mod topology;
 mod transaction;
 pub mod turn_executor;
@@ -466,6 +474,11 @@ pub use reconcile::{
     ReconcileStage,
 };
 pub use recovery::RestoreIncompatible;
+pub(crate) use retirement_settlement::MemberLifecycleObservations;
+pub use retirement_settlement::{
+    MemberShutdownOutcome, MobShutdownReport, RetirementSettlement, RetirementSettlementWatch,
+    RetirementStage, ShutdownOptions,
+};
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::LiveDurableSourceObservation;
 pub use session_service::{

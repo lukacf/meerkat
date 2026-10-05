@@ -550,6 +550,11 @@ jobs:
           group: gcp-feature-matrix
           profile: submitter
           mode: ${{ inputs.mode || 'full-fresh' }}
+          # Both lanes in parallel, as Governance runs its three: back to back
+          # they did not fit the 20-minute job even on a warm cache (0.8.51
+          # pre-tag graph 37247648542: test-feature-matrix-lib alone took
+          # 1172 s, so surface-checks started at the timeout).
+          batch_jobs: "2"
           lanes: |
             test-feature-matrix-lib
             test-feature-matrix-surface-checks

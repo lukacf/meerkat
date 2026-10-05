@@ -54,6 +54,7 @@ fn registered_authority() -> MeerkatMachineAuthority {
         MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId::from(TEST_SESSION),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("RegisterSession input");
@@ -199,6 +200,7 @@ fn register_while_draining_is_a_typed_refusal_naming_open_obligations() {
         MeerkatMachineInput::RegisterSession {
             session_id: mm_dsl::SessionId::from(TEST_SESSION),
             runtime_epoch_id: None,
+            initial_run_start_holds: std::collections::BTreeSet::new(),
         },
     )
     .expect("a draining registration is a machine-owned verdict, not a guard rejection");

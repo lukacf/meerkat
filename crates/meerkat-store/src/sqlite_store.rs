@@ -9,8 +9,8 @@ use meerkat_core::session_store::{
     PreparedHeadCanonicalMutation, PreparedHeadCanonicalParentSplice,
     PreparedHeadCanonicalParentTransition, PreparedHeadCanonicalRewriteMutation,
     SESSION_ROW_LINEAGE_REBASE_INTERVAL, SaveGuardWitness, SessionHead, SessionHeadCas,
-    SessionMessageRowPrefixAccumulator, StrandLayout, StrandRewriteLayout, StrandSegment,
-    StrandSplice, TranscriptStrandId, VerifiedHeadCanonicalTranscriptHistory,
+    SessionMessageRowPrefixAccumulator, SessionRowLineageAnchor, StrandLayout, StrandRewriteLayout,
+    StrandSegment, StrandSplice, TranscriptStrandId, VerifiedHeadCanonicalTranscriptHistory,
     head_canonical_plain_save_guard_with_prefix_witness, reconstruct_rewrite_record,
     session_head_cas_token, strand_layout_for_history, validate_save_head_transition,
 };
@@ -19,11 +19,12 @@ use meerkat_core::transcript_messages_digest;
 use meerkat_core::types::Message;
 use meerkat_core::{
     ComponentEventPrefixAuthority, PreparedComponentEventSuffix, Released0810ImportEvidence,
-    SerializedComponentEvent, Session, SessionHeadMetadataCell, SessionHeadMetadataCellIdentity,
-    SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionHeadMetadataValueDigest,
-    SessionId, SessionMeta, StoredComponentEventRow, TranscriptRevisionBody,
-    TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
-    TranscriptRewriteRecord, ValidatedTranscriptHistory, VerifiedComponentEventSequence,
+    RetiredTranscriptGraphBase, SerializedComponentEvent, Session, SessionHeadMetadataCell,
+    SessionHeadMetadataCellIdentity, SessionHeadMetadataIdentity, SessionHeadMetadataProjection,
+    SessionHeadMetadataValueDigest, SessionId, SessionMeta, StoredComponentEventRow,
+    TranscriptGraphPrefixAccumulator, TranscriptRevisionBody, TranscriptRevisionEdge,
+    TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord,
+    ValidatedTranscriptHistory, VerifiedComponentEventSequence,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,19 @@ CREATE TABLE IF NOT EXISTS session_heads (
     metadata_json TEXT NOT NULL,
     head_json BLOB NOT NULL,
     cas_token TEXT NOT NULL
+)";
+
+// One row per session whose transcript graph a head-canonical store has
+// re-anchored: the retired prefix (every retired commit plus the rewrite- and
+// graph-prefix accumulators at the cut) and the anchor the retained
+// `session_rewrites` rows chain from. Rows below `retired_count` are deleted
+// in the same transaction that writes this row.
+const CREATE_SESSION_TRANSCRIPT_RETIREMENTS_TABLE_SQL: &str = r"
+CREATE TABLE session_transcript_retirements (
+    session_id TEXT PRIMARY KEY,
+    retired_count INTEGER NOT NULL,
+    base_json BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL
 )";
 
 const CREATE_SESSION_HEADS_UPDATED_INDEX_SQL: &str = r"
@@ -1058,7 +1072,12 @@ fn initialize_current_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlit
     migration_0001_session_schema(tx)?;
     migration_0002_strand_links(tx)?;
     migration_0003_authenticated_head_sidecars(tx)?;
-    migration_0004_head_canonical_v2_authority(tx)
+    migration_0004_head_canonical_v2_authority(tx)?;
+    migration_0005_transcript_retirements(tx)
+}
+
+fn migration_0005_transcript_retirements(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(CREATE_SESSION_TRANSCRIPT_RETIREMENTS_TABLE_SQL)
 }
 
 fn build_released_0_8_10_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -1281,6 +1300,17 @@ fn verify_released_v3_session_schema(conn: &Connection) -> Result<(), String> {
     )
 }
 
+/// Schema v4 (the head-canonical v2 authority crossing) migrated data only,
+/// so its released catalog is exactly v3's.
+fn verify_released_v4_session_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &SESSION_STORE_DOMAIN,
+        RELEASED_V3_SESSION_OBJECTS,
+        build_released_v3_session_schema,
+    )
+}
+
 /// The session store's schema domain in the per-file migration ledger.
 pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "session-store",
@@ -1305,9 +1335,14 @@ pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::S
             name: "head-canonical-v2-authority",
             apply: migration_0004_head_canonical_v2_authority,
         },
+        meerkat_sqlite::Migration {
+            version: 5,
+            name: "transcript-retirements",
+            apply: migration_0005_transcript_retirements,
+        },
     ],
     initialize_current: initialize_current_session_schema,
-    allowed_existing_versions: &[1, 2, 3, 4],
+    allowed_existing_versions: &[1, 2, 3, 4, 5],
     bridge_recoverable_versions: &[1],
     released_predecessors: &[
         meerkat_sqlite::SchemaPredecessor {
@@ -1321,6 +1356,10 @@ pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::S
         meerkat_sqlite::SchemaPredecessor {
             version: 3,
             verify: verify_released_v3_session_schema,
+        },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 4,
+            verify: verify_released_v4_session_schema,
         },
     ],
     owned_objects: &[
@@ -1399,6 +1438,10 @@ pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::S
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Index,
             name: "session_head_metadata_head_lineage_successor_idx",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "session_transcript_retirements",
         },
     ],
     retired_objects: &[],
@@ -1513,7 +1556,7 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("upgrade");
         assert_eq!(report.from_version, 2);
-        assert_eq!(report.to_version, 4);
+        assert_eq!(report.to_version, SESSION_STORE_DOMAIN.supported_version());
     }
 
     /// The exact catalog of a realm created before the schema ledger: the
@@ -1660,7 +1703,10 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("cross v1 head to v2 authority");
 
-        assert_eq!((report.from_version, report.to_version), (3, 4));
+        assert_eq!(
+            (report.from_version, report.to_version),
+            (3, SESSION_STORE_DOMAIN.supported_version())
+        );
         let tx = conn
             .transaction()
             .expect("verify converted head transaction");
@@ -1849,7 +1895,10 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("advance schema around current authority");
 
-        assert_eq!((report.from_version, report.to_version), (3, 4));
+        assert_eq!(
+            (report.from_version, report.to_version),
+            (3, SESSION_STORE_DOMAIN.supported_version())
+        );
         let tx = conn
             .transaction()
             .expect("read preserved authority transaction");
@@ -1934,7 +1983,10 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("upgrade");
 
-        assert_eq!((report.from_version, report.to_version), (2, 4));
+        assert_eq!(
+            (report.from_version, report.to_version),
+            (2, SESSION_STORE_DOMAIN.supported_version())
+        );
         let (row_version, migrated_json, migrated_token) = raw_head(&conn, &id);
         assert_eq!(
             row_version,
@@ -1970,7 +2022,10 @@ mod schema_floor_tests {
 
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("v2 to current");
-        assert_eq!((report.from_version, report.to_version), (2, 4));
+        assert_eq!(
+            (report.from_version, report.to_version),
+            (2, SESSION_STORE_DOMAIN.supported_version())
+        );
 
         assert_eq!(raw_head(&conn, &older_id), (1, older_json, older_token));
         assert_eq!(
@@ -4428,6 +4483,7 @@ pub fn verify_head_rewrite_prefix_descent_in_txn(
             reason: "rewrite-prefix descent heads are unrelated or reversed".to_string(),
         });
     }
+    refuse_rows_below_retention_cut_in_txn(tx, &descendant.id, ancestor.rewrite_count)?;
     let indexed = indexed_rewrite_rows_range_in_txn(
         tx,
         &descendant.id,
@@ -4625,6 +4681,17 @@ fn validated_graph_edge_bytes_for_session(
         }
         return Ok(Vec::new());
     };
+    // Head-canonical edge rows start at generation 1; a re-anchored graph
+    // retired those edges and cannot be converted.
+    if history.state().retired_count() != 0 {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: session.id().clone(),
+            reason: format!(
+                "transcript graph retired its first {} rewrite occurrence(s); head-canonical conversion needs the whole graph",
+                history.state().retired_count()
+            ),
+        });
+    }
     let mut prefix = TranscriptRewritePrefixAccumulator::empty();
     let mut edges = Vec::with_capacity(actual_count);
     for (index, edge) in history.state().edges().iter().enumerate() {
@@ -5607,11 +5674,52 @@ fn head_has_current_row_lineage_anchor(head: &SessionHead) -> Result<bool, Sessi
         && anchor.prefix() == prefix)
 }
 
-fn verify_direct_current_anchor_rows_in_txn(
+/// Whether `head`'s row-lineage anchor sits at its own rewrite generation
+/// and strand: the origin a rewrite mutation rotates to. It seals the last
+/// edge's result, so it may end before the head when the mutation also
+/// persisted a live tail after that result.
+fn head_has_rotated_row_lineage_anchor(head: &SessionHead) -> bool {
+    head.row_lineage_anchor.as_ref().is_some_and(|anchor| {
+        anchor.rewrite_count() == head.rewrite_count
+            && anchor.strand() == &head.strand
+            && anchor.message_count() <= head.message_count
+    })
+}
+
+/// Verify a rotated anchor against the head's settled direct rows: its sealed
+/// rows reproduce the anchor's flat commitment, and its lineage accumulator
+/// extended by the live tail reproduces the head's.
+fn verify_rotated_anchor_rows(
+    head: &SessionHead,
+    rows: &[Vec<u8>],
+) -> Result<(), SessionStoreError> {
+    let anchor = head
+        .row_lineage_anchor
+        .as_ref()
+        .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
+    let sealed = usize::try_from(anchor.message_count())
+        .map_err(|_| SessionStoreError::Corrupted(head.id.clone()))?;
+    let (anchor_rows, tail_rows) = rows
+        .split_at_checked(sealed)
+        .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
+    let observed = SessionMessageRowPrefixAccumulator::from_serialized_rows(anchor_rows)?;
+    let head_prefix = head
+        .message_row_prefix
+        .as_ref()
+        .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
+    if observed != *anchor.materialized_prefix()
+        || anchor.prefix().extend_serialized_rows(tail_rows)? != *head_prefix
+    {
+        return Err(SessionStoreError::Corrupted(head.id.clone()));
+    }
+    Ok(())
+}
+
+fn verify_direct_rotated_anchor_rows_in_txn(
     tx: &Transaction<'_>,
     head: &SessionHead,
 ) -> Result<(), SessionStoreError> {
-    if !head_has_current_row_lineage_anchor(head)?
+    if !head_has_rotated_row_lineage_anchor(head)
         || strand_link_in_txn(tx, &head.id, &head.strand)?.is_some()
         || materialized_row_count_in_txn(tx, &head.id, &head.strand)? != head.message_count
         || physical_row_extent_in_txn(tx, &head.id, &head.strand)? != head.message_count
@@ -5619,15 +5727,7 @@ fn verify_direct_current_anchor_rows_in_txn(
         return Err(SessionStoreError::Corrupted(head.id.clone()));
     }
     let rows = strand_row_bytes_in_txn(tx, &head.id, &head.strand, 0..head.message_count)?;
-    let observed = SessionMessageRowPrefixAccumulator::from_serialized_rows(&rows)?;
-    let anchor = head
-        .row_lineage_anchor
-        .as_ref()
-        .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
-    if observed != *anchor.materialized_prefix() {
-        return Err(SessionStoreError::Corrupted(head.id.clone()));
-    }
-    Ok(())
+    verify_rotated_anchor_rows(head, &rows)
 }
 
 struct ReplayedHeadCanonicalRows {
@@ -5665,15 +5765,32 @@ fn replay_head_canonical_history_in_txn(
         .graph_prefix
         .as_ref()
         .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
-    let indexed = indexed_rewrite_rows_range_in_txn(tx, id, 0, head.rewrite_count)?;
-    if u64::try_from(indexed.len()).ok() != Some(head.rewrite_count) {
+    // A re-anchored graph replays only the retained rows after its persisted
+    // retirement base; the rows below the cut are gone.
+    let base = transcript_retirement_in_txn(tx, id)?;
+    let first_generation = match base.as_ref() {
+        Some(base) => u64::try_from(base.retired_count())
+            .map_err(|_| SessionStoreError::Corrupted(id.clone()))?,
+        None => 0,
+    };
+    if first_generation >= head.rewrite_count {
         return Err(SessionStoreError::Corrupted(id.clone()));
     }
-    let mut rewrite_prefix = TranscriptRewritePrefixAccumulator::empty();
+    let indexed = indexed_rewrite_rows_range_in_txn(tx, id, first_generation, head.rewrite_count)?;
+    if u64::try_from(indexed.len()).ok() != Some(head.rewrite_count - first_generation) {
+        return Err(SessionStoreError::Corrupted(id.clone()));
+    }
+    let mut rewrite_prefix = base
+        .as_ref()
+        .map_or_else(TranscriptRewritePrefixAccumulator::empty, |base| {
+            base.retired().rewrite_prefix().clone()
+        });
     let mut edges = Vec::with_capacity(indexed.len());
     for (offset, (rewrite_idx, row)) in indexed.iter().enumerate() {
-        let expected_idx =
-            u64::try_from(offset).map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+        let expected_idx = u64::try_from(offset)
+            .ok()
+            .and_then(|offset| offset.checked_add(first_generation))
+            .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
         if *rewrite_idx != expected_idx {
             return Err(SessionStoreError::Corrupted(id.clone()));
         }
@@ -5703,6 +5820,32 @@ fn replay_head_canonical_history_in_txn(
         return Err(SessionStoreError::Corrupted(id.clone()));
     }
 
+    let history = match base {
+        Some(base) => ValidatedTranscriptHistory::from_store_replayed_retired_graph(
+            base,
+            edges,
+            &head.rewrite_prefix,
+            graph_prefix,
+        )
+        .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!("failed to restore store-owned re-anchored transcript graph: {error}"),
+        })?,
+        None => replay_whole_head_canonical_graph_in_txn(tx, head, &indexed, edges, graph_prefix)?,
+    };
+    bind_replayed_history_live_tail_in_txn(tx, head, &indexed, history)
+}
+
+/// The pre-retention replay: resolve the original graph anchor from the
+/// first rewrite's parent strand and rebuild the whole graph.
+fn replay_whole_head_canonical_graph_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+    indexed: &[(u64, RewriteRow)],
+    edges: Vec<TranscriptRevisionEdge>,
+    graph_prefix: &TranscriptGraphPrefixAccumulator,
+) -> Result<ValidatedTranscriptHistory, SessionStoreError> {
+    let id = &head.id;
     let first_row = &indexed
         .first()
         .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?
@@ -5716,7 +5859,7 @@ fn replay_head_canonical_history_in_txn(
             .checked_mul(2)
             .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?,
     );
-    for (_, row) in &indexed {
+    for (_, row) in indexed {
         topology_roots.push(row.parent_strand.clone());
         topology_roots.push(row.strand.clone());
     }
@@ -5745,8 +5888,9 @@ fn replay_head_canonical_history_in_txn(
                 .map_err(|_| SessionStoreError::Corrupted(id.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let history = ValidatedTranscriptHistory::from_store_replayed_compact_graph(
-        first_edge.base_revision().to_string(),
+    let anchor_revision = first_edge.base_revision().to_string();
+    ValidatedTranscriptHistory::from_store_replayed_compact_graph(
+        anchor_revision,
         anchor_messages,
         anchor_prefix,
         edges,
@@ -5756,7 +5900,18 @@ fn replay_head_canonical_history_in_txn(
     .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
         id: id.clone(),
         reason: format!("failed to restore store-owned compact transcript graph: {error}"),
-    })?;
+    })
+}
+
+/// Bind a replayed graph's final endpoint plus the head strand's direct
+/// tail rows to the physical head's current row prefix.
+fn bind_replayed_history_live_tail_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+    indexed: &[(u64, RewriteRow)],
+    history: ValidatedTranscriptHistory,
+) -> Result<Option<VerifiedHeadCanonicalTranscriptHistory>, SessionStoreError> {
+    let id = &head.id;
     let endpoint_count = history
         .final_endpoint_row_prefix()
         .map(SessionMessageRowPrefixAccumulator::row_count)
@@ -5799,6 +5954,7 @@ fn replay_head_canonical_rows_in_txn(
             reason: "current canonical head has no bounded row-lineage anchor".to_string(),
         }
     })?;
+    refuse_rows_below_retention_cut_in_txn(tx, id, anchor.rewrite_count())?;
     let indexed =
         indexed_rewrite_rows_range_in_txn(tx, id, anchor.rewrite_count(), head.rewrite_count)?;
     let post_anchor_rewrite_count = head
@@ -5838,6 +5994,66 @@ fn replay_head_canonical_rows_in_txn(
     let mut replay = head.begin_row_lineage_replay()?;
     let mut current_strand = anchor.strand().clone();
     let mut current_count = anchor.message_count();
+    // Releases before 0.8.51 minted a rotated anchor that also sealed the
+    // live tail persisted after its edge's result, so the next edge's base
+    // sits below the anchor's end. Replay such a head from the sealed edge's
+    // result instead; the core accepts that origin only when it reproduces
+    // the anchor's lineage over the anchor's own rows.
+    if let Some((_, first_row)) = indexed.first() {
+        let first_edge = TranscriptRevisionEdge::from_replay_bytes(
+            first_row
+                .graph_edge_json
+                .as_deref()
+                .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?,
+        )
+        .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+        let first_base = u64::try_from(first_edge.messages_before_base())
+            .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+        if first_base < anchor.message_count() {
+            let sealed_idx = anchor
+                .rewrite_count()
+                .checked_sub(1)
+                .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+            let sealed =
+                indexed_rewrite_rows_range_in_txn(tx, id, sealed_idx, anchor.rewrite_count())?;
+            let [(_, sealed_row)] = sealed.as_slice() else {
+                return Err(SessionStoreError::Corrupted(id.clone()));
+            };
+            let sealed_bytes = sealed_row
+                .graph_edge_json
+                .as_deref()
+                .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+            let sealed_edge = TranscriptRevisionEdge::from_replay_bytes(sealed_bytes)
+                .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+            if sealed_edge
+                .to_replay_bytes()
+                .map_err(SessionStoreError::from)?
+                .as_slice()
+                != sealed_bytes
+                || sealed_edge.commit() != &sealed_row.commit
+            {
+                return Err(SessionStoreError::Corrupted(id.clone()));
+            }
+            let result_count = sealed_edge.messages_after();
+            let tail_rows = anchor_rows
+                .get(result_count..)
+                .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+            replay = head.begin_row_lineage_replay_from_released_rotated_anchor(
+                &sealed_edge,
+                &sealed_row.strand,
+                tail_rows,
+            )?;
+            current_count = u64::try_from(result_count)
+                .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+            tracing::warn!(
+                session_id = %id,
+                anchor_rewrite_count = anchor.rewrite_count(),
+                anchor_message_count = anchor.message_count(),
+                replay_origin_message_count = current_count,
+                "replaying a pre-0.8.51 rotated row-lineage anchor from its sealed edge result; the next rewrite re-mints it"
+            );
+        }
+    }
     let mut final_replayed_endpoint = None;
     let mut decoded_rewrite_count = 0_u64;
 
@@ -6177,6 +6393,7 @@ fn activation_boundary_strand_and_prove_rewrite_descent_in_txn(
         });
     }
 
+    refuse_rows_below_retention_cut_in_txn(tx, id, boundary_rewrite_count)?;
     let tail = indexed_rewrite_rows_range_in_txn(
         tx,
         id,
@@ -7810,7 +8027,7 @@ fn verify_prepared_head_canonical_rewrite_rows_named_in_txn(
 ) -> Result<(), SessionStoreError> {
     let id = mutation.session_id();
     let successor_head = mutation.successor_head();
-    let successor_anchor_rotated = head_has_current_row_lineage_anchor(successor_head)?
+    let successor_anchor_rotated = head_has_rotated_row_lineage_anchor(successor_head)
         && successor_head.row_lineage_anchor != mutation.predecessor_head().row_lineage_anchor;
     verify_prepared_rewrite_row_lineage(mutation)?;
 
@@ -7965,7 +8182,7 @@ fn verify_prepared_head_canonical_rewrite_rows_named_in_txn(
     let final_link = strand_link_in_txn(tx, id, &successor_head.strand)?;
     match final_link.as_ref() {
         None if successor_anchor_rotated => {
-            verify_direct_current_anchor_rows_in_txn(tx, successor_head)?;
+            verify_direct_rotated_anchor_rows_in_txn(tx, successor_head)?;
         }
         None => return Err(SessionStoreError::Corrupted(id.clone())),
         Some(_) => {}
@@ -8124,7 +8341,7 @@ pub fn apply_prepared_head_canonical_rewrite_mutation_in_txn(
         mutation.tail_base_seq(),
         mutation.serialized_tail(),
     )?;
-    let successor_anchor_rotated = head_has_current_row_lineage_anchor(mutation.successor_head())?
+    let successor_anchor_rotated = head_has_rotated_row_lineage_anchor(mutation.successor_head())
         && mutation.successor_head().row_lineage_anchor
             != mutation.predecessor_head().row_lineage_anchor;
     if successor_anchor_rotated {
@@ -8148,15 +8365,7 @@ pub fn apply_prepared_head_canonical_rewrite_mutation_in_txn(
             mutation.successor_head().message_count,
             &links,
         )?;
-        let observed = SessionMessageRowPrefixAccumulator::from_serialized_rows(&settled)?;
-        let anchor = mutation
-            .successor_head()
-            .row_lineage_anchor
-            .as_ref()
-            .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
-        if observed != *anchor.materialized_prefix() {
-            return Err(SessionStoreError::Corrupted(id.clone()));
-        }
+        verify_rotated_anchor_rows(mutation.successor_head(), &settled)?;
     }
     if let Some(suffix) = mutation.realtime_suffix() {
         reconcile_prepared_component_suffix_in_txn(tx, suffix)?;
@@ -8175,7 +8384,238 @@ pub fn apply_prepared_head_canonical_rewrite_mutation_in_txn(
             mutation.session_id()
         )));
     }
+    retire_head_canonical_rows_in_txn(
+        tx,
+        mutation.successor_head(),
+        mutation.transcript_retired_count(),
+    )?;
     Ok(HeadCanonicalMutationApplyOutcome::Applied)
+}
+
+/// Whether schema v5's retirement table exists. Released migrations up to
+/// v4 replay graphs before v5 runs; no retirement can exist before then.
+fn transcript_retirements_table_exists_in_txn(
+    tx: &Transaction<'_>,
+) -> Result<bool, SessionStoreError> {
+    tx.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_transcript_retirements'",
+        [],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(StoreError::from)
+    .map_err(into_session_store_error)
+}
+
+/// The persisted retirement base of a re-anchored session graph, if any.
+fn transcript_retirement_in_txn(
+    tx: &Transaction<'_>,
+    id: &SessionId,
+) -> Result<Option<RetiredTranscriptGraphBase>, SessionStoreError> {
+    if !transcript_retirements_table_exists_in_txn(tx)? {
+        return Ok(None);
+    }
+    let row = tx
+        .query_row(
+            "SELECT retired_count, base_json FROM session_transcript_retirements
+             WHERE session_id = ?1",
+            params![id.to_string()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, JsonColumnBytes>(1)?)),
+        )
+        .optional()
+        .map_err(StoreError::from)
+        .map_err(into_session_store_error)?;
+    let Some((retired_count, base_json)) = row else {
+        return Ok(None);
+    };
+    let base: RetiredTranscriptGraphBase = serde_json::from_slice(&base_json.into_bytes())
+        .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+    if i64::try_from(base.retired_count()).ok() != Some(retired_count) {
+        return Err(SessionStoreError::Corrupted(id.clone()));
+    }
+    Ok(Some(base))
+}
+
+/// Typed refusal for a proof that needs rewrite rows from `from_generation`
+/// when the store retired rows past it.
+fn refuse_rows_below_retention_cut_in_txn(
+    tx: &Transaction<'_>,
+    id: &SessionId,
+    from_generation: u64,
+) -> Result<(), SessionStoreError> {
+    let retired = retired_rewrite_count_in_txn(tx, id)?;
+    if from_generation < retired {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!(
+                "rewrite generation {from_generation} predates the stored transcript retention cut at {retired}; its rows were retired"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Rewrite generations retired from this session's rows (zero when none).
+fn retired_rewrite_count_in_txn(
+    tx: &Transaction<'_>,
+    id: &SessionId,
+) -> Result<u64, SessionStoreError> {
+    if !transcript_retirements_table_exists_in_txn(tx)? {
+        return Ok(0);
+    }
+    let count = tx
+        .query_row(
+            "SELECT retired_count FROM session_transcript_retirements WHERE session_id = ?1",
+            params![id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(StoreError::from)
+        .map_err(into_session_store_error)?
+        .unwrap_or(0);
+    u64::try_from(count).map_err(|_| SessionStoreError::Corrupted(id.clone()))
+}
+
+/// Retire the persisted transcript graph to `target` occurrences.
+///
+/// Runs inside the rewrite mutation's transaction, after its head is
+/// written. The stored graph is replayed and re-anchored by the graph owner
+/// (`retired_through`); its base is persisted, the edge rows below the cut
+/// are deleted, and strands no retained authority can reach are collected.
+/// Never retires past the head's row-lineage anchor (cold row replay starts
+/// there) or the newest occurrence; a target at or below the stored cut is a
+/// no-op, so an exact retry is idempotent.
+fn retire_head_canonical_rows_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+    target: u64,
+) -> Result<(), SessionStoreError> {
+    let id = &head.id;
+    let anchor_floor = head
+        .row_lineage_anchor
+        .as_ref()
+        .map_or(0, SessionRowLineageAnchor::rewrite_count);
+    let target = target
+        .min(anchor_floor)
+        .min(head.rewrite_count.saturating_sub(1));
+    if target <= retired_rewrite_count_in_txn(tx, id)? {
+        return Ok(());
+    }
+    let replayed = replay_head_canonical_history_in_txn(tx, head)?
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+    let retired = replayed
+        .history()
+        .retired_through(
+            usize::try_from(target).map_err(|_| SessionStoreError::Corrupted(id.clone()))?,
+        )
+        .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!("failed to retire the stored transcript graph: {error}"),
+        })?;
+    let base = retired
+        .state()
+        .retired_base()
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+    if retired.state().graph_prefix() != replayed.history().state().graph_prefix() {
+        return Err(SessionStoreError::Corrupted(id.clone()));
+    }
+    let base_json = serde_json::to_vec(&base).map_err(SessionStoreError::from)?;
+    let durable_target =
+        i64::try_from(target).map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+    tx.execute(
+        "INSERT INTO session_transcript_retirements
+             (session_id, retired_count, base_json, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET
+             retired_count = excluded.retired_count,
+             base_json = excluded.base_json,
+             created_at_ms = excluded.created_at_ms",
+        params![id.to_string(), durable_target, base_json, now_millis()],
+    )
+    .map_err(StoreError::from)
+    .map_err(into_session_store_error)?;
+    tx.execute(
+        "DELETE FROM session_rewrites WHERE session_id = ?1 AND rewrite_idx < ?2",
+        params![id.to_string(), durable_target],
+    )
+    .map_err(StoreError::from)
+    .map_err(into_session_store_error)?;
+    collect_unreachable_strands_in_txn(tx, head)
+}
+
+/// Delete strands no retained authority can reach.
+///
+/// Roots are the head strand, the head's row-lineage anchor strand, and both
+/// strands of every remaining rewrite row; reachability follows overlay links
+/// to their successors. Everything else belonged only to retired history.
+fn collect_unreachable_strands_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+) -> Result<(), SessionStoreError> {
+    let id = &head.id;
+    let sql_error = |error: rusqlite::Error| into_session_store_error(StoreError::from(error));
+    let mut roots = vec![head.strand.as_str().to_string()];
+    if let Some(anchor) = head.row_lineage_anchor.as_ref() {
+        roots.push(anchor.strand().as_str().to_string());
+    }
+    {
+        let mut statement = tx
+            .prepare("SELECT parent_strand, strand FROM session_rewrites WHERE session_id = ?1")
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map(params![id.to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql_error)?;
+        for row in rows {
+            let (parent, strand) = row.map_err(sql_error)?;
+            roots.push(parent);
+            roots.push(strand);
+        }
+    }
+    let successors = {
+        let mut statement = tx
+            .prepare("SELECT strand, successor FROM session_strand_links WHERE session_id = ?1")
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map(params![id.to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql_error)?;
+        rows.collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(sql_error)?
+    };
+    let mut reachable = BTreeSet::new();
+    let mut pending = roots;
+    while let Some(strand) = pending.pop() {
+        if let Some(successor) = successors.get(&strand) {
+            pending.push(successor.clone());
+        }
+        reachable.insert(strand);
+    }
+    let stored = {
+        let mut statement = tx
+            .prepare(
+                "SELECT strand FROM session_strand_messages WHERE session_id = ?1
+                 UNION SELECT strand FROM session_strand_links WHERE session_id = ?1",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map(params![id.to_string()], |row| row.get::<_, String>(0))
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?
+    };
+    for strand in stored.iter().filter(|strand| !reachable.contains(*strand)) {
+        for sql in [
+            "DELETE FROM session_strand_messages WHERE session_id = ?1 AND strand = ?2",
+            "DELETE FROM session_strand_links WHERE session_id = ?1 AND strand = ?2",
+        ] {
+            tx.execute(sql, params![id.to_string(), strand])
+                .map_err(sql_error)?;
+        }
+    }
+    Ok(())
 }
 
 fn materialize_slim_in_txn(
@@ -8771,6 +9211,7 @@ fn delete_all_session_rows_in_txn(
         "DELETE FROM session_strand_messages WHERE session_id = ?1",
         "DELETE FROM session_strand_links WHERE session_id = ?1",
         "DELETE FROM session_rewrites WHERE session_id = ?1",
+        "DELETE FROM session_transcript_retirements WHERE session_id = ?1",
         "DELETE FROM session_component_events WHERE session_id = ?1",
         "DELETE FROM session_head_metadata_refs WHERE session_id = ?1",
         "DELETE FROM session_head_metadata_head_lineage WHERE session_id = ?1",
@@ -8797,6 +9238,10 @@ fn legacy_head_canonical_rewrite_error(id: &SessionId) -> SessionStoreError {
 
 #[async_trait]
 impl IncrementalSessionStore for SqliteSessionStore {
+    fn transcript_row_retention(&self) -> meerkat_core::TranscriptRowRetention {
+        meerkat_core::TranscriptRowRetention::RetiresToCut
+    }
+
     async fn activate_head_canonical_store(
         &self,
     ) -> Result<HeadCanonicalStoreActivation, SessionStoreError> {
@@ -8868,7 +9313,10 @@ impl IncrementalSessionStore for SqliteSessionStore {
                 hop_budget,
             )?;
             let strand_len = strand_logical_len_in_txn(tx, &head.id, &head.strand, &links)?;
-            let recorded = rewrite_row_count_in_txn(tx, &head.id)?;
+            // Retired generations no longer have rows but still count.
+            let recorded = rewrite_row_count_in_txn(tx, &head.id)?
+                .checked_add(retired_rewrite_count_in_txn(tx, &head.id)?)
+                .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
             validate_save_head_transition(
                 &head,
                 stored.as_ref().map(|(h, t)| (h, t.as_str())),
@@ -9118,6 +9566,28 @@ mod tests {
     };
     use meerkat_core::{StopReason, TranscriptRewriteReason, TranscriptRewriteSelection};
     use tempfile::TempDir;
+
+    /// #1551: the session store shares the hard-link refusal: a second name
+    /// for an existing session database is refused typed, never opened.
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_session_database_is_refused_typed() {
+        let dir = TempDir::new().unwrap();
+        let original = dir.path().join("sessions.sqlite3");
+        drop(SqliteSessionStore::open(&original).unwrap());
+        let linked = dir.path().join("linked-sessions.sqlite3");
+        std::fs::hard_link(&original, &linked).unwrap();
+        for name in [&original, &linked] {
+            assert!(
+                matches!(
+                    SqliteSessionStore::open(name),
+                    Err(StoreError::UnsupportedDatabaseFile { .. })
+                ),
+                "{}",
+                name.display()
+            );
+        }
+    }
 
     fn temp_store() -> (TempDir, SqliteSessionStore) {
         let dir = TempDir::new().unwrap();
@@ -10622,6 +11092,808 @@ mod tests {
         )
         .optional()
         .unwrap()
+    }
+
+    /// Transcript-history retention re-anchors the live Session's graph after
+    /// each compaction. HeadCanonical persistence must keep committing the
+    /// pending occurrence from the re-anchored graph, and a cold load replays
+    /// the store's whole graph with the same rolling identity.
+    #[tokio::test]
+    async fn head_canonical_persistence_survives_in_memory_history_retirement() {
+        let (_dir, store) = temp_store();
+        let incremental = incremental(&store);
+        let mut session = Session::new();
+        for turn in 0..4 {
+            session.push(user(&format!("seed {turn}")));
+        }
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session).expect("prepare root");
+        incremental
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist root");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge root");
+        let mut observed_head = root.successor_head().clone();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(2).expect("retention");
+        for cycle in 0..10 {
+            for turn in 0..8 {
+                session.push(user(&format!("cycle {cycle} turn {turn}")));
+            }
+            let end = session.messages().len();
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end },
+                    vec![user(&format!("summary {cycle}"))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .expect("commit rewrite");
+            session
+                .retire_transcript_history(retention)
+                .expect("retire history");
+            let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+                &session,
+                &observed_head,
+                observed_head.clone(),
+            )
+            .expect("prepare rewrite from a re-anchored graph");
+            assert_eq!(
+                rewrite.steps().len(),
+                1,
+                "cycle {cycle} persists one occurrence"
+            );
+            assert_eq!(
+                incremental
+                    .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+                    .await
+                    .expect("persist rewrite"),
+                rewrite.successor_head_token()
+            );
+            rewrite
+                .acknowledge_physical_projection(&mut session, rewrite.successor_head_token())
+                .expect("acknowledge rewrite");
+            observed_head = rewrite.successor_head().clone();
+        }
+        let live = session
+            .transcript_history_state()
+            .expect("live graph")
+            .expect("live graph present");
+        assert_eq!(live.retired_count(), 8);
+        let loaded = store
+            .load(session.id())
+            .await
+            .expect("cold load")
+            .expect("session present");
+        assert_eq!(loaded.messages(), session.messages());
+        let replayed = loaded
+            .transcript_history_state()
+            .expect("replayed graph")
+            .expect("replayed graph present");
+        assert_eq!(replayed.commit_count(), 10);
+        assert_eq!(
+            replayed.retired_count(),
+            8,
+            "the store retires its rows to the live graph's cut in the rewrite transaction"
+        );
+        assert_eq!(replayed.graph_prefix(), live.graph_prefix());
+        assert_eq!(replayed.rewrite_prefix(), live.rewrite_prefix());
+    }
+
+    /// Bytes an ordinary HeadCanonical turn hands the store: appended rows,
+    /// the changed metadata cells and the compact successor head. The
+    /// transcript-history graph is never among them, however large it grows:
+    /// it leaves the session only as per-occurrence edges at rewrite commits.
+    fn ordinary_turn_carried_bytes(mutation: &PreparedHeadCanonicalMutation) -> usize {
+        let rows: usize = mutation.serialized_suffix().iter().map(Vec::len).sum();
+        let cells: usize = mutation
+            .metadata_projection()
+            .mutations()
+            .iter()
+            .filter_map(|mutation| mutation.successor())
+            .map(|cell| cell.canonical_json().len())
+            .sum();
+        let head = serde_json::to_vec(mutation.successor_head())
+            .expect("encode head")
+            .len();
+        rows + cells + head
+    }
+
+    #[tokio::test]
+    async fn ordinary_head_canonical_turn_bytes_stay_o_delta_while_history_grows() {
+        let (_dir, store) = temp_store();
+        let incremental = incremental(&store);
+        let mut session = Session::new();
+        session.push(user("seed"));
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session).expect("prepare root");
+        incremental
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist root");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge root");
+        // Every turn commits its own boundary, so the committed runtime head
+        // and the observed physical head advance together.
+        let mut observed_head = root.successor_head().clone();
+        let filler = "history ".repeat(256);
+        let mut per_turn = Vec::new();
+        for cycle in 0..24 {
+            // Ordinary turns between compactions: each must carry only its
+            // own rows, whatever the accumulated (un-retired) graph holds.
+            for turn in 0..3 {
+                session.push(user(&format!("cycle {cycle} turn {turn} {filler}")));
+                let mutation = PreparedHeadCanonicalMutation::prepare_intra_turn(
+                    &session,
+                    &observed_head,
+                    observed_head.clone(),
+                )
+                .expect("prepare ordinary turn");
+                per_turn.push(ordinary_turn_carried_bytes(&mutation));
+                incremental
+                    .apply_prepared_head_canonical_mutation(&mutation)
+                    .await
+                    .expect("persist ordinary turn");
+                mutation
+                    .acknowledge_session(&mut session, mutation.successor_head_token())
+                    .expect("acknowledge ordinary turn");
+                observed_head = mutation.successor_head().clone();
+            }
+            let end = session.messages().len();
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end },
+                    vec![user(&format!("summary {cycle}"))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .expect("commit rewrite");
+            let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+                &session,
+                &observed_head,
+                observed_head.clone(),
+            )
+            .expect("prepare rewrite");
+            incremental
+                .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+                .await
+                .expect("persist rewrite");
+            rewrite
+                .acknowledge_physical_projection(&mut session, rewrite.successor_head_token())
+                .expect("acknowledge rewrite");
+            observed_head = rewrite.successor_head().clone();
+        }
+        let whole_document = session.to_persisted_bytes().expect("encode").len();
+        let first = per_turn[0];
+        let last = *per_turn.last().expect("turns ran");
+        let max = per_turn.iter().copied().max().expect("turns ran");
+        eprintln!(
+            "ordinary HeadCanonical turn bytes: first {first}, max {max}, last {last}; whole document {whole_document}"
+        );
+        assert!(
+            max <= first + 4096,
+            "ordinary-turn bytes must not grow with history: first {first}, max {max}"
+        );
+        assert!(
+            last * 50 < whole_document,
+            "an ordinary turn ({last} bytes) must be a sliver of the whole document ({whole_document} bytes) a blob store would write"
+        );
+    }
+
+    /// Stored rewrite rows, strand rows, and their payload bytes.
+    fn head_canonical_row_footprint(path: &Path, id: &SessionId) -> (i64, i64, i64) {
+        let conn = Connection::open(path).expect("open store");
+        let id = id.to_string();
+        let rewrites: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_rewrites WHERE session_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("count rewrites");
+        let strand_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_strand_messages WHERE session_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("count strand rows");
+        let bytes: i64 = conn
+            .query_row(
+                "SELECT
+                    (SELECT COALESCE(SUM(LENGTH(graph_edge_json) + LENGTH(commit_json)), 0)
+                       FROM session_rewrites WHERE session_id = ?1)
+                  + (SELECT COALESCE(SUM(LENGTH(message_json)), 0)
+                       FROM session_strand_messages WHERE session_id = ?1)
+                  + (SELECT COALESCE(SUM(LENGTH(base_json)), 0)
+                       FROM session_transcript_retirements WHERE session_id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("sum bytes");
+        (rewrites, strand_rows, bytes)
+    }
+
+    /// Retention bounds a head-canonical store, not only blob documents: the
+    /// rewrite transaction retires the stored graph to the live cut, deletes
+    /// the edge rows below it and collects strands only retired history could
+    /// reach. Rows and bytes stay flat however many compactions run, and a
+    /// cold load replays the re-anchored graph with the same rolling identity.
+    /// Drive `cycles` compaction rewrites through the prepared HeadCanonical
+    /// path, each preceded by ordinary turns and followed by a live-tail
+    /// message persisted in the same rewrite mutation (a compaction whose
+    /// turn continues before the write lands). Returns the session and the
+    /// last observed head.
+    async fn rewrite_cycles_with_live_tail(
+        store: &SqliteSessionStore,
+        cycles: usize,
+        retention: Option<meerkat_core::TranscriptHistoryRetention>,
+    ) -> Session {
+        let incremental = incremental(store);
+        let mut session = Session::new();
+        session.push(user("seed"));
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session).expect("prepare root");
+        incremental
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist root");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge root");
+        let mut observed_head = root.successor_head().clone();
+        for cycle in 0..cycles {
+            for turn in 0..2 {
+                session.push(user(&format!("cycle {cycle} turn {turn}")));
+                let mutation = PreparedHeadCanonicalMutation::prepare_intra_turn(
+                    &session,
+                    &observed_head,
+                    observed_head.clone(),
+                )
+                .expect("prepare ordinary turn");
+                incremental
+                    .apply_prepared_head_canonical_mutation(&mutation)
+                    .await
+                    .expect("persist ordinary turn");
+                mutation
+                    .acknowledge_session(&mut session, mutation.successor_head_token())
+                    .expect("acknowledge ordinary turn");
+                observed_head = mutation.successor_head().clone();
+            }
+            // Shrink everything but the newest message into one summary.
+            let end = session.messages().len() - 1;
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end },
+                    vec![user(&format!("summary {cycle}"))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .expect("commit rewrite");
+            if let Some(retention) = retention {
+                session
+                    .retire_transcript_history(retention)
+                    .expect("retire live history");
+            }
+            // The live tail: appended after the rewrite commit, persisted by
+            // the same rewrite mutation.
+            session.push(user(&format!("cycle {cycle} live tail")));
+            let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+                &session,
+                &observed_head,
+                observed_head.clone(),
+            )
+            .expect("prepare rewrite");
+            incremental
+                .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+                .await
+                .map_err(|error| format!("cycle {cycle}: persist rewrite: {error}"))
+                .expect("persist rewrite");
+            rewrite
+                .acknowledge_physical_projection(&mut session, rewrite.successor_head_token())
+                .expect("acknowledge rewrite");
+            observed_head = rewrite.successor_head().clone();
+            let loaded = store
+                .load(session.id())
+                .await
+                .map_err(|error| format!("cycle {cycle}: cold load: {error}"))
+                .expect("cold load")
+                .expect("session present");
+            assert_eq!(loaded.messages(), session.messages(), "cycle {cycle}");
+        }
+        session
+    }
+
+    /// A retention cut past the row-lineage anchor rotates the anchor inside
+    /// a rewrite mutation. The rotated anchor must seal the transcript the
+    /// graph's next edge is based on (the last edge's result), not the live
+    /// tail persisted after it, or cold row replay of the next rewrite reads
+    /// a base below the anchor and the load reports `Corrupted`.
+    #[tokio::test]
+    async fn retention_rotated_row_lineage_anchor_excludes_the_live_tail() {
+        let (_dir, store) = temp_store();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(2).expect("retention");
+        let session = rewrite_cycles_with_live_tail(&store, 8, Some(retention)).await;
+        let head = incremental(&store)
+            .load_head(session.id())
+            .await
+            .expect("load head")
+            .expect("head");
+        let anchor = head.row_lineage_anchor.as_ref().expect("anchor");
+        assert!(
+            anchor.rewrite_count() > 0,
+            "the retention cut must have rotated the anchor"
+        );
+    }
+
+    /// A head written before 0.8.51 can carry a rotated anchor that also
+    /// sealed the live tail after its edge's result, with a later rewrite row
+    /// based below the anchor's end. Cold load replays it from the sealed
+    /// edge's result, and the next rewrite re-mints the anchor.
+    #[tokio::test]
+    async fn released_rotated_anchor_over_the_live_tail_loads_and_self_heals() {
+        let (_dir, store) = temp_store();
+        let interval = usize::try_from(SESSION_ROW_LINEAGE_REBASE_INTERVAL).expect("interval");
+        // Rotation lands on rewrite `interval`; one more rewrite then writes
+        // a post-anchor row.
+        let session = rewrite_cycles_with_live_tail(&store, interval + 1, None).await;
+        let incremental = incremental(&store);
+        let head = incremental
+            .load_head(session.id())
+            .await
+            .expect("load head")
+            .expect("head");
+        let anchor = head.row_lineage_anchor.clone().expect("anchor");
+        assert_eq!(anchor.rewrite_count(), SESSION_ROW_LINEAGE_REBASE_INTERVAL);
+        // Rebuild the released shape: the anchor sealed the rotating
+        // mutation's one live-tail row too.
+        let released_count = anchor.message_count() + 1;
+        let anchor_strand = anchor.strand().clone();
+        let replay_head = head.clone();
+        let anchor_rows = store
+            .in_read_txn(move |tx| {
+                let roots = [anchor_strand.clone(), replay_head.strand.clone()];
+                let links =
+                    bounded_strand_links_for_roots_in_txn(tx, &replay_head.id, &roots, usize::MAX)?;
+                resolve_strand_bytes_in_txn(
+                    tx,
+                    &replay_head.id,
+                    &anchor_strand,
+                    0..released_count,
+                    &links,
+                )
+            })
+            .await
+            .expect("anchor strand rows");
+        let tail_row = anchor_rows.last().expect("tail row").clone();
+        let mut head_json = serde_json::to_value(&head).expect("head json");
+        let released_anchor = head_json
+            .get_mut("row_lineage_anchor")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("anchor object");
+        released_anchor.insert(
+            "message_count".to_string(),
+            serde_json::json!(released_count),
+        );
+        released_anchor.insert(
+            "materialized_prefix".to_string(),
+            serde_json::to_value(
+                SessionMessageRowPrefixAccumulator::from_serialized_rows(&anchor_rows)
+                    .expect("flat prefix"),
+            )
+            .expect("flat prefix json"),
+        );
+        released_anchor.insert(
+            "prefix".to_string(),
+            serde_json::to_value(
+                anchor
+                    .prefix()
+                    .extend_serialized_rows(std::slice::from_ref(&tail_row))
+                    .expect("lineage prefix"),
+            )
+            .expect("lineage prefix json"),
+        );
+        let released_head: SessionHead =
+            serde_json::from_value(head_json).expect("decode released head");
+        let released_bytes = serde_json::to_vec(&released_head).expect("released head bytes");
+        let released_token = session_head_cas_token(&released_head).expect("released head token");
+        let conn = open_connection(store.path()).unwrap();
+        conn.execute(
+            "UPDATE session_heads SET head_json = ?1, cas_token = ?2 WHERE session_id = ?3",
+            params![released_bytes, released_token, session.id().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let loaded = store
+            .load(session.id())
+            .await
+            .expect("released anchor cold load")
+            .expect("session present");
+        assert_eq!(loaded.messages(), session.messages());
+
+        // The next rewrite never preserves the released anchor.
+        let mut session = loaded;
+        session.push(user("after repair"));
+        let observed = incremental
+            .load_head(session.id())
+            .await
+            .expect("load head")
+            .expect("head");
+        let end = session.messages().len();
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end },
+                vec![user("summary after repair")],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("commit rewrite");
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &session,
+            &observed,
+            observed.clone(),
+        )
+        .expect("prepare rewrite after repair");
+        incremental
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("persist rewrite after repair");
+        let healed = rewrite
+            .successor_head()
+            .row_lineage_anchor
+            .clone()
+            .expect("anchor");
+        assert_eq!(
+            healed.rewrite_count(),
+            rewrite.successor_head().rewrite_count
+        );
+        let reloaded = store
+            .load(session.id())
+            .await
+            .expect("cold load after self-heal")
+            .expect("session present");
+        assert_eq!(reloaded.messages(), session.messages());
+    }
+
+    /// The v0.8.50-written rotated-anchor fixture, embedded so archived and
+    /// sandboxed test runs need no source-tree path.
+    const V0_8_50_ROTATED_ANCHOR_DB: &[u8] =
+        include_bytes!("../tests/fixtures/v0_8_50_rotated_anchor_live_tail/sessions.sqlite3");
+    const V0_8_50_ROTATED_ANCHOR_EXPECTED: &str =
+        include_str!("../tests/fixtures/v0_8_50_rotated_anchor_live_tail/expected.json");
+
+    /// Bytes written by v0.8.50 (see the fixture README): the released
+    /// rotated anchor sealed the live tail, so v0.8.50 cannot cold-load this
+    /// session. The fixed store migrates the file and loads it through the
+    /// released-anchor repair, without writing during the read.
+    #[tokio::test]
+    async fn v0_8_50_rotated_anchor_fixture_loads_through_the_repair() {
+        let expected: serde_json::Value =
+            serde_json::from_str(V0_8_50_ROTATED_ANCHOR_EXPECTED).expect("decode expected");
+        let session_id =
+            SessionId::parse(expected["session_id"].as_str().expect("fixture session id"))
+                .expect("parse fixture session id");
+        let expected_messages: Vec<Message> =
+            serde_json::from_value(expected["messages"].clone()).expect("expected messages");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        std::fs::write(&path, V0_8_50_ROTATED_ANCHOR_DB).expect("write fixture");
+        let store = SqliteSessionStore::open(&path).expect("open and migrate v0.8.50 file");
+        let head_before = incremental(&store)
+            .load_head(&session_id)
+            .await
+            .expect("load head")
+            .expect("head");
+        let anchor = head_before.row_lineage_anchor.clone().expect("anchor");
+        assert_eq!(anchor.rewrite_count(), SESSION_ROW_LINEAGE_REBASE_INTERVAL);
+        let loaded = store
+            .load(&session_id)
+            .await
+            .expect("v0.8.50 rotated anchor cold load")
+            .expect("session present");
+        assert_eq!(loaded.messages(), expected_messages.as_slice());
+        // A pure read never rewrites the stored head.
+        let head_after = incremental(&store)
+            .load_head(&session_id)
+            .await
+            .expect("load head")
+            .expect("head");
+        assert_eq!(head_after, head_before);
+
+        // Self-heal under retention: the first rewrite after the repaired
+        // load re-mints the anchor in the same transaction whose retention
+        // cut may retire the edge row the repair replayed from.
+        let mut session = loaded;
+        session.push(user("after v0.8.50 repair"));
+        let end = session.messages().len();
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end },
+                vec![user("summary after v0.8.50 repair")],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("commit rewrite");
+        session
+            .retire_transcript_history(
+                meerkat_core::TranscriptHistoryRetention::from_count(2).expect("retention"),
+            )
+            .expect("retire live history");
+        session.push(user("live tail after v0.8.50 repair"));
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &session,
+            &head_after,
+            head_after.clone(),
+        )
+        .expect("prepare rewrite after repair");
+        incremental(&store)
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("persist rewrite after repair");
+        let healed = rewrite
+            .successor_head()
+            .row_lineage_anchor
+            .clone()
+            .expect("anchor");
+        assert_eq!(
+            healed.rewrite_count(),
+            rewrite.successor_head().rewrite_count
+        );
+        assert!(
+            rewrite.transcript_retired_count() >= SESSION_ROW_LINEAGE_REBASE_INTERVAL,
+            "the cut must reach the edge row the repair replayed from"
+        );
+        let (kept_rewrite_rows, _, _) = head_canonical_row_footprint(store.path(), &session_id);
+        assert_eq!(
+            kept_rewrite_rows, 2,
+            "the cut retired every row below the re-minted anchor, including the repair's"
+        );
+        let reloaded = store
+            .load(&session_id)
+            .await
+            .expect("cold load after self-heal under retention")
+            .expect("session present");
+        assert_eq!(reloaded.messages(), session.messages());
+    }
+
+    /// The released-anchor repair is fail-closed: an anchor whose tail rows
+    /// do not reproduce its lineage accumulator from the sealed edge's result
+    /// stays `Corrupted`.
+    #[tokio::test]
+    async fn tampered_released_rotated_anchor_stays_corrupted() {
+        let expected: serde_json::Value =
+            serde_json::from_str(V0_8_50_ROTATED_ANCHOR_EXPECTED).expect("decode expected");
+        let session_id =
+            SessionId::parse(expected["session_id"].as_str().expect("fixture session id"))
+                .expect("parse fixture session id");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        std::fs::write(&path, V0_8_50_ROTATED_ANCHOR_DB).expect("write fixture");
+        let store = SqliteSessionStore::open(&path).expect("open and migrate v0.8.50 file");
+        let head = incremental(&store)
+            .load_head(&session_id)
+            .await
+            .expect("load head")
+            .expect("head");
+        let anchor = head.row_lineage_anchor.clone().expect("anchor");
+        // Same row count, different lineage: the anchor's last row replaced.
+        let forged_tail = serde_json::to_vec(&user("forged tail")).expect("forged row");
+        let anchor_rows_but_last = usize::try_from(anchor.message_count() - 1).expect("count");
+        let replay_head = head.clone();
+        let anchor_strand = anchor.strand().clone();
+        let leading_rows = store
+            .in_read_txn(move |tx| {
+                let roots = [anchor_strand.clone(), replay_head.strand.clone()];
+                let links =
+                    bounded_strand_links_for_roots_in_txn(tx, &replay_head.id, &roots, usize::MAX)?;
+                resolve_strand_bytes_in_txn(
+                    tx,
+                    &replay_head.id,
+                    &anchor_strand,
+                    0..u64::try_from(anchor_rows_but_last).expect("count"),
+                    &links,
+                )
+            })
+            .await
+            .expect("anchor rows");
+        let mut forged_prefix = SessionMessageRowPrefixAccumulator::empty()
+            .extend_serialized_rows(&leading_rows)
+            .expect("forged prefix");
+        forged_prefix = forged_prefix
+            .extend_serialized_rows(std::slice::from_ref(&forged_tail))
+            .expect("forged prefix");
+        let mut head_json = serde_json::to_value(&head).expect("head json");
+        head_json["row_lineage_anchor"]["prefix"] =
+            serde_json::to_value(&forged_prefix).expect("forged prefix json");
+        let forged_head: SessionHead =
+            serde_json::from_value(head_json).expect("decode forged head");
+        let forged_bytes = serde_json::to_vec(&forged_head).expect("forged head bytes");
+        let forged_token = session_head_cas_token(&forged_head).expect("forged head token");
+        let conn = open_connection(&path).unwrap();
+        conn.execute(
+            "UPDATE session_heads SET head_json = ?1, cas_token = ?2 WHERE session_id = ?3",
+            params![forged_bytes, forged_token, session_id.to_string()],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(matches!(
+            store.load(&session_id).await,
+            Err(SessionStoreError::Corrupted(corrupted)) if corrupted == session_id
+        ));
+    }
+
+    /// The pre-retention rotation every `SESSION_ROW_LINEAGE_REBASE_INTERVAL`
+    /// rewrites takes the same path: with a live tail in the rotating
+    /// mutation, the next rewrite must still cold-load.
+    #[tokio::test]
+    async fn interval_rotated_row_lineage_anchor_excludes_the_live_tail() {
+        let (_dir, store) = temp_store();
+        let cycles = usize::try_from(SESSION_ROW_LINEAGE_REBASE_INTERVAL).expect("interval") + 3;
+        let session = rewrite_cycles_with_live_tail(&store, cycles, None).await;
+        let head = incremental(&store)
+            .load_head(session.id())
+            .await
+            .expect("load head")
+            .expect("head");
+        assert_eq!(
+            head.row_lineage_anchor
+                .as_ref()
+                .expect("anchor")
+                .rewrite_count(),
+            SESSION_ROW_LINEAGE_REBASE_INTERVAL
+        );
+    }
+
+    #[tokio::test]
+    async fn head_canonical_rows_stay_bounded_under_history_retention() {
+        let (_dir, store) = temp_store();
+        let incremental = incremental(&store);
+        let mut session = Session::new();
+        session.push(user("seed"));
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session).expect("prepare root");
+        incremental
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist root");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge root");
+        let mut observed_head = root.successor_head().clone();
+        let retention = meerkat_core::TranscriptHistoryRetention::from_count(3).expect("retention");
+        let filler = "history ".repeat(128);
+        let mut footprints = Vec::new();
+        let mut last_rewrite = None;
+        for cycle in 0..40 {
+            for turn in 0..3 {
+                session.push(user(&format!("cycle {cycle} turn {turn} {filler}")));
+                let mutation = PreparedHeadCanonicalMutation::prepare_intra_turn(
+                    &session,
+                    &observed_head,
+                    observed_head.clone(),
+                )
+                .expect("prepare ordinary turn");
+                incremental
+                    .apply_prepared_head_canonical_mutation(&mutation)
+                    .await
+                    .expect("persist ordinary turn");
+                mutation
+                    .acknowledge_session(&mut session, mutation.successor_head_token())
+                    .expect("acknowledge ordinary turn");
+                observed_head = mutation.successor_head().clone();
+            }
+            let end = session.messages().len();
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end },
+                    vec![user(&format!("summary {cycle}"))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .expect("commit rewrite");
+            session
+                .retire_transcript_history(retention)
+                .expect("retire live history");
+            let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+                &session,
+                &observed_head,
+                observed_head.clone(),
+            )
+            .expect("prepare rewrite");
+            incremental
+                .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+                .await
+                .expect("persist rewrite");
+            rewrite
+                .acknowledge_physical_projection(&mut session, rewrite.successor_head_token())
+                .expect("acknowledge rewrite");
+            observed_head = rewrite.successor_head().clone();
+            footprints.push(head_canonical_row_footprint(store.path(), session.id()));
+            last_rewrite = Some(rewrite);
+        }
+        let (steady_rewrites, steady_strand_rows, steady_bytes) = footprints[9];
+        for (cycle, (rewrites, strand_rows, bytes)) in footprints.iter().enumerate().skip(10) {
+            assert!(
+                *rewrites <= steady_rewrites,
+                "cycle {cycle}: {rewrites} rewrite rows (steady {steady_rewrites})"
+            );
+            assert!(
+                *strand_rows <= steady_strand_rows + 2,
+                "cycle {cycle}: {strand_rows} strand rows (steady {steady_strand_rows})"
+            );
+            assert!(
+                *bytes <= steady_bytes + 64 * 1024,
+                "cycle {cycle}: {bytes} stored bytes (steady {steady_bytes})"
+            );
+        }
+        eprintln!(
+            "head-canonical footprint at cycles 10/20/40 (rewrite rows, strand rows, bytes): {:?} {:?} {:?}",
+            footprints[9], footprints[19], footprints[39]
+        );
+
+        // An exact retry of the last rewrite stays idempotent after pruning.
+        let last_rewrite = last_rewrite.expect("rewrites ran");
+        assert_eq!(
+            incremental
+                .apply_prepared_head_canonical_rewrite_mutation(&last_rewrite)
+                .await
+                .expect("exact retry after retirement"),
+            last_rewrite.successor_head_token()
+        );
+
+        let live = session
+            .transcript_history_state()
+            .expect("live graph")
+            .expect("live graph present");
+        let loaded = store
+            .load(session.id())
+            .await
+            .expect("cold load")
+            .expect("session present");
+        assert_eq!(loaded.messages(), session.messages());
+        let replayed = loaded
+            .transcript_history_state()
+            .expect("replayed graph")
+            .expect("replayed graph present");
+        assert_eq!(replayed.commit_count(), 40);
+        assert_eq!(replayed.retired_count(), live.retired_count());
+        assert_eq!(replayed.graph_prefix(), live.graph_prefix());
+        assert_eq!(replayed.rewrite_prefix(), live.rewrite_prefix());
+        assert_eq!(
+            replayed.commits().collect::<Vec<_>>(),
+            live.commits().collect::<Vec<_>>()
+        );
+
+        // A fresh open re-activates head-canonical authority over the pruned
+        // rows and cold-loads the same session.
+        let path = store.path().to_path_buf();
+        drop(incremental);
+        drop(store);
+        let reopened = SqliteSessionStore::open(&path).expect("reopen store");
+        let reopened_incremental = self::incremental(&reopened);
+        let activation = reopened_incremental
+            .activate_head_canonical_store()
+            .await
+            .expect("activate over pruned rows");
+        assert!(
+            matches!(activation, HeadCanonicalStoreActivation::Activated(_)),
+            "re-activation must cross the pruned session"
+        );
+        let reloaded = reopened
+            .load(session.id())
+            .await
+            .expect("cold load after reopen")
+            .expect("session present after reopen");
+        assert_eq!(reloaded.messages(), session.messages());
+        assert_eq!(
+            reloaded
+                .transcript_history_state()
+                .expect("graph")
+                .expect("graph present")
+                .graph_prefix(),
+            live.graph_prefix()
+        );
     }
 
     #[tokio::test]
@@ -13500,7 +14772,7 @@ mod tests {
         );
         assert_eq!(state.head(), second_commit.revision);
         assert_eq!(
-            state.commits().last(),
+            state.commits().next_back(),
             Some(&second_commit),
             "audited graph must end at the exact latest rewrite occurrence"
         );

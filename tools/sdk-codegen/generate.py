@@ -337,8 +337,6 @@ SYSTEM_NOTICE_NESTED_ALIAS_TYPES = [
 ]
 
 PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
-    "LoginCancelParams",
-    "WireLoginCancelled",
     "ActivateInstructionParams",
     "ApprovalDecideParams",
     "ApprovalGetParams",
@@ -430,15 +428,18 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireInputTerminalOutcome",
     "WireDeviceCompleteResult",
     "AuthStatusParams",
+    "LoginCancelParams",
     "LoginCompleteParams",
     "LoginStartParams",
     "WireAuthStatusResult",
+    "WireLoginCancelled",
 ]
 
 # Request unions (serde-untagged, flattened targets) whose schemas live in the
 # params roster rather than the wire roster.
 PARAMS_UNION_ALIAS_TYPES = {
     "AuthStatusParams",
+    "LoginCancelParams",
     "LoginCompleteParams",
     "LoginStartParams",
 }
@@ -3706,9 +3707,24 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     # `config/set` accepts a bare config object or a wrapped
     # `{config, expected_generation}` envelope (untagged union).
     append_python_alias("ConfigSetParams", wire_schema, "Request payload for config/set.")
-    # Auth target unions reference the MCP target by name.
+    # Auth target unions reference the MCP and connector targets by name.
     append_python_dataclass(
         "WireMcpAuthTarget", wire_schema, "MCP server target for auth/login/* and auth/status/get."
+    )
+    append_python_dataclass(
+        "WireConnectorSlot", wire_schema, "Connector credential slot: a realm-scoped storage address."
+    )
+    append_python_alias(
+        "WireConnectorAccountSelection", wire_schema, "Account selection of a connector login."
+    )
+    append_python_dataclass(
+        "WireConnectorAuthTarget", wire_schema, "Connector target for auth/login/start and complete."
+    )
+    append_python_dataclass(
+        "WireConnectorVerifiedAccount", wire_schema, "Provider account bound to a connector slot."
+    )
+    append_python_alias(
+        "WireScopeEvidence", wire_schema, "Owner-assigned evidence for a connector's granted scopes."
     )
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
@@ -4519,8 +4535,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_alias("ConfigSetParams", wire_schema)
-    # Auth target unions reference the MCP target by name.
+    # Auth target unions reference the MCP and connector targets by name.
     append_typescript_interface("WireMcpAuthTarget", wire_schema)
+    append_typescript_interface("WireConnectorSlot", wire_schema)
+    append_typescript_alias("WireConnectorAccountSelection", wire_schema)
+    append_typescript_interface("WireConnectorAuthTarget", wire_schema)
+    append_typescript_interface("WireConnectorVerifiedAccount", wire_schema)
+    append_typescript_alias("WireScopeEvidence", wire_schema)
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_typescript_alias(name, alias_root)

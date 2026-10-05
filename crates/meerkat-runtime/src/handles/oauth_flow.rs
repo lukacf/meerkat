@@ -746,15 +746,8 @@ impl RuntimeOAuthFlowHandle {
             &record.redirect_uri,
             expires_at_millis,
         )?;
-        self.registry.insert_restored_browser_flow(
-            state.to_string(),
-            record.target.clone(),
-            record.provider.clone(),
-            record.redirect_uri.clone(),
-            record.pkce_verifier.clone(),
-            record.nonce.clone(),
-            record.created_at,
-        )
+        self.registry
+            .insert_restored_browser_flow(state.to_string(), record.clone())
     }
 
     fn rehydrate_persisted_payloads(&self) {
@@ -951,12 +944,14 @@ impl RuntimeOAuthFlowHandle {
             .registry
             .insert_restored_browser_flow(
                 persisted.state.clone(),
-                persisted.target.clone(),
-                provider,
-                persisted.redirect_uri.clone(),
-                persisted.pkce_verifier.clone(),
-                persisted.nonce.clone(),
-                created_at,
+                OAuthFlowRecord {
+                    target: persisted.target.clone(),
+                    provider,
+                    redirect_uri: persisted.redirect_uri.clone(),
+                    pkce_verifier: persisted.pkce_verifier.clone(),
+                    nonce: persisted.nonce.clone(),
+                    created_at,
+                },
             )
             .is_err()
             && let Err(err) = self.expire_browser(&persisted.target, &persisted.state)

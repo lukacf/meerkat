@@ -517,6 +517,39 @@ impl ConnectorOAuthAuthority {
         })
     }
 
+    /// [`login_complete`](Self::login_complete) for a caller that names the
+    /// whole target again (wire callers): the admitted attempt's descriptor
+    /// must equal `target`'s facts, so a completion cannot be redirected to
+    /// a different connector, strategy or account selection.
+    pub async fn login_complete_for_target(
+        &self,
+        target: &ConnectorOAuthTarget,
+        callback: ConnectorOAuthCallback,
+    ) -> Result<ConnectorLoginComplete, ConnectorLoginError> {
+        let identity = AuthCredentialIdentity::Account(target.slot.clone());
+        let admitted = self
+            .flows
+            .admitted_connector_browser_attempt(&callback.state, &identity)
+            .map_err(ConnectorLoginError::Flow)?
+            .ok_or(ConnectorLoginError::Flow(OAuthFlowError::Missing))?;
+        let OAuthBrowserFlowIdentity::Connector { connector } = &admitted.provider else {
+            return Err(ConnectorLoginError::Flow(
+                OAuthFlowError::BrowserIdentityMismatch,
+            ));
+        };
+        let facts = connector.parameters();
+        if facts.issuer != target.issuer
+            || facts.client != target.client
+            || facts.resource != target.resource
+            || facts.scopes != target.scopes
+            || facts.strategy_id != target.strategy_id
+            || facts.expected_account != target.account
+        {
+            return Err(ConnectorOAuthRefusal::DescriptorMismatch.into());
+        }
+        self.login_complete(&target.slot, callback).await
+    }
+
     /// Retire the attempt admitted under `state` for `slot` (host timeout,
     /// cancellation or a closed browser). Local only; an unknown state is
     /// refused. Cancellation consumes no authorization response and
@@ -535,6 +568,57 @@ impl ConnectorOAuthAuthority {
         self.flows
             .expire(state, &identity, record.provider, &record.redirect_uri)
             .map_err(ConnectorLoginError::Flow)
+    }
+
+    /// Disconnect `slot`: remove its connector credential and release its
+    /// AuthMachine lifecycle, inside the slot's exclusive mutation. An empty
+    /// slot is already disconnected; a slot holding another owner's
+    /// credential is refused and left untouched.
+    pub async fn logout(&self, slot: &CredentialAccountRef) -> Result<(), ConnectorLoginError> {
+        let identity = AuthCredentialIdentity::Account(slot.clone());
+        let key = TokenKey::from_credential_identity(&identity);
+        let store = self.persistence.token_store();
+        let auth_lease = self.auth_lease.clone();
+        let load_key = key.clone();
+        self.persistence
+            .refresh_coordinator()
+            .with_exclusive_mutation(
+                key,
+                Box::new(move || {
+                    Box::pin(async move {
+                        let lease_key = LeaseKey::from_credential_identity(&identity);
+                        let _guard =
+                            meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                        let stored = store
+                            .load(&load_key)
+                            .await
+                            .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?;
+                        match stored {
+                            None => {}
+                            Some(tokens) if tokens.auth_mode != PersistedAuthMode::ConnectorOauth => {
+                                return Err(CredentialMutationError::SlotRefused(
+                                    CredentialSlotRefusal::ModeMismatch,
+                                ));
+                            }
+                            Some(_) => {
+                                meerkat_core::clear_tokens_and_publish_lifecycle_released_for_identity(
+                                    store.as_ref(),
+                                    &auth_lease,
+                                    &identity,
+                                )
+                                .await
+                                .map_err(|error| {
+                                    CredentialMutationError::AuthLifecycle(error.to_string())
+                                })?;
+                            }
+                        }
+                        Ok(crate::auth_store::CredentialMutationOutcome::Cleared)
+                    })
+                }),
+            )
+            .await
+            .map(|_| ())
+            .map_err(map_mutation_error)
     }
 
     /// Secret-free status of `slot`, projected from its durable credential.
@@ -975,7 +1059,7 @@ impl ConnectorOAuthAuthority {
     async fn refresh_failed(&self, lease_key: &LeaseKey, reason: &str) -> RefreshError {
         let observation = meerkat_core::RefreshFailureObservation::transient();
         match self.auth_lease.refresh_failed(lease_key, observation) {
-            Ok(_) => RefreshError::Refresh(reason.to_owned()),
+            Ok(()) => RefreshError::Refresh(reason.to_owned()),
             Err(error) => RefreshError::Refresh(format!(
                 "{reason}; AuthMachine refresh_failed rejected closure: {error}"
             )),

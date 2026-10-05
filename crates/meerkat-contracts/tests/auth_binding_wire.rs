@@ -492,6 +492,102 @@ mod mcp_login_target {
     }
 
     #[test]
+    fn connector_targets_dispatch_by_member_and_round_trip() {
+        let connector = json!({
+            "slot": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+            "issuer": "https://accounts.example.com",
+            "client": "client",
+            "resource": "https://api.example.com",
+            "scopes": ["openid"],
+            "strategy_id": "oidc-userinfo-v1",
+            "account_selection": {"mode": "discover"},
+        });
+        let start: LoginStartParams = serde_json::from_value(json!({
+            "connector": connector,
+            "redirect_uri": "http://127.0.0.1:1/connector/oauth/callback",
+        }))
+        .unwrap();
+        let meerkat_contracts::WireLoginTarget::Connector(target) = &start.target else {
+            panic!("connector member selects the connector arm");
+        };
+        assert_eq!(
+            target.connector.account_selection,
+            meerkat_contracts::WireConnectorAccountSelection::Discover
+        );
+        assert_eq!(
+            serde_json::to_value(&start).unwrap()["connector"],
+            connector
+        );
+
+        let mut known = connector.clone();
+        known["account_selection"] = json!({"mode": "known", "account": "subject-7"});
+        let known: meerkat_contracts::WireConnectorAuthTarget =
+            serde_json::from_value(known).unwrap();
+        assert_eq!(
+            known.account_selection,
+            meerkat_contracts::WireConnectorAccountSelection::Known {
+                account: "subject-7".into()
+            }
+        );
+        let mut unknown_field = connector;
+        unknown_field["expected_account"] = json!("subject-7");
+        assert!(
+            serde_json::from_value::<meerkat_contracts::WireConnectorAuthTarget>(unknown_field)
+                .is_err()
+        );
+
+        let status: AuthStatusParams = serde_json::from_value(json!({
+            "connector": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+        }))
+        .unwrap();
+        assert!(matches!(status, AuthStatusParams::Connector(_)));
+        assert!(
+            serde_json::from_value::<AuthStatusParams>(json!({
+                "Connector": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+            }))
+            .is_err(),
+            "a case-variant connector member cannot fall back to a binding status"
+        );
+    }
+
+    #[test]
+    fn cancel_params_select_mcp_or_connector_and_refuse_neither() {
+        let mcp: LoginCancelParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+            "state": "s",
+        }))
+        .unwrap();
+        assert!(matches!(mcp, LoginCancelParams::Mcp(_)));
+        let connector: LoginCancelParams = serde_json::from_value(json!({
+            "connector": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+            "state": "state-canary",
+        }))
+        .unwrap();
+        assert!(matches!(connector, LoginCancelParams::Connector(_)));
+        assert_eq!(connector.state(), "state-canary");
+        assert!(!format!("{connector:?}").contains("state-canary"));
+        assert!(serde_json::from_value::<LoginCancelParams>(json!({"state": "s"})).is_err());
+        let cancelled = meerkat_contracts::WireLoginCancelled {
+            target: meerkat_contracts::WireLoginCancelledTarget::Connector(
+                meerkat_contracts::WireConnectorSlotTarget {
+                    connector: meerkat_contracts::WireConnectorSlot {
+                        realm_id: "tenant-a".into(),
+                        slot_id: "drive-work".into(),
+                    },
+                },
+            ),
+            cancelled: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&cancelled).unwrap(),
+            json!({
+                "connector": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+                "cancelled": true,
+            })
+        );
+    }
+
+    #[test]
     fn cancel_params_are_strict_and_redact_state() {
         let cancel: LoginCancelParams = serde_json::from_value(json!({
             "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},

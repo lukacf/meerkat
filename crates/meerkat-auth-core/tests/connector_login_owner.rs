@@ -137,6 +137,8 @@ struct Fixture {
     subjects: Arc<Mutex<HashMap<String, String>>>,
     nonces: Arc<Mutex<Vec<Option<String>>>>,
     strategy: Arc<FixtureStrategy>,
+    persistence: ProviderAuthPersistence,
+    flows: Arc<RuntimeOAuthFlowHandle>,
 }
 
 async fn fixture() -> Fixture {
@@ -176,8 +178,8 @@ async fn fixture() -> Fixture {
         scopes_override: Mutex::new(None),
     });
     let authority = ConnectorOAuthAuthority::with_http(
-        persistence,
-        flows,
+        persistence.clone(),
+        flows.clone(),
         ConnectorStrategies::default()
             .with(strategy.clone())
             .with(nonce_strategy),
@@ -192,6 +194,8 @@ async fn fixture() -> Fixture {
         subjects,
         nonces,
         strategy,
+        persistence,
+        flows,
     }
 }
 
@@ -717,4 +721,74 @@ async fn connector_slots_refuse_other_modes_and_the_loader_refuses_their_rows() 
         CredentialSlotRefusal::ModeMismatch
     );
     assert_eq!(fx.store.load(&key).await.unwrap(), Some(foreign));
+}
+
+#[tokio::test]
+async fn logout_frees_the_slot_for_a_new_account_and_refuses_foreign_rows() {
+    let fx = fixture().await;
+    let work = slot("tenant-a", "drive-work");
+    fx.grant("code-a", "access-a", "subject-a", Some("files.read"));
+    fx.login(&work, AccountSelection::Discover, "code-a")
+        .await
+        .unwrap();
+    fx.authority.logout(&work).await.unwrap();
+    assert!(fx.stored(&work).await.is_none());
+    assert_eq!(
+        fx.authority.status(&work).await.unwrap().phase,
+        ConnectorAuthPhase::AuthorizationRequired
+    );
+    // An empty slot is already disconnected.
+    fx.authority.logout(&work).await.unwrap();
+    fx.grant("code-b", "access-b", "subject-b", Some("files.read"));
+    fx.login(&work, AccountSelection::Discover, "code-b")
+        .await
+        .expect("a disconnected slot accepts a new account");
+    assert_eq!(
+        fx.stored(&work).await.unwrap().account_id.as_deref(),
+        Some("subject-b")
+    );
+
+    let foreign_slot = slot("tenant-a", "not-a-connector");
+    let key =
+        TokenKey::from_credential_identity(&AuthCredentialIdentity::Account(foreign_slot.clone()));
+    let foreign = PersistedTokens::api_key("another-owners-credential");
+    fx.store.save(&key, &foreign).await.unwrap();
+    assert!(matches!(
+        fx.authority.logout(&foreign_slot).await,
+        Err(ConnectorLoginError::Slot(
+            CredentialSlotRefusal::ModeMismatch
+        ))
+    ));
+    assert_eq!(fx.store.load(&key).await.unwrap(), Some(foreign));
+}
+
+#[tokio::test]
+async fn other_publication_paths_never_overwrite_a_connector_credential() {
+    let fx = fixture().await;
+    let work = slot("tenant-a", "drive-work");
+    fx.grant("code-a", "access-a", "subject-a", Some("files.read"));
+    fx.login(&work, AccountSelection::Discover, "code-a")
+        .await
+        .unwrap();
+    let before = fx.stored(&work).await.unwrap();
+    let lease = meerkat_auth_core::oauth_flow::OAuthFlowAuthority::generated_credential_lifecycle(
+        fx.flows.as_ref(),
+    )
+    .unwrap();
+    let refused = meerkat_auth_core::save_tokens_and_publish_lifecycle(
+        fx.persistence.clone(),
+        lease,
+        AuthCredentialIdentity::Account(work.clone()),
+        PersistedTokens::api_key("direct-secret"),
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(
+            meerkat_auth_core::auth_store::CredentialMutationError::SlotRefused(
+                CredentialSlotRefusal::ModeMismatch
+            )
+        )
+    ));
+    assert_eq!(fx.stored(&work).await.unwrap(), before);
 }

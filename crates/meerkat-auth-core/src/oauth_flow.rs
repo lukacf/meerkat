@@ -1336,29 +1336,15 @@ impl OAuthFlowRegistry {
         OAuthFlowRegistrySnapshot { browser, device }
     }
 
+    /// Re-insert a restored browser attempt under `state`, exactly as it
+    /// was admitted (including its original `created_at`).
     pub fn insert_restored_browser_flow(
         &self,
         state: String,
-        target: AuthCredentialIdentity,
-        provider: OAuthBrowserFlowIdentity,
-        redirect_uri: String,
-        pkce_verifier: String,
-        nonce: Option<String>,
-        created_at: Instant,
+        record: OAuthFlowRecord,
     ) -> Result<(), OAuthFlowError> {
-        provider.validate_redirect(&redirect_uri)?;
-        let mut flows = self.flows.lock();
-        flows.insert(
-            state,
-            OAuthFlowRecord {
-                target,
-                provider,
-                redirect_uri,
-                pkce_verifier,
-                nonce,
-                created_at,
-            },
-        );
+        record.provider.validate_redirect(&record.redirect_uri)?;
+        self.flows.lock().insert(state, record);
         Ok(())
     }
 

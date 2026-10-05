@@ -401,7 +401,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/login/start",
-            "Begin an OAuth login for a provider binding or an MCP server; returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent",
+            "Begin an OAuth login for a provider binding, an MCP server or a connector slot; returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent",
             "LoginStartParams",
             "WireLoginStart",
         ),
@@ -413,7 +413,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/login/cancel",
-            "Retire a pending MCP OAuth attempt by its state",
+            "Retire a pending MCP or connector OAuth attempt by its state",
             "LoginCancelParams",
             "WireLoginCancelled",
         ),
@@ -437,7 +437,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/status/get",
-            "Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target",
+            "Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target or a connector slot",
             "AuthStatusParams",
             "WireAuthStatusResult",
         ),

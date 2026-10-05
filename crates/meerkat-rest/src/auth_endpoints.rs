@@ -233,6 +233,11 @@ fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Re
             StatusCode::BAD_REQUEST
         }
         meerkat::HostAuthError::McpTarget(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        meerkat::HostAuthError::Connector(connector) if connector.is_refusal() => {
+            StatusCode::BAD_REQUEST
+        }
+        meerkat::HostAuthError::Connector(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        meerkat::HostAuthError::ConnectorTarget(_) => StatusCode::BAD_REQUEST,
     };
     (
         status,
@@ -1304,6 +1309,33 @@ pub async fn start_login(
                 Err(error) => host_auth_error_response(error),
             };
         }
+        WireLoginTarget::Connector(meerkat_contracts::WireConnectorLoginTarget { connector }) => {
+            let started = match meerkat::connector_target_from_wire(&connector) {
+                Ok(target) => {
+                    host_auth_service(&state)
+                        .connector_login_start(&target, &body.redirect_uri)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            return match started {
+                Ok(started) => (
+                    StatusCode::OK,
+                    Json(WireLoginStart {
+                        authorize_url: started.authorize_url,
+                        state: started.state,
+                        redirect_uri: started.redirect_uri,
+                        target: WireLoginStartTarget::Connector(
+                            meerkat_contracts::WireConnectorSlotTarget {
+                                connector: connector.slot,
+                            },
+                        ),
+                    }),
+                )
+                    .into_response(),
+                Err(error) => host_auth_error_response(error),
+            };
+        }
     };
     let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
         &provider_target.realm_id,
@@ -1402,6 +1434,41 @@ pub async fn complete_login(
                 Err(error) => host_auth_error_response(error),
             };
         }
+        WireLoginTarget::Connector(meerkat_contracts::WireConnectorLoginTarget { connector }) => {
+            let completed = match meerkat::connector_target_from_wire(&connector) {
+                Ok(target) => {
+                    host_auth_service(&state)
+                        .connector_login_complete(
+                            &target,
+                            meerkat::ConnectorOAuthCallback {
+                                redirect_uri: body.redirect_uri,
+                                state: body.state,
+                                code: body.code,
+                            },
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            return match completed {
+                Ok(completed) => {
+                    tracing::info!(
+                        target: "meerkat::auth::audit",
+                        connector_realm = %connector.slot.realm_id,
+                        connector_slot = %connector.slot.slot_id,
+                        action = "login_connector_oauth_complete",
+                        has_refresh_token = %completed.has_refresh_token,
+                        "connector OAuth login completed via REST"
+                    );
+                    (
+                        StatusCode::OK,
+                        Json(meerkat::connector_ready_to_wire(&completed)),
+                    )
+                        .into_response()
+                }
+                Err(error) => host_auth_error_response(error),
+            };
+        }
     };
     let (realm_id, binding_id, profile_id) = match parse_auth_identity_triple(
         &provider_target.realm_id,
@@ -1460,27 +1527,42 @@ pub async fn complete_login(
 /// RPC `auth/login/cancel` method).
 pub use meerkat_contracts::wire::LoginCancelParams as LoginCancelBody;
 
-/// Retire the pending MCP attempt admitted under `state` for a configured
-/// server. Local only; an unknown state is refused.
+/// Retire the pending attempt admitted under `state` for a configured MCP
+/// server or a connector slot. Local only; an unknown state is refused.
 pub async fn cancel_login(
     State(state): State<AppState>,
     Json(body): Json<LoginCancelBody>,
 ) -> impl IntoResponse {
-    let target = match meerkat::resolve_configured_mcp_target(
-        &body.mcp,
-        state.context_root.as_deref(),
-        state.user_config_root.as_deref(),
-    )
-    .await
-    {
-        Ok(target) => target,
-        Err(error) => return host_auth_error_response(error),
+    use meerkat_contracts::WireLoginCancelledTarget;
+    let cancelled = match body {
+        LoginCancelBody::Mcp(body) => {
+            let target = match meerkat::resolve_configured_mcp_target(
+                &body.mcp,
+                state.context_root.as_deref(),
+                state.user_config_root.as_deref(),
+            )
+            .await
+            {
+                Ok(target) => target,
+                Err(error) => return host_auth_error_response(error),
+            };
+            host_auth_service(&state)
+                .mcp_login_cancel_by_state(&target, &body.state)
+                .map(|()| WireLoginCancelledTarget::Mcp(WireMcpLoginTarget { mcp: body.mcp }))
+        }
+        LoginCancelBody::Connector(body) => meerkat::connector_slot_from_wire(&body.connector)
+            .and_then(|slot| host_auth_service(&state).connector_login_cancel(&slot, &body.state))
+            .map(|()| {
+                WireLoginCancelledTarget::Connector(meerkat_contracts::WireConnectorSlotTarget {
+                    connector: body.connector,
+                })
+            }),
     };
-    match host_auth_service(&state).mcp_login_cancel_by_state(&target, &body.state) {
-        Ok(()) => (
+    match cancelled {
+        Ok(target) => (
             StatusCode::OK,
             Json(meerkat_contracts::WireLoginCancelled {
-                mcp: body.mcp,
+                target,
                 cancelled: true,
             }),
         )
@@ -3010,10 +3092,12 @@ mod tests {
         let (status, cancelled) = rest_json(
             cancel_login(
                 State(state.clone()),
-                Json(LoginCancelBody {
-                    mcp: mcp.clone(),
-                    state: attempt_state,
-                }),
+                Json(LoginCancelBody::Mcp(
+                    meerkat_contracts::wire::McpLoginCancelParams {
+                        mcp: mcp.clone(),
+                        state: attempt_state,
+                    },
+                )),
             )
             .await
             .into_response(),

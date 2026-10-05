@@ -611,6 +611,36 @@
         ],
         "type": "object"
       },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlotTarget": {
+        "additionalProperties": false,
+        "description": "A connector slot addressed by `auth/status/get`, `auth/login/cancel` and\nthe start/complete results.",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          }
+        },
+        "required": [
+          "connector"
+        ],
+        "type": "object"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
         "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
@@ -649,13 +679,16 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `auth/status/get`: a provider binding (the original\nflat fields) or an MCP server (`{\"mcp\": {...}}`).",
+    "description": "Request payload for `auth/status/get`: a provider binding (the original\nflat fields), an MCP server (`{\"mcp\": {...}}`) or a connector slot\n(`{\"connector\": {...}}`).",
     "oneOf": [
       {
         "$ref": "#/$defs/BindingIdParams"
       },
       {
         "$ref": "#/$defs/WireMcpLoginTarget"
+      },
+      {
+        "$ref": "#/$defs/WireConnectorSlotTarget"
       }
     ],
     "title": "AuthStatusParams"
@@ -25167,6 +25200,57 @@
   },
   "LoginCancelParams": {
     "$defs": {
+      "ConnectorLoginCancelParams": {
+        "additionalProperties": false,
+        "description": "Connector arm of [`LoginCancelParams`]. `Debug` redacts `state`.",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector",
+          "state"
+        ],
+        "type": "object"
+      },
+      "McpLoginCancelParams": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`LoginCancelParams`]. `Debug` redacts `state`.",
+        "properties": {
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mcp",
+          "state"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
         "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
@@ -25192,25 +25276,124 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Request payload for `auth/login/cancel`: retire the pending MCP attempt\nadmitted under `state` for this configured server. `Debug` redacts `state`.",
-    "properties": {
-      "mcp": {
-        "$ref": "#/$defs/WireMcpAuthTarget"
+    "description": "Request payload for `auth/login/cancel`: retire the pending attempt\nadmitted under `state` for a configured MCP server (`{\"mcp\": {...}}`) or\na connector slot (`{\"connector\": {...}}`).",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/McpLoginCancelParams"
       },
-      "state": {
-        "type": "string"
+      {
+        "$ref": "#/$defs/ConnectorLoginCancelParams"
       }
-    },
-    "required": [
-      "mcp",
-      "state"
     ],
-    "title": "LoginCancelParams",
-    "type": "object"
+    "title": "LoginCancelParams"
   },
   "LoginCompleteParams": {
     "$defs": {
+      "WireConnectorAccountSelection": {
+        "description": "Which provider account a connector login must prove.\n\n`known` refuses any other verified account. `discover` admits the login\nwith no account and binds the provider-verified account at completion;\nit publishes only into an empty slot.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "mode": {
+                "const": "known",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "account"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "discover",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireConnectorAuthTarget": {
+        "additionalProperties": false,
+        "description": "Generic connector OAuth target addressed by `auth/login/start` and\n`auth/login/complete`: the slot plus the descriptor facts the attempt is\nadmitted with. `strategy_id` names an account strategy installed on the\nhost (`oidc-userinfo-v1` by default). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "account_selection": {
+            "$ref": "#/$defs/WireConnectorAccountSelection"
+          },
+          "client": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "slot": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          },
+          "strategy_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot",
+          "issuer",
+          "client",
+          "resource",
+          "scopes",
+          "strategy_id",
+          "account_selection"
+        ],
+        "type": "object"
+      },
+      "WireConnectorLoginTarget": {
+        "additionalProperties": false,
+        "description": "Connector arm of [`WireLoginTarget`].",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorAuthTarget"
+          }
+        },
+        "required": [
+          "connector"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
         "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
@@ -25293,6 +25476,9 @@
       },
       {
         "$ref": "#/$defs/WireMcpLoginTarget"
+      },
+      {
+        "$ref": "#/$defs/WireConnectorLoginTarget"
       }
     ],
     "properties": {
@@ -25316,6 +25502,111 @@
   },
   "LoginStartParams": {
     "$defs": {
+      "WireConnectorAccountSelection": {
+        "description": "Which provider account a connector login must prove.\n\n`known` refuses any other verified account. `discover` admits the login\nwith no account and binds the provider-verified account at completion;\nit publishes only into an empty slot.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "mode": {
+                "const": "known",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "account"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "discover",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireConnectorAuthTarget": {
+        "additionalProperties": false,
+        "description": "Generic connector OAuth target addressed by `auth/login/start` and\n`auth/login/complete`: the slot plus the descriptor facts the attempt is\nadmitted with. `strategy_id` names an account strategy installed on the\nhost (`oidc-userinfo-v1` by default). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "account_selection": {
+            "$ref": "#/$defs/WireConnectorAccountSelection"
+          },
+          "client": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "slot": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          },
+          "strategy_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot",
+          "issuer",
+          "client",
+          "resource",
+          "scopes",
+          "strategy_id",
+          "account_selection"
+        ],
+        "type": "object"
+      },
+      "WireConnectorLoginTarget": {
+        "additionalProperties": false,
+        "description": "Connector arm of [`WireLoginTarget`].",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorAuthTarget"
+          }
+        },
+        "required": [
+          "connector"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
         "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
@@ -25398,6 +25689,9 @@
       },
       {
         "$ref": "#/$defs/WireMcpLoginTarget"
+      },
+      {
+        "$ref": "#/$defs/WireConnectorLoginTarget"
       }
     ],
     "properties": {

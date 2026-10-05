@@ -546,6 +546,66 @@ agent, tool result, transcript or log."""
     oauth_account: Optional[str] = None
 
 
+@dataclass
+class WireConnectorSlot:
+    """Credential slot of a connector credential: a realm-scoped storage
+address chosen by the trusted host. It is not proof of any provider
+account; the provider-verified account is reported separately."""
+    realm_id: str
+    slot_id: str
+
+
+# Which provider account a connector login must prove.
+#
+# `known` refuses any other verified account. `discover` admits the login
+# with no account and binds the provider-verified account at completion;
+# it publishes only into an empty slot.
+class WireConnectorAccountSelectionKnown(TypedDict, total=False):
+    account: Required[str]
+    mode: Required[Literal['known']]
+
+class WireConnectorAccountSelectionDiscover(TypedDict, total=False):
+    mode: Required[Literal['discover']]
+
+WireConnectorAccountSelection = WireConnectorAccountSelectionKnown | WireConnectorAccountSelectionDiscover
+
+@dataclass
+class WireConnectorAuthTarget:
+    """Generic connector OAuth target addressed by `auth/login/start` and
+`auth/login/complete`: the slot plus the descriptor facts the attempt is
+admitted with. `strategy_id` names an account strategy installed on the
+host (`oidc-userinfo-v1` by default). Login is host-driven: the
+authorize URL and state are host-channel data and must never reach an
+agent, tool result, transcript or log."""
+    account_selection: dict[str, Any] | dict[str, Literal['discover']]
+    client: str
+    issuer: str
+    resource: str
+    scopes: list[str]
+    slot: WireConnectorSlot
+    strategy_id: str
+
+
+@dataclass
+class WireConnectorVerifiedAccount:
+    """The provider account bound to a connector credential, qualified by the
+issuer and the strategy that verified it."""
+    issuer: str
+    strategy_id: str
+    subject: str
+
+
+# What authorizes a connector credential's granted scopes. Assigned by the
+# native owner from its own parsed token response, never by a caller.
+class WireScopeEvidenceTokenEndpointResponse(TypedDict, total=False):
+    kind: Required[Literal['token_endpoint_response']]
+
+class WireScopeEvidenceRetainedOnRefresh(TypedDict, total=False):
+    granted_at: Required[str]
+    kind: Required[Literal['retained_on_refresh']]
+
+WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireScopeEvidenceRetainedOnRefresh
+
 # Wire payload for InstructionActivationDisposition.
 InstructionActivationDisposition = Any
 
@@ -670,7 +730,8 @@ class WireDeviceCompleteResultReady(TypedDict, total=False):
 WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady
 
 # Request payload for `auth/status/get`: a provider binding (the original
-# flat fields) or an MCP server (`{"mcp": {...}}`).
+# flat fields), an MCP server (`{"mcp": {...}}`) or a connector slot
+# (`{"connector": {...}}`).
 class AuthStatusParamsBindingIdParams(TypedDict, total=False):
     binding_id: Required[str]
     profile_id: NotRequired[Optional[str]]
@@ -679,7 +740,23 @@ class AuthStatusParamsBindingIdParams(TypedDict, total=False):
 class AuthStatusParamsMcpLoginTarget(TypedDict, total=False):
     mcp: Required[WireMcpAuthTarget]
 
-AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget
+class AuthStatusParamsConnectorSlotTarget(TypedDict, total=False):
+    connector: Required[WireConnectorSlot]
+
+AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget | AuthStatusParamsConnectorSlotTarget
+
+# Request payload for `auth/login/cancel`: retire the pending attempt
+# admitted under `state` for a configured MCP server (`{"mcp": {...}}`) or
+# a connector slot (`{"connector": {...}}`).
+class LoginCancelParamsMcpLoginCancelParams(TypedDict, total=False):
+    mcp: Required[WireMcpAuthTarget]
+    state: Required[str]
+
+class LoginCancelParamsConnectorLoginCancelParams(TypedDict, total=False):
+    connector: Required[WireConnectorSlot]
+    state: Required[str]
+
+LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCancelParamsConnectorLoginCancelParams
 
 # Request payload for `auth/login/complete`. For an MCP target, issuer,
 # client and resource come from the admitted attempt named by `state`;
@@ -699,7 +776,13 @@ class LoginCompleteParamsMcpLoginTarget(TypedDict, total=False):
     state: Required[str]
     mcp: Required[WireMcpAuthTarget]
 
-LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget
+class LoginCompleteParamsConnectorLoginTarget(TypedDict, total=False):
+    code: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    connector: Required[WireConnectorAuthTarget]
+
+LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget | LoginCompleteParamsConnectorLoginTarget
 
 # Request payload for `auth/login/start`.
 class LoginStartParamsProviderLoginTarget(TypedDict, total=False):
@@ -713,7 +796,11 @@ class LoginStartParamsMcpLoginTarget(TypedDict, total=False):
     redirect_uri: Required[str]
     mcp: Required[WireMcpAuthTarget]
 
-LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget
+class LoginStartParamsConnectorLoginTarget(TypedDict, total=False):
+    redirect_uri: Required[str]
+    connector: Required[WireConnectorAuthTarget]
+
+LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget | LoginStartParamsConnectorLoginTarget
 
 # `auth/status/get` result: a provider binding status or an MCP status.
 class WireAuthStatusResultAuthStatusDetail(TypedDict, total=False):
@@ -735,22 +822,27 @@ class WireAuthStatusResultMcpAuthStatus(TypedDict, total=False):
     mcp: Required[WireMcpAuthTarget]
     phase: Required[Literal['authorized', 'reauth_required'] | Literal['authorization_required']]
 
-WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus
+class WireAuthStatusResultConnectorAuthStatus(TypedDict, total=False):
+    connector: Required[WireConnectorSlot]
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    phase: Required[Literal['authorized', 'reauth_required'] | Literal['authorization_required']]
+    scope_evidence: NotRequired[Optional[WireScopeEvidence]]
+    scopes: NotRequired[list[str]]
+    verified_account: NotRequired[Optional[WireConnectorVerifiedAccount]]
 
-@dataclass
-class LoginCancelParams:
-    """Request payload for `auth/login/cancel`: retire the pending MCP attempt
-admitted under `state` for this configured server. `Debug` redacts `state`."""
-    mcp: WireMcpAuthTarget
-    state: str
+WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus | WireAuthStatusResultConnectorAuthStatus
 
+# `auth/login/cancel` success body.
+class WireLoginCancelledMcpLoginTarget(TypedDict, total=False):
+    cancelled: Required[bool]
+    mcp: Required[WireMcpAuthTarget]
 
-@dataclass
-class WireLoginCancelled:
-    """`auth/login/cancel` success body."""
-    cancelled: bool
-    mcp: WireMcpAuthTarget
+class WireLoginCancelledConnectorSlotTarget(TypedDict, total=False):
+    cancelled: Required[bool]
+    connector: Required[WireConnectorSlot]
 
+WireLoginCancelled = WireLoginCancelledMcpLoginTarget | WireLoginCancelledConnectorSlotTarget
 
 @dataclass
 class ActivateInstructionParams:
@@ -6013,7 +6105,13 @@ class WireLoginStartMcpLoginStart(TypedDict, total=False):
     disposition: Required[Literal['started', 'joined']]
     mcp: Required[WireMcpAuthTarget]
 
-WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart
+class WireLoginStartConnectorSlotTarget(TypedDict, total=False):
+    authorize_url: Required[str]
+    redirect_uri: Required[str]
+    state: Required[str]
+    connector: Required[WireConnectorSlot]
+
+WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart | WireLoginStartConnectorSlotTarget
 
 # `POST /auth/login/complete` / ready leg of device-code success body.
 #
@@ -6040,7 +6138,16 @@ class WireLoginReadyMcpLoginReady(TypedDict, total=False):
     account_id: NotRequired[Optional[str]]
     mcp: Required[WireMcpAuthTarget]
 
-WireLoginReady = WireLoginReadyProviderLoginReady | WireLoginReadyMcpLoginReady
+class WireLoginReadyConnectorLoginReady(TypedDict, total=False):
+    expires_at: NotRequired[Optional[str]]
+    has_refresh_token: Required[bool]
+    scopes: Required[list[str]]
+    state: NotRequired[Optional[str]]
+    connector: Required[WireConnectorSlot]
+    scope_evidence: Required[WireScopeEvidence]
+    verified_account: Required[WireConnectorVerifiedAccount]
+
+WireLoginReady = WireLoginReadyProviderLoginReady | WireLoginReadyMcpLoginReady | WireLoginReadyConnectorLoginReady
 
 @dataclass
 class WireDeviceStart:

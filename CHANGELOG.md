@@ -2568,8 +2568,10 @@ them.
     turn-taking segment is journaled on every yield. A reply already in
     flight when the provider hears the user is measured as the yield.
     Assistant speech that starts after the provider could react, while the
-    user is still speaking, fails unless it is a classified backchannel, and
-    a wordless burst there must end within the talk-over bound. The bounds are frozen: each is the maximum of a stated
+    user is still speaking, fails unless it is a classified backchannel or
+    the duck held it to one provider frame (audible for at most 200 ms, the
+    duck's reaction time; journaled, #1710), and a wordless burst there must
+    end within the talk-over bound. The bounds are frozen: each is the maximum of a stated
     healthy population (73 yields of the 0.8.51 soak) plus the browser's
     100 ms energy window, and an exceedance is a finding to attribute, never
     a reason to raise the number. The old rule, that the audio ends before

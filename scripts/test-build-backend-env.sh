@@ -155,4 +155,51 @@ EOF
   [[ -z "${GEMINI_API_KEY+x}" ]]
 )
 
+# Exercise the actual Make recipe with only its downstream gates stubbed.
+# Sourcing the shared Bash helper must be clean, and source failure must stop
+# before any doctor, documentation or changed-path gate is invoked.
+MAKE_ROOT="${TEST_ROOT}/make-agent-gate"
+mkdir -p "${MAKE_ROOT}/scripts"
+cp "${REPO_ROOT}/Makefile" "${MAKE_ROOT}/Makefile"
+cp "${REPO_ROOT}/scripts/build-backend-env" "${MAKE_ROOT}/scripts/build-backend-env"
+cat > "${FAKE_BIN}/gate-make" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${GATE_TEST_LOG}"
+EOF
+cat > "${MAKE_ROOT}/scripts/agent-gate" <<'EOF'
+#!/usr/bin/env bash
+printf 'changed-path-gate\n' >> "${GATE_TEST_LOG}"
+EOF
+chmod +x "${FAKE_BIN}/gate-make" "${MAKE_ROOT}/scripts/agent-gate"
+for backend in 0 1; do
+  gate_log="${TEST_ROOT}/gate-${backend}.log"
+  gate_output="${TEST_ROOT}/gate-${backend}.out"
+  GATE_TEST_LOG="${gate_log}" MEERKAT_BUILDBUDDY="${backend}" \
+    make --no-print-directory -C "${MAKE_ROOT}" agent-gate \
+      MAKE="${FAKE_BIN}/gate-make" > "${gate_output}" 2>&1
+  if grep -Eiq 'syntax error|unexpected token' "${gate_output}"; then
+    echo "Make agent-gate did not source its Bash helper cleanly" >&2
+    cat "${gate_output}" >&2
+    exit 1
+  fi
+  if grep -Fq '\033[' "${gate_output}"; then
+    echo "Make agent-gate printed literal color escapes" >&2
+    cat "${gate_output}" >&2
+    exit 1
+  fi
+  doctor=rust-lane-doctor
+  [[ "${backend}" == 1 ]] && doctor=buildbuddy-doctor
+  printf '%s\ndocs-check\nchanged-path-gate\n' "${doctor}" > "${TEST_ROOT}/expected-gates"
+  cmp "${gate_log}" "${TEST_ROOT}/expected-gates"
+done
+printf '\nreturn 19\n' >> "${MAKE_ROOT}/scripts/build-backend-env"
+gate_log="${TEST_ROOT}/failed-source.log"
+if GATE_TEST_LOG="${gate_log}" MEERKAT_BUILDBUDDY=0 \
+  make --no-print-directory -C "${MAKE_ROOT}" agent-gate \
+    MAKE="${FAKE_BIN}/gate-make" > "${TEST_ROOT}/failed-source.out" 2>&1; then
+  echo "Make agent-gate accepted a failed helper source" >&2
+  exit 1
+fi
+[[ ! -e "${gate_log}" ]]
+
 echo "build backend secret environment contract holds"

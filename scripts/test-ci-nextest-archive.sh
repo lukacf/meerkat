@@ -269,6 +269,60 @@ if grep -Fq 'name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github
   echo "nextest archive artifact is keyed by run attempt; partition re-runs cannot find it" >&2
   exit 1
 fi
+# Archive consumers must use Nextest's direct runner; these paths execute the
+# supplied binaries without resolving or rebuilding the source Cargo graph.
+assert_file_contains "$TOP_LEVEL_WORKFLOW" 'cargo-nextest nextest list --archive-file "${archive}"'
+assert_file_contains "$TOP_LEVEL_WORKFLOW" 'cargo-nextest nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-${ARCHIVE}.tar.zst"'
+
+# Execute the doctor's actual workflow check against temporary source fixtures.
+# This keeps its archive-only exception covered without copying the detector.
+WORKFLOW_PROBE_ROOT="${TEST_ROOT}/workflow-entrypoints"
+mkdir -p "${WORKFLOW_PROBE_ROOT}/.github/workflows"
+WORKFLOW_CHECK="${TEST_ROOT}/doctor-workflow-check.sh"
+cat >"${WORKFLOW_CHECK}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+pass() { :; }
+bad() { printf '%s\n' "$1" >&2; return 1; }
+EOF
+sed -n '/^raw_cargo_workflow_hits=/,/^rust_channel=/p' \
+  "$ROOT/scripts/rust-lane-doctor" | sed '$d' >>"${WORKFLOW_CHECK}"
+grep -Fq 'bad "GitHub workflow Rust entrypoints bypass scripts/repo-cargo"' "${WORKFLOW_CHECK}" || {
+  echo "doctor workflow check fixture no longer selects its actual owner" >&2
+  exit 1
+}
+check_workflow_entrypoints() {
+  local description="$1" expected="$2" source="$3" actual
+  printf '%s\n' "${source}" >"${WORKFLOW_PROBE_ROOT}/.github/workflows/probe.yml"
+  if (cd "${WORKFLOW_PROBE_ROOT}" && bash "${WORKFLOW_CHECK}") \
+    >"${TEST_ROOT}/workflow-check.out" 2>&1; then
+    actual=pass
+  else
+    actual=fail
+  fi
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "doctor workflow check ${description}: expected ${expected}, got ${actual}" >&2
+    cat "${TEST_ROOT}/workflow-check.out" >&2
+    exit 1
+  fi
+}
+check_workflow_entrypoints "actual archive consumers" pass "$(cat "$TOP_LEVEL_WORKFLOW")"
+check_workflow_entrypoints "alias run" fail $'run: |\n  cargo-nextest nextest r --archive-file fixture.tar.zst'
+check_workflow_entrypoints "archive subcommand" fail $'run: |\n  cargo-nextest nextest archive --archive-file fixture.tar.zst'
+check_workflow_entrypoints "path-qualified binary" fail $'run: |\n  /usr/local/bin/cargo-nextest nextest run --archive-file fixture.tar.zst'
+check_workflow_entrypoints "global option before run" fail $'run: |\n  cargo-nextest nextest --color always run --archive-file fixture.tar.zst'
+check_workflow_entrypoints "global option before nextest" fail $'run: |\n  cargo-nextest --color always nextest list --archive-file fixture.tar.zst'
+check_workflow_entrypoints "continued archive flag" pass $'run: |\n  cargo-nextest nextest list \\\n    --archive-file "fixture.tar.zst" --profile ci-pr'
+check_workflow_entrypoints "equals archive flag" pass $'run: |\n  cargo-nextest nextest run --archive-file=fixture.tar.zst'
+check_workflow_entrypoints "nonarchive run" fail $'run: |\n  cargo-nextest nextest run -p meerkat-core'
+check_workflow_entrypoints "nonarchive list" fail $'run: |\n  cargo-nextest nextest list \\\n    --profile ci-pr'
+check_workflow_entrypoints "following command flag" fail $'run: |\n  cargo-nextest nextest run; echo --archive-file fixture.tar.zst'
+check_workflow_entrypoints "commented flag" fail $'run: |\n  cargo-nextest nextest list # --archive-file fixture.tar.zst'
+check_workflow_entrypoints "lookalike flag" fail $'run: |\n  cargo-nextest nextest run --archive-file-other fixture.tar.zst'
+check_workflow_entrypoints "test-binary argument flag" fail $'run: |\n  cargo-nextest nextest run -p meerkat-core -- --archive-file fixture.tar.zst'
+check_workflow_entrypoints "comment cannot continue over next command" fail $'run: |\n  cargo-nextest nextest list --archive-file fixture.tar.zst # \\\n  cargo-nextest nextest run -p meerkat-core'
+check_workflow_entrypoints "raw Cargo archive consumer" fail 'run: cargo nextest list --archive-file fixture.tar.zst'
+check_workflow_entrypoints "quoted diagnostic" pass 'run: echo "cargo-nextest nextest run"'
 assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 4'
 assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "github-hosted-cargo"'
 assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 3'

@@ -24,15 +24,15 @@ assert.deepEqual(refs, [
 
 // Package directories sorted longest-first, as packageDirs() produces them.
 const dirs = [
-  ["meerkat-core", { name: "meerkat-core" }],
-  ["meerkat", { name: "meerkat" }],
+  ["crates/meerkat-core", { name: "meerkat-core" }],
+  ["crates/meerkat", { name: "meerkat" }],
 ];
 
 assert.equal(packageForFile("crates/meerkat-core/src/lib.rs", dirs)?.name, "meerkat-core");
 assert.equal(packageForFile("crates/meerkat/Cargo.toml", dirs)?.name, "meerkat");
 
 // The facade embeds the platform and CLI reference skills through tracked
-// symlinks under meerkat/embedded_skills; edits to the symlink targets are
+// symlinks under crates/meerkat/embedded_skills; edits to the symlink targets are
 // facade inputs and must select the facade, not fall through as docs-only.
 assert.equal(packageForFile(".claude/skills/meerkat-platform/SKILL.md", dirs)?.name, "meerkat");
 assert.equal(

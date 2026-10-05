@@ -35,6 +35,15 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-tools` tests compile on macOS again. The custody foreign-namespace
+  fixture (`a_host_in_another_pid_namespace_is_proven_ended_by_its_lock`, its
+  host role and their constants) uses `unshare(1)` and tokio's read-write FIFO
+  receiver, which exists only on Linux and Android, so `cargo test -p
+  meerkat-tools` stopped compiling on macOS. The fixture is now Linux-only;
+  nothing changes on Linux.
+
 ## [0.8.51] - 2026-10-05
 
 ### Breaking

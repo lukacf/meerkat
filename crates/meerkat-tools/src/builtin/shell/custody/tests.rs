@@ -1392,13 +1392,21 @@ async fn the_sweep_reaps_only_ended_unreferenced_incarnation_locks() {
     assert!(incarnation_lock_path(root.path(), current.id).exists());
 }
 
+// The foreign-namespace fixture below is Linux-only: it needs unshare(1)
+// and a read-write FIFO receiver (tokio::net::unix::pipe::OpenOptions::
+// read_write), which exists only on Linux and Android.
+
 /// New user, pid and mount namespaces with a procfs for the new pid namespace.
 /// Without `--mount-proc` the host would still see the outer `/proc`, where
 /// its children's namespace-local pids name other processes or none, so
 /// custody could not capture the identity of the leader it just spawned.
+#[cfg(target_os = "linux")]
 const UNSHARE_ARGS: [&str; 3] = ["-Urpf", "--mount-proc", "--kill-child"];
+#[cfg(target_os = "linux")]
 const UNSHARE_ROOT_ENV: &str = "MEERKAT_TEST_CUSTODY_UNSHARE_ROOT";
+#[cfg(target_os = "linux")]
 const UNSHARE_SCOPE_ENV: &str = "MEERKAT_TEST_CUSTODY_UNSHARE_SCOPE";
+#[cfg(target_os = "linux")]
 const UNSHARE_CHILD_TEST: &str =
     "builtin::shell::custody::tests::custody_foreign_namespace_host_role";
 
@@ -1406,6 +1414,7 @@ const UNSHARE_CHILD_TEST: &str =
 /// [`a_host_in_another_pid_namespace_is_proven_ended_by_its_lock`]: open
 /// custody (taking the incarnation lock), run a tool in custody, report
 /// ready, and wait to be killed with its namespace.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "helper role executed only inside a new pid namespace"]
 async fn custody_foreign_namespace_host_role() {
@@ -1434,6 +1443,7 @@ async fn custody_foreign_namespace_host_role() {
     std::future::pending::<()>().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
     // Unprivileged user, pid and mount namespaces (and a procfs mount in

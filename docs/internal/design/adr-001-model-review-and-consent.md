@@ -100,6 +100,13 @@ normal repository checks. Surfaces project the same meanings.
 | Consent consumption | Existing approval lifecycle conditionally commits use against the shared approval/budget owner. One budget has one commit domain across sessions and processes; nested checks do not consume again. |
 | Policy edit | Existing policy authority authenticates administrator, typed scope and requested tier/duration. It emits an attributable current policy result. Console and channel adapters do not keep an authoritative override map. |
 
+The same settled native outcome is available outside the model transcript as a
+reader-authorized typed host/SDK event identifying outcome kind (unsatisfied
+review, reviewer unavailable or consent required), the existing action owner
+reference and tool/action. Hosts can derive requested versus completed counts.
+Events and counters are projections; they cannot authorize entry or expose
+protected reviewer rationale to an ineligible audience.
+
 An owning session that cannot receive a result has an explicit delivery failure
 or terminal disposition, visible to the host/person. It is not silently treated
 as delivered or used to recreate a deleted session. Reuse normal admission and
@@ -227,6 +234,7 @@ new runner or receipt framework.
 | Restart, expiry and notification | Recover open pending and decisions under the declared store profile; four-hour HomeCore expiry notifies person and agent; old memory-only references refuse while unrelated new work progresses. |
 | Temporary owner policy edit | Authenticated administrator, actor/tool/typed-argument scope, current reviewer context, expiry/auto-revert without clobbering later edits; unknown tool stays denied. |
 | Delivery/store/audit failure | Distinct infrastructure outcomes, no unchecked entry, settled sibling results retained, notice recovery or visible terminal failure. |
+| Host observability | Typed host/SDK outcomes outside the model transcript agree with settled tool feedback and identify the existing owner reference and tool/action. Requested/completed projections add no authority or unauthorized rationale disclosure. |
 
 The changed HomeCore seams are C1 real-reviewer evidence; C2 explicit closed
 manifest; C3-C5 expiring policy edit and authenticated channel administration;

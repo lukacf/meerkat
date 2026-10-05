@@ -512,7 +512,20 @@ async function prepare(command) {
         case 'now':
           return true;
         case 'first_assistant_audio':
-          if (item.allow_active && item.armed_active) return true;
+          // Already-speaking assistant: fire only while it is voicing (an
+          // active window within the last energy window). `assistant_active`
+          // stays true through the end hysteresis after the last voiced
+          // window, so armed in that tail it is a finished burst; wait for
+          // the next burst start instead of barging in on silence (Turbo S
+          // S103 soak 65b7a5c3 R6: armed 681 ms after the last active window).
+          if (
+            item.allow_active &&
+            item.armed_active &&
+            energy.last_active_ms !== null &&
+            t - energy.last_active_ms <= energy.window_ms
+          ) {
+            return true;
+          }
           return energy.first_assistant_audio_ms.some((start) => start >= item.armed_ms);
         case 'assistant_quiet': {
           const spoke = item.armed_active || (energy.last_active_ms !== null && energy.last_active_ms >= item.armed_ms);

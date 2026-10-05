@@ -83,6 +83,13 @@ them.
 
 ### Fixed
 
+- Examples: the Office demo (`examples/033-the-office-demo-sh`) works when
+  served from a sub-path, not only from a site root. Its built page loaded
+  `/assets/...` and the WASM runtime from `/meerkat-pkg/...` at the root;
+  Vite now builds with relative asset URLs (`base: "./"`) and the runtime
+  loads page-relative, like the demo's sprites and background. The offline
+  regression suite imports the runtime the same way.
+
 - Model catalog: Claude Sonnet 5.5 (`claude-sonnet-5-5`) now refuses a forced
   `tool_choice` (`required` or a named tool) locally with the typed
   `ModelDoesNotSupportForcedToolChoice` before the provider call, as Claude Opus

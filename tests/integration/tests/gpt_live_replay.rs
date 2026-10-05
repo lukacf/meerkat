@@ -834,6 +834,34 @@ static REPLAY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Committed fixtures carry no credential, SDP, host path or voice audio
 /// (the same rules as `scripts/gpt-live-scrub-provider-stream check`).
+/// The broker's duck-release burst gap is the browser peer's end hysteresis:
+/// the gap the talk-over oracle uses to join voiced frames into one burst.
+/// One value, never two tunables that drift apart.
+#[test]
+fn the_duck_release_burst_gap_is_the_peer_end_hysteresis() {
+    const BROKER: &str = include_str!("../../../crates/meerkat-openai/src/public_live.rs");
+    const PEER: &str = include_str!("../../live_smoke/browser/harness/gpt-live-peer-e2e.mjs");
+    let value_after = |source: &str, marker: &str| -> u64 {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("`{marker}` is defined"))
+            + marker.len();
+        source[start..]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit() || *c == '_')
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|_| panic!("`{marker}` has a numeric value"))
+    };
+    assert_eq!(
+        value_after(BROKER, "const OUTPUT_BURST_GAP_MS: u64 ="),
+        value_after(PEER, "end_hysteresis_ms:"),
+        "the broker's burst gap must equal the peer's end hysteresis"
+    );
+}
+
 #[test]
 fn replay_fixtures_are_scrubbed() {
     for (name, text) in FIXTURES {

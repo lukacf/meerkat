@@ -28,6 +28,7 @@ use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::image_generation::{
@@ -88,6 +89,18 @@ enum OpenAiBackendWire {
     AzureOpenAi(AzureOpenAiWireConfig),
 }
 
+impl OpenAiBackendWire {
+    /// Whether this backend has admitted Meerkat's prompt-cache fields
+    /// (`prompt_cache_enabled`, `_key`, `_retention`, `_options` and the
+    /// input breakpoints they author). Only the public OpenAI API has; the
+    /// ChatGPT backend and Azure OpenAI stay gated off until their contracts
+    /// admit them (#925). This is the one owner of that decision: every
+    /// request this client sends passes it, whoever set the fields (#1669).
+    fn admits_prompt_cache_fields(&self) -> bool {
+        matches!(self, Self::PublicOpenAi)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SystemMessageMode {
     IncludeInInput,
@@ -146,11 +159,11 @@ impl ResponsesCacheBreakpoints {
         matches!(self, Self::ImplicitWithTurnAnchor { .. })
     }
 
-    /// The breakpoint placement `request` asks for.
-    fn for_request(request: &LlmRequest) -> Self {
+    /// The breakpoint placement `request` asks for, from its OpenAI tag as
+    /// the client's backend admits it (see `OpenAiClient::wire_openai_tag`).
+    fn for_request(request: &LlmRequest, tag: Option<&OpenAiProviderTag>) -> Self {
         use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode;
-        let Some(tag) = openai_tag(request).filter(|tag| tag.prompt_cache_enabled != Some(false))
-        else {
+        let Some(tag) = tag.filter(|tag| tag.prompt_cache_enabled != Some(false)) else {
             return Self::None;
         };
         match tag.prompt_cache_options.and_then(|options| options.mode) {
@@ -719,6 +732,32 @@ impl OpenAiClient {
         matches!(self.backend_wire, OpenAiBackendWire::ChatGptBackend)
     }
 
+    /// The request's OpenAI tag as this client's backend admits it. On a
+    /// backend that has not admitted prompt-cache fields they are cleared,
+    /// whether they came from the factory's model defaults or a host's
+    /// explicit `provider_params`, so breakpoint planning, validation, the
+    /// body and the authored breakpoint claims all see none of them.
+    fn wire_openai_tag<'a>(&self, request: &'a LlmRequest) -> Option<Cow<'a, OpenAiProviderTag>> {
+        let tag = openai_tag(request)?;
+        let carries_cache_fields = tag.prompt_cache_enabled.is_some()
+            || tag.prompt_cache_key.is_some()
+            || tag.prompt_cache_retention.is_some()
+            || tag.prompt_cache_options.is_some();
+        if !carries_cache_fields || self.backend_wire.admits_prompt_cache_fields() {
+            return Some(Cow::Borrowed(tag));
+        }
+        tracing::debug!(
+            model = %request.model,
+            "prompt-cache fields dropped: this OpenAI backend has not admitted them"
+        );
+        let mut gated = tag.clone();
+        gated.prompt_cache_enabled = None;
+        gated.prompt_cache_key = None;
+        gated.prompt_cache_retention = None;
+        gated.prompt_cache_options = None;
+        Some(Cow::Owned(gated))
+    }
+
     fn azure_openai_wire_config(&self) -> Option<&AzureOpenAiWireConfig> {
         match &self.backend_wire {
             OpenAiBackendWire::AzureOpenAi(config) => Some(config),
@@ -809,7 +848,9 @@ impl OpenAiClient {
     /// not a supported host API.
     #[doc(hidden)]
     pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
-        let cache_breakpoints = ResponsesCacheBreakpoints::for_request(request);
+        let wire_tag = self.wire_openai_tag(request);
+        let cache_breakpoints =
+            ResponsesCacheBreakpoints::for_request(request, wire_tag.as_deref());
         let (input, instructions, _) = if self.is_chatgpt_backend_wire() {
             Self::validate_chatgpt_system_messages(&request.messages)?;
             Self::convert_to_responses_input_with_system_mode(
@@ -826,7 +867,7 @@ impl OpenAiClient {
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
 
-        if let Some(tag) = openai_tag(request) {
+        if let Some(tag) = wire_tag.as_deref() {
             if reasoning_enabled
                 && let Some(effort) = tag.reasoning_effort
                 && crate::request_support::supports_reasoning_effort(&request.model, effort)
@@ -1011,7 +1052,7 @@ impl OpenAiClient {
         }
 
         // Inject provider-native web search tool from typed tag.
-        if let Some(web_search) = openai_tag(request).and_then(|t| t.web_search.as_ref()) {
+        if let Some(web_search) = wire_tag.as_deref().and_then(|t| t.web_search.as_ref()) {
             let ws_value = web_search.as_value();
             if ws_value.is_object() {
                 match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
@@ -1023,7 +1064,7 @@ impl OpenAiClient {
 
         self.apply_tool_choice(request, &mut body)?;
 
-        if let Some(tag) = openai_tag(request) {
+        if let Some(tag) = wire_tag.as_deref() {
             if let Some(store) = tag.store {
                 body["store"] = Value::Bool(store);
             }
@@ -2404,7 +2445,7 @@ impl LlmClient for OpenAiClient {
         request: &LlmRequest,
         canonical_messages: &[Message],
     ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
-        let Some(tag) = openai_tag(request) else {
+        let Some(tag) = self.wire_openai_tag(request) else {
             return Ok(Vec::new());
         };
         let explicit = tag.prompt_cache_enabled != Some(false)

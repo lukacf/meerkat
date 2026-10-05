@@ -1349,7 +1349,6 @@ fn provider_request_defaults_for(
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
     web_search_override: ToolCategoryOverride,
     _session_id: Option<&meerkat_core::SessionId>,
-    openai_cache_defaults_supported: bool,
 ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
     use meerkat_core::lifecycle::run_primitive::{
         AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiPromptCacheOptions,
@@ -1371,12 +1370,13 @@ fn provider_request_defaults_for(
             }))
         }
         Provider::OpenAI => {
-            let cache_capabilities = if openai_cache_defaults_supported {
-                meerkat_models::capabilities_for(Provider::OpenAI, model)
-                    .and_then(|capabilities| capabilities.openai_responses_params)
-            } else {
-                None
-            };
+            // The model's cache defaults, whatever the binding: whether they
+            // apply is decided on the wire by the OpenAI client's backend
+            // (`admits_prompt_cache_fields`), the one owner of that decision,
+            // which also covers explicit host params and identities whose
+            // binding is resolved only when the client is built (#1669).
+            let cache_capabilities = meerkat_models::capabilities_for(Provider::OpenAI, model)
+                .and_then(|capabilities| capabilities.openai_responses_params);
             let prompt_cache_options = cache_capabilities.and_then(|capabilities| {
                 // The catalog row names its default mode (GPT-5.6 explicit,
                 // GPT-6 implicit). Implicit mode on a row that also accepts
@@ -1485,20 +1485,6 @@ fn validate_anthropic_request_shaping(
         Some(rejection) => Err(BuildAgentError::Config(rejection)),
         None => Ok(()),
     }
-}
-
-fn openai_cache_defaults_supported(
-    config: &Config,
-    auth_binding: Option<&meerkat_core::AuthBindingRef>,
-) -> bool {
-    let Some(auth_binding) = auth_binding else {
-        return true;
-    };
-    if auth_binding.is_env_default() {
-        return true;
-    }
-    meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding)
-        .is_ok_and(|target| target.backend.backend_kind == "openai_api")
 }
 
 /// Typed create-session model hints supplied by a public surface.
@@ -4736,8 +4722,6 @@ impl AgentFactory {
                 model_profile.as_ref(),
                 web_search,
                 session_id,
-                identity.provider != Provider::OpenAI
-                    || openai_cache_defaults_supported(config, identity.auth_binding.as_ref()),
             ),
             provider_native_tools: if copilot_route {
                 meerkat_core::ProviderNativeToolPolicy::DisableAll
@@ -7548,8 +7532,6 @@ impl AgentFactory {
             model_profile.as_ref(),
             build_config.override_web_search,
             Some(session.id()),
-            provider != Provider::OpenAI
-                || openai_cache_defaults_supported(config, build_config.auth_binding.as_ref()),
         ) {
             builder = builder.provider_tool_defaults(defaults);
         }
@@ -10253,7 +10235,6 @@ mod tests {
             Some(&profile),
             ToolCategoryOverride::Inherit,
             Some(&session_id),
-            true,
         );
         assert_eq!(
             enabled,
@@ -10277,7 +10258,6 @@ mod tests {
             Some(&profile),
             ToolCategoryOverride::Disable,
             Some(&session_id),
-            true,
         );
         assert!(
             disabled.is_none(),
@@ -10488,10 +10468,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gpt_56_cache_defaults_are_scoped_to_public_openai_backend() {
-        let temp = tempfile::tempdir().expect("temp sessions");
-        let factory = AgentFactory::new(temp.path().join("sessions"));
+    /// A realm whose OpenAI binding is the private ChatGPT backend.
+    fn chatgpt_backend_cache_config() -> (Config, AuthBindingRef) {
         let mut config = Config::default();
         let mut realm = inline_realm_section(&[("openai", "test-key")]);
         realm
@@ -10509,7 +10487,56 @@ mod tests {
         let target = meerkat_core::resolve_explicit_auth_binding_target(&config, &auth_binding)
             .expect("valid ChatGPT backend binding");
         assert_eq!(target.backend.backend_kind, "chatgpt_backend");
+        (config, auth_binding)
+    }
 
+    /// Lower `identity`'s request policy through a ChatGPT-backend client, as
+    /// the session's turn does, and return the body the wire would carry.
+    #[cfg(feature = "openai")]
+    fn chatgpt_wire_body_for_policy(
+        factory: &AgentFactory,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+    ) -> serde_json::Value {
+        let policy = factory
+            .request_policy_for_session_llm_identity(
+                config,
+                identity,
+                ToolCategoryOverride::Disable,
+                &SessionId::new(),
+            )
+            .expect("request policy");
+        let mut request = meerkat_llm_core::LlmRequest::new(
+            &identity.model,
+            vec![meerkat_core::Message::User(
+                meerkat_core::UserMessage::text("hello"),
+            )],
+        );
+        request.provider_params = policy.provider_tool_defaults;
+        meerkat_openai::OpenAiClient::new("test-key".to_string())
+            .with_chatgpt_backend_wire()
+            .build_request_body(&request)
+            .expect("ChatGPT backend request body")
+    }
+
+    #[cfg(feature = "openai")]
+    fn cache_fields(body: &serde_json::Value) -> Vec<&'static str> {
+        [
+            "prompt_cache_key",
+            "prompt_cache_options",
+            "prompt_cache_retention",
+        ]
+        .into_iter()
+        .filter(|field| body.get(*field).is_some())
+        .collect()
+    }
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn gpt_56_cache_defaults_never_reach_the_private_chatgpt_backend_wire() {
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let (config, auth_binding) = chatgpt_backend_cache_config();
         let identity = SessionLlmIdentity {
             model: "gpt-5.6-sol".to_string(),
             provider: Provider::OpenAI,
@@ -10517,17 +10544,38 @@ mod tests {
             provider_params: None,
             auth_binding: Some(auth_binding),
         };
-        let policy = factory
-            .request_policy_for_session_llm_identity(
-                &config,
-                &identity,
-                ToolCategoryOverride::Disable,
-                &SessionId::new(),
-            )
-            .expect("request policy");
+        let body = chatgpt_wire_body_for_policy(&factory, &config, &identity);
         assert!(
-            policy.provider_tool_defaults.is_none(),
-            "public OpenAI cache defaults must not leak onto the private ChatGPT backend wire"
+            cache_fields(&body).is_empty(),
+            "public OpenAI cache defaults must not leak onto the private ChatGPT backend wire: {:?}",
+            cache_fields(&body)
+        );
+    }
+
+    /// #1669, second path: an explicit model change with `auth_binding: Clear`
+    /// leaves the target identity's binding `None`, so its request policy is
+    /// computed without the binding the client then resolves (here the
+    /// realm's ChatGPT-backend binding). The policy cannot know that backend;
+    /// the client built for it must still keep the public API's cache
+    /// defaults off its wire.
+    #[cfg(feature = "openai")]
+    #[test]
+    fn cache_defaults_from_an_unresolved_binding_never_reach_the_chatgpt_backend_wire() {
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let (config, _auth_binding) = chatgpt_backend_cache_config();
+        let cleared = SessionLlmIdentity {
+            model: "gpt-5.6-sol".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let body = chatgpt_wire_body_for_policy(&factory, &config, &cleared);
+        assert!(
+            cache_fields(&body).is_empty(),
+            "cache defaults computed for an unresolved binding reached the ChatGPT backend wire: {:?}",
+            cache_fields(&body)
         );
     }
 

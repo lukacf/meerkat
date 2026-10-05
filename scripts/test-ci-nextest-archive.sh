@@ -251,6 +251,24 @@ if grep -F 'mob-dense-topology.yml' "$TOP_LEVEL_WORKFLOW" | grep -Fq 'uses:'; th
 fi
 assert_file_contains "$TOP_LEVEL_WORKFLOW" 'schema_version: 4'
 assert_file_contains "$TOP_LEVEL_WORKFLOW" 'validation_backend: "github-hosted-cargo"'
+# A partition-only re-run (attempt 2+) does not re-run the archive build, so
+# the archive artifact must be keyed by run, not attempt, and a full re-run
+# must be able to replace it.
+archive_name='          name: nextest-${{ matrix.archive }}-${{ github.run_id }}'
+for step in 'Upload nextest archive' 'Download nextest archive'; do
+  if ! grep -F -A8 -- "- name: ${step}" "$TOP_LEVEL_WORKFLOW" | grep -qxF -- "${archive_name}"; then
+    echo "${step} does not use the run-keyed archive name" >&2
+    exit 1
+  fi
+done
+if ! grep -F -A10 -- '- name: Upload nextest archive' "$TOP_LEVEL_WORKFLOW" | grep -qxF -- '          overwrite: true'; then
+  echo "Upload nextest archive must overwrite so a full re-run can replace the archive" >&2
+  exit 1
+fi
+if grep -Fq 'name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}' "$TOP_LEVEL_WORKFLOW"; then
+  echo "nextest archive artifact is keyed by run attempt; partition re-runs cannot find it" >&2
+  exit 1
+fi
 assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 4'
 assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "github-hosted-cargo"'
 assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 3'

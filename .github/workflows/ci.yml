@@ -1072,9 +1072,14 @@ jobs:
       - name: Upload nextest archive
         uses: actions/upload-artifact@v7
         with:
-          name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Keyed by run, not attempt: re-running only a failed partition job
+          # (attempt 2+) does not re-run this build job, so the partition must
+          # find the archive an earlier attempt uploaded. A full re-run rebuilds
+          # and replaces it.
+          name: nextest-${{ matrix.archive }}-${{ github.run_id }}
           path: ${{ runner.temp }}/nextest-${{ matrix.archive }}.tar.zst
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
       - name: Upload sccache server log
@@ -1112,7 +1117,7 @@ jobs:
       - name: Download nextest archive
         uses: actions/download-artifact@v5
         with:
-          name: nextest-${{ matrix.archive }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: nextest-${{ matrix.archive }}-${{ github.run_id }}
           path: ${{ runner.temp }}/nextest-archive
 
       - name: Unit tests (archived lane partition)

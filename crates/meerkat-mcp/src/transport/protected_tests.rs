@@ -618,13 +618,58 @@ impl std::io::Write for Capture {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_rmcp_stdio_trace_keeps_live_metadata_and_malformed_input_private() {
     use futures::FutureExt;
     use rmcp::{
         ServiceExt,
         model::{ServerCapabilities, ServerInfo},
     };
+    use tokio::io::AsyncReadExt;
+
+    const CHILD_ENV: &str = "MEERKAT_MCP_TRACE_CAPTURE_CHILD";
+    const CHILD_COMPLETE: &str = "meerkat-mcp-trace-capture-complete";
+    if std::env::var_os(CHILD_ENV).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        // rmcp spawns its own workers. Capture them with one global subscriber
+        // in a separate process, without capturing unrelated tests' canaries.
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transport::protected::tests::real_rmcp_stdio_trace_keeps_live_metadata_and_malformed_input_private",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let status = match tokio::time::timeout(LIMIT * 4, child.wait()).await {
+            Ok(status) => status.unwrap(),
+            Err(_) => {
+                child.kill().await.unwrap();
+                panic!("isolated MCP TRACE fixture timed out");
+            }
+        };
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .take(64 * 1024)
+            .read_to_string(&mut output)
+            .await
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated MCP TRACE fixture failed: {output}"
+        );
+        // An exact-name mismatch must not pass by running zero tests.
+        assert!(output.contains(CHILD_COMPLETE));
+        return;
+    }
+
     let captured = Capture::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -633,7 +678,7 @@ async fn real_rmcp_stdio_trace_keeps_live_metadata_and_malformed_input_private()
         .without_time()
         .with_writer(move || writer.clone())
         .finish();
-    let _trace_guard = tracing::subscriber::set_default(subscriber);
+    tracing::subscriber::set_global_default(subscriber).unwrap();
     let (client, server) = tokio::io::duplex(16384);
     let (read, write) = tokio::io::split(client);
     let (server_read, mut server_write) = tokio::io::split(server);
@@ -688,6 +733,13 @@ async fn real_rmcp_stdio_trace_keeps_live_metadata_and_malformed_input_private()
     joined.unwrap().unwrap();
     let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("ordinary-diagnostic-survives"));
+    assert!(logs.lines().any(|line| {
+        line.contains("TRACE")
+            && line.contains("rmcp::service")
+            && line.contains("new event")
+            && line.contains("safe-result")
+    }));
     assert!(logs.contains("MCP input refused: invalid JSON-RPC frame"));
     assert!(!logs.contains(SECRET));
+    println!("{CHILD_COMPLETE}");
 }

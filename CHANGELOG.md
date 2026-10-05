@@ -1302,6 +1302,11 @@ them.
 
 ### Fixed
 
+- GPT Live Turbo S S97 and S99 journals now carry the browser timeline
+  (`fixture_start` with `speech_ms`, `input_final` with `t_ms`), one record
+  per channel, written whether the scenario passed or failed. The lag rule
+  that voids provider-degraded runs could not be computed for them before,
+  so a failing S97 or S99 run could not be classified as void or valid.
 - A voice delegation's result that was merged into the session after its call
   closed now replays on a reopened channel as the result of that request:
   "Finished voice request: "<the user's own words>". It finished after the

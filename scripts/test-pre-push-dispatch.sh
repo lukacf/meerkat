@@ -205,6 +205,15 @@ if [[ "${second_bazel_output_base}" != "${validated_bazel_output_base}" ]]; then
   exit 1
 fi
 
+# `git push origin HEAD:refs/heads/x` reports local_ref=HEAD. Branch creation
+# is decided by where the push goes, not how the local side was spelled, so it
+# gets the same default-branch diff base as refs/heads/x:refs/heads/x instead
+# of the all-files empty-tree scope.
+: > "$INVOCATION_LOG"
+run_dispatch "HEAD ${head_sha} refs/heads/head-spelled ${ZERO_SHA:-0000000000000000000000000000000000000000}"
+assert_log_line "args=run --config .pre-commit-config.yaml --hook-stage pre-push --from-ref ${base_sha} --to-ref ${head_sha}"
+assert_log_line "from=${base_sha}"
+
 # If the remote default branch is unavailable, branch creation stays
 # fail-closed on the empty tree rather than guessing a comparison base.
 git -C "$TEST_ROOT" symbolic-ref --delete refs/remotes/origin/HEAD

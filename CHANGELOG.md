@@ -43,6 +43,15 @@ them.
   receiver, which exists only on Linux and Android, so `cargo test -p
   meerkat-tools` stopped compiling on macOS. The fixture is now Linux-only;
   nothing changes on Linux.
+- A push that creates a branch as `git push origin HEAD:refs/heads/<branch>`
+  no longer runs every pre-push hook over all files. The pre-push dispatcher
+  gave a new branch the remote default branch's merge-base as its diff base
+  only when the local ref was spelled `refs/heads/...`. Git reports
+  `local_ref=HEAD` for the `HEAD:` form, so that push fell back to the
+  empty tree (`--all-files`) and selected unrelated machine-codegen and TLC
+  work. The base is now decided by the destination ref (`refs/heads/*`), and
+  tags stay fail-closed on the empty tree. `scripts/test-pre-push-dispatch.sh`
+  covers the `HEAD:refs/heads/<branch>` push.
 
 ### Testing
 

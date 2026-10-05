@@ -935,6 +935,9 @@ pub struct AttributedEvent {
 /// serialized on the public event surface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemberSpawnedEvent {
+    /// Runtime-issued immutable creation identity and ancestry.
+    #[serde(default)]
+    pub creation: crate::MemberCreationRecord,
     /// Stable member identity.
     pub agent_identity: AgentIdentity,
     /// Generation counter (0 for initial spawn).
@@ -1037,6 +1040,7 @@ impl MemberSpawnedEvent {
         role: ProfileName,
     ) -> Self {
         Self {
+            creation: crate::MemberCreationRecord::default(),
             agent_identity,
             generation,
             fence_token,

@@ -495,6 +495,41 @@ impl AgentMobToolSurface {
         }
     }
 
+    /// Capture the authenticated source's immutable creation facts, including
+    /// when it delegates into another mob. Arguments never select the source.
+    async fn capture_creation_source(
+        &self,
+    ) -> Result<meerkat_mob::MemberCreationSourceWitness, MobError> {
+        // A nonpersistent service may derive this read through the current
+        // session task, which is waiting for this tool. It has no durable
+        // source authority to capture, so do not enter that read at all.
+        if !self.state.session_service().supports_persistent_sessions() {
+            return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
+        }
+        let view = self
+            .state
+            .session_service()
+            .load_persisted_session_metadata(&self.owner_bridge_session_id)
+            .await?;
+        let Some(binding) = view.as_ref().and_then(|view| view.mob_member_binding()) else {
+            return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
+        };
+        let source = self
+            .state
+            .handle_for(&MobId::from(binding.mob_id.as_str()))
+            .await?;
+        match source
+            .capture_member_creation_source(&self.owner_bridge_session_id)
+            .await
+        {
+            Ok(witness) => Ok(witness),
+            Err(meerkat_mob::MemberCreationError::Unavailable(_)) => {
+                Ok(meerkat_mob::MemberCreationSourceWitness::unavailable())
+            }
+            Err(error) => Err(MobError::Internal(error.to_string())),
+        }
+    }
+
     /// The member this surface's session is bound to, when it belongs to
     /// `mob_id`. Resolved from the session binding, never from arguments.
     async fn caller_identity_in_mob(
@@ -1027,6 +1062,11 @@ impl AgentMobToolSurface {
         };
         let mut request = DelegationExecutionRequest::new(identity.clone(), args.task, result_spec);
         let mut member = DelegationMemberOptions::default();
+        member.creation_source = Some(
+            self.capture_creation_source()
+                .await
+                .map_err(|error| Self::map_mob_error(call, error))?,
+        );
         member.placement = lower_wire_placement(args.placement);
         member.additional_instructions = args.additional_instructions.map(|value| vec![value]);
         member.inherited_tool_filter = resolved.inherited_tool_filter;
@@ -1772,13 +1812,15 @@ impl AgentMobToolSurface {
         // worker-stack budget).
         let handle = handle.clone();
         let owner_bridge_session_id = self.owner_bridge_session_id.clone();
-        Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
-            move || async move {
+        Box::pin(async move {
+            let spec = spec.with_creation_source(self.capture_creation_source().await?);
+            meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
                 handle
                     .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id)
                     .await
-            },
-        ))
+            })
+            .await
+        })
     }
 
     async fn dispatch_conclude_objective(

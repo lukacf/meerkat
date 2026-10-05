@@ -5580,6 +5580,7 @@ pub struct SpawnMemberSpec {
     /// without holding manage scope over the whole mob. Never taken from
     /// caller-supplied arguments.
     pub(crate) spawned_by: Option<AgentIdentity>,
+    pub(crate) creation_source: Option<crate::MemberCreationSourceWitness>,
     pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed lineage of a fork-derived member, carried into its seating build
     /// as `SessionBuildOptions::fork_source`. Set only when the runtime applies
@@ -5648,6 +5649,12 @@ impl std::fmt::Debug for SpawnMemberSpec {
 }
 
 impl SpawnMemberSpec {
+    /// Attach exact runtime-proven parent ancestry to a child launch.
+    pub fn with_creation_source(mut self, source: crate::MemberCreationSourceWitness) -> Self {
+        self.creation_source = Some(source);
+        self
+    }
+
     pub fn new(profile: impl Into<ProfileName>, identity: impl Into<AgentIdentity>) -> Self {
         Self {
             role_name: profile.into(),
@@ -5679,6 +5686,7 @@ impl SpawnMemberSpec {
             placement: None,
             forked_participant_attachment: None,
             spawned_by: None,
+            creation_source: None,
             fork_job: None,
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
@@ -14400,13 +14408,22 @@ impl MobHandle {
             },
             source_session_id.clone(),
         );
-        Ok(super::ForkBuildInheritance::new(
+        let creation_source = match self.capture_member_creation_source(source_session_id).await {
+            Ok(witness) => witness,
+            Err(crate::MemberCreationError::Unavailable(_)) => {
+                crate::MemberCreationSourceWitness::unavailable()
+            }
+            Err(error) => return Err(MobError::Internal(error.to_string())),
+        };
+        let mut inheritance = super::ForkBuildInheritance::new(
             source,
             app_context,
             labels,
             external_tools,
             external_tools_origin,
-        ))
+        );
+        inheritance.creation_source = Some(creation_source);
+        Ok(inheritance)
     }
 
     /// Seat an already committed durable fork as a new mob member through the

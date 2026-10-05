@@ -73,6 +73,8 @@ pub enum DelegationExecutionSource {
 #[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct DelegationMemberOptions {
+    /// Sealed runtime source proof, independent of optional comms wiring.
+    pub creation_source: Option<crate::MemberCreationSourceWitness>,
     pub placement: Option<HostId>,
     pub additional_instructions: Option<Vec<String>>,
     pub inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
@@ -821,6 +823,11 @@ impl DelegationExecutionService {
             "delegation service resolved member role"
         );
         let mut spec = SpawnMemberSpec::new(role, identity.clone());
+        spec.creation_source = Some(
+            member
+                .creation_source
+                .unwrap_or_else(crate::MemberCreationSourceWitness::unavailable),
+        );
         spec.initial_message = None;
         spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
         spec.auto_wire_parent = false;

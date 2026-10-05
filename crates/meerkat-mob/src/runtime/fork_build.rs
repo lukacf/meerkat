@@ -270,6 +270,7 @@ impl RetainedOverlays {
 #[derive(Clone)]
 pub struct ForkBuildInheritance {
     source: ForkBuildSource,
+    pub(crate) creation_source: Option<crate::MemberCreationSourceWitness>,
     app_context: Option<serde_json::Value>,
     labels: BTreeMap<String, String>,
     external_tools: Option<Arc<dyn AgentToolDispatcher>>,
@@ -294,6 +295,7 @@ impl ForkBuildInheritance {
         labels.retain(|key, _| !crate::build::is_standard_mob_member_label(key));
         Self {
             source,
+            creation_source: None,
             app_context,
             labels,
             external_tools,
@@ -341,12 +343,14 @@ impl ForkBuildInheritance {
     pub(crate) fn apply_to(self, spec: &mut super::handle::SpawnMemberSpec) {
         let Self {
             source,
+            creation_source,
             app_context,
             labels,
             external_tools,
             external_tools_origin,
         } = self;
         spec.fork_source = Some(source);
+        spec.creation_source = creation_source;
         spec.fork_overlay = match (spec.external_tools.is_some(), external_tools_origin) {
             (true, _) => ForkOverlayOrigin::Caller,
             (false, RetainedOverlayOrigin::Inherited) => ForkOverlayOrigin::Source,

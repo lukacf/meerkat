@@ -180,6 +180,8 @@ pub(crate) struct RosterAddEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Roster {
     entries: BTreeMap<AgentIdentity, RosterEntry>,
+    #[serde(skip)]
+    pub(crate) creation_history: std::sync::Arc<crate::member_creation::MemberCreationProjection>,
 }
 
 impl Roster {
@@ -199,6 +201,7 @@ impl Roster {
 
     /// Apply a single event to update roster state.
     pub fn apply(&mut self, event: &MobEvent) {
+        std::sync::Arc::make_mut(&mut self.creation_history).observe(event);
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
                 // Fail closed on a malformed spawn event: a member with no
@@ -288,6 +291,11 @@ impl Roster {
                 }
             }
             MobEventKind::MemberSessionBindingRecovered(recovered) => {
+                std::sync::Arc::make_mut(&mut self.creation_history).recover_binding(
+                    &event.mob_id,
+                    recovered,
+                    self.entries.get(&recovered.agent_identity),
+                );
                 if let Some(bridge_session_id) = recovered.bridge_session_id() {
                     self.set_bridge_session_id(
                         &recovered.agent_identity,
@@ -404,6 +412,7 @@ impl Roster {
     /// Build a read projection from already-materialized entries.
     pub(crate) fn from_projected_entries(entries: impl IntoIterator<Item = RosterEntry>) -> Self {
         let mut projected = Self {
+            creation_history: Default::default(),
             entries: entries
                 .into_iter()
                 .map(|entry| (entry.agent_identity.clone(), entry))

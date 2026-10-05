@@ -76,6 +76,7 @@ pub mod ids;
 pub mod launch;
 #[doc(hidden)]
 pub mod machines;
+pub mod member_creation;
 mod mob_machine;
 mod portable_profile;
 pub mod profile;
@@ -91,6 +92,11 @@ pub mod temporary_council;
 pub mod validate;
 pub mod workgraph_attention;
 pub mod workgraph_flow;
+
+pub use member_creation::{
+    MemberCreationError, MemberCreationId, MemberCreationProvenance, MemberCreationRecord,
+    MemberCreationSnapshot, MemberCreationSource, MemberCreationSourceWitness,
+};
 
 // Re-exports for convenience
 pub use backend::{MobBackendKind, RuntimeBinding};
@@ -232,6 +238,7 @@ pub use runtime::DeliveryInputSettleTestRelease;
 pub use runtime::FactoryChainSpawnBasePromptSource;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::MemberInstructionActivationError;
+pub use runtime::MobBeforeActivation;
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};
 pub use runtime::bridge_protocol::{

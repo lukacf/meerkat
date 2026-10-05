@@ -91,6 +91,7 @@ exports_files(
         "docs/guides/mobpack.mdx",
         "docs/guides/mobs.mdx",
         "docs/reference/mob-architecture.mdx",
+        "tests/live_smoke/browser/harness/gpt-live-peer-e2e.mjs",
     ],
     visibility = ["//visibility:public"],
 )

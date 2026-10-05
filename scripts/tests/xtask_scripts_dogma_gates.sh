@@ -320,6 +320,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # to be reported violated.
 # live_delegation_worker_start_after_close_audit.sh requires its two goals to
 # be reported violated.
+# live_context_result_barrier_audit.sh with --mutants requires its
+# summary-dropped mutant to violate AuditResultFollowsSummary.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -335,6 +337,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalMissing is violated."' \
   'echo "Error: Invariant NotAuditWitnessRefused is violated."' \
   'echo "Error: Invariant AuditNeverDeliveredWithQueuedReplay is violated."' \
+  'echo "Error: Invariant AuditResultFollowsSummary is violated."' \
   'echo "Error: Invariant AuditNeverBatchAuthorized is violated."' \
   'echo "Error: Invariant AuditNeverBatchDelivered is violated."' \
   'echo "Error: Invariant AuditNeverBatchRejected is violated."' \

@@ -23,6 +23,12 @@
 \* property and requires TLC to report it violated:
 \*   - a result delivery is authorized while a replay is still queued.
 \*
+\* With --mutants it also seeds two defects into a copy of the generated
+\* model and requires each outcome: restoring the pre-#1597 tail-drain
+\* conjuncts in the result-delivery authorization arms leaves that goal
+\* unreachable, and dropping their summary conjunct violates
+\* AuditResultFollowsSummary.
+\*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* live_context_result_barrier_audit.sh. Run a deeper bound by hand with:
 \*   specs/machines/meerkat_machine/live_context_result_barrier_audit.sh 26

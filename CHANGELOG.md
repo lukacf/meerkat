@@ -117,6 +117,22 @@ them.
 
 ### Fixed
 
+- OpenAI: prompt-cache fields reach only a backend that has admitted them
+  (#1669). The public OpenAI API admits them; the ChatGPT backend and Azure
+  OpenAI do not, but two paths sent them there anyway:
+  - an explicit `provider_params` tag (`prompt_cache_enabled`, `_key`,
+    `_retention`, `_options`) was lowered for every backend, and
+    `prompt_cache_enabled: true` alone became `prompt_cache_options: {mode:
+    "implicit"}`;
+  - after an explicit model change with `auth_binding: Clear`, the request
+    defaults were computed for an unresolved binding, so a session whose
+    client resolved a ChatGPT-backend binding received the public API's cache
+    defaults.
+  The OpenAI client's backend now owns the decision for every request: on a
+  backend that has not admitted prompt-cache fields it drops them, with no
+  input breakpoints and no cache breakpoint claims, whoever set them. The
+  factory no longer applies its own backend gate to the defaults.
+
 - BuildBuddy runs no longer sit idle for 600 s after every build (#1744).
   Since the Bazel client started running under an environment allowlist,
   `scripts/buildbuddy-bazel-poc` put its stderr `tee` redirect on a call of a

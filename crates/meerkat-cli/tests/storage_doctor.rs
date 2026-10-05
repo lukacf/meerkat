@@ -15,6 +15,11 @@ use meerkat_core::{BlobId, ContentBlock, ImageData, Message, Session, UserMessag
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+/// Session-store migration 4 (`head-canonical-v2-authority`) completes the
+/// supported HeadCanonical v1-to-v2 authority crossing: the floor a healthy
+/// realm's session-store ledger stamp must reach.
+const SESSION_STORE_HEAD_CANONICAL_CROSSING: i64 = 4;
+
 const SESSIONS_DDL: &str = "CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
     created_at_ms INTEGER NOT NULL,
@@ -144,16 +149,18 @@ fn healthy_sqlite_realm_is_clean_and_exits_zero() {
     let domains = inventory[0]["databases"][0]["domains"]
         .as_array()
         .expect("domains array");
-    // A healthy realm is stamped at the current session-store version, read
-    // from the code: the literal 4 went stale when #1541 added migration 5.
-    let session_store_version =
-        meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.supported_version();
+    // A floor, not the current version: a healthy realm has completed the
+    // HeadCanonical v1-to-v2 authority crossing (session-store migration 4,
+    // "head-canonical-v2-authority"); later migrations (5,
+    // "transcript-retirements", #1541) keep it healthy.
     assert!(
-        domains
-            .iter()
-            .any(|pair| pair[0] == "session-store" && pair[1] == session_store_version),
-        "session-store domain must be ledger-stamped at the current version \
-         {session_store_version}: {domains:?}"
+        domains.iter().any(|pair| pair[0] == "session-store"
+            && pair[1]
+                .as_i64()
+                .is_some_and(|version| version >= SESSION_STORE_HEAD_CANONICAL_CROSSING)),
+        "session-store domain must be ledger-stamped at v{SESSION_STORE_HEAD_CANONICAL_CROSSING} \
+         or later (v{SESSION_STORE_HEAD_CANONICAL_CROSSING} completes the supported HeadCanonical \
+         v1-to-v2 authority crossing): {domains:?}"
     );
     let errors: Vec<_> = report["findings"]
         .as_array()

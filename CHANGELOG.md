@@ -43,16 +43,15 @@ them.
   receiver, which exists only on Linux and Android, so `cargo test -p
   meerkat-tools` stopped compiling on macOS. The fixture is now Linux-only;
   nothing changes on Linux.
-
-### Testing
-
-- The live-context result barrier TLC audit
-  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
-  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
-  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
-  must leave the audit's goal unreachable. Dropping the bootstrap-summary
-  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
-  previously checked only by hand (#1607).
+- A push that creates a branch as `git push origin HEAD:refs/heads/<branch>`
+  no longer runs every pre-push hook over all files. The pre-push dispatcher
+  gave a new branch the remote default branch's merge-base as its diff base
+  only when the local ref was spelled `refs/heads/...`. Git reports
+  `local_ref=HEAD` for the `HEAD:` form, so that push fell back to the
+  empty tree (`--all-files`) and selected unrelated machine-codegen and TLC
+  work. The base is now decided by the destination ref (`refs/heads/*`), and
+  tags stay fail-closed on the empty tree. `scripts/test-pre-push-dispatch.sh`
+  covers the `HEAD:refs/heads/<branch>` push.
 - Repository scripts, hooks and Make targets that need Python 3.11 now pick
   it explicitly and refuse an older interpreter up front. They used whatever
   `python3` came first in `PATH`, so on macOS, where Apple's Python 3.9 can
@@ -62,7 +61,7 @@ them.
   `hashlib.sha256()` (still verifying the digest before extracting), so it
   runs on the release scripts' Python >= 3.10 floor, and refuses anything
   older up front. The new `scripts/require-python
-  MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.13 through
+  MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.14 through
   python3.11 over `python3`, and fails with "WHO needs Python >= MIN; found
   <version> (<path>)". It replaces the per-script copies of that selection,
   which had no version check, in 15 scripts plus `release-hook.sh` (still
@@ -97,6 +96,16 @@ them.
   - Four workers spawn at once while a member's turn runs.
   - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
   - The mob then shuts down mid-turn under a 30 s deadline. Shutdown must return within that deadline and report an explicit outcome for every member.
+
+### Testing
+
+- The live-context result barrier TLC audit
+  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
+  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
+  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
+  must leave the audit's goal unreachable. Dropping the bootstrap-summary
+  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
+  previously checked only by hand (#1607).
 
 ## [0.8.51] - 2026-10-05
 

@@ -244,6 +244,7 @@ const GATED_TESTS: &[&str] = &[
     "profile_works_where_unprivileged_user_namespaces_are_unusable",
     "python_multiprocessing_runs_with_an_explicit_shared_memory_grant_only",
     "unix_datagram_socketpair_cannot_reach_a_host_pathname_socket",
+    "baseline_grants_trust_anchors_but_no_credential_bearing_system_config",
     "node_child_processes_run_under_the_baseline",
     "git_init_add_and_commit_run_under_the_baseline",
 ];
@@ -491,6 +492,10 @@ fn linux_probe_process() {
             );
         }
         "read-denied" => denied("read", std::fs::read(&argument)),
+        "read-allowed" => {
+            std::fs::read(&argument).expect("granted read must work");
+        }
+        "list-denied" => denied("list", std::fs::read_dir(&argument)),
         "write-denied" => denied("write", std::fs::write(&argument, b"forbidden")),
         "pid" => {
             println!("\nMEERKAT_PROBE_PID={}", std::process::id());
@@ -773,6 +778,57 @@ async fn mutable_symlink_in_a_granted_path_is_refused_with_a_positive_control() 
         .shell(fixture.spec(), "printf 'supported'", &[])
         .await;
     assert_completed(&output, b"supported");
+}
+
+#[tokio::test]
+async fn baseline_grants_trust_anchors_but_no_credential_bearing_system_config() {
+    if !verified("baseline_grants_trust_anchors_but_no_credential_bearing_system_config") {
+        return;
+    }
+    let fixture = Fixture::new();
+    // Control: the credential-free CA trust anchors stay readable.
+    for bundle in [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ] {
+        if std::fs::read(bundle).is_ok() {
+            fixture
+                .assert_probe(fixture.spec(), "read-allowed", bundle)
+                .await;
+        }
+    }
+    // /etc/ssl/private (the standard key placement) is not readable by this
+    // host user, so a live probe there would only prove DAC. Its readable
+    // siblings prove the policy: nothing under /etc/ssl outside certs is
+    // granted, and neither is git's system configuration. Each is checked
+    // readable by the host first, so EACCES in the target is the policy.
+    let mut probed = 0;
+    for (mode, path) in [
+        ("list-denied", "/etc/ssl"),
+        ("read-denied", "/etc/ssl/openssl.cnf"),
+        ("read-denied", "/etc/gitconfig"),
+    ] {
+        let readable = if mode == "list-denied" {
+            std::fs::read_dir(path).is_ok()
+        } else {
+            std::fs::read(path).is_ok()
+        };
+        if readable {
+            fixture.assert_probe(fixture.spec(), mode, path).await;
+            probed += 1;
+        } else {
+            println!("UNVERIFIED: {path} is not readable by the host ({mode})");
+        }
+    }
+    assert!(
+        probed > 0,
+        "no host-readable credential-location sibling to probe"
+    );
+    // A later permitted operation under the same requirement still works.
+    let output = fixture
+        .shell(fixture.spec(), "printf 'ok' > after && cat after", &[])
+        .await;
+    assert_completed(&output, b"ok");
 }
 
 #[tokio::test]
@@ -1322,6 +1378,12 @@ async fn node_child_processes_run_under_the_baseline() {
     let mut spec = fixture.spec();
     if let FilesystemAccess::Paths(paths) = &mut spec.read {
         paths.push(PathAccess::Literal(node.clone()));
+        // OpenSSL's configuration is not in the baseline (it sits beside
+        // /etc/ssl/private); node needs it, so the host grants it explicitly.
+        let openssl = PathBuf::from("/etc/ssl/openssl.cnf");
+        if openssl.is_file() {
+            paths.push(PathAccess::Literal(openssl));
+        }
     }
     let script = r#"
         const { execFileSync, spawnSync } = require("child_process");
@@ -1358,6 +1420,9 @@ async fn git_init_add_and_commit_run_under_the_baseline() {
         .shell(
             fixture.spec(),
             r#"
+        # /etc/gitconfig can carry credentials (http.extraHeader), so it is
+        # not in the baseline; git is told explicitly not to read it.
+        export GIT_CONFIG_NOSYSTEM=1
         git init -q repo || exit 90
         cd repo || exit 91
         printf 'tracked' > file || exit 92

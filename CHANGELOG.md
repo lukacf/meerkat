@@ -342,10 +342,14 @@ them.
   pathname sockets), so in-sandbox Unix servers such as Python's forkserver
   fail. The Linux
   `CommandRuntimeV1` baseline grants read and execute beneath `/usr` and its
-  merged aliases, a few system files (`ld.so.cache`, `passwd`, `group`,
-  `nsswitch.conf`, `/etc/ssl`, `/etc/gitconfig`) and the null, zero and random
-  devices. It grants no `/proc`, home directory or `/tmp`. Bubblewrap is not
-  part of this profile.
+  merged aliases, a few credential-free system files (`ld.so.cache`, `passwd`,
+  `group`, `nsswitch.conf`, `localtime`), the CA trust anchors
+  (`/etc/ssl/certs`, `/etc/pki/tls/certs`, `/etc/pki/ca-trust/extracted`) and
+  the null, zero and random devices. It grants no `/proc`, home directory,
+  `/tmp`, private key directory, OpenSSL configuration or `/etc/gitconfig`;
+  workloads that need those use an explicit host grant or explicit
+  configuration such as `GIT_CONFIG_NOSYSTEM=1`. Bubblewrap is not part of
+  this profile.
 - The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
   single-connection profile with native input admission and a fixed callback
   catalog. It requires `default-features = false` plus `local-authorization`;

@@ -132,11 +132,16 @@ struct PathBeneathAttr {
 }
 
 /// CommandRuntimeV1 on Linux: loaders, system libraries and executables,
-/// the system configuration standard tools fail without, and the null and
-/// random devices. No /proc, /sys, home directory or shared scratch. Entries
-/// absent from this host, or reached through a symlink, are skipped: merged
-/// /bin, /sbin and /lib resolve beneath /usr.
-const BASELINE_READ: [&str; 15] = [
+/// the credential-free system files standard tools fail without, CA trust
+/// anchors, and the null and random devices. No /proc, /sys, home directory
+/// or shared scratch, and no ambient credential grant: nothing reaches
+/// /etc/ssl/private, /etc/pki/tls/private, OpenSSL's configuration or git's
+/// system configuration (which can carry http.extraHeader). A workload that
+/// needs those gets an explicit host grant or explicit configuration
+/// (OPENSSL_CONF, GIT_CONFIG_NOSYSTEM). Entries absent from this host, or
+/// reached through a symlink, are skipped: merged /bin, /sbin and /lib
+/// resolve beneath /usr.
+const BASELINE_READ: [&str; 16] = [
     "/usr",
     "/bin",
     "/sbin",
@@ -149,10 +154,11 @@ const BASELINE_READ: [&str; 15] = [
     "/etc/nsswitch.conf",
     "/etc/passwd",
     "/etc/group",
-    // OpenSSL configuration and trust anchors (node fails to start without
-    // openssl.cnf) and git's system configuration (EACCES on it is fatal).
-    "/etc/ssl",
-    "/etc/gitconfig",
+    // CA trust anchors only (Debian and RHEL layouts), never their parent
+    // directories, which hold private keys.
+    "/etc/ssl/certs",
+    "/etc/pki/tls/certs",
+    "/etc/pki/ca-trust/extracted",
     "/dev/zero",
 ];
 const BASELINE_DEVICES_READ: [&str; 2] = ["/dev/random", "/dev/urandom"];
@@ -912,6 +918,29 @@ mod tests {
             ),
             Err(ConfinementRefusal::UnsupportedRequirement)
         );
+    }
+
+    /// The baseline carries no ambient credential grant: no entry may reach
+    /// standard key or credential-bearing configuration locations.
+    #[test]
+    fn baseline_reaches_no_credential_location() {
+        let baseline = BASELINE_READ
+            .iter()
+            .chain(&BASELINE_DEVICES_READ)
+            .chain(&BASELINE_READ_WRITE);
+        for credential in [
+            "/etc/ssl/private/server.key",
+            "/etc/ssl/openssl.cnf",
+            "/etc/pki/tls/private/server.key",
+            "/etc/gitconfig",
+        ] {
+            for entry in baseline.clone() {
+                assert!(
+                    !Path::new(credential).starts_with(entry),
+                    "baseline entry {entry} reaches {credential}"
+                );
+            }
+        }
     }
 
     #[test]

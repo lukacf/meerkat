@@ -120,6 +120,36 @@ metadata and subsequent retention assertions remain intact. The focused pass
 does not qualify the broad candidate. Raw output is
 `envelope-retention-v4-fixture-green.log` in the same local evidence directory.
 
+The retention correction committed as
+`1394677f2768fdaa49290f3746aa8214596daf22`, tree
+`e5bbf083fe8c7c04446b35ec3393028ed51d4262`. Its normal push started at
+22:53:41 UTC and exited 1 after 1,664.44 seconds; terminal state was observed
+at 23:21:43 UTC and the owned process group drained. Preliminary checks and
+formatting passed. Strict Clippy rejected the runtime admission closure at
+`meerkat-session/src/ephemeral.rs:6422`: its error tuple had grown to at least
+128 bytes. Later gates did not execute and no push occurred. Raw output is
+`envelope-main-retention-normal-push.log` in the same evidence directory.
+
+The narrow repair boxes the owned `HookDenied.denial` and
+`PolicyIndeterminate.failure` payloads. These nested error variants enlarged
+`SessionError`; the admission guard and closure are unchanged from main.
+Typed classification, serialized hook denial shape and settlement diagnostics
+remain intact. The allocation occurs only when constructing those failures.
+The public Rust fields now contain `Box` values, so downstream explicit
+constructors and owned payload consumers must adapt. Two independent reviews
+cleared this source delta. Scoped strict Clippy for every `meerkat-session`
+target passed with warnings denied in 168.70 seconds, starting at 23:35:21 UTC.
+The command exited 0 and its owned process group drained. Raw output is
+`envelope-error-payload-clippy.log` in the same evidence directory. All six
+selected denial, settlement and admission controls passed across four binaries;
+5,059 other tests were not run. That command started at 23:38:55 UTC, exited 0
+after 1,068.96 seconds, and its owned process group drained. Compilation took
+17m46s; test execution took 2.113 seconds. The controls preserve same-turn
+siblings after refusal, exact hook payload roundtrips, the original infrastructure
+failure class, joined admission capacity and the terminal carrier. Raw output is
+`envelope-error-payload-focused-green.log`. Normal publication qualification
+remains pending; these scoped passes do not qualify the broad candidate.
+
 The Mac candidate adds one test-build correction to that GCP source:
 `StdioChildCustody::spawned_pid` is compiled only for Linux tests, matching its
 only caller. The Mac compile check emitted an unused-method warning for its

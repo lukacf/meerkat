@@ -526,7 +526,9 @@ fn hook_denial_retains_owner_facts_payload_presence_and_canonical_settlement()
             assert_eq!(wire.get("payload"), payload.as_ref());
             let restored: HookDenial = serde_json::from_value(wire)?;
             assert_eq!(restored, denial);
-            let primary = ToolError::HookDenied { denial };
+            let primary = ToolError::HookDenied {
+                denial: Box::new(denial),
+            };
             assert_eq!(
                 primary.to_string(),
                 report

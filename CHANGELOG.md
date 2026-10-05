@@ -328,7 +328,9 @@ them.
   hook decision now refuses only the attempted call, returning `hook_denied`
   feedback with the exact hook, point, reason and optional payload. Siblings and
   the same model controller continue. Existing terminal error ordinals and
-  other hook-point dispositions are preserved.
+  other hook-point dispositions are preserved. `HookDenied.denial` owns a
+  `Box<HookDenial>`; explicit constructors must box the payload. Its serialized
+  representation is unchanged.
 - Exhaustive matches must handle `meerkat_core::HookFailureReason::ConfinementRefused`,
   `meerkat_core::HookEngineError::LaunchRefused`,
   `meerkat_core::AgentError::HookLaunchRefused`,
@@ -373,9 +375,11 @@ them.
 - `meerkat_core::ToolResult`, `meerkat_core::error::PendingCallbackToolCall`,
   `meerkat_contracts::WireToolResult` and `WirePendingToolCall` gain
   `settlement_failures`. `meerkat_core::AgentError::PolicyIndeterminate` gains the
-  same field. Initialize empty companions with `Vec::new()` or use the existing
-  result constructors. Old wire records still decode, and empty companions stay
-  omitted on encode. A callback with a companion uses `CallbackBatchPending`,
+  same field, and its `failure` field now owns a `Box<ToolConsequenceFailure>`.
+  Explicit constructors must box that payload; owned payload consumers may need
+  to dereference it. Initialize empty companions with `Vec::new()` or use the
+  existing result constructors. Old wire records still decode, and empty
+  companions stay omitted on encode. A callback with a companion uses `CallbackBatchPending`,
   including a single-item batch; ordinary single callbacks keep `CallbackPending`.
   Companions preserve the original result and do not authorize repeating an
   effect whose body already ran.

@@ -1684,13 +1684,13 @@ mod tests {
                 Some(json!({"nested": [null, 4]})),
             ] {
                 let primary = ToolError::HookDenied {
-                    denial: HookDenial {
+                    denial: Box::new(HookDenial {
                         hook_id: HookId::new("policy-hook"),
                         point: HookPoint::PreToolExecution,
                         reason_code,
                         message: "same diagnostic across all typed reasons".into(),
                         payload,
-                    },
+                    }),
                 };
                 let error = primary
                     .clone()

@@ -6988,7 +6988,14 @@ where
             if let Some(denial) = pre_tool_report.denial(HookPoint::PreToolExecution) {
                 // The entered guardrail's decision refuses only this attempted
                 // tool. The same settlement path retains ordering and siblings.
-                refused_tool_calls.push((tool_index, tc, Err(ToolError::HookDenied { denial }), 0));
+                refused_tool_calls.push((
+                    tool_index,
+                    tc,
+                    Err(ToolError::HookDenied {
+                        denial: Box::new(denial),
+                    }),
+                    0,
+                ));
                 continue;
             }
 
@@ -7052,7 +7059,7 @@ where
                     })
         {
             let error = AgentError::PolicyIndeterminate {
-                failure,
+                failure: Box::new(failure),
                 settlement_failures,
             };
             self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
@@ -26886,7 +26893,7 @@ mod tests {
             panic!("settlement must not change the existing infrastructure failure class");
         };
         assert_eq!(
-            failure,
+            *failure,
             crate::ToolConsequenceFailure::InvalidProvenance {
                 reason: "original indeterminate policy".into(),
             }

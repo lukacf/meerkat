@@ -256,7 +256,10 @@ pub enum ToolError {
     },
     /// An entered hook refused this attempted operation by explicit policy.
     #[error("{denial}")]
-    HookDenied { denial: crate::hooks::HookDenial },
+    HookDenied {
+        /// Keep the full denial without enlarging unrelated result values.
+        denial: Box<crate::hooks::HookDenial>,
+    },
 }
 
 impl From<crate::OperationAuthorizationError> for ToolError {
@@ -539,7 +542,7 @@ pub enum AgentError {
     },
     #[error("Tool consequence policy is indeterminate: {failure}")]
     PolicyIndeterminate {
-        failure: crate::ToolConsequenceFailure,
+        failure: Box<crate::ToolConsequenceFailure>,
         /// Admission settlement diagnostics accompanying the original policy failure.
         settlement_failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
     },

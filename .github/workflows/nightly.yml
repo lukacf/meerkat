@@ -60,7 +60,17 @@ name: Nightly
 on:
   schedule:
     - cron: "17 2 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      graph_only:
+        # Run only gcp-buildbuddy (the whole Bazel graph): the release
+        # final gate dispatches it on the release branch tip before the tag,
+        # where the full graph otherwise first runs (#1687), and the same
+        # dispatch warms the remote cache for the tag run.
+        description: Run only the full BuildBuddy graph (pre-tag check / cache warm-up).
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -86,7 +96,7 @@ jobs:
   workspace-unit:
     name: Workspace unit tests
     needs: machine-verify
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -134,7 +144,7 @@ jobs:
   workspace-int:
     name: Workspace integration-fast tests
     needs: feature-matrix
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -173,7 +183,7 @@ jobs:
   e2e-fast:
     name: Deterministic e2e lane
     needs: minimal-and-modularity
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -212,13 +222,13 @@ jobs:
   dense-topology:
     name: GitHub-hosted dense Mob topology
     needs: clippy-full
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     uses: ./.github/workflows/mob-dense-topology.yml
 
   machine-verify:
     name: Bounded TLC machine verification
     needs: gcp-buildbuddy
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -269,7 +279,7 @@ jobs:
   machine-verify-deep:
     name: Deep TLC composition verification
     needs: audit
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -320,7 +330,7 @@ jobs:
   sdk-host:
     name: Python + TypeScript SDK suites
     needs: e2e-fast
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -374,7 +384,7 @@ jobs:
   clippy-full:
     name: Clippy (all targets, all features)
     needs: workspace-unit
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -406,7 +416,7 @@ jobs:
   feature-matrix:
     name: Feature matrix (lint + test)
     needs: gcp-buildbuddy
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -446,7 +456,7 @@ jobs:
   minimal-and-modularity:
     name: Minimal features + surface modularity
     needs: release-stack-budget
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -486,7 +496,7 @@ jobs:
   release-stack-budget:
     name: Release worker-stack budget (rkat-rpc dispatch path)
     needs: gcp-buildbuddy
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -527,7 +537,7 @@ jobs:
   e2e-system:
     name: System e2e lane
     needs: gcp-buildbuddy
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -564,7 +574,7 @@ jobs:
   sdk-web:
     name: Web SDK build + tests
     needs: e2e-system
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -614,7 +624,7 @@ jobs:
   wasm-contract:
     name: WASM browser contract
     needs: dense-topology
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -670,7 +680,7 @@ jobs:
   release-packaging:
     name: Release packaging dry-run
     needs: gcp-buildbuddy
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -702,7 +712,7 @@ jobs:
   audit:
     name: Security audit
     needs: sdk-web
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -722,7 +732,7 @@ jobs:
   mobkit-docs-lag:
     name: MobKit docs mirror lag
     needs: release-packaging
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

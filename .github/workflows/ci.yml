@@ -30,10 +30,17 @@ name: CI
 #                     main pushes alike
 #   closure-check   - cargo check (lib and bin targets) over the
 #                     reverse-dependency closure of the changed packages
-#   example-web     - sdks/web wasm runtime build plus the example 031, 032
-#                     and 033 browser suites; every main push, and pull
-#                     requests that touch the runtime, its crates, or those
-#                     examples
+#   feature-check   - (xN, one per clippy shard) compile-only checks of the
+#                     shard's packages under their Bazel feature sets (tests
+#                     included) and the `make test-minimal` /
+#                     `test-feature-matrix-lib` check rows
+#   wasm-check      - wasm32 check of meerkat-web-runtime: every main push
+#                     with a Rust change, and pull requests whose changed
+#                     packages reach the web runtime
+#   example-web     - sdks/web wasm runtime build, the Web SDK type and unit
+#                     tests, plus the example 031, 032 and 033 browser
+#                     suites; every main push, and pull requests that touch
+#                     the runtime, its crates, or those examples
 #   wasm-timers     - shared timer ownership in Chrome and Node, selected
 #                     with the web runtime suites
 #   gate            - "CI gate": fail-closed aggregate; on pull requests a
@@ -64,13 +71,14 @@ name: CI
 #                     archive, and partition jobs run it with
 #                     --partition hash:k/n, since that crate's compile alone
 #                     fills most of a 4-vCPU lane
-#   wasm-check      - wasm32 check of meerkat-web-runtime
 #   sdk-host        - Python + TypeScript SDK suites
 #
 # Everything else (integration-fast, e2e-fast, the dense Mob topology
-# stress, bounded TLC, feature matrices, minimal builds, audit, the Web SDK
-# and browser contract suites, and the whole Bazel graph) runs in nightly.yml
-# and in the release workflow; PR CI never starts the remote Bazel fleet.
+# stress, bounded TLC, the feature-matrix test runs, audit, the browser
+# contract suites, and the whole Bazel graph) runs in nightly.yml and in the
+# release workflow; PR CI never starts the remote Bazel fleet. A nightly
+# dispatch with graph_only=true runs only the full graph, for the pre-tag
+# check on a release branch.
 
 on:
   # Pushes run on main (the attestation boundary) and on release
@@ -250,6 +258,8 @@ jobs:
       main_archive_run_matrix: ${{ steps.plan.outputs.main_archive_run_matrix }}
       integration_count: ${{ steps.plan.outputs.integration_count }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix }}
+      feature_check_count: ${{ steps.plan.outputs.feature_check_count }}
+      feature_check_matrix: ${{ steps.plan.outputs.feature_check_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -281,7 +291,7 @@ jobs:
           # build-relevant change; a failure here fails the CI gate.
           node scripts/ci-cargo-lanes.mjs --format github --base "${classification_base}" --head HEAD \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
-          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix|feature_check_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 
   fmt-governance:
     name: Format + governance
@@ -1134,11 +1144,96 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  feature-check:
+    name: Feature combinations (${{ matrix.name }})
+    needs: changes
+    # Compile-only checks of the changed packages under the feature sets the
+    # Cargo lanes never build, which the Bazel graph (nightly and the release
+    # tag only) and the nightly feature matrix do (#1687):
+    #   - the Bazel test feature set from each package's generated BUILD.bazel
+    #     (`check --lib --bins --tests`; #1595 broke meerkat-mob-mcp's lib
+    #     tests under `openai-live` alone);
+    #   - its other Bazel library/binary sets (production variants without
+    #     `test-support`, surface variants);
+    #   - the `$(CARGO) check` rows of `make test-minimal` and
+    #     `make test-feature-matrix-lib` (#1558 broke `meerkat-mob
+    #     --no-default-features`).
+    # One job per clippy shard, over that shard's packages.
+    if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.feature_check_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.feature_check_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only; compiled objects come from
+          # sccache (see the closure-check lane).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Check each feature combination
+        shell: bash
+        env:
+          COMMANDS: ${{ matrix.commands }}
+        run: |
+          set -euo pipefail
+          [[ -n "${COMMANDS}" ]] || { echo "::error::empty feature-combination row"; exit 1; }
+          failed=0
+          while IFS= read -r args; do
+            [[ -n "${args}" ]] || continue
+            echo "::group::cargo check ${args}"
+            # shellcheck disable=SC2086
+            if ! ./scripts/repo-cargo check ${args}; then
+              echo "::error::cargo check ${args} failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done <<< "${COMMANDS}"
+          exit "${failed}"
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-feature-check-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
   wasm-check:
     name: wasm32 check
     needs: changes
-    # Post-merge only (12 min measured); pull requests defer it.
-    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true' }}
+    # Every main push with a Rust change, and pull requests whose changed
+    # packages reach meerkat-web-runtime (the classifier's `wasm` flag): the
+    # wasm32 clippy of the web runtime and the provider crates it links
+    # caught breaks only after merge before (#1108).
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true') || needs.changes.outputs.wasm == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -1362,6 +1457,12 @@ jobs:
         working-directory: examples/033-the-office-demo-sh/web
         run: npx playwright install --with-deps chromium
 
+      - name: Web SDK type and unit tests
+        working-directory: sdks/web
+        # tsc over tests/ (the exhaustive event switches over the generated
+        # events) and the node unit suites; #1469 failed only in nightly.
+        run: npm test
+
       - name: Direct WASM runtime browser contracts
         working-directory: sdks/web
         run: npm run test:browser
@@ -1507,6 +1608,7 @@ jobs:
       - main-unit-archive-build
       - main-unit-archive-run
       - closure-check
+      - feature-check
       - wasm-check
       - sdk-host
       - example-web
@@ -1531,6 +1633,9 @@ jobs:
           MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
           MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
           CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
+          FEATURE_CHECK_RESULT: ${{ needs.feature-check.result }}
+          FEATURE_CHECK_COUNT: ${{ needs.changes.outputs.feature_check_count }}
+          WASM: ${{ needs.changes.outputs.wasm }}
           WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
           SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
           EXAMPLE_WEB_RESULT: ${{ needs.example-web.result }}
@@ -1571,7 +1676,7 @@ jobs:
             echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
           fi
           echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT} tlc-audits=${TLC_AUDITS_RESULT}"
-          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
+          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} feature-check=${FEATURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
             local lane="$1" result="$2"
@@ -1614,6 +1719,14 @@ jobs:
             fi
             require_ran "Clippy" "${CLIPPY_RESULT}"
             require_ran "Closure check" "${CLOSURE_CHECK_RESULT}"
+            if [[ "${FEATURE_CHECK_COUNT}" =~ ^[0-9]+$ ]] && (( FEATURE_CHECK_COUNT > 0 )); then
+              require_ran "Feature combinations" "${FEATURE_CHECK_RESULT}"
+            elif [[ "${FEATURE_CHECK_COUNT}" =~ ^[0-9]+$ ]]; then
+              forbid_failure "Feature combinations" "${FEATURE_CHECK_RESULT}"
+            else
+              echo "::error::the plan carries no feature-combination count (feature_check_count='${FEATURE_CHECK_COUNT}')."
+              failed=1
+            fi
             # Fail closed on the unit plan: every changed package is either in
             # a pull-request unit shard or named as deferred to main.
             if [[ "${UNIT_SHARD_COUNT}" =~ ^[0-9]+$ ]] && (( UNIT_SHARD_COUNT > 0 )); then
@@ -1626,7 +1739,7 @@ jobs:
               failed=1
             fi
           elif [[ "${CHANGES_RESULT}" == "success" ]]; then
-            for lane in Clippy:"${CLIPPY_RESULT}" "Unit tests":"${UNIT_RESULT}" "Closure check":"${CLOSURE_CHECK_RESULT}"; do
+            for lane in Clippy:"${CLIPPY_RESULT}" "Unit tests":"${UNIT_RESULT}" "Closure check":"${CLOSURE_CHECK_RESULT}" "Feature combinations":"${FEATURE_CHECK_RESULT}"; do
               forbid_failure "${lane%%:*}" "${lane##*:}"
             done
           fi
@@ -1648,9 +1761,14 @@ jobs:
               forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
             fi
           else
-            for lane in "Main unit tests":"${MAIN_UNIT_RESULT}" "wasm32 check":"${WASM_CHECK_RESULT}"; do
-              forbid_failure "${lane%%:*}" "${lane##*:}"
-            done
+            forbid_failure "Main unit tests" "${MAIN_UNIT_RESULT}"
+            # Pull requests run the wasm32 check when a changed package
+            # reaches the web runtime.
+            if [[ "${WASM}" == "true" ]]; then
+              require_ran "wasm32 check" "${WASM_CHECK_RESULT}"
+            else
+              forbid_failure "wasm32 check" "${WASM_CHECK_RESULT}"
+            fi
             # Pull requests run the Node example suites of the SDK lane when
             # their inputs changed.
             if [[ "${EXAMPLES_BROWSER}" == "true" ]]; then

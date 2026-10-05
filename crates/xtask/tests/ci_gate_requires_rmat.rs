@@ -68,6 +68,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "clippy",
             "closure-check",
             "example-web",
+            "feature-check",
             "fmt-governance",
             "gate",
             "integration",
@@ -504,6 +505,11 @@ fn nightly_holds_a_bounded_number_of_hosted_slots() {
         let name = name.as_str().expect("job name");
         if name == ROOT {
             assert!(job.get("needs").is_none(), "{ROOT} runs first");
+            // A graph-only dispatch (the pre-tag check) runs exactly this job.
+            assert!(
+                job.get("if").is_none(),
+                "{ROOT} runs on every nightly run, graph-only dispatches included"
+            );
             continue;
         }
         let need = job
@@ -512,8 +518,8 @@ fn nightly_holds_a_bounded_number_of_hosted_slots() {
             .unwrap_or_else(|| panic!("nightly job {name} must need exactly one job (a chain)"));
         assert_eq!(
             job.get("if").and_then(serde_yaml::Value::as_str),
-            Some("${{ !cancelled() }}"),
-            "nightly job {name} must run under !cancelled() so a red predecessor does not skip it"
+            Some("${{ !cancelled() && !inputs.graph_only }}"),
+            "nightly job {name} must run under !cancelled() so a red predecessor does not skip it, and skip only on a graph-only dispatch"
         );
         *needed_by.entry(need.to_string()).or_default() += 1;
         if need == ROOT {

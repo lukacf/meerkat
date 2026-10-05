@@ -141,7 +141,9 @@ export const INTEGRATION_SUITES = [
     package: "meerkat-machine-codegen",
     triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime", "meerkat-mob", "meerkat-machine-codegen"],
   },
-  { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/"] },
+  // buildbuddy_static_lanes also reads the SDK manifests and generated types
+  // and walks sdks/ (version parity, generated-type and banned-name checks).
+  { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/", "sdks/"] },
   // kernel_typed_round_trip drives the generated kernels with hand-built
   // inputs, so any machine DSL change can break it; it needs `test-oracle`.
   { package: "meerkat-machine-kernels", features: ["test-oracle"], triggers: MACHINE_AUTHORITY_PACKAGES },
@@ -202,6 +204,157 @@ export const INTEGRATION_SUITES = [
 // default-feature lane and per feature suite) and fan the run out over
 // `partitions` jobs that execute the archive with `--partition hash:k/n`.
 export const ARCHIVED_UNIT_LANES = [{ package: "meerkat-mob", partitions: 2 }];
+
+// Feature-combination checks (#1687). Every Cargo lane builds a package with
+// its default features (plus FEATURE_UNIT_SUITES and --all-features), but the
+// Bazel graph builds each crate with the feature set the generated BUILD.bazel
+// gives it, and the nightly feature matrix checks further combinations. That
+// graph runs only nightly on main and at the release tag, so a break under one
+// of those sets reached release/0.8.51 three times: meerkat-mob-mcp's lib tests
+// under `openai-live` alone (#1595) and `meerkat-mob --no-default-features`
+// (#1558) among them. For each changed package the plan adds compile-only
+// checks under:
+//   - its Bazel test feature set (every rust_test of a package carries the
+//     same set), in one `check --lib --bins --tests` per clippy shard over the
+//     shard's packages, as Bazel's own unified graph builds them;
+//   - every other Bazel library or binary feature set it has (production
+//     variants that strip `test-support`, the surface feature variants);
+//   - the `$(CARGO) check` rows of the Make feature-matrix targets below.
+// The rows follow the clippy shards (one feature-check job per shard), whose
+// packing is already sized for a pull-request lane; a shard's rows share its
+// compiled dependencies.
+// Feature names come from the generated BUILD.bazel (kept fresh by the
+// bazel-locks-freshness gate) and the Makefile, and are validated against
+// cargo metadata, so a renamed feature fails the plan.
+export const MAKE_FEATURE_MATRIX_TARGETS = ["test-minimal", "test-feature-matrix-lib"];
+
+function parseBazelFeatureSets(pkg) {
+  const buildPath = resolve(root, packageDir(pkg), "BUILD.bazel");
+  if (!existsSync(buildPath)) {
+    throw new Error(`no generated BUILD.bazel for ${pkg.name} (${relative(root, buildPath)})`);
+  }
+  const text = readFileSync(buildPath, "utf8");
+  const known = new Set(Object.keys(pkg.features ?? {}));
+  const testSets = new Set();
+  const variants = new Map();
+  for (const [, rule, body] of text.matchAll(/^(rust_test|rust_library|rust_binary)\(\n([\s\S]*?)^\)/gm)) {
+    const list = body.match(/^ {4}crate_features = \[([\s\S]*?)\]/m);
+    // Weak dependency features (`dep?/feature`) are rustc cfgs the generator
+    // passes through; Cargo enables them from the package's own features.
+    const features = list
+      ? [...list[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).filter((name) => !name.includes("/"))
+      : [];
+    for (const feature of features) {
+      if (!known.has(feature)) {
+        throw new Error(`${relative(root, buildPath)} enables ${feature}, which ${pkg.name} does not declare`);
+      }
+    }
+    const key = [...new Set(features)].sort().join(",");
+    if (rule === "rust_test") {
+      testSets.add(key);
+    } else {
+      const variant = variants.get(key) ?? { lib: false, bins: false };
+      if (rule === "rust_library") variant.lib = true;
+      if (rule === "rust_binary") variant.bins = true;
+      variants.set(key, variant);
+    }
+  }
+  if (testSets.size > 1) {
+    throw new Error(
+      `${relative(root, buildPath)} gives ${pkg.name}'s tests ${testSets.size} feature sets; the feature-combination check expects one`,
+    );
+  }
+  const testSet = testSets.size === 1 ? [...testSets][0] : null;
+  if (testSet !== null) variants.delete(testSet);
+  const split = (key) => (key === "" ? [] : key.split(","));
+  return {
+    test: testSet === null ? null : split(testSet),
+    variants: [...variants]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, variant]) => ({ features: split(key), ...variant })),
+  };
+}
+
+function parseMakeFeatureMatrix(byName) {
+  const text = readFileSync(resolve(root, "Makefile"), "utf8");
+  const rows = [];
+  for (const target of MAKE_FEATURE_MATRIX_TARGETS) {
+    const start = text.match(new RegExp(`^${target}:.*\\n((?:\\t.*\\n|#.*\\n)*)`, "m"));
+    if (!start) throw new Error(`Makefile has no ${target} target`);
+    let count = 0;
+    for (const line of start[1].split("\n")) {
+      const check = line.match(/^\t\$\(CARGO\) check (.+)$/);
+      if (!check) continue;
+      const args = check[1].trim();
+      const pkgName = args.match(/(?:^|\s)-p (\S+)/)?.[1];
+      if (!pkgName || !byName.has(pkgName)) {
+        throw new Error(`Makefile ${target} row names no known package: ${args}`);
+      }
+      const features = args.match(/--features (\S+)/)?.[1]?.split(",") ?? [];
+      for (const feature of features) {
+        const [owner, name] = feature.includes("/") ? feature.split("/", 2) : [pkgName, feature];
+        const ownerPkg = byName.get(owner);
+        if (!ownerPkg || !Object.hasOwn(ownerPkg.features, name)) {
+          throw new Error(`Makefile ${target} row enables unknown feature ${feature}: ${args}`);
+        }
+      }
+      rows.push({ target, package: pkgName, args });
+      count += 1;
+    }
+    if (count === 0) throw new Error(`Makefile ${target} has no $(CARGO) check rows`);
+  }
+  return rows;
+}
+
+function targetFlags(pkgs, { tests }) {
+  const kinds = new Set(pkgs.flatMap((pkg) => pkg.targets.flatMap((target) => target.kind)));
+  const flags = [];
+  if (["lib", "rlib", "cdylib", "dylib", "staticlib", "proc-macro"].some((kind) => kinds.has(kind))) flags.push("--lib");
+  if (kinds.has("bin")) flags.push("--bins");
+  if (tests) flags.push("--tests");
+  return flags;
+}
+
+function bazelTestRow(pkgs, sets) {
+  const withTests = pkgs.filter((pkg) => sets.get(pkg.name).test !== null);
+  if (withTests.length === 0) return null;
+  const features = withTests.flatMap((pkg) => sets.get(pkg.name).test.map((feature) => `${pkg.name}/${feature}`));
+  return [
+    ...withTests.map((pkg) => `-p ${pkg.name}`),
+    "--no-default-features",
+    ...(features.length > 0 ? [`--features ${features.join(",")}`] : []),
+    ...targetFlags(withTests, { tests: true }),
+  ].join(" ");
+}
+
+function featureChecks(shards, byName) {
+  const changedNames = shards.flatMap((shard) => shard.packages);
+  const sets = new Map(changedNames.map((name) => [name, parseBazelFeatureSets(byName.get(name))]));
+  const makeRows = parseMakeFeatureMatrix(byName);
+  return shards.map((shard) => {
+    const pkgs = shard.packages.map((name) => byName.get(name));
+    const commands = [];
+    const add = (args) => {
+      if (args && !commands.includes(args)) commands.push(args);
+    };
+    add(bazelTestRow(pkgs, sets));
+    for (const pkg of pkgs) {
+      for (const variant of sets.get(pkg.name).variants) {
+        add([
+          `-p ${pkg.name}`,
+          "--no-default-features",
+          ...(variant.features.length > 0 ? [`--features ${variant.features.join(",")}`] : []),
+          ...(variant.lib ? ["--lib"] : []),
+          ...(variant.bins ? ["--bins"] : []),
+        ].join(" "));
+      }
+      for (const row of makeRows) {
+        if (row.package === pkg.name) add(row.args);
+      }
+    }
+    return { name: shard.name, packages: shard.packages, commands };
+  }).filter((job) => job.commands.length > 0);
+}
 
 function estimatedMinutes(cost) {
   return Math.round((LANE_SETUP_MINUTES + cost / COST_UNITS_PER_MINUTE) * 10) / 10;
@@ -807,6 +960,7 @@ function plan(args) {
         );
       }
     }
+    result.feature_check_jobs = featureChecks(result.shards, byName);
   } else {
     result.unit_deferred = [];
     result.unit_packages = [];
@@ -816,6 +970,7 @@ function plan(args) {
     result.unit_feature_shards = [];
     result.main_archive_builds = [];
     result.main_archive_runs = [];
+    result.feature_check_jobs = [];
   }
 
   // Integration suites of the directly changed packages' triggers. Package
@@ -974,6 +1129,15 @@ function githubOutput(result) {
   scalar("main_archive_run_matrix", archiveMatrixOf(result.main_archive_runs));
   scalar("integration_count", String(result.integration_suites.length));
   scalar("integration_matrix", matrixOf(result.integration_suites));
+  scalar("feature_check_count", String(result.feature_check_jobs.length));
+  scalar(
+    "feature_check_matrix",
+    JSON.stringify({
+      include: result.feature_check_jobs.length > 0
+        ? result.feature_check_jobs.map((job) => ({ name: job.name, commands: job.commands.join("\n") }))
+        : [{ name: "none", commands: "" }],
+    }),
+  );
   return `${lines.join("\n")}\n`;
 }
 
@@ -986,7 +1150,7 @@ function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
   process.stderr.write(
-    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} integration=${result.integration_suites.length} (${result.reason})\n`,
+    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} integration=${result.integration_suites.length} feature_check_jobs=${result.feature_check_jobs.length} (${result.reason})\n`,
   );
 }
 

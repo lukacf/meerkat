@@ -5,6 +5,7 @@
 mod adapter;
 mod client_service;
 mod connection;
+mod context_provider;
 mod error;
 pub mod external_tool_surface_authority;
 pub mod generated;
@@ -16,6 +17,9 @@ pub use adapter::McpRouterAdapter;
 pub use adapter::{McpNotReady, McpReloadFailure, McpReloadReport};
 pub use client_service::McpClientServiceFactory;
 pub use connection::{McpAuthResolver, McpConnection};
+pub use context_provider::{
+    McpCallContext, McpCallContextError, McpCallContextProvider, McpCallTarget, McpConnectionId,
+};
 pub use error::{McpError, ToolDiscoveryLimit};
 pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
 pub use protocol::McpProtocol;

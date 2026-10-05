@@ -33,11 +33,10 @@
 //!   use run by the provider) never traverse [`AgentToolDispatcher`], so this
 //!   gate cannot see them. A read-only launch is only truthful when the host
 //!   also disables native tool capabilities.
-//! - **MCP tools** are `Unknown` and denied. The MCP `readOnlyHint`
-//!   annotation is a hint supplied by the server being gated, not a proof, so
-//!   it is deliberately not honored here. An operator who has audited a
-//!   specific MCP tool should use an explicit `AllowList` instead of asking
-//!   read-only intent to guess.
+//! - **MCP tools** default to `Unknown` and are denied. A trusted process-local
+//!   MCP context provider may explicitly declare the exact configured destination
+//!   and raw operation read-only. The server's `readOnlyHint` annotation remains
+//!   untrusted and is never used to establish that authority.
 //! - **`shell`** is mutating: nothing in-tree classifies a command line, so
 //!   there is no read-only shell. Read-only intent denies it outright, which
 //!   also means the in-tree read surface is narrow (file reads go through
@@ -563,7 +562,13 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 .await?;
             return Err(error);
         }
-        let result = self.inner.dispatch(call).await;
+        let result = if self.policy.requires_mutation_declaration() {
+            let mut context = ToolDispatchContext::default();
+            context.require_read_only_execution();
+            self.inner.dispatch_with_context(call, &context).await
+        } else {
+            self.inner.dispatch(call).await
+        };
         let outcome = if result.is_ok() {
             crate::LiveBridgeEffectOutcome::Committed
         } else {
@@ -592,7 +597,18 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 .await?;
             return Err(error);
         }
-        let result = self.inner.dispatch_with_context(call, context).await;
+        let mut narrowed;
+        let dispatch_context = if self.policy.requires_mutation_declaration() {
+            narrowed = context.clone();
+            narrowed.require_read_only_execution();
+            &narrowed
+        } else {
+            context
+        };
+        let result = self
+            .inner
+            .dispatch_with_context(call, dispatch_context)
+            .await;
         let outcome = if result.is_ok() {
             crate::LiveBridgeEffectOutcome::Committed
         } else {
@@ -622,9 +638,17 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 .await?;
             return Err(error);
         }
+        let mut narrowed;
+        let dispatch_context = if self.policy.requires_mutation_declaration() {
+            narrowed = context.clone();
+            narrowed.require_read_only_execution();
+            &narrowed
+        } else {
+            context
+        };
         let result = self
             .inner
-            .dispatch_resolved_with_context(call, context, plan)
+            .dispatch_resolved_with_context(call, dispatch_context, plan)
             .await;
         let outcome = if result.is_ok() {
             crate::LiveBridgeEffectOutcome::Committed

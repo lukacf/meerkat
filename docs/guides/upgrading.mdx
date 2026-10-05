@@ -4,10 +4,56 @@ description: "What to do when moving a running system to a new Meerkat release: 
 icon: "arrow-up"
 ---
 
-Each section below covers one release, newest first. Read every section
-between the version you run and the version you are moving to. The full list
-of changes for each release is in
+This page has two parts: the steps for any upgrade, then one section per
+release, newest first. Read every release section between the version you
+run and the version you are moving to. The full list of changes for each
+release is in
 [CHANGELOG.md](https://github.com/lukacf/meerkat/blob/main/CHANGELOG.md).
+
+## How to upgrade
+
+Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
+
+- **Keep everything on the same patch version.** The SDK handshake accepts
+  any `rkat-rpc` with the same major and minor version, so a mismatched
+  patch connects without complaint. Upgrade `rkat-rpc`, `meerkat-sdk`,
+  `@rkat/sdk` and `@rkat/web` together.
+- **Bump Rust pins together.** The `meerkat*` crates are versioned in lock
+  step: move every `=0.8.x` pin at once.
+- **Expect one-way migrations.** A release can migrate durable state forward
+  the first time it opens it, after which older binaries refuse it. Each
+  release section below says whether it does.
+
+### Steps
+
+1. Stop every process that shares the state root: the CLI, `rkat-rpc`,
+   `rkat-rest`, `rkat-mcp` and SDK applications.
+2. Back up the realm state root. Without a backup, a release that migrates
+   durable state cannot be rolled back.
+3. Run `rkat storage doctor` (read-only) and keep its report.
+4. Upgrade the binaries and SDKs (table below).
+5. Start the new version. It migrates durable state on first open. To
+   migrate offline instead, run `rkat storage migrate` as a dry run, then
+   with `--apply` (see [Storage Operations](/guides/storage-operations)).
+6. Run `rkat storage doctor` again and compare.
+7. Once the rollback window has passed, remove migration backups with
+   `rkat storage prune`.
+
+| Install path | Upgrade command |
+|---|---|
+| Homebrew | `brew update && brew upgrade rkat` (upgrades all four binaries) |
+| Release archives | Download the new per-binary archives, verify them against `checksums.sha256`, and replace the binaries (see [Linux without Homebrew](/quickstart#linux-without-homebrew)) |
+| Cargo | `cargo install rkat --locked --force`, and the same for `meerkat-rpc`, `meerkat-rest` or `meerkat-mcp-server` if you use them |
+| Python | `pip install -U "meerkat-sdk==<version>"` |
+| TypeScript | `npm install @rkat/sdk@<version>` (and `@rkat/web@<version>`) |
+| Rust | Set every `meerkat*` dependency to `=<version>` |
+
+### Verify
+
+- `rkat --version` and `rkat-rpc --version` print the new version.
+- `rkat doctor` passes.
+- `rkat storage doctor` reports no new problems.
+- An SDK `connect()` succeeds.
 
 ## Upgrading to 0.8.51
 
@@ -24,8 +70,8 @@ the CHANGELOG under `## [0.8.51]`.
 - **Upgrade every process that shares a store at the same time.** A 0.8.50
   process left running against a store a 0.8.51 process has migrated will be
   refused on its next open.
-- **Take a backup first** if you might need to roll back, since there is no
-  downgrade path for migrated files.
+- **Take a backup first** (step 2 of [How to upgrade](#how-to-upgrade)),
+  since there is no downgrade path for migrated files.
 
 ### SQLite sessions that 0.8.50 could no longer load
 

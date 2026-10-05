@@ -10,7 +10,8 @@
 //! - an exclusion inside a grant (allow-minus-deny), including the baseline;
 //! - exact IP endpoints (Landlock TCP rules are port-only and miss UDP);
 //! - any `unix_connect` grant (this kernel interface has no pathname-socket
-//!   right; with none requested, AF_UNIX socket creation is denied);
+//!   right; with none requested, AF_UNIX socket creation is denied and
+//!   socketpair is limited to unredirectable stream pairs);
 //! - descendant termination (no whole-tree ownership without namespaces).
 //!
 //! Absent kernel facilities (Landlock ABI below 6, seccomp filters,
@@ -688,6 +689,9 @@ mod seccomp {
     const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
     const RET_ALLOW: u32 = libc::SECCOMP_RET_ALLOW;
+    /// The socket type bits of a socket(2)/socketpair(2) type argument,
+    /// without SOCK_NONBLOCK and SOCK_CLOEXEC.
+    const SOCK_TYPE_MASK: u32 = 0xf;
     const RET_KILL_PROCESS: u32 = libc::SECCOMP_RET_KILL_PROCESS;
 
     fn ret_errno(errno: i32) -> u32 {
@@ -803,8 +807,26 @@ mod seccomp {
             ret(ret_errno(libc::EPERM)),
             ret(RET_ALLOW),
         ]);
+        // socketpair(2): AF_UNIX SOCK_STREAM only. A connected stream
+        // endpoint cannot be redirected (connect gives EISCONN, a sendto
+        // address EISCONN/EOPNOTSUPP), but a datagram endpoint can sendto or
+        // reconnect to any pathname datagram socket, which Landlock does not
+        // mediate. Seqpacket is denied too: nothing here needs it.
+        program.extend([
+            jump(libc::BPF_JEQ, nr(libc::SYS_socketpair), 0, 7),
+            load(arg_low(0)),
+            jump(libc::BPF_JEQ, libc::AF_UNIX as u32, 0, 4),
+            load(arg_low(1)),
+            stmt(
+                (libc::BPF_ALU | libc::BPF_AND | libc::BPF_K) as u16,
+                SOCK_TYPE_MASK,
+            ),
+            jump(libc::BPF_JEQ, libc::SOCK_STREAM as u32, 0, 1),
+            ret(RET_ALLOW),
+            ret(ret_errno(libc::EPERM)),
+        ]);
         // socket(2) family allow-list. AF_UNIX stays denied: no unix_connect
-        // grant is supported, and socketpair(2) remains available.
+        // grant is supported.
         let allowed: &[i32] = if unrestricted_ip {
             &[libc::AF_INET, libc::AF_INET6]
         } else {

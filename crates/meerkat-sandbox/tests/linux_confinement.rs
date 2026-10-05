@@ -243,6 +243,7 @@ const GATED_TESTS: &[&str] = &[
     "absent_landlock_is_backend_unavailable_and_the_present_kernel_still_works",
     "profile_works_where_unprivileged_user_namespaces_are_unusable",
     "python_multiprocessing_runs_with_an_explicit_shared_memory_grant_only",
+    "unix_datagram_socketpair_cannot_reach_a_host_pathname_socket",
     "node_child_processes_run_under_the_baseline",
     "git_init_add_and_commit_run_under_the_baseline",
 ];
@@ -401,6 +402,28 @@ fn linux_probe_process() {
             "unix pathname connect",
             std::os::unix::net::UnixStream::connect(&argument),
         ),
+        "unix-dgram-pair-denied" => {
+            // A datagram socketpair endpoint is connected only to its peer,
+            // but sendto(2) and connect(2) can still address any pathname
+            // datagram socket, which Landlock does not mediate.
+            match std::os::unix::net::UnixDatagram::pair() {
+                Err(error) => denied::<()>("unix datagram socketpair", Err(error)),
+                Ok((endpoint, _peer)) => {
+                    denied(
+                        "unix datagram sendto host",
+                        endpoint.send_to(b"bypass", &argument),
+                    );
+                    denied("unix datagram reconnect host", endpoint.connect(&argument));
+                }
+            }
+            // Control: a stream pair works and cannot be redirected.
+            let (mut first, mut second) =
+                std::os::unix::net::UnixStream::pair().expect("stream socketpair control");
+            std::io::Write::write_all(&mut first, b"pair").unwrap();
+            let mut buffer = [0u8; 4];
+            std::io::Read::read_exact(&mut second, &mut buffer).unwrap();
+            assert_eq!(&buffer, b"pair", "stream socketpair control");
+        }
         "unix-abstract-denied" => {
             use std::os::linux::net::SocketAddrExt;
             let address =
@@ -847,6 +870,33 @@ async fn exact_connect_endpoints_are_refused_with_a_positive_control() {
 // 4. Unix: no grant blocks live pathname and abstract sockets (the pathname one
 //    inside the writable work root); IP Unrestricted grants no Unix access;
 //    an exact Unix grant is enforced, or refused where the kernel cannot.
+
+#[tokio::test]
+async fn unix_datagram_socketpair_cannot_reach_a_host_pathname_socket() {
+    if !verified("unix_datagram_socketpair_cannot_reach_a_host_pathname_socket") {
+        return;
+    }
+    let fixture = Fixture::new();
+    // A live host datagram socket outside every grant, as a host service
+    // (journald, syslog) would be.
+    let socket = fixture.root.join("host.dgram");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&socket).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    for spec in [fixture.spec(), {
+        let mut ip_only = fixture.spec();
+        ip_only.network = IpNetworkAccess::Unrestricted;
+        ip_only
+    }] {
+        fixture
+            .assert_probe(spec, "unix-dgram-pair-denied", socket.to_str().unwrap())
+            .await;
+    }
+    let mut buffer = [0u8; 16];
+    assert!(
+        receiver.recv(&mut buffer).is_err(),
+        "a confined datagram reached the host pathname socket"
+    );
+}
 
 #[tokio::test]
 async fn unix_sockets_are_independent_of_ip_and_of_filesystem_grants() {

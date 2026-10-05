@@ -58,8 +58,8 @@ pub use principal::{
 };
 pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{
-    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedAuthMode,
-    PersistedTokens, ProviderAuthPersistence, ProviderAuthPersistenceId, RefreshCoordinator,
-    RefreshError, RefreshFailureDisposition, RefreshFailureObservation, RefreshFn, TokenKey,
-    TokenStore, TokenStoreError,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome,
+    CredentialSlotRefusal, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence,
+    ProviderAuthPersistenceId, RefreshCoordinator, RefreshError, RefreshFailureDisposition,
+    RefreshFailureObservation, RefreshFn, TokenKey, TokenStore, TokenStoreError,
 };

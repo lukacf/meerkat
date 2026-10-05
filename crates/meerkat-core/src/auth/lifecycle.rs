@@ -82,7 +82,8 @@ pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -
         | PersistedAuthMode::OauthToApiKey
         | PersistedAuthMode::GoogleOauth
         | PersistedAuthMode::GithubCopilotOauth
-        | PersistedAuthMode::McpOauth => true,
+        | PersistedAuthMode::McpOauth
+        | PersistedAuthMode::ConnectorOauth => true,
         PersistedAuthMode::ApiKey
         | PersistedAuthMode::StaticBearer
         | PersistedAuthMode::Adc
@@ -723,6 +724,7 @@ mod tests {
             PersistedAuthMode::GoogleOauth,
             PersistedAuthMode::GithubCopilotOauth,
             PersistedAuthMode::McpOauth,
+            PersistedAuthMode::ConnectorOauth,
         ] {
             assert!(
                 !persisted_auth_mode_is_directly_creatable(mode),

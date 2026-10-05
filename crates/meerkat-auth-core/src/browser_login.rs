@@ -196,14 +196,21 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                             "durable credential predecessor rehydrate failed: {error}"
                         ))
                     })?;
+                    let completion = flow.completion;
                     flow.authority
                         .consume(
                             &flow.state,
                             &credential_identity,
-                            flow.completion,
+                            completion.clone(),
                             &flow.redirect_uri,
                         )
                         .map_err(flow_error)?;
+                    // The attempt stays consumed on refusal: its code was
+                    // already exchanged. Nothing has been published yet, so
+                    // the slot keeps its credential and lifecycle.
+                    completion
+                        .admit_into_slot(previous.as_ref(), &tokens)
+                        .map_err(CredentialMutationError::SlotRefused)?;
 
                     let previous_lifecycle_restore =
                         auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);

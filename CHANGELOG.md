@@ -1310,6 +1310,17 @@ them.
   typed `StoreError::UnsupportedRealmBackend`. `make test-feature-matrix-lib`
   checks that combination.
 
+- GPT Live Turbo S S103 no longer reports a duplicate readout when a later
+  correction result prompts the voice to re-read the brief it updates
+  (#1705, control 0375acca R3: the corrections came back diff-only,
+  "Updated the kickoff to Friday", and the voice read the whole brief again
+  with Friday). A response opened by a later result delivery's commentary
+  acknowledgement, a delivery that does not itself carry the sentence and
+  whose job was created after the original delivery on the same channel, may
+  re-voice that channel's earlier-delivered sentences in one response.
+  Re-reads opened by a narration, a cue or the user's speech, a second
+  re-read for the same delivery, and deliveries from another channel or a
+  parallel job are still duplicate readouts.
 - GPT Live Turbo S S97 and S99 journals now carry the browser timeline
   (`fixture_start` with `speech_ms`, `input_final` with `t_ms`), one record
   per channel, written whether the scenario passed or failed. The lag rule

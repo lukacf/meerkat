@@ -5035,6 +5035,9 @@ struct ResultDelivery {
     channel: u32,
     elapsed_ms: u64,
     text: String,
+    /// Sideband arrival of the delegation's `session.delegation.created` on
+    /// the same channel, when recorded.
+    created_ms: Option<u64>,
 }
 
 /// Every result delivery on the sideband, all channels, in send order.
@@ -5055,6 +5058,20 @@ fn announced_result_text(content: &str) -> Option<&str> {
 }
 
 fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> {
+    let created: std::collections::BTreeMap<(u32, &str), u64> = lines
+        .iter()
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.delegation.created" =>
+            {
+                Some((
+                    (line.channel_ordinal, raw["delegation"]["id"].as_str()?),
+                    line.elapsed_ms,
+                ))
+            }
+            _ => None,
+        })
+        .collect();
     lines
         .iter()
         .filter_map(|line| match &line.entry {
@@ -5069,6 +5086,7 @@ fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> 
                     channel: line.channel_ordinal,
                     elapsed_ms: line.elapsed_ms,
                     text: text.to_owned(),
+                    created_ms: created.get(&(line.channel_ordinal, delegation_id)).copied(),
                 })
             }
             _ => None,
@@ -5076,30 +5094,72 @@ fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> 
         .collect()
 }
 
-/// Sideband send times of every broker append on `channel` that can prompt
-/// the model to speak: delegation commentary (results and narrations),
-/// thinking appends (result cues, runtime work, context) and instruction
-/// appends (in-progress notices).
-fn broker_prompt_elapsed(lines: &[provider_recording::Line], channel: u32) -> Vec<u64> {
+/// The provider lane of a broker append that can prompt the model to speak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptLane {
+    /// Delegation commentary: a result or a narration.
+    Commentary,
+    /// Thinking: result cues, runtime work, context.
+    Thinking,
+    /// Instructions: in-progress notices.
+    Instructions,
+}
+
+/// One broker append on the channel that can prompt speech, at its sideband
+/// send time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BrokerPrompt {
+    elapsed_ms: u64,
+    lane: PromptLane,
+}
+
+/// Every broker append on `channel` that can prompt the model to speak:
+/// delegation commentary (results and narrations), thinking appends (result
+/// cues, runtime work, context) and instruction appends (in-progress
+/// notices), in send order.
+fn broker_prompts(lines: &[provider_recording::Line], channel: u32) -> Vec<BrokerPrompt> {
     lines
         .iter()
         .filter_map(|line| match &line.entry {
-            provider_recording::Entry::ClientEvent { event }
-                if line.channel_ordinal == channel
-                    && matches!(
-                        event["type"].as_str(),
-                        Some(
-                            "session.commentary.append"
-                                | "session.thinking.append"
-                                | "session.instructions.append"
-                        )
-                    ) =>
-            {
-                Some(line.elapsed_ms)
+            provider_recording::Entry::ClientEvent { event } if line.channel_ordinal == channel => {
+                let lane = match event["type"].as_str() {
+                    Some("session.commentary.append") => PromptLane::Commentary,
+                    Some("session.thinking.append") => PromptLane::Thinking,
+                    Some("session.instructions.append") => PromptLane::Instructions,
+                    _ => return None,
+                };
+                Some(BrokerPrompt {
+                    elapsed_ms: line.elapsed_ms,
+                    lane,
+                })
             }
             _ => None,
         })
         .collect()
+}
+
+/// The peer's response boundary for a delegation commentary acknowledgement.
+const COMMENTARY_BOUNDARY: &str = "session.commentary.appended";
+
+/// The result delivery whose commentary acknowledgement opened `record`, on
+/// the peer's clock: the response opened by `session.commentary.appended`
+/// whose latest commentary append sent before that boundary is one of the
+/// channel's result deliveries, not a narration.
+fn opening_delivery(
+    record: &support::ReadoutRecord,
+    prompts_ms: &[(i64, PromptLane)],
+    delivered_ms: &[i64],
+) -> Option<i64> {
+    let opened_ms = record.opened_ms? as i64;
+    if record.opened_by != COMMENTARY_BOUNDARY {
+        return None;
+    }
+    let acknowledged = prompts_ms
+        .iter()
+        .filter(|(sent, lane)| *lane == PromptLane::Commentary && *sent <= opened_ms)
+        .map(|(sent, _)| *sent)
+        .max()?;
+    delivered_ms.contains(&acknowledged).then_some(acknowledged)
 }
 
 /// The peer's response boundary for a user transcript delta.
@@ -5233,11 +5293,15 @@ fn readout_faults(
     deliveries: &[ResultDelivery],
     channel: u32,
     records: &[support::ReadoutRecord],
-    prompts: &[u64],
+    prompts: &[BrokerPrompt],
     offset: i64,
     close_request_ms: Option<i64>,
 ) -> Vec<ReadoutFault> {
-    let prompts_ms: Vec<i64> = prompts.iter().map(|sent| *sent as i64 - offset).collect();
+    let prompt_lanes_ms: Vec<(i64, PromptLane)> = prompts
+        .iter()
+        .map(|prompt| (prompt.elapsed_ms as i64 - offset, prompt.lane))
+        .collect();
+    let prompts_ms: Vec<i64> = prompt_lanes_ms.iter().map(|(sent, _)| *sent).collect();
     let mut faults = Vec::new();
     let mut per_delegation: std::collections::BTreeMap<&str, usize> = Default::default();
     for delivery in deliveries {
@@ -5280,6 +5344,15 @@ fn readout_faults(
             )
         })
         .collect();
+    // Each channel delivery's send and its delegation's creation, peer clock.
+    let delivery_created_ms: std::collections::BTreeMap<i64, i64> = deliveries
+        .iter()
+        .filter(|d| d.channel == channel)
+        .filter_map(|d| Some((d.elapsed_ms as i64 - offset, d.created_ms? as i64 - offset)))
+        .collect();
+    let delivered_ms: Vec<i64> = delivered.iter().map(|(sent, _)| *sent).collect();
+    // A licensing delivery's one re-reading response, across sentences.
+    let mut licensed: std::collections::BTreeMap<i64, u64> = Default::default();
     let mut voicings: std::collections::BTreeMap<String, Vec<&support::ReadoutRecord>> =
         Default::default();
     for record in records {
@@ -5304,6 +5377,31 @@ fn readout_faults(
         let mut used = 0usize;
         let mut unaccounted = false;
         for (position, response) in responses.iter().enumerate() {
+            // A re-reading of what a later correction updates (S103 #1705,
+            // 0375acca R3: diff-only corrections, "Updated the kickoff to
+            // Friday", and the brief read again with Friday). Licensed only
+            // when the response was opened by that delivery's own
+            // commentary acknowledgement on this channel, the delivery does
+            // not carry the sentence, the sentence was delivered on this
+            // channel before it, and its delegation was created after that
+            // earlier delivery (a correction requested once the result
+            // existed, never a parallel job); one re-reading response per
+            // licensing delivery. Narration-, cue- and speech-opened
+            // re-reads stay unaccounted.
+            if position > 0
+                && let Some(delivery) = opening_delivery(response, &prompt_lanes_ms, &delivered_ms)
+                && !sends.contains(&delivery)
+                && let Some(original) = sends.iter().copied().filter(|sent| *sent < delivery).min()
+                && delivery_created_ms
+                    .get(&delivery)
+                    .is_some_and(|created| *created > original)
+                && licensed
+                    .get(&delivery)
+                    .is_none_or(|licensed_response| *licensed_response == response.index)
+            {
+                licensed.insert(delivery, response.index);
+                continue;
+            }
             if position > 0
                 && resumes_interrupted_readout(
                     responses[position - 1],
@@ -5436,7 +5534,7 @@ async fn readout_contract(
             )?;
         }
     }
-    let prompts = broker_prompt_elapsed(&lines, channel);
+    let prompts = broker_prompts(&lines, channel);
     let faults = readout_faults(
         &deliveries,
         channel,
@@ -12338,6 +12436,20 @@ mod config_tests {
             channel: 1,
             elapsed_ms,
             text: text.to_owned(),
+            created_ms: None,
+        }
+    }
+
+    /// A result whose delegation was created at `created_ms`.
+    fn created_delivery(
+        delegation_id: &str,
+        created_ms: u64,
+        elapsed_ms: u64,
+        text: &str,
+    ) -> super::ResultDelivery {
+        super::ResultDelivery {
+            created_ms: Some(created_ms),
+            ..result_delivery(delegation_id, elapsed_ms, text)
         }
     }
 
@@ -12463,12 +12575,240 @@ mod config_tests {
         ]
     }
 
+    fn commentary(elapsed_ms: u64) -> super::BrokerPrompt {
+        super::BrokerPrompt {
+            elapsed_ms,
+            lane: super::PromptLane::Commentary,
+        }
+    }
+
+    fn cue(elapsed_ms: u64) -> super::BrokerPrompt {
+        super::BrokerPrompt {
+            elapsed_ms,
+            lane: super::PromptLane::Thinking,
+        }
+    }
+
+    const THURSDAY: &str = "Updated the kickoff to Thursday afternoon.";
+    const FRIDAY: &str = "Updated the kickoff to Friday afternoon.";
+
+    /// #1705 (S103 control 0375acca R3): the brief's readout is cut off before
+    /// its first line; two diff-only corrections follow. The voice reads the
+    /// brief with Thursday (response 8, opened by the Friday request's
+    /// "Started" narration), then the Friday result lands and it reads the
+    /// brief again with Friday (response 9, opened by that delivery).
+    fn s103_correction_records(response_9_opened_by: &str) -> Vec<super::support::ReadoutRecord> {
+        vec![
+            bounded_readout(
+                1,
+                COMMENTARY,
+                Some((USER, 1500)),
+                "Here it is, reading it back now:",
+            ),
+            bounded_readout(
+                8,
+                COMMENTARY,
+                Some((COMMENTARY, 8999)),
+                "The updated version with Thursday. The client is the Marigold account. The deck code name is Pelican.",
+            ),
+            bounded_readout(
+                9,
+                response_9_opened_by,
+                None,
+                "Actually, the version with Friday. The client is the Marigold account. The deck code name is Pelican.",
+            ),
+        ]
+    }
+
+    /// The corrections were requested after the brief was delivered (their
+    /// delegations are created at 4000 and 6000, the brief sent at 1000).
+    fn s103_correction_deliveries() -> Vec<super::ResultDelivery> {
+        vec![
+            created_delivery("item_brief", 500, 1000, BRIEF),
+            created_delivery("item_thursday", 4000, 7500, THURSDAY),
+            created_delivery("item_friday", 6000, 8800, FRIDAY),
+        ]
+    }
+
+    #[test]
+    fn a_re_reading_opened_by_a_later_result_delivery_is_licensed_once() {
+        // Commentary appends: the brief, Thursday, the Friday request's
+        // "Started" narration (acknowledged at response 8's boundary), Friday.
+        let prompts = [
+            commentary(1000),
+            commentary(7500),
+            commentary(7800),
+            commentary(8800),
+        ];
+        assert!(
+            super::readout_faults(
+                &s103_correction_deliveries(),
+                1,
+                &s103_correction_records(COMMENTARY),
+                &prompts,
+                0,
+                None
+            )
+            .is_empty()
+        );
+    }
+
+    /// The same re-reading opened by a narration's acknowledgement (no new
+    /// result behind it) is still a duplicate readout.
+    #[test]
+    fn a_re_reading_opened_by_a_narration_still_fails() {
+        let prompts = [
+            commentary(1000),
+            commentary(7500),
+            commentary(7800),
+            commentary(8800),
+            commentary(8900),
+        ];
+        assert_eq!(
+            super::readout_faults(
+                &s103_correction_deliveries(),
+                1,
+                &s103_correction_records(COMMENTARY),
+                &prompts,
+                0,
+                None
+            ),
+            vec![
+                super::ReadoutFault::DuplicateReadout {
+                    sentence: "the client is the marigold account".to_owned(),
+                    responses: vec![8, 9],
+                },
+                super::ReadoutFault::DuplicateReadout {
+                    sentence: "the deck code name is pelican".to_owned(),
+                    responses: vec![8, 9],
+                },
+            ]
+        );
+    }
+
+    /// The commentary sends of the R3 shape: the brief, Thursday, the Friday
+    /// request's "Started" narration (acknowledged at response 8's boundary)
+    /// and Friday.
+    fn s103_correction_prompts() -> Vec<super::BrokerPrompt> {
+        vec![
+            commentary(1000),
+            commentary(7500),
+            commentary(7800),
+            commentary(8800),
+        ]
+    }
+
+    fn duplicate_count(
+        deliveries: &[super::ResultDelivery],
+        records: &[super::support::ReadoutRecord],
+        prompts: &[super::BrokerPrompt],
+    ) -> usize {
+        super::readout_faults(deliveries, 1, records, prompts, 0, None)
+            .iter()
+            .filter(|fault| matches!(fault, super::ReadoutFault::DuplicateReadout { .. }))
+            .count()
+    }
+
+    /// A re-reading after a result cue (a thinking append, never a response
+    /// boundary): the response is opened by the user's speech, so no
+    /// delivery licenses it.
+    #[test]
+    fn a_cue_opened_re_reading_still_fails() {
+        let mut prompts = s103_correction_prompts();
+        prompts.push(cue(8950));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &s103_correction_records(USER),
+                &prompts
+            ),
+            2
+        );
+    }
+
+    /// A third reading with no new delivery since the licensed one (opened
+    /// by a new delegation's boundary, not cut off by the user, so no
+    /// resumption either) is still a duplicate readout.
+    #[test]
+    fn a_re_reading_with_no_new_delivery_still_fails() {
+        const DELEGATION: &str = "session.delegation.created";
+        let mut records = s103_correction_records(COMMENTARY);
+        records[2].closed_by = Some(DELEGATION.to_owned());
+        records[2].closed_ms = Some(9_900);
+        records.push(bounded_readout(
+            10,
+            DELEGATION,
+            None,
+            "Once more. The client is the Marigold account. The deck code name is Pelican.",
+        ));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &records,
+                &s103_correction_prompts()
+            ),
+            2
+        );
+    }
+
+    /// One delivery licenses one re-reading: a second response whose opening
+    /// boundary acknowledges the same delivery (no commentary sent between)
+    /// is still a duplicate readout.
+    #[test]
+    fn two_re_readings_licensed_by_one_delivery_still_fail() {
+        let mut records = s103_correction_records(COMMENTARY);
+        records[2].closed_by = Some(COMMENTARY.to_owned());
+        records[2].closed_ms = Some(9_900);
+        records.push(bounded_readout(
+            10,
+            COMMENTARY,
+            None,
+            "Again. The client is the Marigold account. The deck code name is Pelican.",
+        ));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &records,
+                &s103_correction_prompts()
+            ),
+            2
+        );
+    }
+
+    /// A delivery on another channel, or of a job created before the brief
+    /// existed (S101-style parallel jobs), licenses nothing.
+    #[test]
+    fn a_delivery_from_another_channel_or_a_parallel_job_licenses_nothing() {
+        let mut other_channel = s103_correction_deliveries();
+        other_channel[2].channel = 2;
+        assert_eq!(
+            duplicate_count(
+                &other_channel,
+                &s103_correction_records(COMMENTARY),
+                &s103_correction_prompts()
+            ),
+            2,
+            "another channel's delivery"
+        );
+        let mut parallel_job = s103_correction_deliveries();
+        parallel_job[2].created_ms = Some(800);
+        assert_eq!(
+            duplicate_count(
+                &parallel_job,
+                &s103_correction_records(COMMENTARY),
+                &s103_correction_prompts()
+            ),
+            2,
+            "a job created before the brief was delivered"
+        );
+    }
+
     #[test]
     fn a_readout_restarted_after_the_user_cuts_it_off_is_one_reading() {
         let deliveries = [result_delivery("item_a", 2900, BRIEF)];
         // The result itself is the only broker append, sent before the
         // interruption.
-        let prompts = [2900];
+        let prompts = [commentary(2900)];
         assert!(
             super::readout_faults(&deliveries, 1, &s103_r5_records(), &prompts, 0, None).is_empty()
         );
@@ -12479,7 +12819,7 @@ mod config_tests {
     #[test]
     fn a_re_read_after_a_cue_still_fails_after_an_interruption() {
         let deliveries = [result_delivery("item_a", 2900, BRIEF)];
-        let prompts = [2900, 4500];
+        let prompts = [commentary(2900), cue(4500)];
         assert_eq!(
             super::readout_faults(&deliveries, 1, &s103_r5_records(), &prompts, 0, None),
             vec![super::ReadoutFault::DuplicateReadout {
@@ -12497,7 +12837,7 @@ mod config_tests {
         let mut records = s103_r5_records();
         records[2].opened_by = COMMENTARY.to_owned();
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &records, &[2900], 0, None),
+            super::readout_faults(&deliveries, 1, &records, &[commentary(2900)], 0, None),
             vec![super::ReadoutFault::DuplicateReadout {
                 sentence: "client is the marigold account".to_owned(),
                 responses: vec![3, 5],
@@ -12526,7 +12866,7 @@ mod config_tests {
             bounded_readout(5, USER, None, "client is the Marigold account."),
         ];
         assert_eq!(
-            super::readout_faults(&deliveries, 1, &records, &[2900], 0, None),
+            super::readout_faults(&deliveries, 1, &records, &[commentary(2900)], 0, None),
             vec![super::ReadoutFault::DuplicateReadout {
                 sentence: "client is the marigold account".to_owned(),
                 responses: vec![3, 5],

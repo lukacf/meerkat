@@ -103,6 +103,12 @@ them.
 
 ### Testing
 
+- `meerkat-memory` `released_v2_store_with_empty_rows_is_purged_on_open` no
+  longer treats approximate HNSW search recall as an exact oracle. Its final
+  reopen check asserted three hits for one query and failed 5 of 200 serial
+  runs on main. It now checks the rebuilt index cardinality and the exact
+  durable texts (780/780 under serial and 48-way stress).
+
 - The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
   - Four workers spawn at once while a member's turn runs.
   - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.

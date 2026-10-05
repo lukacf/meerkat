@@ -4120,6 +4120,27 @@ mod tests {
         // Idempotent: a later open finds nothing more to purge.
         let store = HnswMemoryStore::open(&memory_dir).unwrap();
         assert_eq!(query_i64(&db_path, "SELECT COUNT(*) FROM memory_text"), 3);
-        assert_eq!(store.search(&scope, "cat mat", 10).await.unwrap().len(), 3);
+        // Approximate search recall is not an exact oracle, even for three
+        // points: check the rebuilt index cardinality and the exact durable
+        // texts instead. The search loads the scoped index.
+        let _ = store.search(&scope, "cat mat", 10).await.unwrap();
+        assert_eq!(store.hnsw_point_count(), 3);
+        let mut texts = store
+            .enumerate_scoped(&scope, enumeration(10, 0))
+            .await
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|record| record.content)
+            .collect::<Vec<_>>();
+        texts.sort();
+        assert_eq!(
+            texts,
+            [
+                "deploy the release on friday",
+                "staged real memory",
+                "the cat sat on the mat",
+            ]
+        );
     }
 }

@@ -1386,6 +1386,11 @@ async fn the_sweep_reaps_only_ended_unreferenced_incarnation_locks() {
     assert!(incarnation_lock_path(root.path(), current.id).exists());
 }
 
+/// New user, pid and mount namespaces with a procfs for the new pid namespace.
+/// Without `--mount-proc` the host would still see the outer `/proc`, where
+/// its children's namespace-local pids name other processes or none, so
+/// custody could not capture the identity of the leader it just spawned.
+const UNSHARE_ARGS: [&str; 3] = ["-Urpf", "--mount-proc", "--kill-child"];
 const UNSHARE_ROOT_ENV: &str = "MEERKAT_TEST_CUSTODY_UNSHARE_ROOT";
 const UNSHARE_SCOPE_ENV: &str = "MEERKAT_TEST_CUSTODY_UNSHARE_SCOPE";
 const UNSHARE_CHILD_TEST: &str =
@@ -1425,24 +1430,25 @@ async fn custody_foreign_namespace_host_role() {
 
 #[tokio::test]
 async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
-    // Unprivileged user and pid namespaces may be unavailable (for example
-    // restricted by AppArmor); the test then has nothing to exercise, and
-    // says why.
+    // Unprivileged user, pid and mount namespaces (and a procfs mount in
+    // them) may be unavailable, for example restricted by AppArmor; the test
+    // then has nothing to exercise, and says why.
     match Command::new("unshare")
-        .args(["-Urpf", "--kill-child", "true"])
+        .args(UNSHARE_ARGS)
+        .arg("true")
         .output()
     {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
             eprintln!(
-                "skipped: user+pid namespaces unavailable: unshare probe ({}): {}",
+                "skipped: user+pid+mount namespaces unavailable: unshare probe ({}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
             return;
         }
         Err(error) => {
-            eprintln!("skipped: user+pid namespaces unavailable: unshare probe: {error}");
+            eprintln!("skipped: user+pid+mount namespaces unavailable: unshare probe: {error}");
             return;
         }
     }
@@ -1459,7 +1465,7 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
         .open_receiver(&fifo_path)
         .unwrap();
     let mut host = tokio::process::Command::new("unshare")
-        .args(["-Urpf", "--kill-child"])
+        .args(UNSHARE_ARGS)
         .arg(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -1507,7 +1513,7 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
             // means the namespaces are unavailable here.
             if stderr.starts_with("unshare:") {
                 eprintln!(
-                    "skipped: user+pid namespaces unavailable: unshare failed before the host started ({status}): {}",
+                    "skipped: user+pid+mount namespaces unavailable: unshare failed before the host started ({status}): {}",
                     stderr.trim()
                 );
                 return;

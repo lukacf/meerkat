@@ -671,6 +671,17 @@ them.
   `meerkat_live::LiveSidebandObservationKind::AssistantPlaybackRestorable`;
   exhaustive matches must handle them. Later discriminants move in
   `GptLiveBrokerObservation::*` and `LiveSidebandObservationKind::*`.
+- Causal-tail batch (see Fixed): new MeerkatMachine input
+  `AuthorizeLiveContextCausalTailBatch { channel_id, runtime_id, fence_token,
+  generation, append_id, previous_cursor, next_cursor, tail_cursors }` and
+  kernel transitions `AuthorizeLiveContextCausalTailBatchIdle`,
+  `AuthorizeLiveContextCausalTailBatchAttached` and
+  `AuthorizeLiveContextCausalTailBatchRunning`; later discriminants and
+  ordering move in the generated `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*` and kernel `Input::*`, `InputKind::*`,
+  `TransitionId::*`. `meerkat_machine_dsl_core::ast::UpdateDef` gains
+  `ForEach { binding, over, updates }`. Exhaustive matches must handle the new
+  variants.
 
 ### Security
 
@@ -730,6 +741,9 @@ them.
 
 ### Added
 
+- Machine DSL: `for binding in <set-or-seq> { updates }` in transition update
+  blocks, lowered to the schema IR's existing `Update::ForEach` (already
+  supported by the kernel runtime and TLA generation).
 - `meerkat::experimental_gpt_live::LivePostCloseWorkSource`: host source of
   delegated work that outlived its voice channel, bound on a public Live open
   authority with `ExperimentalLiveOpenAuthorityProvider::bind_post_close_work_source`;
@@ -1335,6 +1349,23 @@ them.
   doctor test asserts the HeadCanonical crossing floor (v4 or later), and
   the migrate test pins the stamped version to 5 so the next bump fails
   loudly.
+- Turbo S S99: after a late summary, the replay of speech the call had
+  already heard (the causal tail) went to the provider as one quiet append per
+  row, and gpt-live-1 answered the replayed rows one by one ("level nine", "I
+  don't know yet", "Cobalt"). That pushed a delegation result's readout into
+  the user's next question, which then got the rest of the result as its
+  answer. The contiguous run of queued heard-speech replays at the outbox head
+  now goes out as ONE append (the replay framing once, the rows in order)
+  through the generated edge `AuthorizeLiveContextCausalTailBatch`, under the
+  same binding, bootstrap, recovery and turn-boundary guards as one row. Its
+  single pending append is resolved by the ordinary resolve edges, which now
+  pin the cursor range by the pending append (`next > previous`) instead of
+  `next == previous + 1`. Every other row keeps one-row appends, and a run the
+  generated state refuses as one append falls back to them. A rejected batch
+  is re-queued row by row under the original cursors. The S99 echo checks
+  now inspect whole reassembled thinking appends row by row: a wire fragment
+  that held a typed assistant row ("Marigold") and the later spoken
+  correction ("Cobalt") no longer reads as re-sent current-facts speech.
 - A voice delegation's result that was merged into the session after its call
   closed now replays on a reopened channel as the result of that request:
   "Finished voice request: "<the user's own words>". It finished after the

@@ -1059,6 +1059,22 @@ fn parse_single_update(input: ParseStream) -> Result<UpdateDef> {
         });
     }
 
+    // Loop: for binding in collection { updates }
+    if input.peek(Token![for]) {
+        let _: Token![for] = input.parse()?;
+        let binding: Ident = input.parse()?;
+        let _: Token![in] = input.parse()?;
+        let over = parse_expr(input)?;
+        let body;
+        braced!(body in input);
+        let updates = parse_updates(&body)?;
+        return Ok(UpdateDef::ForEach {
+            binding,
+            over,
+            updates,
+        });
+    }
+
     // self.field <op> ...
     let _: Token![self] = input.parse()?;
     let _: Token![.] = input.parse()?;

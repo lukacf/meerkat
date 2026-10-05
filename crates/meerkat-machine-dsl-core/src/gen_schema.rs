@@ -1029,6 +1029,20 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
                         else_updates: vec![#(#else_u),*],
                     } }
                 }
+                UpdateDef::ForEach {
+                    binding,
+                    over,
+                    updates,
+                } => {
+                    let b = binding.to_string();
+                    let over_e = gen_schema_expr(over);
+                    let body = gen_schema_updates(updates);
+                    quote! { Update::ForEach {
+                        binding: #b.into(),
+                        over: #over_e,
+                        updates: vec![#(#body),*],
+                    } }
+                }
             }
         })
         .collect()

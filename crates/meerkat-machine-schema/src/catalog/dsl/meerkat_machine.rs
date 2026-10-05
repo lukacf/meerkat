@@ -6298,6 +6298,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_cursor: u64,
                 next_cursor: u64,
             },
+            // One append for the contiguous run of queued replays of heard
+            // speech (the causal tail) at the outbox head: `append_id` is the
+            // head row's, `tail_cursors` every cursor in (previous, next].
+            AuthorizeLiveContextCausalTailBatch {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                append_id: String,
+                previous_cursor: u64,
+                next_cursor: u64,
+                tail_cursors: Set<u64>,
+            },
             EnqueueLiveContextRow {
                 channel_id: String,
                 runtime_id: AgentRuntimeId,
@@ -30708,6 +30721,118 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // The causal tail (replays of speech the provider already heard,
+        // held behind a late summary) goes out as ONE quiet append instead of
+        // one per row. Each replayed row was a separate thinking append, and
+        // gpt-live-1 answered them one by one ("level nine", "I don't know
+        // yet", "Cobalt"), which pushed a delegation result's readout into
+        // the user's next question (Turbo S S99 on 7f770753 R3). The batch
+        // covers exactly the contiguous run (previous, next] of queued
+        // ReassertCausalTail/ReassertAssistantOutput rows at the outbox head,
+        // under the same binding, bootstrap, recovery and safe-boundary
+        // guards as one row; its single pending append is acknowledged,
+        // rejected or recovered by the ordinary resolve edges, which pin the
+        // exact range by the pending append. Every other row keeps one-row
+        // appends (cursor_edge_is_next).
+        transition AuthorizeLiveContextCausalTailBatch {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextCausalTailBatch {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor, tail_cursors
+            }
+            guard "append_present" { append_id != "" }
+            guard "bootstrap_is_acknowledged" {
+                !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            // At least two rows (one row takes the ordinary edge), and the
+            // cursor set is exactly (previous, next]: as many cursors as the
+            // range is wide, every one inside it.
+            guard "tail_run_is_the_exact_cursor_range" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor > previous_cursor + 1
+                && tail_cursors.len() == next_cursor - previous_cursor
+                && for_all(tail_cursor in tail_cursors,
+                    tail_cursor > previous_cursor && tail_cursor <= next_cursor)
+            }
+            guard "head_row_is_the_batch_append" {
+                self.live_context_queued_append_by_cursor.get_cloned(previous_cursor + 1) == Some(append_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(previous_cursor + 1)
+            }
+            guard "every_tail_row_is_a_queued_heard_speech_replay" {
+                for_all(tail_cursor in tail_cursors,
+                    self.live_context_queued_append_by_cursor.contains_key(tail_cursor)
+                    && self.live_context_queued_session_by_append.get_cloned(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                        == self.live_channel_session_by_channel.get_cloned(channel_id)
+                    && self.live_context_queued_digest_by_append.contains_key(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                    && self.live_context_queued_commit_token_by_append.contains_key(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                    && (self.live_context_queued_disposition_by_append.get_copied(
+                            self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                            == Some(LiveContextRowDisposition::ReassertCausalTail)
+                        || self.live_context_queued_disposition_by_append.get_copied(
+                            self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"))
+                            == Some(LiveContextRowDisposition::ReassertAssistantOutput)))
+            }
+            guard "channel_has_no_pending_append" {
+                !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "channel_accepts_context_delivery" {
+                !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            // Replays of heard speech wait for the turn boundary, as one row does.
+            guard "safe_provider_turn_boundary" {
+                !self.live_provider_turn_by_channel.contains_key(channel_id)
+            }
+            guard "channel_has_no_recovery_obligation" {
+                !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
+            }
+            guard "append_identity_is_fresh" {
+                !self.live_context_pending_channel_by_append.contains_key(append_id)
+                && !self.live_context_delivered_append_ids.contains(append_id)
+                && !self.live_context_ambiguous_no_retry.contains(append_id)
+            }
+            update {
+                for tail_cursor in tail_cursors {
+                    self.live_context_queued_session_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_cursor_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_digest_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_commit_token_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_disposition_by_append.remove(
+                        self.live_context_queued_append_by_cursor.get_cloned(tail_cursor).get("value"));
+                    self.live_context_queued_append_by_cursor.remove(tail_cursor);
+                }
+                self.live_context_pending_append_by_channel.insert(channel_id, append_id);
+                self.live_context_pending_channel_by_append.insert(append_id, channel_id);
+                self.live_context_pending_previous_cursor_by_append.insert(append_id, previous_cursor);
+                self.live_context_pending_next_cursor_by_append.insert(append_id, next_cursor);
+            }
+            to Idle
+            emit LiveContextAppendAuthorized {
+                channel_id: channel_id,
+                append_id: append_id,
+                previous_cursor: previous_cursor,
+                next_cursor: next_cursor,
+                superseded_by_heard_speech: false
+            }
+        }
+
         transition AuthorizeLiveContextAppendSuperseded {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveContextAppend {
@@ -31088,7 +31213,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "cursor_matches" {
                 self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
             }
             guard "not_ambiguously_sent" { !self.live_context_ambiguous_no_retry.contains(append_id) }
             guard "append_not_already_delivered" { !self.live_context_delivered_append_ids.contains(append_id) }
@@ -31144,7 +31269,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "cursor_matches_without_advance" {
                 self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
             }
             guard "ambiguity_not_recorded" { !self.live_context_ambiguous_no_retry.contains(append_id) }
             guard "append_not_already_delivered" { !self.live_context_delivered_append_ids.contains(append_id) }
@@ -31516,7 +31641,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_pending_previous_cursor_by_append.get_copied(append_id) == Some(previous_cursor)
                 && self.live_context_pending_next_cursor_by_append.get_copied(append_id) == Some(next_cursor)
                 && self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
                 && !self.live_context_ambiguous_no_retry.contains(append_id)
                 && !self.live_context_delivered_append_ids.contains(append_id)
             }
@@ -31562,7 +31687,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "cursor_has_not_advanced" {
                 self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
-                && next_cursor == previous_cursor + 1
+                && next_cursor > previous_cursor
             }
             update {
                 self.live_context_pending_append_by_channel.remove(channel_id);

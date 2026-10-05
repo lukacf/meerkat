@@ -760,6 +760,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveLiveContextBootstrapAppend`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64, observation: LiveContextAppendObservation, retained_sessions: Map<String, String>, retained_cursors: Map<String, u64>, retained_digests: Map<String, String>, retained_commits: Map<String, String>, retained_dispositions: Map<String, LiveContextRowDisposition>, retained_append_by_cursor: Map<u64, String>)
 - `FailLiveContextPreparation`(session_id: String, channel_id: String, lease_id: String, reason: LiveContextPreparationFailure)
 - `AuthorizeLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `AuthorizeLiveContextCausalTailBatch`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, tail_cursors: Set<u64>)
 - `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition, payload_availability: LiveContextPayloadAvailability, row_source: LiveContextRowSource, row_author: LiveContextRowAuthor, observation_id: Option<String>)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveContextAppendObservation)
@@ -18221,6 +18222,66 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
   - `quiet_history_waits_for_the_conversation`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveContextCausalTailBatchIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextCausalTailBatch`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, tail_cursors)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `tail_run_is_the_exact_cursor_range`
+  - `head_row_is_the_batch_append`
+  - `every_tail_row_is_a_queued_heard_speech_replay`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveContextCausalTailBatchAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextCausalTailBatch`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, tail_cursors)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `tail_run_is_the_exact_cursor_range`
+  - `head_row_is_the_batch_append`
+  - `every_tail_row_is_a_queued_heard_speech_replay`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveContextCausalTailBatchRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextCausalTailBatch`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, tail_cursors)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `tail_run_is_the_exact_cursor_range`
+  - `head_row_is_the_batch_append`
+  - `every_tail_row_is_a_queued_heard_speech_replay`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`

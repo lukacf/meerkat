@@ -1250,7 +1250,7 @@ mod live_context_mirror_tests {
             .expect("tail drained");
         {
             let records = host.appends.lock().expect("records");
-            assert_eq!(records.len(), 5);
+            assert_eq!(records.len(), 4);
             assert_eq!(records[0].1, "frozen historical prefix");
             assert!(records[1].1.contains("new typed correction"));
             assert!(!records[1].1.contains("old source"));
@@ -1269,16 +1269,23 @@ mod live_context_mirror_tests {
                 .find("spoken correction while history is pending")
                 .expect("superseding speech rides with the typed row");
             assert!(typed_at < heading_at && heading_at < spoken_at);
-            assert!(
-                records[2]
-                    .1
-                    .contains("spoken correction while history is pending")
-            );
-            assert!(records[3].1.contains("unmeasured assistant snapshot"));
+            // The causal tail behind it (the heard speech and the
+            // assistant's own unmeasured output) replays as ONE append, in
+            // canonical order (Turbo S S99: one append per row was answered
+            // row by row).
+            let tail = &records[2].1;
+            let spoken_at = tail
+                .find("spoken correction while history is pending")
+                .expect("heard speech in the tail");
+            let snapshot_at = tail
+                .find("unmeasured assistant snapshot")
+                .expect("assistant output in the tail");
+            assert!(spoken_at < snapshot_at);
+            assert!(tail.contains("spoken_unmeasured"));
+            assert!(!tail.contains("written companion"));
+            assert!(records[3].1.contains("written companion"));
+            assert!(records[3].1.contains("unmeasured companion"));
             assert!(records[3].1.contains("spoken_unmeasured"));
-            assert!(records[4].1.contains("written companion"));
-            assert!(records[4].1.contains("unmeasured companion"));
-            assert!(records[4].1.contains("spoken_unmeasured"));
         }
         // The typed correction waited behind the summary while the channel
         // heard the newer spoken correction: voicing it now would make it
@@ -1289,7 +1296,6 @@ mod live_context_mirror_tests {
             [
                 crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
                 crate::live_execution::LiveContextAppendKind::SupersededTypedRow,
-                crate::live_execution::LiveContextAppendKind::CausalReassertion,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
             ]
@@ -1695,6 +1701,119 @@ mod live_context_mirror_tests {
                 .expect("replacement state")
                 .live_context_cursor_by_channel[replacement.as_str()],
             0
+        );
+    }
+
+    /// Turbo S S99 (7f770753 R3): the causal tail (rows the channel heard
+    /// while the summary was prepared, replayed after it) goes out as ONE
+    /// quiet append carrying every row in order, not one append per row; the
+    /// ordinary row behind it follows on its own edge, never interleaved.
+    #[tokio::test]
+    async fn the_causal_tail_replays_as_one_append_before_the_next_row() {
+        use crate::live_execution::LiveContextAppendKind;
+        let (machine, session_id, channel) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel, 0)
+            .await
+            .expect("reservation");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generator");
+        bind_experimental_live_machine(&machine, &session_id, &channel, 0).await;
+        user_turn_completes_on(&machine, &session_id, &channel).await;
+        let bootstrap = machine
+            .authorize_live_context_bootstrap_append(&lease, "late summary")
+            .await
+            .expect("summary authority");
+        let mut heard = Vec::new();
+        for _ in 0..3 {
+            heard.push(
+                machine
+                    .record_live_context_observation(&lease, lease.new_observation_id())
+                    .await
+                    .expect("heard row observed while the summary was prepared")
+                    .observation_id()
+                    .clone(),
+            );
+        }
+        machine
+            .record_live_context_bootstrap_ack_cut(&bootstrap)
+            .await
+            .expect("ACK cut");
+        machine
+            .resolve_live_context_bootstrap_append(
+                &bootstrap,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            )
+            .await
+            .expect("summary ACK");
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        for (index, (observation, text)) in heard
+            .iter()
+            .zip(["heard level nine", "heard I don't know yet", "heard cobalt"])
+            .enumerate()
+        {
+            let mut row = meerkat_core::UserMessage::text(text);
+            row.identity.realtime_origin = Some(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": session_id, "channel_id": channel,
+                    "canonical_row_sequence": index + 1,
+                    "context_observation_id": observation
+                }))
+                .expect("heard origin"),
+            );
+            session.push(meerkat_core::Message::User(row));
+        }
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("a later row"),
+        ));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("canonical prefix");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "tail")
+            .await
+            .expect("queue the tail and the later row");
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel)
+            .await
+            .expect("drain");
+
+        let kinds = host.append_kinds.lock().expect("kinds").clone();
+        let appends = host.appends.lock().expect("appends").clone();
+        assert_eq!(
+            kinds,
+            vec![
+                LiveContextAppendKind::CausalReassertion,
+                LiveContextAppendKind::Ordinary
+            ],
+            "one append for the whole tail, then the later row: {appends:?}"
+        );
+        let tail = &appends[0].1;
+        let positions: Vec<usize> = ["heard level nine", "heard I don't know yet", "heard cobalt"]
+            .iter()
+            .map(|text| {
+                tail.find(text)
+                    .expect("every heard row rides the one append")
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "the rows keep their order"
+        );
+        assert!(appends[1].1.contains("a later row"));
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel[channel.as_str()],
+            4,
+            "the cursor covers the tail and the later row"
         );
     }
 
@@ -2249,11 +2368,20 @@ mod live_context_mirror_tests {
             .expect("ordered drain");
         {
             let appends = host.appends.lock().expect("appends");
-            assert_eq!(appends.len(), 3);
+            // The two pre-cut reassertions are the causal tail: one append,
+            // in canonical order (Turbo S S99).
+            assert_eq!(appends.len(), 2);
             assert!(appends[0].1.contains("ordinary prerequisite"));
-            assert!(appends[1].1.contains("pre-cut live correction"));
-            assert!(appends[2].1.contains("pre-cut unmeasured speech"));
-            assert!(appends[2].1.contains("spoken_unmeasured"));
+            let correction_at = appends[1]
+                .1
+                .find("pre-cut live correction")
+                .expect("correction in the tail");
+            let speech_at = appends[1]
+                .1
+                .find("pre-cut unmeasured speech")
+                .expect("unmeasured speech in the tail");
+            assert!(correction_at < speech_at);
+            assert!(appends[1].1.contains("spoken_unmeasured"));
             assert!(
                 !appends
                     .iter()
@@ -12509,61 +12637,109 @@ impl MeerkatMachine {
             let Some(host) = self.live_context_mirror_host() else {
                 return Ok(());
             };
-            let authority = match self.authorize_queued_live_context_append(&queued).await? {
-                crate::live_execution::LiveContextAppendAdmission::Authorized(authority) => {
-                    authority
-                }
-                crate::live_execution::LiveContextAppendAdmission::Deferred => return Ok(()),
-                crate::live_execution::LiveContextAppendAdmission::AlreadyCovered => {
-                    self.shared
+            // The causal tail (replays of speech the channel already heard,
+            // held behind a late summary) goes out as one quiet append for
+            // the whole contiguous run at the head: one row per append made
+            // gpt-live-1 answer each replayed row again, which pushed a
+            // delegation result's readout into the user's next question
+            // (Turbo S S99, 7f770753 R3). The generated batch edge refuses a
+            // run it cannot take as one (the turn boundary, a close or a
+            // recovery); the ordinary one-row edge then decides, with its
+            // typed deferrals.
+            let tail_batch = if queued.is_causal_reassertion() {
+                let run = {
+                    let queued_rows = self
+                        .shared
                         .live_context_queued_rows
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&key);
-                    continue;
-                }
-            };
-            // A typed row superseded by newer heard speech (generated edge
-            // AuthorizeLiveContextAppendSuperseded) travels together with the
-            // speech rows that superseded it, in canonical order: sent alone,
-            // the model spoke its stale value before the correction's replay
-            // arrived (S99). The later rows still replay on their own edges.
-            let context = if authority.kind()
-                == crate::live_execution::LiveContextAppendKind::SupersededTypedRow
-            {
-                let queued_rows = self
-                    .shared
-                    .live_context_queued_rows
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let mut superseding: Vec<(u64, String)> = queued_rows
-                    .iter()
-                    .filter(|((row_session, row_cursor), row)| {
-                        row_session == session_id
-                            && *row_cursor > next_cursor
-                            && row.is_heard_speech_replay()
-                    })
-                    .filter_map(|((_, row_cursor), row)| {
-                        row.provider_context()
-                            .map(|text| (*row_cursor, text.to_string()))
-                    })
-                    .collect();
-                drop(queued_rows);
-                superseding.sort_by_key(|(row_cursor, _)| *row_cursor);
-                // The generated edge guarantees a later queued heard-speech
-                // row; an empty set means runtime custody diverged from it.
-                // Fail closed rather than send the typed row without its
-                // correction (the S99 failure mode).
-                // The typed author decides whether the row may still be an
-                // open request: a typed turn's reply never is (#1629).
-                let role = if queued.row().author()
-                    == crate::meerkat_machine::dsl::LiveContextRowAuthor::User
-                {
-                    crate::live_execution::SupersededTypedRowRole::UserInput
-                } else {
-                    crate::live_execution::SupersededTypedRowRole::Reply
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut run = Vec::new();
+                    let mut row_cursor = next_cursor;
+                    while let Some(row) = queued_rows.get(&(session_id.clone(), row_cursor)) {
+                        if !row.is_causal_reassertion() || row.provider_context().is_none() {
+                            break;
+                        }
+                        run.push(((session_id.clone(), row_cursor), row.clone()));
+                        let Some(following) = row_cursor.checked_add(1) else {
+                            break;
+                        };
+                        row_cursor = following;
+                    }
+                    run
                 };
-                crate::live_execution::superseded_typed_row_context(
+                if run.len() >= 2 {
+                    self.authorize_live_context_causal_tail_batch(&run)
+                        .await?
+                        .map(|authority| (authority, run))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let (authority, context, carried) = if let Some((authority, run)) = tail_batch {
+                let context = run
+                    .iter()
+                    .filter_map(|(_, row)| row.provider_context())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (authority, context, run)
+            } else {
+                let authority = match self.authorize_queued_live_context_append(&queued).await? {
+                    crate::live_execution::LiveContextAppendAdmission::Authorized(authority) => {
+                        authority
+                    }
+                    crate::live_execution::LiveContextAppendAdmission::Deferred => return Ok(()),
+                    crate::live_execution::LiveContextAppendAdmission::AlreadyCovered => {
+                        self.shared
+                            .live_context_queued_rows
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&key);
+                        continue;
+                    }
+                };
+                // A typed row superseded by newer heard speech (generated edge
+                // AuthorizeLiveContextAppendSuperseded) travels together with the
+                // speech rows that superseded it, in canonical order: sent alone,
+                // the model spoke its stale value before the correction's replay
+                // arrived (S99). The later rows still replay on their own edges.
+                let context = if authority.kind()
+                    == crate::live_execution::LiveContextAppendKind::SupersededTypedRow
+                {
+                    let queued_rows = self
+                        .shared
+                        .live_context_queued_rows
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut superseding: Vec<(u64, String)> = queued_rows
+                        .iter()
+                        .filter(|((row_session, row_cursor), row)| {
+                            row_session == session_id
+                                && *row_cursor > next_cursor
+                                && row.is_heard_speech_replay()
+                        })
+                        .filter_map(|((_, row_cursor), row)| {
+                            row.provider_context()
+                                .map(|text| (*row_cursor, text.to_string()))
+                        })
+                        .collect();
+                    drop(queued_rows);
+                    superseding.sort_by_key(|(row_cursor, _)| *row_cursor);
+                    // The generated edge guarantees a later queued heard-speech
+                    // row; an empty set means runtime custody diverged from it.
+                    // Fail closed rather than send the typed row without its
+                    // correction (the S99 failure mode).
+                    // The typed author decides whether the row may still be an
+                    // open request: a typed turn's reply never is (#1629).
+                    let role = if queued.row().author()
+                        == crate::meerkat_machine::dsl::LiveContextRowAuthor::User
+                    {
+                        crate::live_execution::SupersededTypedRowRole::UserInput
+                    } else {
+                        crate::live_execution::SupersededTypedRowRole::Reply
+                    };
+                    crate::live_execution::superseded_typed_row_context(
                     &context,
                     role,
                     superseding.iter().map(|(_, text)| text.as_str()),
@@ -12584,16 +12760,17 @@ impl MeerkatMachine {
                             .to_string(),
                     )
                 })?
-            } else if authority.kind()
-                == crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay
-                && let Some(title) = queued
-                    .row()
-                    .interaction_id()
-                    .and_then(|interaction| self.post_close_result_title(session_id, interaction))
-            {
-                crate::live_execution::post_close_result_context(&title, &context)
-            } else {
-                context
+                } else if authority.kind()
+                    == crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay
+                    && let Some(title) = queued.row().interaction_id().and_then(|interaction| {
+                        self.post_close_result_title(session_id, interaction)
+                    })
+                {
+                    crate::live_execution::post_close_result_context(&title, &context)
+                } else {
+                    context
+                };
+                (authority, context, vec![(key.clone(), queued.clone())])
             };
             drop(projection_guard);
             let (returned_authority, outcome) = host
@@ -12615,28 +12792,35 @@ impl MeerkatMachine {
                     if receipt.outcome()
                         == meerkat_core::LiveAppendDeliveryOutcome::Acknowledged =>
                 {
-                    self.shared
+                    let mut queued_rows = self
+                        .shared
                         .live_context_queued_rows
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&key);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for (carried_key, _) in &carried {
+                        queued_rows.remove(carried_key);
+                    }
                 }
                 crate::live_execution::LiveContextAppendResolution::Resolved(receipt) => {
-                    if receipt.retry_allowed() {
-                        let retry = self
-                            .enqueue_live_context_row(&binding, queued.row().clone())
-                            .await?;
-                        self.shared
-                            .live_context_queued_rows
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .insert(key, retry);
-                    } else {
-                        self.shared
-                            .live_context_queued_rows
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(&key);
+                    // A rejected append is offered again row by row: each
+                    // carried row is queued afresh under its own cursor.
+                    for (carried_key, carried_row) in carried {
+                        if receipt.retry_allowed() {
+                            let retry = self
+                                .enqueue_live_context_row(&binding, carried_row.row().clone())
+                                .await?;
+                            self.shared
+                                .live_context_queued_rows
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .insert(carried_key, retry);
+                        } else {
+                            self.shared
+                                .live_context_queued_rows
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(&carried_key);
+                        }
                     }
                     return Ok(());
                 }
@@ -12647,11 +12831,16 @@ impl MeerkatMachine {
                     // failure can never make the old append retryable again.
                     // The authorization also ended every row the
                     // replacement's seed carries; release those too.
-                    self.shared
-                        .live_context_queued_rows
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&key);
+                    {
+                        let mut queued_rows = self
+                            .shared
+                            .live_context_queued_rows
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        for (carried_key, _) in &carried {
+                            queued_rows.remove(carried_key);
+                        }
+                    }
                     self.retain_live_context_rows_owed_by_generated_outbox(session_id)
                         .await?;
                     drop(projection_guard);
@@ -12911,6 +13100,82 @@ impl MeerkatMachine {
         Err(RuntimeDriverError::Internal(
             "generated context append authorization emitted no matching authority effect"
                 .to_string(),
+        ))
+    }
+
+    /// Authorize one append for the contiguous causal tail `run` at the
+    /// outbox head (generated edge AuthorizeLiveContextCausalTailBatch).
+    /// `None` when the generated state refuses the run as one append (a
+    /// typed refusal leaves it unchanged); the caller then takes the
+    /// ordinary one-row edge, which owns the typed deferrals.
+    #[cfg(feature = "live")]
+    pub(crate) async fn authorize_live_context_causal_tail_batch(
+        &self,
+        run: &[(
+            (SessionId, u64),
+            crate::live_execution::LiveContextQueuedRow,
+        )],
+    ) -> Result<Option<crate::live_execution::LiveContextAppendAuthority>, RuntimeDriverError> {
+        let (Some((_, head)), Some(((_, last_cursor), _))) = (run.first(), run.last()) else {
+            return Ok(None);
+        };
+        let binding = head.binding();
+        let next_cursor = *last_cursor;
+        let previous_cursor = head
+            .row()
+            .canonical_row_sequence()
+            .checked_sub(1)
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "canonical live-context row sequence must be one-based".to_string(),
+            })?;
+        let tail_cursors: std::collections::BTreeSet<u64> =
+            run.iter().map(|((_, row_cursor), _)| *row_cursor).collect();
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(binding.session_id())
+            .await?;
+        let effects = match self
+            .apply_session_dsl_input_typed(
+                binding.session_id(),
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeLiveContextCausalTailBatch {
+                    channel_id: binding.channel_id().to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                        binding.fence_token(),
+                    ),
+                    generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                        binding.generation(),
+                    ),
+                    append_id: head.append_id().to_string(),
+                    previous_cursor,
+                    next_cursor,
+                    tail_cursors,
+                },
+                "AuthorizeLiveContextCausalTailBatch",
+            )
+            .await
+        {
+            Ok((_, effects)) => effects,
+            // A typed refusal: the run cannot go as one append now.
+            Err(RuntimeDriverError::ValidationFailed { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        for effect in effects.as_slice() {
+            if let Some(authority) =
+                crate::live_execution::LiveContextAppendAuthority::from_causal_tail_batch_effect(
+                    head,
+                    previous_cursor,
+                    next_cursor,
+                    effect,
+                )
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+            {
+                return Ok(Some(authority));
+            }
+        }
+        Err(RuntimeDriverError::Internal(
+            "generated causal tail authorization emitted no matching authority effect".to_string(),
         ))
     }
 

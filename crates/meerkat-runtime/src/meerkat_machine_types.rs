@@ -1053,6 +1053,7 @@ meerkat_machine_runtime_internal_inputs!(
         ResolveLiveBridgeSubmission,
         RecoverLiveBridgeSubmission,
         AuthorizeLiveContextAppend,
+        AuthorizeLiveContextCausalTailBatch,
         EnqueueLiveContextRow,
         AdvanceLiveContextCanonicalCoverage,
         ResolveLiveContextAppend,

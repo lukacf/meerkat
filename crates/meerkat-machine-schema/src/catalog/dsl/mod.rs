@@ -3198,6 +3198,7 @@ runtime_internal_inputs!(
         FailLiveContextPreparation,
         ObserveLiveContextDeliveryReadiness,
         AuthorizeLiveContextAppend,
+        AuthorizeLiveContextCausalTailBatch,
         EnqueueLiveContextRow,
         AdvanceLiveContextCanonicalCoverage,
         ResolveLiveContextAppend,

@@ -5096,6 +5096,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeLiveContextAppendRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeLiveContextCausalTailBatchIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextCausalTailBatchAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextCausalTailBatchRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveContextAppendSupersededIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

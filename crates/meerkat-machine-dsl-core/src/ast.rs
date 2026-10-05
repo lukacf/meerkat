@@ -398,6 +398,13 @@ pub enum UpdateDef {
         then_updates: Vec<UpdateDef>,
         else_updates: Vec<UpdateDef>,
     },
+    /// `for binding in over { updates }`: apply `updates` once per element of
+    /// the set or sequence `over`, with `binding` bound to the element.
+    ForEach {
+        binding: Ident,
+        over: ExprDef,
+        updates: Vec<UpdateDef>,
+    },
 }
 
 // ---------------------------------------------------------------------------

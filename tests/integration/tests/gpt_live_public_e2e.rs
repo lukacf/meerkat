@@ -7961,6 +7961,11 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
 
 /// Tokens the monologue plants; the single executor input must carry all.
 const S103_TOKENS: [&str; 4] = ["marigold", "tuesday", "copenhagen", "pelican"];
+/// S103's fixtures. The monologue's provider-stream window runs from its
+/// `play_at` step to the barge-in queue's step.
+const S103_MONOLOGUE: &str = "interrupt_monologue";
+const S103_BARGE_IN: &str = "interrupt_barge_in";
+const S103_CORRECTION: &str = "interrupt_correction";
 /// The barge-in starts at the onset of the first assistant audio after the
 /// brief's commentary. That audio is often a short acknowledgement ("Okay,
 /// I'm on it.") rather than the readout, and a 1500 ms offset landed after
@@ -8147,7 +8152,7 @@ async fn run_s103_interrupt_and_recover(
             .peer
             // Overlap over the monologue is gpt-live-1's turn-taking, measured
             // (GPT_LIVE_S103_MONOLOGUE_TURNS) rather than judged.
-            .play_at(&PlayAt::new("interrupt_monologue", Anchor::Now, 0).overlap_bound_ms(60_000))
+            .play_at(&PlayAt::new(S103_MONOLOGUE, Anchor::Now, 0).overlap_bound_ms(60_000))
             .await?;
         let monologue_start_ms = live
             .peer
@@ -8181,7 +8186,7 @@ async fn run_s103_interrupt_and_recover(
             &monologue_classification
                 .backchannels
                 .iter()
-                .map(|burst| ("interrupt_monologue".to_owned(), burst.clone()))
+                .map(|burst| (S103_MONOLOGUE.to_owned(), burst.clone()))
                 .collect::<Vec<_>>(),
         )?;
         // Classified backchannels ("mm-hm" yielded to the user) are allowed;
@@ -8205,10 +8210,10 @@ async fn run_s103_interrupt_and_recover(
         let scheduled = live
             .peer
             .queue(&[
-                PlayAt::new("interrupt_barge_in", Anchor::FirstAssistantAudio, S103_BARGE_IN_OFFSET_MS)
+                PlayAt::new(S103_BARGE_IN, Anchor::FirstAssistantAudio, S103_BARGE_IN_OFFSET_MS)
                     .allow_active(true)
                     .overlap_bound_ms(S103_BARGE_IN_OVERLAP_BOUND_MS),
-                PlayAt::new("interrupt_correction", Anchor::Now, 300)
+                PlayAt::new(S103_CORRECTION, Anchor::Now, 300)
                     .overlap_bound_ms(S103_BARGE_IN_OVERLAP_BOUND_MS),
             ])
             .await?;
@@ -8351,16 +8356,62 @@ async fn run_s103_interrupt_and_recover(
             .map(|task| split_executor_task(task).0)
             .collect();
         // Each planted token is spoken once, so it must reach exactly one of
-        // the monologue's delegations: none lost, none carried twice.
+        // the monologue's delegations: none lost, none carried twice. A token
+        // that reached none is classified from the provider's own evidence
+        // for the monologue window (#1706): lost by us after the provider
+        // transcribed it (a failure), never transcribed during an
+        // untranscribed provider ingest stall (provider-degraded, void), or
+        // transcribed as something else with no stall (a failure: that can
+        // come from our own prompt).
+        let mut monologue_ingest: Option<Result<evidence::ProviderIngestWindow, String>> = None;
         for token in S103_TOKENS {
             let carriers = monologue_requests
                 .iter()
                 .filter(|request| request.contains(token))
                 .count();
-            if carriers != 1 {
-                deterministic_failures.push(format!(
-                    "planted token {token:?} reached {carriers} of the monologue's executor inputs (exactly one required): {monologue_requests:?}"
-                ));
+            if carriers == 1 {
+                continue;
+            }
+            let reached = format!(
+                "planted token {token:?} reached {carriers} of the monologue's executor inputs (exactly one required): {monologue_requests:?}"
+            );
+            if carriers > 1 {
+                deterministic_failures.push(reached);
+                continue;
+            }
+            let window = monologue_ingest.get_or_insert_with(|| {
+                evidence.provider_stream_lines().and_then(|lines| {
+                    evidence::ProviderIngestWindow::between_steps(
+                        &lines,
+                        channel,
+                        &support::play_at_step(S103_MONOLOGUE),
+                        &support::queue_step(&[S103_BARGE_IN, S103_CORRECTION]),
+                    )
+                })
+            });
+            match window {
+                Err(error) => deterministic_failures.push(format!(
+                    "{reached}; the provider's evidence for the monologue could not be read: {error}"
+                )),
+                Ok(window) => match evidence::classify_planted_token_loss(token, window) {
+                    evidence::PlantedTokenLoss::DroppedAfterTranscript => {
+                        deterministic_failures.push(format!(
+                            "{reached}; the provider transcribed it, so it was lost after the input transcript"
+                        ));
+                    }
+                    evidence::PlantedTokenLoss::OmittedDuringIngestStall(stall) => {
+                        println!(
+                            "GPT_LIVE_S103_TRANSCRIPT_OMISSION token={token:?} stall_gap_ms={} burst_ms={} audio_ms={}..{}",
+                            stall.stall_gap_ms, stall.burst_ms, stall.audio_start_ms, stall.audio_end_ms
+                        );
+                        evidence.note_input_transcript_omission("monologue", token, &stall)?;
+                    }
+                    evidence::PlantedTokenLoss::TranscribedOtherwise { heard } => {
+                        deterministic_failures.push(format!(
+                            "{reached}; the provider transcribed something else in the token's place, with no ingest stall: heard {heard:?}"
+                        ));
+                    }
+                },
             }
         }
         println!(

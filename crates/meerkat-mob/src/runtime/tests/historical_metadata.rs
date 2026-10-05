@@ -219,58 +219,58 @@ async fn retained_metadata_default_is_unsupported_for_nonpersistent_service() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn persistent_factory_metadata_fixture(
+    path: &std::path::Path,
+    head_canonical: bool,
+) -> (
+    meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>,
+    Arc<dyn meerkat_runtime::RuntimeStore>,
+    HeadCanonicalQueueGateClient,
+) {
+    let sessions: Arc<dyn SessionStore> =
+        Arc::new(meerkat_store::SqliteSessionStore::open(path).expect("open session projection"));
+    let runtime: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        if head_canonical {
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(path)
+        } else {
+            meerkat_runtime::SqliteRuntimeStore::new_whole_blob(path)
+        }
+        .expect("open native runtime authority"),
+    );
+    let root = path.parent().expect("fixture database parent");
+    for name in ["store", "user", "runtime", "project", "context"] {
+        std::fs::create_dir_all(root.join(name)).expect("isolated factory root");
+    }
+    let factory = meerkat::AgentFactory::new(root.join("store"))
+        .user_config_root(root.join("user"))
+        .runtime_root(root.join("runtime"))
+        .project_root(root.join("project"))
+        .context_root(root.join("context"))
+        .builtins(false)
+        .shell(false)
+        .comms(false);
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
+    builder.default_session_store =
+        Some(Arc::new(meerkat_store::StoreAdapter::new(sessions.clone())));
+    let client = HeadCanonicalQueueGateClient::new();
+    client.release();
+    builder.default_llm_client = Some(Arc::new(client.clone()));
+    (
+        meerkat_session::PersistentSessionService::new(
+            builder,
+            4,
+            sessions,
+            runtime.clone(),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        ),
+        runtime,
+        client,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source() {
-    fn open(
-        path: &std::path::Path,
-        head_canonical: bool,
-    ) -> (
-        meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>,
-        Arc<dyn meerkat_runtime::RuntimeStore>,
-        HeadCanonicalQueueGateClient,
-    ) {
-        let sessions: Arc<dyn SessionStore> = Arc::new(
-            meerkat_store::SqliteSessionStore::open(path).expect("open session projection"),
-        );
-        let runtime: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-            if head_canonical {
-                meerkat_runtime::SqliteRuntimeStore::new_head_canonical(path)
-            } else {
-                meerkat_runtime::SqliteRuntimeStore::new_whole_blob(path)
-            }
-            .expect("open native runtime authority"),
-        );
-        let root = path.parent().expect("fixture database parent");
-        for name in ["store", "user", "runtime", "project", "context"] {
-            std::fs::create_dir_all(root.join(name)).expect("isolated factory root");
-        }
-        let factory = meerkat::AgentFactory::new(root.join("store"))
-            .user_config_root(root.join("user"))
-            .runtime_root(root.join("runtime"))
-            .project_root(root.join("project"))
-            .context_root(root.join("context"))
-            .builtins(false)
-            .shell(false)
-            .comms(false);
-        let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
-        builder.default_session_store =
-            Some(Arc::new(meerkat_store::StoreAdapter::new(sessions.clone())));
-        let client = HeadCanonicalQueueGateClient::new();
-        client.release();
-        builder.default_llm_client = Some(Arc::new(client.clone()));
-        (
-            meerkat_session::PersistentSessionService::new(
-                builder,
-                4,
-                sessions,
-                runtime.clone(),
-                Arc::new(meerkat_store::MemoryBlobStore::new()),
-            ),
-            runtime,
-            client,
-        )
-    }
-
     for head_canonical in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("retained.sqlite3");
@@ -280,7 +280,8 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
             member: "same-logical-member".into(),
         };
         let (source_id, successor_id) = {
-            let (service, runtime, client) = open(&path, head_canonical);
+            let (service, runtime, client) =
+                persistent_factory_metadata_fixture(&path, head_canonical);
             let machine = meerkat_runtime::MeerkatMachine::persistent(
                 runtime,
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
@@ -333,7 +334,7 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
         };
 
         // The original service, machine and store handles have left scope.
-        let (reopened, _, _) = open(&path, head_canonical);
+        let (reopened, _, _) = persistent_factory_metadata_fixture(&path, head_canonical);
         let retained = reopened
             .load_retained_session_metadata(&source_id)
             .await
@@ -379,4 +380,194 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
                 .is_none()
         );
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct RetainedPolicyBundle {
+    dispatched: Arc<Mutex<Vec<String>>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl AgentToolDispatcher for RetainedPolicyBundle {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        ["retained_read", "retained_edit"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(ToolDef {
+                    name: name.into(),
+                    description: "Native policy parity probe".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    provenance: None,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn tool_mutation_class(&self, name: &str) -> meerkat_core::ToolMutationClass {
+        match name {
+            "retained_read" => meerkat_core::ToolMutationClass::ReadOnly,
+            "retained_edit" => meerkat_core::ToolMutationClass::Mutating,
+            _ => meerkat_core::ToolMutationClass::Unknown,
+        }
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        if !matches!(call.name, "retained_read" | "retained_edit") {
+            return Err(ToolError::not_found(call.name));
+        }
+        self.dispatched.lock().unwrap().push(call.name.into());
+        Ok(ToolResult::new(call.id.into(), "probe admitted".into(), false).into())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn assert_retained_profile_policy_matches_native_gate(read_only: bool) {
+    use meerkat_core::{ToolExecutionPolicy, ToolMutationClass};
+
+    for head_canonical in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("profile-policy.sqlite3");
+        let (source_id, expected_policy) = {
+            let (service, _, client) = persistent_factory_metadata_fixture(&path, head_canonical);
+            let service = Arc::new(service);
+            let dispatched = Arc::new(Mutex::new(Vec::new()));
+            let bundle = Arc::new(RetainedPolicyBundle {
+                dispatched: dispatched.clone(),
+            });
+            let mut definition = with_unique_mob_id(
+                sample_definition_with_tool_bundle("retained-policy"),
+                "retained-profile-policy",
+            );
+            let profile = definition
+                .profiles
+                .get_mut(&ProfileName::from("worker"))
+                .and_then(ProfileBinding::as_inline_mut)
+                .unwrap();
+            profile.model = "gpt-5.5".into();
+            profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+            profile.tools.read_only = read_only;
+            if !read_only {
+                // The name belongs to the registered profile bundle, so this
+                // passes the same declared vocabulary validation as production.
+                profile.tools.deny = vec!["retained_edit".into()];
+            }
+            let handle = MobBuilder::new(definition, MobStorage::in_memory())
+                .with_session_service(service.clone())
+                .register_tool_bundle("retained-policy", bundle)
+                .create()
+                .await
+                .unwrap();
+            let identity = AgentIdentity::from("profile-source");
+            let source_id = handle
+                .spawn(ProfileName::from("worker"), identity.clone(), None)
+                .await
+                .unwrap()
+                .bridge_session_id()
+                .unwrap()
+                .clone();
+            let metadata = service
+                .load_retained_session_metadata(&source_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .session_metadata
+                .unwrap();
+            let effective = metadata
+                .tooling
+                .tool_access_policy
+                .expect("profile-only restriction is persisted in the effective field");
+            let expected_policy = ToolExecutionPolicy::resolve(effective.clone()).unwrap();
+            assert!(expected_policy.permits_call("retained_read", ToolMutationClass::ReadOnly));
+            assert!(!expected_policy.permits_call("retained_edit", ToolMutationClass::Mutating));
+            assert_eq!(
+                metadata.tooling.spawn_tool_access_policy,
+                Some(meerkat_core::ops::SpawnToolAccessPolicy::Unrestricted),
+                "no launch restriction was requested"
+            );
+            let launch_only = metadata
+                .tooling
+                .spawn_tool_access_policy
+                .unwrap()
+                .into_launch()
+                .map(ToolExecutionPolicy::resolve)
+                .transpose()
+                .unwrap()
+                .unwrap_or_else(ToolExecutionPolicy::unrestricted);
+            assert!(
+                launch_only.permits_call("retained_edit", ToolMutationClass::Mutating),
+                "negative control: the separate spawn field would over-grant edit"
+            );
+            for (name, class) in [
+                ("retained_read", ToolMutationClass::ReadOnly),
+                ("retained_edit", ToolMutationClass::Mutating),
+            ] {
+                let outcome = service
+                    .dispatch_external_tool_call(
+                        &source_id,
+                        meerkat_core::ToolCall::new(
+                            name.into(),
+                            name.into(),
+                            serde_json::json!({}),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    !outcome.result.is_error,
+                    expected_policy.permits_call(name, class),
+                    "retained effective policy must match the actual native gate for {name}"
+                );
+                if outcome.result.is_error {
+                    assert!(
+                        outcome
+                            .result
+                            .text_content()
+                            .contains("\"error\":\"access_denied\"")
+                    );
+                }
+            }
+            assert_eq!(*dispatched.lock().unwrap(), ["retained_read"]);
+            handle.retire(identity).await.unwrap();
+            assert!(
+                service
+                    .load_persisted_session_metadata(&source_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            handle.shutdown().await.unwrap();
+            assert_eq!(client.request_count(), 0);
+            MobSessionService::cancel_all_checkpointers(service.as_ref()).await;
+            (source_id, effective)
+        };
+        let (reopened, _, _) = persistent_factory_metadata_fixture(&path, head_canonical);
+        let retained = reopened
+            .load_retained_session_metadata(&source_id)
+            .await
+            .unwrap()
+            .expect("retired profile policy survives cold SQLite reopen");
+        assert_eq!(retained.session_id, source_id);
+        assert_eq!(
+            retained
+                .session_metadata
+                .unwrap()
+                .tooling
+                .tool_access_policy,
+            Some(expected_policy)
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn retained_metadata_profile_read_only_matches_native_gate_after_retirement() {
+    assert_retained_profile_policy_matches_native_gate(true).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn retained_metadata_profile_deny_matches_native_gate_after_retirement() {
+    assert_retained_profile_policy_matches_native_gate(false).await;
 }

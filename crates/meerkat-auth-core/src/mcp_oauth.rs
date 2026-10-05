@@ -2536,7 +2536,7 @@ mod tests {
         );
     }
 
-    // Interactive browser-flow tests live in tests/mcp_oauth_owner.rs so the
+    // Host-driven login tests live in tests/mcp_oauth_owner.rs so the
     // runtime flow owner and test use the same auth-core trait identity. These
     // private refresh tests seed a managed credential through the shared commit
     // owner, then exercise the real MCP refresh HTTP and generated lease.
@@ -2570,22 +2570,12 @@ mod tests {
         refresh_release: Notify,
     }
 
-    struct NoRefreshBrowser;
-
-    #[async_trait]
-    impl BrowserOpener for NoRefreshBrowser {
-        async fn open(&self, _url: &str) -> Result<(), McpOAuthError> {
-            panic!("managed credential refresh must not open an interactive browser")
-        }
-    }
-
     fn ce_refresh_authority(
         store: Arc<EphemeralTokenStore>,
         auth: GeneratedAuthLeaseHandle,
     ) -> McpOAuthAuthority {
         McpOAuthAuthority::with_http(
             ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new())),
-            Arc::new(NoRefreshBrowser),
             Client::new(),
             auth,
         )

@@ -229,9 +229,15 @@ impl MemberCreationProjection {
         else {
             return;
         };
-        let Ok(Some(mut snapshot)) =
-            select_creation_snapshot(std::slice::from_ref(event), &event.mob_id, session_id)
-        else {
+        let Ok(previous) = self.get(session_id) else {
+            return;
+        };
+        let Ok(Some(mut snapshot)) = select_creation_snapshot(
+            std::slice::from_ref(event),
+            &event.mob_id,
+            session_id,
+            previous,
+        ) else {
             self.poison(session_id);
             return;
         };
@@ -304,8 +310,9 @@ pub(crate) fn select_creation_snapshot(
     events: &[crate::MobEvent],
     mob_id: &crate::MobId,
     session_id: &SessionId,
+    previous: Option<MemberCreationSnapshot>,
 ) -> Result<Option<MemberCreationSnapshot>, MemberCreationError> {
-    let mut found: Option<MemberCreationSnapshot> = None;
+    let mut found = previous;
     for event in events {
         if &event.mob_id != mob_id {
             continue;
@@ -327,7 +334,7 @@ pub(crate) fn select_creation_snapshot(
                 "incoherent member incarnation",
             ));
         }
-        let candidate = MemberCreationSnapshot {
+        let mut candidate = MemberCreationSnapshot {
             birth_cursor: event.cursor,
             session_id: session_id.clone(),
             member_binding: MobMemberBinding {
@@ -338,6 +345,22 @@ pub(crate) fn select_creation_snapshot(
             creation: spawned.creation.clone(),
             fork_source: spawned.fork_source.clone(),
         };
+        if let Some(previous) = found.as_ref()
+            && candidate.fork_source.is_none()
+            && previous.session_id == candidate.session_id
+            && previous.member_binding.mob_id == candidate.member_binding.mob_id
+            && previous.member_binding.member == candidate.member_binding.member
+            && previous.creation == candidate.creation
+            && matches!(
+                previous.creation.provenance,
+                MemberCreationProvenance::Fork { .. }
+            )
+        {
+            // A plain exact-session resume may omit the launch's fork field.
+            // Retain the first canonical endpoint for the same creation;
+            // never manufacture one or replace a conflicting supplied one.
+            candidate.fork_source.clone_from(&previous.fork_source);
+        }
         if !candidate.coherent() {
             return Err(MemberCreationError::Unavailable(
                 "incoherent creation proof",
@@ -529,6 +552,70 @@ mod tests {
             index.get(&session).unwrap().unwrap().member_binding.role,
             "worker"
         );
+    }
+
+    #[test]
+    fn fork_reseat_retains_original_endpoint_and_rejects_conflicting_or_missing_proof() {
+        let session = SessionId::new();
+        let mut original = created(&session, MemberCreationId::new());
+        let source = meerkat_core::ForkBuildSource::new(
+            MobMemberBinding {
+                mob_id: "test".into(),
+                role: "worker".into(),
+                member: "parent".into(),
+            },
+            SessionId::new(),
+        );
+        let MobEventKind::MemberSpawned(spawned) = &mut original.kind else {
+            unreachable!()
+        };
+        spawned.creation.provenance = MemberCreationProvenance::Fork {
+            source_creation_id: MemberCreationId::new(),
+        };
+        spawned.fork_source = Some(source.clone());
+        let mut reseated = original.clone();
+        reseated.cursor = 9;
+        let MobEventKind::MemberSpawned(spawned) = &mut reseated.kind else {
+            unreachable!()
+        };
+        spawned.role = ProfileName::from("analyst");
+        spawned.fork_source = None;
+
+        let index = MemberCreationProjection::default();
+        index.observe(&original);
+        index.observe(&reseated);
+        let retained = index.get(&session).unwrap().unwrap();
+        assert_eq!(retained.birth_cursor, original.cursor);
+        assert_eq!(retained.member_binding.role, "worker");
+        assert_eq!(retained.fork_source, Some(source.clone()));
+
+        let missing_original = MemberCreationProjection::default();
+        missing_original.observe(&reseated);
+        assert!(missing_original.get(&session).is_err());
+
+        let mut different_creation = reseated.clone();
+        let MobEventKind::MemberSpawned(spawned) = &mut different_creation.kind else {
+            unreachable!()
+        };
+        spawned.creation.provenance = MemberCreationProvenance::Fork {
+            source_creation_id: MemberCreationId::new(),
+        };
+        let changed_source = MemberCreationProjection::default();
+        changed_source.observe(&original);
+        changed_source.observe(&different_creation);
+        assert!(changed_source.get(&session).is_err());
+
+        let MobEventKind::MemberSpawned(spawned) = &mut reseated.kind else {
+            unreachable!()
+        };
+        spawned.fork_source = Some(meerkat_core::ForkBuildSource::new(
+            source.source_member,
+            SessionId::new(),
+        ));
+        index.observe(&reseated);
+        assert!(index.get(&session).is_err());
+        index.observe(&original);
+        assert!(index.get(&session).is_err());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

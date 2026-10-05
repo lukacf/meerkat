@@ -5664,6 +5664,9 @@ impl SpawnMemberSpec {
         self
     }
 
+    /// Construct a launch without claiming an independent host origin.
+    /// Attach a sealed source witness for child ancestry, or use
+    /// [`Self::host_root`] at an explicitly trusted host creation boundary.
     pub fn new(profile: impl Into<ProfileName>, identity: impl Into<AgentIdentity>) -> Self {
         Self {
             role_name: profile.into(),
@@ -5695,12 +5698,21 @@ impl SpawnMemberSpec {
             placement: None,
             forked_participant_attachment: None,
             spawned_by: None,
-            creation_origin: crate::member_creation::MemberCreationOrigin::HostRoot,
+            creation_origin: crate::member_creation::MemberCreationOrigin::Unproven,
             fork_job: None,
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
             fork_build_inheritance: None,
         }
+    }
+
+    /// Attest an independent creation at a trusted host boundary.
+    /// Agent-lane and owner-context ingress still downgrade this claim unless
+    /// a sealed parent witness supplies the actual child ancestry.
+    pub fn host_root(profile: impl Into<ProfileName>, identity: impl Into<AgentIdentity>) -> Self {
+        let mut spec = Self::new(profile, identity);
+        spec.creation_origin = crate::member_creation::MemberCreationOrigin::HostRoot;
+        spec
     }
 
     /// Seat this capability-attached participant with its source member's
@@ -10375,7 +10387,7 @@ impl MobHandle {
         binding: crate::RuntimeBinding,
     ) -> Result<MemberRef, MobError> {
         let external_binding = matches!(binding, crate::RuntimeBinding::External { .. });
-        let mut spec = SpawnMemberSpec::new(profile_name, agent_identity);
+        let mut spec = SpawnMemberSpec::host_root(profile_name, agent_identity);
         spec.initial_message = initial_message;
         spec.binding = Some(binding);
         if external_binding {
@@ -10411,7 +10423,7 @@ impl MobHandle {
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
-        let mut spec = SpawnMemberSpec::new(profile_name, agent_identity);
+        let mut spec = SpawnMemberSpec::host_root(profile_name, agent_identity);
         spec.initial_message = initial_message;
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;

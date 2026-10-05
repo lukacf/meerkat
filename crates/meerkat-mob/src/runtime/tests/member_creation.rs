@@ -2,6 +2,83 @@ use super::*;
 use crate::MemberCreationProvenance;
 
 #[tokio::test]
+async fn member_creation_host_root_is_explicit_and_agent_lane_downgrades_it() {
+    let (handle, _) = create_test_mob(sample_definition()).await;
+    for (spec, agent_lane, expected) in [
+        (
+            SpawnMemberSpec::new("worker", "default-origin"),
+            false,
+            MemberCreationProvenance::Unproven,
+        ),
+        (
+            SpawnMemberSpec::host_root("worker", "host-origin"),
+            false,
+            MemberCreationProvenance::Root,
+        ),
+        (
+            SpawnMemberSpec::host_root("worker", "agent-origin"),
+            true,
+            MemberCreationProvenance::Unproven,
+        ),
+    ] {
+        let caller = if agent_lane {
+            handle
+                .clone()
+                .with_command_authority(crate::control_policy::CommandAuthority::agent_lane())
+        } else {
+            handle.clone()
+        };
+        let result = caller.spawn_spec(spec).await.unwrap();
+        let session = handle
+            .resolve_bridge_session_id(&result.agent_identity)
+            .await
+            .unwrap();
+        assert_eq!(
+            handle
+                .member_creation_for_session(&session)
+                .await
+                .unwrap()
+                .unwrap()
+                .creation
+                .provenance,
+            expected,
+        );
+    }
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn member_creation_policy_auto_spawn_has_no_attested_host_origin() {
+    let target = AgentIdentity::from("policy-origin");
+    let (handle, _) = create_test_mob(sample_definition_with_static_spawn_policy(
+        target.as_str(),
+        "lead",
+    ))
+    .await;
+    handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new("policy origin".to_string(), WorkOrigin::External),
+        )
+        .await
+        .unwrap();
+    let session = handle.resolve_bridge_session_id(&target).await.unwrap();
+    assert_eq!(
+        handle
+            .member_creation_for_session(&session)
+            .await
+            .unwrap()
+            .unwrap()
+            .creation
+            .provenance,
+        MemberCreationProvenance::Unproven,
+    );
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
     for (bind_owner, fail_metadata) in [(false, false), (true, false), (true, true)] {
         let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
@@ -76,6 +153,7 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
                 );
             }
         }
+        service.metadata_read_failures_for.lock().unwrap().clear();
         handle.shutdown().await.unwrap();
     }
 }
@@ -111,14 +189,7 @@ async fn member_creation_public_roster_snapshot_cannot_mutate_live_history() {
 #[tokio::test]
 async fn member_creation_source_metadata_fault_remains_an_error() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    let member = handle
-        .spawn(
-            ProfileName::from("worker"),
-            AgentIdentity::from("fault-source"),
-            None,
-        )
-        .await
-        .unwrap();
+    let member = spawn_settled_fork_source(&handle, &AgentIdentity::from("fault-source")).await;
     let session = member.bridge_session_id().unwrap();
     service.fail_persisted_session_metadata_reads_for(session.clone());
     assert!(matches!(
@@ -143,6 +214,7 @@ async fn member_creation_source_metadata_fault_remains_an_error() {
             .provenance,
         MemberCreationProvenance::Unproven,
     );
+    service.metadata_read_failures_for.lock().unwrap().clear();
     handle.shutdown().await.unwrap();
 }
 
@@ -252,13 +324,15 @@ async fn member_creation_unproven_boundary_and_context_forks_are_not_roots() {
 async fn member_creation_runtime_fork_spawn_and_respawn_keep_exact_authority() {
     let (handle, _) = create_test_mob(sample_definition()).await;
     let identity = AgentIdentity::from("creation-parent");
-    let mut parent_spec = SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone());
+    let mut parent_spec = SpawnMemberSpec::host_root(ProfileName::from("worker"), identity.clone());
+    parent_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     parent_spec.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly);
     let parent = handle.spawn_spec(parent_spec).await.unwrap();
     let parent_session = handle
         .resolve_bridge_session_id(&parent.agent_identity)
         .await
         .unwrap();
+    wait_for_fork_source_settled(&handle, &parent_session).await;
     let parent_proof = handle
         .member_creation_for_session(&parent_session)
         .await
@@ -391,8 +465,12 @@ async fn member_creation_runtime_fork_spawn_and_respawn_keep_exact_authority() {
 async fn member_creation_cross_mob_delegate_has_source_proof_without_comms() {
     let (source, _) =
         create_test_mob(with_unique_mob_id(sample_definition(), "creation-source")).await;
-    let (target, target_service) =
-        create_test_mob(with_unique_mob_id(sample_definition(), "creation-target")).await;
+    let mut target_definition = with_unique_mob_id(sample_definition(), "creation-target");
+    target_definition.profiles.insert(
+        ProfileName::from("delegate"),
+        target_definition.profiles[&ProfileName::from("worker")].clone(),
+    );
+    let (target, target_service) = create_test_mob(target_definition).await;
     target_service.set_return_exact_run_result(true);
     let parent = source
         .spawn(
@@ -487,6 +565,10 @@ async fn member_creation_cold_resume_projects_recovered_binding_immediately() {
         })
         .await
         .unwrap();
+    MobSessionService::discard_live_session(service.as_ref(), &replacement.session_id)
+        .await
+        .unwrap();
+    let restored_service = Arc::new(PersistedListingSessionService::new(service));
     let retained = Arc::new(RwLock::new(None));
     let observed = Arc::clone(&retained);
     let hook: MobBeforeActivation = Arc::new(move |handle| {
@@ -497,14 +579,17 @@ async fn member_creation_cold_resume_projects_recovered_binding_immediately() {
         })
     });
     let resumed = MobBuilder::for_resume(storage)
-        .with_session_service(service)
+        .with_session_service(restored_service)
         .before_activation(hook)
         .notify_orchestrator_on_resume(false)
         .resume()
         .await
         .unwrap();
     let preview = retained.read().await.clone().unwrap();
-    for handle in [resumed.read_handle(), preview] {
+    for (label, handle) in [
+        ("final", resumed.read_handle()),
+        ("retained preview", preview),
+    ] {
         assert_eq!(
             handle
                 .get_member(&identity)
@@ -512,7 +597,8 @@ async fn member_creation_cold_resume_projects_recovered_binding_immediately() {
                 .unwrap()
                 .unwrap()
                 .bridge_session_id(),
-            Some(&replacement.session_id)
+            Some(&replacement.session_id),
+            "{label} handle must observe the recovered exact session"
         );
         let recovered = handle
             .member_creation_for_session(&replacement.session_id)

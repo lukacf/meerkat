@@ -453,12 +453,18 @@ original token and birth cursor and records its exact predecessor binding.
 
 | Provenance | Meaning |
 |---|---|
-| `Root` | The runtime attests an independent creation with no delegated ancestor. |
+| `Root` | Explicit trusted host-origin input establishes an independent creation. |
 | `Spawn` | An exact source session, typed member binding and creation token establish a spawn edge. |
 | `Fork` | The existing `fork_source` owns the source endpoint; the creation record adds its token. |
 | `Successor` | An exact predecessor proves continuity of the same logical member, not a new delegation edge. |
 | `Unproven` | A new creation has a token, but complete ancestry cannot be proved. This does not prevent ordinary member execution. |
 | `LegacyUnknown` | The runtime cannot prove complete ancestry. An absent old field never becomes a root. |
+
+`SpawnMemberSpec::new` defaults to `Unproven`. Trusted host ingress must use
+`SpawnMemberSpec::host_root` explicitly. Agent-lane handles downgrade that
+claim; authenticated source witnesses establish delegated ancestry instead.
+Policy auto-spawn remains `Unproven`, because a host-configured policy does not
+prove that the resulting creation was independent of member activity.
 
 Historical creation facts remain in the existing journal-backed roster
 projection after retirement. `MobHandle::member_creation_for_session` reads
@@ -477,6 +483,30 @@ policy and host access policy still apply to every call. Optional consumers
 that need a source policy ceiling must read it through the native session API;
 missing proof cannot be interpreted as unrestricted access.
 
+`MobSessionService::load_retained_session_metadata` is the supported
+exact-session read for ancestry and policy-ceiling observations. Its
+`PersistedSessionMetadataView` contains the latest committed metadata of the
+exact retained session, including archived sessions. Persistent services read
+through the authoritative native metadata owner. An absent session returns
+`None`; corrupt metadata returns an error. Unsupported backends return a typed
+`Unsupported` error. The method never substitutes a successor, revives a
+session, permits a write, or changes ordinary
+`load_persisted_session_metadata` visibility. It does not provide a historical
+revision, lease or currentness guarantee. A valid present metadata view whose
+resolved tool policy is `None` has the native meaning of unrestricted; missing
+metadata or an unresolved policy must not be interpreted that way.
+
+An optional resource service can intersect its current ACL with the current
+policies of the exact source and executing sessions. In this dynamic model,
+an authorized host policy change can widen an existing resource-access route;
+the native policy owner records that change. An ancestry record is never a
+frozen policy ceiling. Native tool execution still makes its own decision.
+These observations identify an executing agent, not the original human
+requester, and are not an execution-time currentness fence. Native originating
+authority and governed execution work continue separately in
+[#1646](https://github.com/lukacf/meerkat/issues/1646) and
+[#1730](https://github.com/lukacf/meerkat/pull/1730).
+
 Trusted hosts can install `MobBuilder::before_activation` to bind optional
 services before fresh or restored members execute. The `MobBeforeActivation`
 callback receives a `MobReadHandle` backed by the same roster and lifecycle
@@ -485,6 +515,12 @@ the type cannot submit actor commands while the actor has not started.
 A callback error aborts bootstrap. Hosts must discard provisional service
 bindings if a later bootstrap step fails. With no callback configured, no host
 hook runs.
+
+`MobMcpState::set_before_activation` carries that hook into delegated child
+mobs. `set_additional_child_tool_bundles` carries the matching optional tool
+factories, so children can use a configured host service. Each factory uses
+the actual executing caller's resolver; registration conveys no inherited
+parent authority and exposes no tools unless the host selects their bundle.
 
 ## Compaction contract
 

@@ -6758,6 +6758,7 @@ mod tests {
     #[tokio::test]
     async fn test_mob_spawn_member_auto_wire_parent_uses_bound_owner_session() {
         let state = MobMcpState::new_in_memory();
+        assert!(!state.session_service().supports_persistent_sessions());
         let mob_id = state
             .mob_create_definition(sample_definition("spawn-auto-wire-parent"))
             .await
@@ -6819,6 +6820,16 @@ mod tests {
         assert!(
             child.wired_to.contains(&parent_identity),
             "auto_wire_parent must wire the spawned member to the bound spawning member"
+        );
+        let creation = handle
+            .member_creation_for_session(child.bridge_session_id().expect("child session"))
+            .await
+            .expect("read child creation")
+            .expect("child creation event");
+        assert_eq!(
+            creation.creation.provenance,
+            meerkat_mob::MemberCreationProvenance::Unproven,
+            "nonpersistent caller metadata must not become an independent host root"
         );
     }
 

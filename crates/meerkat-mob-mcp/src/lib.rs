@@ -2281,7 +2281,7 @@ impl MobMcpState {
         backend: Option<MobBackendKind>,
         placement: Option<meerkat_mob::machines::mob_machine::HostId>,
     ) -> Result<meerkat_mob::SpawnResult, MobError> {
-        let mut spec = SpawnMemberSpec::new(profile, identity);
+        let mut spec = SpawnMemberSpec::host_root(profile, identity);
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
         spec.placement = placement;

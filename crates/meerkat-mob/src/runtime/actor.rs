@@ -33488,7 +33488,7 @@ impl MobActor {
             effective_profile_override: override_profile.clone(),
             effective_model_override: model_override.clone(),
             spawned_by: None,
-            creation_origin: crate::member_creation::MemberCreationOrigin::HostRoot,
+            creation_origin: crate::member_creation::MemberCreationOrigin::Unproven,
             fork_job: None,
             // A policy auto-spawn is fresh, never a fork seating.
             fork_source: None,

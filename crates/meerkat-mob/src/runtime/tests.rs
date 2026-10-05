@@ -3,8 +3,11 @@ use super::*;
 mod before_activation;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
+mod historical_metadata;
 mod host_human_input;
 mod member_creation;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod member_creation_upcall;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,

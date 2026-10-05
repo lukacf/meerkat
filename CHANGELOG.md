@@ -1362,7 +1362,16 @@ them.
   pin the cursor range by the pending append (`next > previous`) instead of
   `next == previous + 1`. Every other row keeps one-row appends, and a run the
   generated state refuses as one append falls back to them. A rejected batch
-  is re-queued row by row under the original cursors. The S99 echo checks
+  is re-queued row by row under the original cursors. `EnqueueLiveContextRow`
+  gains the guard `canonical_cursor_is_above_the_pending_append`: a row is
+  never queued at or below the next cursor of the channel's in-flight append,
+  so a row a batch carries cannot be queued again and delivered twice (the
+  runtime already classifies new rows past every carried row). The TLA
+  lowering of a DSL `for` update now reads every field's pre-loop value, as
+  the Rust kernel does; it fed one field's post-loop fold into the others
+  (latent until this edge, the first `for` on the release). The bounded audit
+  `live_context_causal_tail_batch_audit` (24 steps, with four mutants) runs
+  in the TLC lane. The S99 echo checks
   now inspect whole reassembled thinking appends row by row: a wire fragment
   that held a typed assistant row ("Marigold") and the later spoken
   correction ("Cobalt") no longer reads as re-sent current-facts speech.

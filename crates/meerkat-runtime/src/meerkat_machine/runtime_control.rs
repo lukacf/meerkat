@@ -1817,6 +1817,159 @@ mod live_context_mirror_tests {
         );
     }
 
+    /// A row committed while a causal-tail batch is still in flight queues
+    /// above the batch's last cursor: the shell keeps the carried rows in its
+    /// queue until the append resolves, so classification never re-offers a
+    /// row the batch carries, and the generated enqueue guard
+    /// (canonical_cursor_is_above_the_pending_append) never refuses it.
+    #[tokio::test]
+    async fn a_row_committed_during_an_in_flight_tail_batch_queues_above_it() {
+        use crate::live_execution::LiveContextAppendKind;
+        let (machine, session_id, channel) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel, 0)
+            .await
+            .expect("reservation");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generator");
+        bind_experimental_live_machine(&machine, &session_id, &channel, 0).await;
+        user_turn_completes_on(&machine, &session_id, &channel).await;
+        let bootstrap = machine
+            .authorize_live_context_bootstrap_append(&lease, "late summary")
+            .await
+            .expect("summary authority");
+        let mut heard = Vec::new();
+        for _ in 0..3 {
+            heard.push(
+                machine
+                    .record_live_context_observation(&lease, lease.new_observation_id())
+                    .await
+                    .expect("heard row observed while the summary was prepared")
+                    .observation_id()
+                    .clone(),
+            );
+        }
+        machine
+            .record_live_context_bootstrap_ack_cut(&bootstrap)
+            .await
+            .expect("ACK cut");
+        machine
+            .resolve_live_context_bootstrap_append(
+                &bootstrap,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            )
+            .await
+            .expect("summary ACK");
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        for (index, (observation, text)) in heard
+            .iter()
+            .zip(["heard level nine", "heard I don't know yet", "heard cobalt"])
+            .enumerate()
+        {
+            let mut row = meerkat_core::UserMessage::text(text);
+            row.identity.realtime_origin = Some(
+                serde_json::from_value(serde_json::json!({
+                    "session_id": session_id, "channel_id": channel,
+                    "canonical_row_sequence": index + 1,
+                    "context_observation_id": observation
+                }))
+                .expect("heard origin"),
+            );
+            session.push(meerkat_core::Message::User(row));
+        }
+        let tail_only = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+            Arc::new(session.clone()),
+        )
+        .expect("canonical tail");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &tail_only, "tail")
+            .await
+            .expect("queue the tail");
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            first_append_barrier: Some(barrier.clone()),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let drain = tokio::spawn({
+            let machine = machine.clone();
+            let session_id = session_id.clone();
+            let channel = channel.clone();
+            async move {
+                machine
+                    .drain_live_context_outbox_for_channel(&session_id, &channel)
+                    .await
+            }
+        });
+        barrier.entered.notified().await;
+
+        // The batch for cursors 1..=3 is in flight; a later row commits now.
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("a row committed mid-batch"),
+        ));
+        let with_later =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("canonical prefix");
+        let queued = machine
+            .enqueue_committed_parent_session_boundary(&session_id, &with_later, "later")
+            .await
+            .expect("a row above the in-flight batch is admitted");
+        assert_eq!(
+            queued, 1,
+            "only the new row is classified, never a carried one"
+        );
+        let state = machine.session_dsl_state(&session_id).await.expect("state");
+        let pending = state.live_context_pending_append_by_channel[channel.as_str()].clone();
+        assert_eq!(
+            state.live_context_pending_next_cursor_by_append[pending.as_str()],
+            3,
+            "the in-flight batch covers the whole tail"
+        );
+        assert_eq!(
+            state
+                .live_context_queued_append_by_cursor
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![4],
+            "the new row queues above the batch's last cursor"
+        );
+
+        barrier.release.add_permits(1);
+        drain.await.expect("drain task").expect("drain");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel)
+            .await
+            .expect("drain the later row");
+        let kinds = host.append_kinds.lock().expect("kinds").clone();
+        let appends = host.appends.lock().expect("appends").clone();
+        assert_eq!(
+            kinds,
+            vec![
+                LiveContextAppendKind::CausalReassertion,
+                LiveContextAppendKind::Ordinary
+            ],
+            "the tail once, then the later row once: {appends:?}"
+        );
+        assert!(!appends[0].1.contains("a row committed mid-batch"));
+        assert!(appends[1].1.contains("a row committed mid-batch"));
+        assert!(!appends[1].1.contains("heard cobalt"));
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel[channel.as_str()],
+            4
+        );
+    }
+
     #[tokio::test]
     async fn bootstrap_recovery_ack_retires_only_covered_rows_and_unblocks_results() {
         use crate::live_execution::{

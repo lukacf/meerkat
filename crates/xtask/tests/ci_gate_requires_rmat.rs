@@ -394,7 +394,7 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
             .is_some_and(|run| run.contains("make machine-verify"))
     }));
     assert!(cargo.contains("actions/setup-java@v5"));
-    assert!(cargo.contains("tlaplus/releases/download/v1.8.0/tla2tools.jar"));
+    assert!(cargo.contains("uses: ./.github/actions/setup-tlc-ci"));
     assert!(cargo.contains("scripts/machine-authority-changed"));
     assert!(cargo.contains("machine_authority_changed:"));
 

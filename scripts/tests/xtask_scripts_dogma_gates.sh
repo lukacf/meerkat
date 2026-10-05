@@ -455,18 +455,30 @@ else
   bad "TLC lane: an audit shard needs an xtask argument, or machine-verify runs without one"
 fi
 
-# setup-tlc-ci (the PR TLC lane's install) records the jar's digest and
-# enforces a pinned one when set.
+# setup-tlc-ci is the one TLC install: the repository's immutable mirror of
+# the tlaplus v1.8.0 build (tlaplus rebuilds that pre-release in place),
+# pinned by sha256, with no fallback. Every workflow and action installs TLC
+# through it, so PR, nightly and BuildBuddy lanes run one build.
 tlc_action=.github/actions/setup-tlc-ci/action.yml
+tlc_mirror='https://github.com/lukacf/meerkat/releases/download/tlc-tla2tools-v1.8.0-20261004/tla2tools.jar'
+tlc_sha256='c2fe4e56e43bde19f213b4a7e441d037297fda733e503579623e859b79348239'
 if [ -f "$tlc_action" ] \
-  && grep -Fq 'tla2tools.jar' "$tlc_action" \
+  && grep -Fq "default: ${tlc_mirror}" "$tlc_action" \
+  && grep -Fq "default: ${tlc_sha256}" "$tlc_action" \
   && grep -Fq 'distribution: temurin' "$tlc_action" \
   && grep -Fq 'sha256sum' "$tlc_action" \
+  && grep -Fq 'needs a sha256 pin' "$tlc_action" \
   && grep -Fq 'does not match the pinned' "$tlc_action" \
   && grep -Fq 'GITHUB_PATH' "$tlc_action"; then
-  ok "setup-tlc-ci installs TLC, prints the jar digest and enforces a pinned sha256"
+  ok "setup-tlc-ci installs the mirrored TLC jar pinned by sha256 and reports its digest"
 else
-  bad "setup-tlc-ci is missing, or no longer reports or enforces the jar digest"
+  bad "setup-tlc-ci is missing, unpinned, off the mirror, or no longer reports the jar digest"
+fi
+if [ -z "$(grep -rlF 'tlaplus/tlaplus/releases' .github)" ] \
+  && [ "$(grep -rlF 'uses: ./.github/actions/setup-tlc-ci' .github | sort | tr '\n' ' ')" = ".github/actions/setup-buildbuddy-ci/action.yml .github/workflows/cargo.yml .github/workflows/ci.yml .github/workflows/nightly.yml " ]; then
+  ok "every TLC install goes through setup-tlc-ci; no workflow downloads the rolling tlaplus jar"
+else
+  bad "a workflow or action installs TLC outside setup-tlc-ci, or downloads the rolling tlaplus jar"
 fi
 
 echo ""

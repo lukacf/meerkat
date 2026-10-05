@@ -12504,10 +12504,10 @@ mod tests {
     async fn test_archive_of_a_member_session_redrives_its_stuck_retirement_and_surfaces_a_still_failing_cause()
      {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let mob_id = state
             .mob_create_definition(explicit_definition("archive-redrive"))
             .await

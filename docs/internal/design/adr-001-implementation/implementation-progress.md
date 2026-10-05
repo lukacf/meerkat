@@ -17,12 +17,33 @@ through `be2932374793ae84d3b844129cf58229509a1f0c`, including connector OAuth.
 The current successor also integrates actual main merge
 `74b6c7473797cb904f554c8c2cc1bb7386ec3c66`, containing the upstream memory-test
 correction described below. That correction changes no production behavior.
-Normal local and GCP qualification remain pending; earlier published results
-do not qualify the integrated candidate. Luka's explicit 2026-10-05 instruction
+Qualification of that integrated source, `f3ebf2a02e19330aa926b61a205fcd62466ca2fc`,
+failed as described below. A test-fixture successor is under preparation;
+earlier published results do not qualify it. Luka's explicit 2026-10-05 instruction
 in the 0.9 coordinator chat temporarily removes GitHub CI as a blocker during
 the Actions outage. CI is recorded as skipped, never passed. Existing local
 checks, source identity, consumer acceptance and publication ownership remain;
 normal CI resumes when the service is healthy.
+
+The GCP run lasted from 20:39:20 to 21:05:56 UTC on the exact `f3ebf2a02`
+source. Workspace library, integration and E2E inventories stopped during
+compilation and ran zero tests. Three fixtures had not adopted the fallible
+`PersistenceBundle` or `MobMcpState` constructors: the shared delivery-inbox
+fixture, the stuck member-retirement fixture and the profile tool-denial fixture.
+The separate `cold_restart_mob_resume` target passed all nine tests with zero
+skips in 2.751 seconds of test execution; its command took 7m49s. That result
+does not qualify the inventories that did not run. Raw command output and timing
+remain under `/tmp/rb/toolkit-work/receipts/adr1730-f3ebf2a0` on GCP.
+
+The redundant Mac normal push was stopped after the deterministic compile
+failures were reported. Its process exited 143 and its owned group was confirmed
+absent at 21:05:58 UTC; no push occurred. The successor handles constructor
+failure in the three reported fixtures and three analogous live/replay fixtures
+found by a finite source review, including the replay's fallible mob composition.
+It preserves production behavior, every existing assertion and the intentional
+negative constructor test. A local workspace all-targets compile check with the
+replay feature will precede the next GCP handoff. These repairs have no executed
+GREEN result yet.
 
 The connector merge needed four integration repairs: preserve typed stale
 preparation, use coordinated mode-constrained logout, adapt the generated

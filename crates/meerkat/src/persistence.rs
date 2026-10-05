@@ -3085,7 +3085,7 @@ mod tests {
             store,
             runtime_store.clone(),
             Arc::new(MemoryBlobStore::new()),
-        );
+        )?;
 
         let observer = bundle.runtime_delivery_inbox();
         let producer = bundle.runtime_delivery_inbox();

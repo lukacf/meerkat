@@ -92,7 +92,8 @@ fn wired_state(root: &std::path::Path, client: ScriptedCouncilClient) -> Arc<Mob
             store_dyn,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
-        ),
+        )
+        .expect("construct runtime authority"),
     );
     meerkat_mob_mcp::wire_mob_tools(
         &mob_tools_slot,

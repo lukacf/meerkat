@@ -7108,10 +7108,10 @@ mod tests {
         );
         let runtime = Arc::clone(&sessions.runtime_adapter);
         let sessions = Arc::new(sessions);
-        let mobs = Arc::new(crate::MobMcpState::new(
-            sessions.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mobs = Arc::new(
+            crate::MobMcpState::new(sessions.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let mob = meerkat_mob::MobBuilder::new(
             meerkat_mob::MobDefinition::implicit("start-after-close", "claude-sonnet-4-5"),
             meerkat_mob::MobStorage::in_memory(),

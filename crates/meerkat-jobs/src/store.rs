@@ -604,7 +604,7 @@ pub(crate) fn validate_job_replacement(
         });
     }
     if current.spec.submission_key != replacement.spec.submission_key
-        || !current.spec.equivalent_submission(&replacement.spec)
+        || !current.spec.same_admission(&replacement.spec)
     {
         return Err(DetachedJobError::Store(
             "compare-and-swap cannot change the submitted job specification".into(),

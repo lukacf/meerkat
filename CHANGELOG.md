@@ -57,9 +57,12 @@ them.
   - `DetachedJobStore` gains the required `outbox_commit_signal()`; a store
     returns the `JobOutboxCommitSignal` it owns and a wrapping store returns
     its inner store's.
+  - `SqliteDetachedJobStore` (which now owns its `JobOutboxCommitSignal`) is
+    no longer `UnwindSafe` or `RefUnwindSafe`.
   - `JobSpec` gains `terminal_application: JobTerminalApplication`
-    (`JobSpec::new` sets `Subscribers`). It is part of submission identity:
-    the same submission key with another value is a conflict.
+    (`JobSpec::new` sets `Subscribers`). It is fixed at admission: a replay
+    under the same submission key returns the original job with its original
+    value, and no compare-and-swap can rewrite it.
   - `PreparedJobDelivery` gains `producer_applied`.
   - `SystemMessageAppendError` gains `CallbackBatchPending` and
     `CallbackBatchUnreadable`.

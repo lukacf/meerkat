@@ -657,41 +657,51 @@ async fn a_stale_census_live_column_fails_closed_on_read() {
     );
 }
 
-/// Who applies a job's terminal survives reopen, and it is part of the
-/// submission identity: the same key with another application conflicts.
+/// Who applies a job's terminal survives reopen. It is admission data, not
+/// replay identity: a replay under the same submission key with another value
+/// (a newer producer replaying a job committed before the field existed)
+/// returns the original job, which keeps the value it was admitted with.
 #[tokio::test]
 async fn sqlite_reopen_preserves_terminal_application() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.sqlite3");
-    let produced = spec("terminal-application", RestartClass::Adoptable)
-        .with_terminal_application(meerkat_jobs::JobTerminalApplication::Producer);
+    let admitted = spec("terminal-application", RestartClass::Adoptable);
     let job_id = {
         let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("open"));
         DetachedJobService::new(store)
-            .submit(produced.clone())
+            .submit(admitted.clone())
             .await
             .expect("submit")
             .job_id
     };
     let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("reopen"));
-    let reopened = store
-        .get(&job_id)
-        .await
-        .expect("read")
-        .expect("job survives reopen");
     assert_eq!(
-        reopened.spec.terminal_application,
-        meerkat_jobs::JobTerminalApplication::Producer
+        store
+            .get(&job_id)
+            .await
+            .expect("read")
+            .expect("job survives reopen")
+            .spec
+            .terminal_application,
+        meerkat_jobs::JobTerminalApplication::Subscribers
     );
 
-    let mut conflicting = produced;
-    conflicting.terminal_application = meerkat_jobs::JobTerminalApplication::Subscribers;
-    assert!(
-        DetachedJobService::new(store)
-            .submit(conflicting)
+    let replay = DetachedJobService::new(store.clone())
+        .submit(admitted.with_terminal_application(meerkat_jobs::JobTerminalApplication::Producer))
+        .await
+        .expect("a replay with another terminal application is still a replay");
+    assert!(replay.deduplicated);
+    assert_eq!(replay.job_id, job_id);
+    assert_eq!(
+        store
+            .get(&job_id)
             .await
-            .is_err(),
-        "the same submission key with another terminal application conflicts"
+            .expect("reread")
+            .expect("job")
+            .spec
+            .terminal_application,
+        meerkat_jobs::JobTerminalApplication::Subscribers,
+        "the original admission stands"
     );
 }
 

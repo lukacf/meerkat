@@ -412,7 +412,18 @@ impl JobSpec {
             && self.restart_class == other.restart_class
             && self.canonical_arguments_hash == other.canonical_arguments_hash
             && self.credential_context_refs == other.credential_context_refs
-            && self.terminal_application == other.terminal_application
+    }
+
+    /// [`Self::equivalent_submission`] plus the admission-time facts that are
+    /// not part of replay identity but never change after submit.
+    ///
+    /// `terminal_application` is one: a replay under the same submission key
+    /// returns the original job with the value it was admitted with (a job
+    /// committed before the field existed reads as `Subscribers`, and a newer
+    /// producer replaying it must still find it), while no compare-and-swap
+    /// may rewrite it.
+    pub(crate) fn same_admission(&self, other: &Self) -> bool {
+        self.equivalent_submission(other) && self.terminal_application == other.terminal_application
     }
 }
 

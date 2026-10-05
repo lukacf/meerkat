@@ -9992,7 +9992,8 @@ mod tests {
     /// `materialize_head` runs: a moved head is a revision conflict, a
     /// missing head is `NotFound`, and a stored CAS token that no longer
     /// matches the token recomputed from the stored head is `Corrupted`
-    /// (which `load_head`, dropping the stored token, cannot see).
+    /// (as `load_head` also refuses it: session envelope v4 checks the
+    /// stored token on load).
     #[tokio::test]
     async fn verify_current_head_keeps_the_materialize_head_row_checks() {
         let (_dir, store) = temp_store();
@@ -10029,14 +10030,10 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        assert!(
-            incremental(&store)
-                .load_head(session.id())
-                .await
-                .unwrap()
-                .is_some(),
-            "instrument honesty: load_head does not see the stored token"
-        );
+        assert!(matches!(
+            incremental(&store).load_head(session.id()).await,
+            Err(SessionStoreError::Corrupted(id)) if id == *session.id()
+        ));
         assert!(matches!(
             incremental(&store).verify_current_head(&current).await,
             Err(SessionStoreError::Corrupted(id)) if id == *session.id()

@@ -747,11 +747,12 @@ impl McpOAuthError {
             | Self::AccountSelectionRequired
             | Self::UnsupportedAccountSelection
             | Self::Verification(_)
-            | Self::Flow(_)
             | Self::MissingStoredToken { .. }
             | Self::HumanAuthorizationRequired { .. }
             | Self::ReauthRequired { .. }
             | Self::TokenKey { .. } => true,
+            // Flow-owner persistence and lifecycle failures are not refusals.
+            Self::Flow(error) => error.is_refusal(),
             Self::Callback { .. }
             | Self::DiscoveryFailed { .. }
             | Self::RegistrationFailed { .. }
@@ -2196,14 +2197,29 @@ fn map_coordinated_refresh_error(target: &McpServerIdentity, error: RefreshError
     if matches!(&error, RefreshError::ReauthRequired(_))
         || error.refresh_failure_disposition() == Some(RefreshFailureDisposition::ReauthRequired)
     {
-        McpOAuthError::ReauthRequired {
+        return McpOAuthError::ReauthRequired {
             server_name: target.server_name().to_string(),
+        };
+    }
+    match &error {
+        // A failure the token endpoint reported: an upstream failure.
+        RefreshError::Classified { .. } | RefreshError::Observed { .. } => {
+            McpOAuthError::RefreshFailed {
+                server_name: target.server_name().to_string(),
+                reason: error.to_string(),
+            }
         }
-    } else {
-        McpOAuthError::RefreshFailed {
+        RefreshError::RequiredScopesNotGranted => ConnectorOAuthRefusal::MissingScopes.into(),
+        // A local lifecycle, lock or closure failure: infrastructure.
+        RefreshError::Refresh(_)
+        | RefreshError::Cancelled
+        | RefreshError::LockFailed(_)
+        | RefreshError::CredentialIdentityMismatch
+        | RefreshError::ReauthRequired(_)
+        | RefreshError::DurableTerminalCommit { .. } => McpOAuthError::AuthLifecycle {
             server_name: target.server_name().to_string(),
             reason: error.to_string(),
-        }
+        },
     }
 }
 
@@ -2445,6 +2461,52 @@ mod tests {
         )
         .expect_err("remote http issuer should fail closed");
         assert!(error.to_string().contains("must use https"));
+    }
+
+    #[test]
+    fn coordinated_refresh_mapping_splits_upstream_reports_from_local_failures() {
+        let target = McpServerIdentity::from_server_config("srv", "https://mcp.example/api");
+        for local in [
+            RefreshError::Refresh("refresh_failed closure rejected".into()),
+            RefreshError::LockFailed("lock".into()),
+            RefreshError::Cancelled,
+        ] {
+            let error = map_coordinated_refresh_error(&target, local);
+            assert!(
+                matches!(error, McpOAuthError::AuthLifecycle { .. }),
+                "{error:?}"
+            );
+            assert!(!error.is_refusal());
+        }
+        assert!(matches!(
+            map_coordinated_refresh_error(&target, RefreshError::CredentialIdentityMismatch),
+            McpOAuthError::Verification(ConnectorOAuthRefusal::AccountMismatch)
+        ));
+        assert!(matches!(
+            map_coordinated_refresh_error(&target, RefreshError::RequiredScopesNotGranted),
+            McpOAuthError::Verification(ConnectorOAuthRefusal::MissingScopes)
+        ));
+    }
+
+    #[test]
+    fn flow_owner_failures_inside_mcp_errors_are_not_refusals() {
+        for error in [
+            OAuthFlowError::PersistenceFailed {
+                operation: "admit_oauth_browser_flow",
+                detail: "disk".into(),
+            },
+            OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_browser_flow",
+                detail: "rejected".into(),
+            },
+            OAuthFlowError::StateGenerationFailed,
+            OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify",
+            },
+        ] {
+            assert!(!McpOAuthError::Flow(error).is_refusal());
+        }
+        assert!(McpOAuthError::Flow(OAuthFlowError::Missing).is_refusal());
     }
 
     #[test]

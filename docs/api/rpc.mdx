@@ -269,6 +269,8 @@ of this full catalog.
 | `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
 | `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |
 
+Auth method errors (`auth/*`) carry a typed reason in `error.data.reason`, one of the closed `WireAuthErrorReason` values (for example `slot_occupied`, `account_mismatch`, `attempt_missing`, `reauth_required`, `infrastructure`). Branch on the reason, not the message text. Infrastructure failures have a fixed message.
+
 Both helper parameter types (`MobSpawnHelperParams`, `MobForkHelperParams`)
 require `result_label` and `max_text_bytes`. `MobHelperResult` is the exact
 operation carrier: `output`, `tokens_used`, `agent_identity`, `member_ref`,

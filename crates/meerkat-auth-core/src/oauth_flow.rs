@@ -669,6 +669,29 @@ pub enum OAuthFlowError {
     },
 }
 
+impl OAuthFlowError {
+    /// Whether this refuses the caller's attempt (unknown, mismatched or
+    /// expired state) rather than reporting a flow-owner persistence or
+    /// lifecycle failure.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::Missing
+            | Self::BrowserIdentityMismatch
+            | Self::Connector(_)
+            | Self::ProviderMismatch { .. }
+            | Self::RedirectUriMismatch
+            | Self::TargetMismatch { .. }
+            | Self::DevicePollInProgress
+            | Self::DeviceCodeAlreadyAdmitted
+            | Self::DeviceExpiryOutOfRange => true,
+            Self::RegistryProjectionMissing { .. }
+            | Self::StateGenerationFailed
+            | Self::LifecycleRejected { .. }
+            | Self::PersistenceFailed { .. } => false,
+        }
+    }
+}
+
 pub trait OAuthDevicePollLifecycle: Send + Sync {
     fn device_flow_state_is_authmachine_owned(&self) -> bool {
         false

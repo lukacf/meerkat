@@ -140721,6 +140721,335 @@
     ],
     "title": "WireAuthError"
   },
+  "WireAuthErrorBody": {
+    "$defs": {
+      "WireAuthErrorReason": {
+        "description": "Typed reason of an auth error on the RPC and REST surfaces: RPC\n`error.data.reason`, REST body `reason`. Hosts branch on it, never on the\nerror text. One native mapping (`HostAuthError::reason`) owns it; the\nexisting status codes and RPC error codes are unchanged.",
+        "oneOf": [
+          {
+            "enum": [
+              "realm_not_found",
+              "binding_not_found",
+              "mcp_server_not_configured",
+              "account_selection_required",
+              "unknown_strategy",
+              "device_poll_in_progress",
+              "device_code_already_admitted",
+              "device_expiry_invalid",
+              "missing_scopes",
+              "slot_occupied",
+              "slot_account_mismatch",
+              "slot_context_mismatch",
+              "slot_mode_mismatch",
+              "unverified_connector_publication",
+              "reauth_required",
+              "configuration_invalid"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "invalid_target",
+            "description": "Malformed or inconsistent target (ids, provider, backend, auth\nmethod, source, connector target, redirect or descriptor).",
+            "type": "string"
+          },
+          {
+            "const": "binding_invalid",
+            "description": "The binding exists but its configuration is invalid.",
+            "type": "string"
+          },
+          {
+            "const": "binding_inherited",
+            "description": "A credential write addressed a binding the realm only inherits.",
+            "type": "string"
+          },
+          {
+            "const": "flow_unsupported",
+            "description": "The provider does not support the requested login flow.",
+            "type": "string"
+          },
+          {
+            "const": "mcp_server_mismatch",
+            "description": "The MCP target differs from the configured server, or it does not\nuse OAuth login.",
+            "type": "string"
+          },
+          {
+            "const": "attempt_missing",
+            "description": "No live attempt under this state (unknown, expired or consumed).",
+            "type": "string"
+          },
+          {
+            "const": "attempt_mismatch",
+            "description": "The attempt exists but the target, provider, identity, redirect or\ndescriptor differs.",
+            "type": "string"
+          },
+          {
+            "const": "account_mismatch",
+            "description": "The provider-verified account is not the expected one.",
+            "type": "string"
+          },
+          {
+            "const": "credential_mismatch",
+            "description": "Token material does not match the verified evidence.",
+            "type": "string"
+          },
+          {
+            "const": "verification_unavailable",
+            "description": "The account strategy could not verify the provider account.",
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: a human must authorize through the host.",
+            "type": "string"
+          },
+          {
+            "const": "callback_unavailable",
+            "description": "The host's loopback callback could not be bound, failed or timed out.",
+            "type": "string"
+          },
+          {
+            "const": "upstream_failure",
+            "description": "The provider's authorization server failed (discovery, registration,\ntoken exchange or refresh).",
+            "type": "string"
+          },
+          {
+            "const": "infrastructure",
+            "description": "An internal failure; its detail is only in protected diagnostics.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Body of a REST auth endpoint error.",
+    "properties": {
+      "error": {
+        "description": "Human-readable, secret-free text; never part of the contract.",
+        "type": "string"
+      },
+      "reason": {
+        "$ref": "#/$defs/WireAuthErrorReason"
+      }
+    },
+    "required": [
+      "error",
+      "reason"
+    ],
+    "title": "WireAuthErrorBody",
+    "type": "object"
+  },
+  "WireAuthErrorData": {
+    "$defs": {
+      "WireAuthErrorReason": {
+        "description": "Typed reason of an auth error on the RPC and REST surfaces: RPC\n`error.data.reason`, REST body `reason`. Hosts branch on it, never on the\nerror text. One native mapping (`HostAuthError::reason`) owns it; the\nexisting status codes and RPC error codes are unchanged.",
+        "oneOf": [
+          {
+            "enum": [
+              "realm_not_found",
+              "binding_not_found",
+              "mcp_server_not_configured",
+              "account_selection_required",
+              "unknown_strategy",
+              "device_poll_in_progress",
+              "device_code_already_admitted",
+              "device_expiry_invalid",
+              "missing_scopes",
+              "slot_occupied",
+              "slot_account_mismatch",
+              "slot_context_mismatch",
+              "slot_mode_mismatch",
+              "unverified_connector_publication",
+              "reauth_required",
+              "configuration_invalid"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "invalid_target",
+            "description": "Malformed or inconsistent target (ids, provider, backend, auth\nmethod, source, connector target, redirect or descriptor).",
+            "type": "string"
+          },
+          {
+            "const": "binding_invalid",
+            "description": "The binding exists but its configuration is invalid.",
+            "type": "string"
+          },
+          {
+            "const": "binding_inherited",
+            "description": "A credential write addressed a binding the realm only inherits.",
+            "type": "string"
+          },
+          {
+            "const": "flow_unsupported",
+            "description": "The provider does not support the requested login flow.",
+            "type": "string"
+          },
+          {
+            "const": "mcp_server_mismatch",
+            "description": "The MCP target differs from the configured server, or it does not\nuse OAuth login.",
+            "type": "string"
+          },
+          {
+            "const": "attempt_missing",
+            "description": "No live attempt under this state (unknown, expired or consumed).",
+            "type": "string"
+          },
+          {
+            "const": "attempt_mismatch",
+            "description": "The attempt exists but the target, provider, identity, redirect or\ndescriptor differs.",
+            "type": "string"
+          },
+          {
+            "const": "account_mismatch",
+            "description": "The provider-verified account is not the expected one.",
+            "type": "string"
+          },
+          {
+            "const": "credential_mismatch",
+            "description": "Token material does not match the verified evidence.",
+            "type": "string"
+          },
+          {
+            "const": "verification_unavailable",
+            "description": "The account strategy could not verify the provider account.",
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: a human must authorize through the host.",
+            "type": "string"
+          },
+          {
+            "const": "callback_unavailable",
+            "description": "The host's loopback callback could not be bound, failed or timed out.",
+            "type": "string"
+          },
+          {
+            "const": "upstream_failure",
+            "description": "The provider's authorization server failed (discovery, registration,\ntoken exchange or refresh).",
+            "type": "string"
+          },
+          {
+            "const": "infrastructure",
+            "description": "An internal failure; its detail is only in protected diagnostics.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`error.data` of an auth RPC error.",
+    "properties": {
+      "reason": {
+        "$ref": "#/$defs/WireAuthErrorReason"
+      }
+    },
+    "required": [
+      "reason"
+    ],
+    "title": "WireAuthErrorData",
+    "type": "object"
+  },
+  "WireAuthErrorReason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed reason of an auth error on the RPC and REST surfaces: RPC\n`error.data.reason`, REST body `reason`. Hosts branch on it, never on the\nerror text. One native mapping (`HostAuthError::reason`) owns it; the\nexisting status codes and RPC error codes are unchanged.",
+    "oneOf": [
+      {
+        "enum": [
+          "realm_not_found",
+          "binding_not_found",
+          "mcp_server_not_configured",
+          "account_selection_required",
+          "unknown_strategy",
+          "device_poll_in_progress",
+          "device_code_already_admitted",
+          "device_expiry_invalid",
+          "missing_scopes",
+          "slot_occupied",
+          "slot_account_mismatch",
+          "slot_context_mismatch",
+          "slot_mode_mismatch",
+          "unverified_connector_publication",
+          "reauth_required",
+          "configuration_invalid"
+        ],
+        "type": "string"
+      },
+      {
+        "const": "invalid_target",
+        "description": "Malformed or inconsistent target (ids, provider, backend, auth\nmethod, source, connector target, redirect or descriptor).",
+        "type": "string"
+      },
+      {
+        "const": "binding_invalid",
+        "description": "The binding exists but its configuration is invalid.",
+        "type": "string"
+      },
+      {
+        "const": "binding_inherited",
+        "description": "A credential write addressed a binding the realm only inherits.",
+        "type": "string"
+      },
+      {
+        "const": "flow_unsupported",
+        "description": "The provider does not support the requested login flow.",
+        "type": "string"
+      },
+      {
+        "const": "mcp_server_mismatch",
+        "description": "The MCP target differs from the configured server, or it does not\nuse OAuth login.",
+        "type": "string"
+      },
+      {
+        "const": "attempt_missing",
+        "description": "No live attempt under this state (unknown, expired or consumed).",
+        "type": "string"
+      },
+      {
+        "const": "attempt_mismatch",
+        "description": "The attempt exists but the target, provider, identity, redirect or\ndescriptor differs.",
+        "type": "string"
+      },
+      {
+        "const": "account_mismatch",
+        "description": "The provider-verified account is not the expected one.",
+        "type": "string"
+      },
+      {
+        "const": "credential_mismatch",
+        "description": "Token material does not match the verified evidence.",
+        "type": "string"
+      },
+      {
+        "const": "verification_unavailable",
+        "description": "The account strategy could not verify the provider account.",
+        "type": "string"
+      },
+      {
+        "const": "authorization_required",
+        "description": "No usable credential: a human must authorize through the host.",
+        "type": "string"
+      },
+      {
+        "const": "callback_unavailable",
+        "description": "The host's loopback callback could not be bound, failed or timed out.",
+        "type": "string"
+      },
+      {
+        "const": "upstream_failure",
+        "description": "The provider's authorization server failed (discovery, registration,\ntoken exchange or refresh).",
+        "type": "string"
+      },
+      {
+        "const": "infrastructure",
+        "description": "An internal failure; its detail is only in protected diagnostics.",
+        "type": "string"
+      }
+    ],
+    "title": "WireAuthErrorReason"
+  },
   "WireAuthProfile": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected; callers that inspect profile metadata use\nthe server-side `auth.profile.get` RPC or the\n`GET /auth/bindings/{binding_id}` REST path; both return typed redacted\nshapes. `source_kind` is a\ndiscriminator for the credential-source variant.",

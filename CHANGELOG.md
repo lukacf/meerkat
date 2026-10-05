@@ -41,6 +41,8 @@ them.
   - `PersistedAuthMode` gains `ConnectorOauth`.
   - `CredentialMutationError` gains `SlotRefused(CredentialSlotRefusal)`.
   - `RefreshError` gains `RequiredScopesNotGranted`.
+  - Connector refresh failures are split: `ConnectorLoginError::RefreshFailed` is now only a failure the token endpoint reported. Lock, lifecycle and closure failures are `AuthLifecycle` (#1737).
+  - MCP OAuth gets the same split: `McpOAuthError::RefreshFailed` is only a token-endpoint report, and local refresh failures are `McpOAuthError::AuthLifecycle`. `McpOAuthError::Flow` flow-owner persistence and lifecycle failures are no longer refusals (`is_refusal() == false`). The new `OAuthFlowError::is_refusal` owns that split (#1737).
   - `ConnectorOAuthParameters::expected_account` is an `AccountSelection`
     (`Known(account)` or `Discover`). `From<String>`/`From<&str>` build
     `Known`, and the wire form of a Known account is unchanged.
@@ -55,6 +57,11 @@ them.
 
 ### Added
 
+- Typed auth error reasons (#1737). Errors from the `auth/*` RPC methods and REST auth endpoints carry a closed `WireAuthErrorReason`, so hosts no longer parse error text:
+  - RPC puts it in `error.data.reason`; REST puts it in the body's `reason`. Status codes and RPC error codes are unchanged.
+  - One exhaustive native mapping owns it: `HostAuthError::reason`.
+  - Infrastructure failures now carry a fixed public message, with their detail logged only on the server.
+  - The SDKs read it with Python `auth_error_reason(error)` and TypeScript `authErrorReason(error)`.
 - Generic connector OAuth (#1631). A trusted host names a credential slot
   (`{realm_id, slot_id}`, a storage address, never account proof) and a
   connector descriptor (issuer, client, resource, scopes, strategy and

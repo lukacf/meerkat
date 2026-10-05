@@ -1182,7 +1182,12 @@ async fn refresh_save_failure_restores_previous_token_and_machine_snapshot() {
         .stored_bearer_token(&target)
         .await
         .expect_err("injected refresh commit failure must surface");
-    assert!(matches!(error, McpOAuthError::RefreshFailed { .. }));
+    // A local store failure is infrastructure, not an upstream refresh report.
+    assert!(
+        matches!(error, McpOAuthError::AuthLifecycle { .. }),
+        "{error:?}"
+    );
+    assert!(!error.is_refusal());
     let key = target.token_key().unwrap();
     let restored = inner.load(&key).await.unwrap().unwrap();
     assert_eq!(restored.primary_secret, previous.primary_secret);

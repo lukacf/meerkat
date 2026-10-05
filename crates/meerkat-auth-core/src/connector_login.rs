@@ -244,6 +244,7 @@ pub enum ConnectorLoginError {
     DiscoveryFailed(String),
     #[error("connector OAuth token exchange failed")]
     TokenExchangeFailed,
+    /// The token endpoint reported a refresh failure.
     #[error("connector OAuth token refresh failed: {0}")]
     RefreshFailed(String),
     #[error("connector OAuth stored credential requires reauthentication")]
@@ -264,34 +265,13 @@ impl ConnectorLoginError {
             | Self::Verification(_)
             | Self::Slot(_)
             | Self::ReauthRequired => true,
-            Self::Flow(error) => flow_error_is_refusal(error),
+            Self::Flow(error) => error.is_refusal(),
             Self::DiscoveryFailed(_)
             | Self::TokenExchangeFailed
             | Self::RefreshFailed(_)
             | Self::TokenStore(_)
             | Self::AuthLifecycle(_) => false,
         }
-    }
-}
-
-/// Whether a flow-owner error refuses the caller's attempt (unknown,
-/// mismatched or expired state) rather than reporting a flow-owner
-/// persistence or lifecycle failure.
-fn flow_error_is_refusal(error: &OAuthFlowError) -> bool {
-    match error {
-        OAuthFlowError::Missing
-        | OAuthFlowError::BrowserIdentityMismatch
-        | OAuthFlowError::Connector(_)
-        | OAuthFlowError::ProviderMismatch { .. }
-        | OAuthFlowError::RedirectUriMismatch
-        | OAuthFlowError::TargetMismatch { .. }
-        | OAuthFlowError::DevicePollInProgress
-        | OAuthFlowError::DeviceCodeAlreadyAdmitted
-        | OAuthFlowError::DeviceExpiryOutOfRange => true,
-        OAuthFlowError::RegistryProjectionMissing { .. }
-        | OAuthFlowError::StateGenerationFailed
-        | OAuthFlowError::LifecycleRejected { .. }
-        | OAuthFlowError::PersistenceFailed { .. } => false,
     }
 }
 
@@ -1445,9 +1425,23 @@ fn map_refresh_error(error: RefreshError) -> ConnectorLoginError {
     if matches!(&error, RefreshError::ReauthRequired(_))
         || error.refresh_failure_disposition() == Some(RefreshFailureDisposition::ReauthRequired)
     {
-        ConnectorLoginError::ReauthRequired
-    } else {
-        ConnectorLoginError::RefreshFailed(error.to_string())
+        return ConnectorLoginError::ReauthRequired;
+    }
+    match &error {
+        // A failure the token endpoint reported: an upstream failure.
+        RefreshError::Classified { .. } | RefreshError::Observed { .. } => {
+            ConnectorLoginError::RefreshFailed(error.to_string())
+        }
+        // A local lifecycle, lock or closure failure: infrastructure.
+        RefreshError::Refresh(_)
+        | RefreshError::Cancelled
+        | RefreshError::LockFailed(_)
+        | RefreshError::CredentialIdentityMismatch
+        | RefreshError::RequiredScopesNotGranted
+        | RefreshError::ReauthRequired(_)
+        | RefreshError::DurableTerminalCommit { .. } => {
+            ConnectorLoginError::AuthLifecycle(error.to_string())
+        }
     }
 }
 
@@ -1505,7 +1499,7 @@ mod tests {
                 Err("transition rejected".into()),
                 refusal,
             ));
-            assert!(matches!(error, ConnectorLoginError::RefreshFailed(_)));
+            assert!(matches!(error, ConnectorLoginError::AuthLifecycle(_)));
             assert!(!error.is_refusal());
         }
     }

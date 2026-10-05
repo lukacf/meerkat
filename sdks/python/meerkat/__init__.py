@@ -380,6 +380,9 @@ from .types import (
 
 # Error hierarchy
 from .errors import (
+    WIRE_AUTH_ERROR_REASONS,
+    WireAuthErrorReason,
+    auth_error_reason,
     CapabilityUnavailableError,
     HostUnavailableError,
     MULTI_HOST_JSON_RPC_ERROR_CODES,
@@ -800,6 +803,9 @@ __all__ = [
     "TextBlock",
     # Errors
     "MeerkatError",
+    "WIRE_AUTH_ERROR_REASONS",
+    "WireAuthErrorReason",
+    "auth_error_reason",
     "CapabilityUnavailableError",
     "HostUnavailableError",
     "MULTI_HOST_JSON_RPC_ERROR_CODES",

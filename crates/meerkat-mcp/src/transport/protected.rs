@@ -257,6 +257,7 @@ pub(crate) fn protected_http_client() -> io::Result<&'static reqwest::Client> {
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .no_proxy()
+                .retry(reqwest::retry::never())
                 .build()
         });
     CLIENT
@@ -277,6 +278,17 @@ pub(crate) fn restore_metadata(message: &mut ClientJsonRpcMessage) {
             .0
             .extend(metadata.0.clone());
     }
+}
+
+/// Serialize once at the final transport boundary and enforce the encoded
+/// frame bound before any bytes are written or sent.
+pub(crate) fn serialize_bounded_message(mut message: ClientJsonRpcMessage) -> io::Result<Vec<u8>> {
+    restore_metadata(&mut message);
+    let bytes = serde_json::to_vec(&message).map_err(|_| invalid_frame())?;
+    if bytes.len() > MAX_FRAME_BYTES {
+        return Err(invalid_frame());
+    }
+    Ok(bytes)
 }
 
 /// Match rmcp 1.8's optional-notification compatibility without its raw-frame
@@ -398,12 +410,8 @@ struct ProtectedOutputCodec;
 impl Encoder<ClientJsonRpcMessage> for ProtectedOutputCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, mut item: ClientJsonRpcMessage, buffer: &mut BytesMut) -> io::Result<()> {
-        restore_metadata(&mut item);
-        let bytes = serde_json::to_vec(&item).map_err(|_| invalid_frame())?;
-        if bytes.len() > MAX_FRAME_BYTES {
-            return Err(invalid_frame());
-        }
+    fn encode(&mut self, item: ClientJsonRpcMessage, buffer: &mut BytesMut) -> io::Result<()> {
+        let bytes = serialize_bounded_message(item)?;
         buffer.extend_from_slice(&bytes);
         buffer.extend_from_slice(b"\n");
         Ok(())

@@ -30,6 +30,23 @@ fn response() -> Value {
 }
 
 #[test]
+fn protected_http_client_explicitly_disables_protocol_nack_retries() {
+    // Configuration pin only: reqwest does not expose a client's retry policy.
+    // This does not claim to exercise HTTP/2 NACK behavior. Scope the assertion
+    // to the actual builder so an unrelated call cannot satisfy it.
+    let function = include_str!("protected.rs")
+        .split_once("pub(crate) fn protected_http_client()")
+        .unwrap()
+        .1
+        .split_once("\n}")
+        .unwrap()
+        .0;
+    let compact: String = function.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.contains(".retry(reqwest::retry::never())"));
+    assert_eq!(compact.matches(".retry(").count(), 1);
+}
+
+#[test]
 fn metadata_is_opaque_until_final_wire_encoding() {
     let call = message(true);
     assert!(!format!("{call:?}").contains(SECRET));
@@ -141,6 +158,183 @@ impl HttpFixture {
             axum::serve(listener, app).await.unwrap();
         });
         Self { url, task }
+    }
+}
+
+#[tokio::test]
+async fn outgoing_http_frame_bound_is_checked_before_sending() {
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::ACCEPTED
+            }
+        }),
+    ))
+    .await;
+    let http = ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
+    let sse = ReqwestSseClient::new(Default::default());
+    http.post_message(
+        server.url.clone().into(),
+        message(false),
+        None,
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    sse.post_message(server.url.parse().unwrap(), message(false), None)
+        .await
+        .unwrap();
+    assert_eq!(received.load(Ordering::SeqCst), 2);
+
+    fn oversized_message(protected: bool) -> ClientJsonRpcMessage {
+        let mut message = message(protected);
+        let ClientJsonRpcMessage::Request(request) = &mut message else {
+            panic!("expected request")
+        };
+        let ClientRequest::CallToolRequest(call) = &mut request.request else {
+            panic!("expected tool call")
+        };
+        // The source string fits in the frame bound; JSON escaping doubles it.
+        call.params.arguments = Some(Map::from_iter([(
+            "payload".into(),
+            Value::String("\\".repeat(MAX_FRAME_BYTES / 2)),
+        )]));
+        message
+    }
+    for protected in [false, true] {
+        let error = http
+            .post_message(
+                server.url.clone().into(),
+                oversized_message(protected),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, StreamableHttpError::UnexpectedServerResponse(message)
+            if message == "invalid or oversized MCP JSON-RPC frame")
+        );
+        let error = sse
+            .post_message(
+                server.url.parse().unwrap(),
+                oversized_message(protected),
+                None,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, SseTransportError::Io(error)
+            if error.to_string() == "invalid or oversized MCP JSON-RPC frame"));
+    }
+    assert_eq!(received.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn bounded_http_encoding_preserves_json_and_content_type_precedence() {
+    use http::header::CONTENT_TYPE;
+    use http::{HeaderMap, HeaderValue};
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(move |headers: HeaderMap, body: axum::body::Bytes| {
+            let sent = sent.clone();
+            async move {
+                sent.send((headers, body)).unwrap();
+                axum::http::StatusCode::ACCEPTED
+            }
+        }),
+    ))
+    .await;
+
+    async fn assert_request(
+        received: &mut tokio::sync::mpsc::UnboundedReceiver<(HeaderMap, axum::body::Bytes)>,
+        content_types: &[&str],
+        protected: bool,
+    ) {
+        let (headers, body) = tokio::time::timeout(LIMIT, received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let actual: Vec<_> = headers
+            .get_all(CONTENT_TYPE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(actual, content_types);
+        let mut expected = serde_json::to_value(message(false)).unwrap();
+        if protected {
+            expected["params"]["_meta"] = json!({KEY: SECRET});
+        }
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+    }
+
+    for protected in [false, true] {
+        for configured in [false, true] {
+            let mut headers = HeaderMap::new();
+            if configured {
+                headers.insert(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("application/example"),
+                );
+            }
+            let http =
+                ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), headers.clone());
+            http.post_message(
+                server.url.clone().into(),
+                message(protected),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            assert_request(
+                &mut received,
+                &[if configured {
+                    "application/example"
+                } else {
+                    "application/json"
+                }],
+                protected,
+            )
+            .await;
+
+            let sse = ReqwestSseClient::new(headers);
+            sse.post_message(server.url.parse().unwrap(), message(protected), None)
+                .await
+                .unwrap();
+            let expected: &[&str] = if configured {
+                &["application/json", "application/example"]
+            } else {
+                &["application/json"]
+            };
+            assert_request(&mut received, expected, protected).await;
+        }
+
+        let http =
+            ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
+        http.post_message(
+            server.url.clone().into(),
+            message(protected),
+            None,
+            None,
+            std::collections::HashMap::from_iter([(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/custom"),
+            )]),
+        )
+        .await
+        .unwrap();
+        assert_request(&mut received, &["application/custom"], protected).await;
     }
 }
 

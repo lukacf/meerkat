@@ -1,11 +1,11 @@
 use super::protected::{
     ProtectedMetadataState, has_protected_metadata, protected_http_client, protected_sse_stream,
-    read_bounded_body, restore_metadata,
+    read_bounded_body, serialize_bounded_message,
 };
 use futures::stream::BoxStream;
 use http::header::WWW_AUTHENTICATE;
 use http::{HeaderName, HeaderValue};
-use reqwest::header::{ACCEPT, HeaderMap};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 use sse_stream::Sse;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -282,7 +282,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
     async fn post_message(
         &self,
         uri: Arc<str>,
-        mut message: ClientJsonRpcMessage,
+        message: ClientJsonRpcMessage,
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
@@ -309,10 +309,19 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         if let Some(session_id) = session_id {
             request = request.header(HEADER_SESSION_ID, session_id.as_ref());
         }
-        restore_metadata(&mut message);
-        let response = request
-            .json(&message)
-            .send()
+        let mut request = request.build().map_err(StreamableHttpError::Client)?;
+        let bytes = serialize_bounded_message(message).map_err(|_| {
+            StreamableHttpError::UnexpectedServerResponse(
+                "invalid or oversized MCP JSON-RPC frame".into(),
+            )
+        })?;
+        request
+            .headers_mut()
+            .entry(CONTENT_TYPE)
+            .or_insert(HeaderValue::from_static(JSON_MIME_TYPE));
+        *request.body_mut() = Some(bytes.into());
+        let response = client
+            .execute(request)
             .await
             .map_err(StreamableHttpError::Client)?;
         self.auth_challenge.record(&response);

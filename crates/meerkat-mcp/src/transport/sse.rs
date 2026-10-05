@@ -1,18 +1,20 @@
 use super::protected::{
     ProtectedMetadataState, has_protected_metadata, protected_http_client, protected_sse_stream,
-    restore_metadata,
+    serialize_bounded_message,
 };
 use futures::StreamExt;
 use futures::{Future, stream::BoxStream};
 use http::Uri;
-use reqwest::header::{ACCEPT, HeaderMap};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 use sse_stream::{Error as SseError, Sse};
 use std::sync::Arc;
 
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use rmcp::service::RoleClient;
 use rmcp::transport::Transport;
-use rmcp::transport::common::http_header::{EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID};
+use rmcp::transport::common::http_header::{
+    EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID, JSON_MIME_TYPE,
+};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SseTransportError<E: std::error::Error + Send + Sync + 'static> {
@@ -268,7 +270,7 @@ impl SseClient for ReqwestSseClient {
     async fn post_message(
         &self,
         uri: Uri,
-        mut message: ClientJsonRpcMessage,
+        message: ClientJsonRpcMessage,
         auth_token: Option<String>,
     ) -> Result<(), SseTransportError<Self::Error>> {
         let protected = has_protected_metadata(&message);
@@ -277,8 +279,11 @@ impl SseClient for ReqwestSseClient {
         } else {
             &self.client
         };
-        restore_metadata(&mut message);
-        let mut request_builder = client.post(uri.to_string()).json(&message);
+        let bytes = serialize_bounded_message(message)?;
+        let mut request_builder = client
+            .post(uri.to_string())
+            .header(CONTENT_TYPE, JSON_MIME_TYPE)
+            .body(bytes);
         request_builder = self.apply_headers(request_builder);
         if let Some(auth_header) = auth_token {
             request_builder = request_builder.bearer_auth(auth_header);

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+machine_drift_by_hook=0
+
 mode="owned"
 base_ref="${BUILDBUDDY_AGENT_BASE:-}"
 local_test=0
@@ -12,7 +14,7 @@ paths=()
 
 usage() {
   cat <<'EOF'
-usage: buildbuddy-agent-gate [--owned|--affected] [--base <rev>] [--staged|--committed|--working-tree] [--local-test] [--clippy-only|--tests-only] [--dry-run] [path ...]
+usage: buildbuddy-agent-gate [--owned|--affected] [--base <rev>] [--staged|--committed|--working-tree] [--local-test] [--clippy-only|--tests-only] [--machine-drift-by-hook] [--dry-run] [path ...]
 
 Runs the opt-in BuildBuddy gate most useful for agent edits. If paths are not
 provided, the script derives changed files from:
@@ -54,6 +56,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --local-test)
       local_test=1
+      shift
+      ;;
+    --machine-drift-by-hook)
+      # The pre-push machine-codegen-drift hook checks machine/protocol
+      # drift for the exact pushed refs; skip the duplicate here.
+      machine_drift_by_hook=1
       shift
       ;;
     --clippy-only)
@@ -271,12 +279,20 @@ fi
 if [[ "${#governance[@]}" -gt 0 ]]; then
   printf 'BuildBuddy agent gate governance/spec paths:\n'
   printf '  %s\n' "${governance[@]}"
-  echo "Formal/governance artifacts changed; running machine-check-drift, machine-authority-docs-gate, runtime-authority-bypass, seam-inventory, and rmat-audit."
+  governance_targets="machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit"
+  summary_targets="machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit"
+  if [[ "${machine_drift_by_hook}" -eq 1 ]]; then
+    governance_targets="${governance_targets#machine-check-drift }"
+    summary_targets="${summary_targets#machine-check-drift }"
+    echo "Machine/protocol drift is checked by the pre-push machine-codegen-drift hook for the pushed refs (--machine-drift-by-hook)."
+  fi
+  echo "Formal/governance artifacts changed; running ${governance_targets// /, }."
   if [[ "${dry_run}" -eq 1 ]]; then
-    echo "DRY-RUN make machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit"
-    echo "DRY-RUN generated-artifact summary: make machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit"
+    echo "DRY-RUN make ${governance_targets}"
+    echo "DRY-RUN generated-artifact summary: make ${summary_targets}"
   else
-    make machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit
+    # shellcheck disable=SC2086
+    make ${governance_targets}
   fi
 fi
 

@@ -1723,8 +1723,21 @@ fn head_canonical_activation_predecessor_matches(
     predecessor: &meerkat_core::session_store::SessionHead,
     successor: &meerkat_core::session_store::SessionHead,
 ) -> Result<bool, RuntimeStoreError> {
+    let version_matches = predecessor
+        .restored_session_version()
+        .and_then(|version| {
+            successor
+                .restored_session_version()
+                .map(|successor_version| version == successor_version)
+        })
+        .map_err(
+            |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: predecessor.id.to_string(),
+                detail: format!("HeadCanonical activation envelope cannot be restored: {error}"),
+            },
+        )?;
     if predecessor.id != successor.id
-        || predecessor.version != successor.version
+        || !version_matches
         || predecessor.strand != successor.strand
         || predecessor.head_revision != successor.head_revision
         || predecessor.message_count != successor.message_count
@@ -2196,9 +2209,12 @@ impl PreparedDurableTailRecoverySource {
                     "committed recovery metadata identity is invalid: {error}"
                 ))
             })?;
+        let committed_version = boundary_head.restored_session_version().map_err(|error| {
+            conflict(format!("committed recovery envelope is invalid: {error}"))
+        })?;
         if committed_session.messages().len() as u64 != boundary_head.message_count
             || committed_revision != boundary_head.head_revision
-            || committed_session.version() != boundary_head.version
+            || committed_session.version() != committed_version
             || committed_session.created_at() != boundary_head.created_at
             || committed_session.updated_at() != boundary_head.updated_at
             || committed_session.total_usage() != boundary_head.usage
@@ -2209,7 +2225,7 @@ impl PreparedDurableTailRecoverySource {
                      (message_count={}, revision={}, version={}, created_at={}, updated_at={}, usage={}, metadata={})",
                 committed_session.messages().len() as u64 == boundary_head.message_count,
                 committed_revision == boundary_head.head_revision,
-                committed_session.version() == boundary_head.version,
+                committed_session.version() == committed_version,
                 committed_session.created_at() == boundary_head.created_at,
                 committed_session.updated_at() == boundary_head.updated_at,
                 committed_session.total_usage() == boundary_head.usage,
@@ -2226,9 +2242,12 @@ impl PreparedDurableTailRecoverySource {
                 "physical recovery metadata identity is invalid: {error}"
             ))
         })?;
+        let physical_version = physical_head
+            .restored_session_version()
+            .map_err(|error| conflict(format!("physical recovery envelope is invalid: {error}")))?;
         if physical_session.messages().len() as u64 != physical_head.message_count
             || physical_revision != physical_head.head_revision
-            || physical_session.version() != physical_head.version
+            || physical_session.version() != physical_version
             || physical_session.created_at() != physical_head.created_at
             || physical_session.updated_at() != physical_head.updated_at
             || physical_session.total_usage() != physical_head.usage

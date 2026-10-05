@@ -2036,7 +2036,8 @@ pub struct VerifiedSessionRowLineageReplay {
 #[serde(rename_all = "snake_case")]
 pub struct SessionHead {
     pub id: SessionId,
-    /// Session envelope version (`Session::version`).
+    /// Exact persisted envelope version, included in the physical CAS token.
+    /// See [`Self::restored_session_version`] for the materialized Session version.
     pub version: u32,
     pub strand: TranscriptStrandId,
     /// `transcript_messages_digest` of the live messages.
@@ -2387,6 +2388,38 @@ impl VerifiedSessionHeadMaterialization {
 }
 
 impl SessionHead {
+    /// Semantic envelope version authorized by the persistence machine.
+    ///
+    /// A supported older head remains byte-exact for CAS verification. Only
+    /// its materialized Session adopts the restored version; this method never
+    /// changes the stored head or its token.
+    pub fn restored_session_version(&self) -> Result<u32, SessionStoreError> {
+        crate::generated::session_persistence_version_authority::restore_session_envelope_version(
+            self.version,
+        )
+        .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+            id: self.id.clone(),
+            reason: error.to_string(),
+        })
+    }
+
+    /// Require the current envelope before minting a new persisted head.
+    ///
+    /// Read migration may retain an older physical predecessor, but every
+    /// successor must fence readers that cannot honor current callback state.
+    pub fn require_current_envelope_for_write(&self) -> Result<(), SessionStoreError> {
+        if self.version != SESSION_VERSION {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: self.id.clone(),
+                reason: format!(
+                    "new session head requires envelope version {SESSION_VERSION}, got {}",
+                    self.version
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Begin exact cold replay at this head's bounded lineage origin.
     #[doc(hidden)]
     pub fn begin_row_lineage_replay(&self) -> Result<SessionRowLineageReplay, SessionStoreError> {
@@ -2423,9 +2456,10 @@ impl SessionHead {
         self,
         session: Session,
     ) -> Result<VerifiedSessionHeadMaterialization, SessionStoreError> {
-        if session.id() != &self.id {
+        if session.id() != &self.id || session.version() != self.restored_session_version()? {
             return Err(SessionStoreError::Corrupted(self.id));
         }
+        let expected_token = session_head_cas_token(&self)?;
         let expected_row_prefix = self.message_row_prefix.clone().ok_or_else(|| {
             SessionStoreError::InvalidTranscriptRewrite {
                 id: self.id.clone(),
@@ -2451,7 +2485,7 @@ impl SessionHead {
                         .to_string(),
             });
         }
-        let projected = Self::from_session_with_message_row_prefix(
+        let mut projected = Self::from_session_with_message_row_prefix(
             &session,
             self.strand.clone(),
             self.rewrite_count,
@@ -2460,7 +2494,10 @@ impl SessionHead {
             self.row_lineage_anchor.clone(),
             self.realtime_event_prefix.is_some(),
         )?;
-        let expected_token = session_head_cas_token(&self)?;
+        // Compare the materialized semantics against the exact persisted
+        // envelope. The generated read migration was checked above; only this
+        // temporary verification projection takes the predecessor's version.
+        projected.version = self.version;
         let actual_token = session_head_cas_token(&projected)?;
         if actual_token != expected_token {
             return Err(SessionStoreError::TranscriptRevisionConflict {
@@ -3151,8 +3188,10 @@ pub enum SessionHeadCas {
 /// Trusted-backend assertion of current HeadCanonical physical authority.
 ///
 /// Construction consumes complete verified materialization data, re-derives
-/// the token from its head, and refuses every pre-current representation. This
-/// proves content consistency, not storage provenance: the trusted backend is
+/// the token from its head, and refuses unsupported storage representations.
+/// A supported older envelope retains its exact head and token while the
+/// persistence machine restores its materialized Session to the current version.
+/// This proves content consistency, not storage provenance: the trusted backend is
 /// responsible for reading the materialization inputs and stored token from
 /// one storage snapshot. Consumers must accept this assertion only as the
 /// direct result of [`IncrementalSessionStore::cross_head_canonical_authority`].
@@ -3200,9 +3239,7 @@ impl VerifiedHeadCanonicalAuthority {
 }
 
 fn validate_current_head_canonical_authority(head: &SessionHead) -> Result<(), SessionStoreError> {
-    if head.version != SESSION_VERSION {
-        return Err(SessionStoreError::Corrupted(head.id.clone()));
-    }
+    head.restored_session_version()?;
     validate_session_head_storage_representation(head)?;
     let Some(message_row_prefix) = head.message_row_prefix.as_ref() else {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
@@ -5582,6 +5619,7 @@ pub fn validate_save_head_transition(
     new_strand_len: u64,
     recorded_rewrites: u64,
 ) -> Result<(), SessionStoreError> {
+    head.require_current_envelope_for_write()?;
     validate_session_head_storage_representation(head)?;
     validate_model_routing_control_durable_transition(
         &head.id,
@@ -5808,7 +5846,7 @@ pub fn validate_commit_rewrite_transition(
         SessionMessageRowPrefixAccumulator::from_messages(&record.revision_body.messages)?;
     Ok(SessionHead {
         id: id.clone(),
-        version: stored.version,
+        version: stored.restored_session_version()?,
         // Occurrence-named: a recurring revision (`A -> B -> ... -> B`) must
         // not re-target an existing strand. See `commit_rewrite`.
         strand: TranscriptStrandId::from_rewrite_occurrence(&record.commit),
@@ -8700,6 +8738,52 @@ mod tests {
             head.verify_materialized_session(changed).is_err(),
             "a session that no longer re-projects to the exact head must fail closed"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn compact_v3_head_verifies_normalized_session_without_changing_physical_cas() {
+        let (session, mut head) = acknowledged_head_canonical_root_with_metadata();
+        // Synthetic supported historical head over the helper's exact row
+        // lineage. The hydrated Session already has the current semantics.
+        head.version = 3;
+        let original_bytes = serde_json::to_vec(&head).expect("synthetic v3 compact bytes");
+        let compact: SessionHead =
+            serde_json::from_slice(&original_bytes).expect("cold compact head");
+        let original_token = session_head_cas_token(&compact).expect("original physical CAS");
+
+        let verified = compact
+            .clone()
+            .verify_materialized_session(session.clone())
+            .expect("supported v3 head must verify its normalized v4 Session");
+        assert_eq!(verified.session().version(), 4);
+        assert_eq!(verified.session().messages(), session.messages());
+        assert_eq!(verified.session().metadata(), session.metadata());
+        assert_eq!(
+            serde_json::to_vec(verified.head()).expect("retained physical head bytes"),
+            original_bytes
+        );
+        assert_eq!(
+            session_head_cas_token(verified.head()).expect("retained physical CAS"),
+            original_token
+        );
+
+        let mut changed = session.clone();
+        changed.set_metadata("a", serde_json::json!(9));
+        assert!(matches!(
+            compact.clone().verify_materialized_session(changed),
+            Err(SessionStoreError::TranscriptRevisionConflict { .. })
+        ));
+        for unsupported in [0, 2, 5, u32::MAX] {
+            let mut invalid = compact.clone();
+            invalid.version = unsupported;
+            assert!(
+                invalid
+                    .verify_materialized_session(session.clone())
+                    .is_err(),
+                "normalization must not admit unsupported physical version {unsupported}"
+            );
+        }
     }
 
     #[test]

@@ -174,11 +174,11 @@ pub use transcript_history::{
 
 /// Current session format version.
 ///
-/// The persisted `version` byte is mandatory and fail-closed: a stored row
-/// with a missing or non-current version is rejected at the serde boundary by
-/// the generated persistence version authority. The exact released 0.8.10
-/// envelope crosses only the explicit one-time importer; ordinary reads never
-/// silently default or upgrade an envelope.
+/// The persisted `version` is mandatory and fail-closed: missing or unsupported
+/// versions are rejected at the serde boundary by the generated persistence
+/// version authority. Declared older versions restore to the current version
+/// in memory; new writes use the current version. The exact released 0.8.10
+/// envelope crosses only the explicit one-time importer.
 pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
 
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
@@ -1896,8 +1896,8 @@ impl Session {
         self.messages.replace(messages);
     }
 
-    /// Decode one current Session envelope without a full-byte pre-hash or a
-    /// process-global memo lookup.
+    /// Decode one supported Session envelope into the current version without
+    /// a full-byte pre-hash or a process-global memo lookup.
     pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
         crate::digest_observability::record_whole_blob_decode(serialized.len() as u64);
         let session: Self = serde_json::from_slice(serialized)?;
@@ -16832,7 +16832,7 @@ mod tests {
         let bytes = serde_json::to_vec(&value).expect("released envelope should serialize");
 
         Session::from_persisted_bytes(&bytes)
-            .expect_err("ordinary Session decode must accept only current envelope v3");
+            .expect_err("released v2 requires the explicit one-time importer");
     }
 
     /// Corrupt values under either reserved key are a read FAULT for the
@@ -17121,7 +17121,30 @@ mod deferred_tool_failure_tests {
     use super::*;
     use crate::types::{AssistantBlock, AssistantMessageId, BlockAssistantMessage, StopReason};
 
-    fn applied_failure() -> (Session, DeferredToolBatchFailure) {
+    // Byte-exact released v0.8.50 authority, commit
+    // acb56f7842215294d83fa3f1877cd7c14d294619, source blob
+    // dfd6e1600c3b626b0428d9bbe22e3a59cb28d229. This is only the historical
+    // envelope-version oracle, not an old binary or a full old Session reader.
+    // The text fixture is historical input, not current codegen output.
+    #[allow(dead_code)]
+    mod released_v0_8_50_version_authority {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/v0_8_50_session_persistence_version_authority.rs.txt"
+        ));
+    }
+
+    fn released_v3_reader_accepts_version(bytes: &[u8]) -> bool {
+        #[derive(Deserialize)]
+        struct EnvelopeVersion {
+            version: u32,
+        }
+        let envelope: EnvelopeVersion = serde_json::from_slice(bytes).unwrap();
+        released_v0_8_50_version_authority::restore_session_envelope_version(envelope.version)
+            .is_ok()
+    }
+
+    fn pending_failure() -> (Session, DeferredToolBatchFailure) {
         let run_id = RunId::new();
         let mut assistant = BlockAssistantMessage::new(
             ["failed", "callback"]
@@ -17163,6 +17186,11 @@ mod deferred_tool_failure_tests {
                 deferred_failure: Some(failure.clone()),
             })
             .unwrap();
+        (session, failure)
+    }
+
+    fn applied_failure() -> (Session, DeferredToolBatchFailure) {
+        let (session, failure) = pending_failure();
         let mut session: Session =
             serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
         assert_eq!(
@@ -17191,6 +17219,199 @@ mod deferred_tool_failure_tests {
             .unwrap();
         let session = serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
         (session, failure)
+    }
+
+    fn assert_saved_failure_rejects_released_reader(
+        session: Session,
+        failure: DeferredToolBatchFailure,
+    ) {
+        let bytes = session.to_persisted_bytes().expect("real Session writer");
+        let restored = Session::from_persisted_bytes(&bytes).expect("current reader");
+        assert_eq!(restored.id(), session.id());
+        assert_eq!(restored.messages(), session.messages());
+        assert_eq!(
+            restored.callback_tool_batch_state().unwrap(),
+            session.callback_tool_batch_state().unwrap(),
+            "saving cannot strip the exact callback state or retained failure"
+        );
+        match restored.callback_tool_batch_state().unwrap().unwrap() {
+            CallbackToolBatchState::Pending { batch } => {
+                assert_eq!(batch.deferred_failure, Some(failure));
+            }
+            CallbackToolBatchState::Applied { .. } => {
+                assert_eq!(
+                    restored
+                        .deferred_callback_continuation()
+                        .unwrap()
+                        .unwrap()
+                        .failure,
+                    failure
+                );
+            }
+        }
+
+        // A synthetic v3 positive control proves this historical oracle is
+        // usable. Only the version is changed; the actual saved batch remains
+        // present, demonstrating why an older version fence is insufficient.
+        let mut v3_control: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        v3_control["version"] = serde_json::json!(3);
+        assert!(released_v3_reader_accepts_version(
+            &serde_json::to_vec(&v3_control).unwrap()
+        ));
+        assert!(
+            !released_v3_reader_accepts_version(&bytes),
+            "newly saved fenced work must be rejected by the released v3-only authority"
+        );
+    }
+
+    #[test]
+    fn persisted_pending_failure_rejects_released_v3_reader() {
+        let (session, failure) = pending_failure();
+        assert_saved_failure_rejects_released_reader(session, failure);
+    }
+
+    #[test]
+    fn persisted_applied_failure_rejects_released_v3_reader() {
+        let (session, failure) = applied_failure();
+        assert_saved_failure_rejects_released_reader(session, failure);
+    }
+
+    #[test]
+    fn v3_pending_and_applied_callback_facts_survive_upgrade() {
+        for applied in [false, true] {
+            for retained_failure in [false, true] {
+                let (session, failure) = if applied {
+                    applied_failure()
+                } else {
+                    pending_failure()
+                };
+                let mut expected = session.callback_tool_batch_state().unwrap().unwrap();
+                let mut fixture: serde_json::Value =
+                    serde_json::from_slice(&session.to_persisted_bytes().unwrap()).unwrap();
+                // Synthetic backward-read input, not a released capture. The
+                // v3 envelope is fixed independently of the current writer.
+                fixture["version"] = serde_json::json!(3);
+                if !retained_failure {
+                    let state = &mut fixture["metadata"][SESSION_PENDING_CALLBACK_BATCH_KEY];
+                    let record = if applied { state } else { &mut state["batch"] };
+                    record.as_object_mut().unwrap().remove("deferred_failure");
+                    match &mut expected {
+                        CallbackToolBatchState::Pending { batch } => batch.deferred_failure = None,
+                        CallbackToolBatchState::Applied {
+                            deferred_failure, ..
+                        } => {
+                            *deferred_failure = None;
+                        }
+                    }
+                }
+                let fixture = serde_json::to_vec(&fixture).unwrap();
+                assert!(released_v3_reader_accepts_version(&fixture));
+                let mut restored = Session::from_persisted_bytes(&fixture)
+                    .expect("supported v3 state must remain readable");
+                assert_eq!(restored.id(), session.id());
+                assert_eq!(restored.messages(), session.messages());
+                assert_eq!(
+                    restored.callback_tool_batch_state().unwrap(),
+                    Some(expected)
+                );
+
+                let incoming = ToolResult::new("callback".into(), "answered".into(), false);
+                assert_eq!(
+                    restored
+                        .classify_callback_result_ingress(std::slice::from_ref(&incoming))
+                        .unwrap(),
+                    if applied {
+                        CallbackResultIngress::AlreadyApplied
+                    } else {
+                        CallbackResultIngress::Pending {
+                            pending_tool_use_ids: vec!["callback".into()],
+                        }
+                    }
+                );
+                if !applied {
+                    let ResolvedPendingCallbackToolResults::Pending {
+                        batch,
+                        ordered_results,
+                    } = restored
+                        .resolve_pending_callback_tool_results(vec![incoming])
+                        .unwrap()
+                    else {
+                        panic!("v3 pending batch must resolve through its existing owner");
+                    };
+                    assert_eq!(
+                        ordered_results
+                            .iter()
+                            .map(|result| result.tool_use_id.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["failed", "callback"]
+                    );
+                    assert_eq!(
+                        ordered_results[0].text_content(),
+                        "fixed infrastructure result"
+                    );
+                    assert!(ordered_results[0].is_error);
+                    assert_eq!(ordered_results[1].text_content(), "answered");
+                    assert!(!ordered_results[1].is_error);
+                    restored
+                        .commit_pending_callback_tool_results(&batch, ordered_results, Vec::new())
+                        .unwrap();
+                }
+                assert_eq!(
+                    restored
+                        .deferred_callback_continuation()
+                        .unwrap()
+                        .map(|value| value.failure),
+                    retained_failure.then_some(failure),
+                    "missing historical failure means None; a present failure must survive"
+                );
+                let rewritten = restored.to_persisted_bytes().unwrap();
+                let reopened = Session::from_persisted_bytes(&rewritten).unwrap();
+                assert_eq!(
+                    reopened.callback_tool_batch_state().unwrap(),
+                    restored.callback_tool_batch_state().unwrap()
+                );
+                assert!(
+                    !released_v3_reader_accepts_version(&rewritten),
+                    "upgraded callback state must not be written back into the unsafe old envelope"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_present_failure_kind_cannot_settle_pending_or_applied_callback() {
+        for applied in [false, true] {
+            for legacy_v3 in [false, true] {
+                let (session, _) = if applied {
+                    applied_failure()
+                } else {
+                    pending_failure()
+                };
+                let mut corrupt: serde_json::Value =
+                    serde_json::from_slice(&session.to_persisted_bytes().unwrap()).unwrap();
+                if legacy_v3 {
+                    corrupt["version"] = serde_json::json!(3);
+                }
+                let state = &mut corrupt["metadata"][SESSION_PENDING_CALLBACK_BATCH_KEY];
+                let record = if applied { state } else { &mut state["batch"] };
+                record["deferred_failure"]["kind"] = serde_json::json!("unknown_future_failure");
+                let bytes = serde_json::to_vec(&corrupt).unwrap();
+                let Ok(restored) = Session::from_persisted_bytes(&bytes) else {
+                    // Rejecting at the envelope boundary is also safe.
+                    continue;
+                };
+                let before = restored.to_persisted_bytes().unwrap();
+                restored
+                    .classify_callback_result_ingress(&[ToolResult::new(
+                        "callback".into(),
+                        "answered".into(),
+                        false,
+                    )])
+                    .expect_err("unknown failure cannot admit an otherwise exact callback result");
+                assert!(restored.deferred_callback_continuation().is_err());
+                assert_eq!(restored.to_persisted_bytes().unwrap(), before);
+            }
+        }
     }
 
     #[test]

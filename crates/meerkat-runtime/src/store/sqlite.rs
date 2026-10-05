@@ -7449,9 +7449,12 @@ ORDER BY runtime_id";
                 tx, head,
             )
             .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?;
+        let restored_version = head
+            .restored_session_version()
+            .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?;
         if session.id() != authority.session_id()
             || session.messages().len() as u64 != head.message_count
-            || session.version() != head.version
+            || session.version() != restored_version
             || session.created_at() != head.created_at
             || session.updated_at() != head.updated_at
             || session.total_usage() != head.usage
@@ -16920,6 +16923,8 @@ ORDER BY runtime_id";
             };
 
             let mut predecessor = verified.head().clone();
+            assert_eq!(verified.head().version, 4);
+            predecessor.version = 3;
             let inline_metadata = predecessor.materialized_metadata().unwrap();
             predecessor.message_row_prefix = None;
             predecessor.row_lineage_anchor = None;
@@ -19399,6 +19404,17 @@ ORDER BY runtime_id";
 
         #[tokio::test]
         async fn head_canonical_provisional_chain_advances_each_physical_checkpoint_then_commits() {
+            assert_head_canonical_provisional_chain(false).await;
+        }
+
+        #[tokio::test]
+        async fn head_canonical_v3_provisional_chain_preserves_old_authority_until_successor_write()
+        {
+            assert_eq!(meerkat_core::SESSION_VERSION, 4);
+            assert_head_canonical_provisional_chain(true).await;
+        }
+
+        async fn assert_head_canonical_provisional_chain(envelope_v3: bool) {
             let dir = TempDir::new().unwrap();
             let path = dir.path().join("head-authority-revisions.sqlite3");
             let runtime_store = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
@@ -19406,6 +19422,59 @@ ORDER BY runtime_id";
             let session = session_with_user("committed base");
             let session_id = session.id().clone();
             let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            // Seed supported old bytes directly, because a current writer must
+            // never emit v3. Preserve every non-version fact and bind the old
+            // physical, retained, and provisional identities to the old CAS.
+            let seed_v3_head = || {
+                let mut conn = open_runtime_connection(&path).unwrap();
+                let tx = conn.transaction().unwrap();
+                let (bytes, previous_token) = tx
+                    .query_row(
+                        "SELECT head_json, cas_token FROM session_heads WHERE session_id = ?1",
+                        params![session_id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get::<_, JsonColumnBytes>(0)?.into_bytes(),
+                                row.get::<_, String>(1)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                let mut head: meerkat_core::session_store::SessionHead =
+                    serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    meerkat_core::session_head_cas_token(&head).unwrap(),
+                    previous_token
+                );
+                head.version = 3;
+                let token = meerkat_core::session_head_cas_token(&head).unwrap();
+                let bytes = serde_json::to_vec(&head).unwrap();
+                assert_eq!(
+                    tx.execute(
+                        "UPDATE session_heads SET version = 3, head_json = ?2, cas_token = ?3 \
+                         WHERE session_id = ?1",
+                        params![session_id.to_string(), &bytes, &token],
+                    )
+                    .unwrap(),
+                    1
+                );
+                tx.execute(
+                    "UPDATE runtime_session_authority \
+                     SET boundary_head_json = ?2, committed_head_token = ?3 \
+                     WHERE session_id = ?1 AND committed_head_token = ?4",
+                    params![session_id.to_string(), &bytes, &token, &previous_token],
+                )
+                .unwrap();
+                tx.execute(
+                    "UPDATE runtime_head_canonical_provisional_tails \
+                     SET physical_head_token = ?2 \
+                     WHERE session_id = ?1 AND physical_head_token = ?3",
+                    params![session_id.to_string(), &token, &previous_token],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                (bytes, token)
+            };
 
             let root = PreparedHeadCanonicalMutation::prepare_root(&session).unwrap();
             let committed = runtime_store
@@ -19422,6 +19491,24 @@ ORDER BY runtime_id";
                 .and_then(RuntimeSessionAuthority::head_canonical)
                 .expect("root HeadCanonical authority")
                 .clone();
+            let v3_boundary_row = if envelope_v3 {
+                Some(seed_v3_head())
+            } else {
+                None
+            };
+            let committed = if envelope_v3 {
+                let retained = runtime_store
+                    .load_session_boundary_authority(&runtime_id)
+                    .await
+                    .unwrap()
+                    .expect("v3 retained authority");
+                let retained = retained.head_canonical().unwrap();
+                assert_eq!(retained.boundary_head().version, 3);
+                assert_eq!(retained.store_revision(), committed.store_revision());
+                retained.clone()
+            } else {
+                committed
+            };
 
             let observed_head = physical_store
                 .load_head(&session_id)
@@ -19466,11 +19553,90 @@ ORDER BY runtime_id";
                     .as_ref(),
                 Some(&provisional)
             );
+            if envelope_v3 {
+                let source = runtime_store
+                    .load_durable_tail_recovery_source(&runtime_id)
+                    .await
+                    .unwrap()
+                    .expect("v3 boundary with an unapplied current intent");
+                assert_eq!(source.physical_head(), committed.boundary_head());
+                assert_eq!(
+                    source.physical_head_cas_token(),
+                    committed.committed_head_token()
+                );
+                assert_eq!(source.committed_session().version(), 4);
+                assert_eq!(source.physical_session().version(), 4);
+                assert_eq!(source.provisional_authority(), Some(&provisional));
+                assert!(!source.provisional_target_applied());
+            }
 
             physical_store
                 .apply_prepared_head_canonical_mutation(&tail)
                 .await
                 .unwrap();
+            let provisional = if let Some((boundary_bytes, boundary_token)) = &v3_boundary_row {
+                let (physical_bytes, physical_token) = seed_v3_head();
+                let reopened = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+                let source = reopened
+                    .load_durable_tail_recovery_source(&runtime_id)
+                    .await
+                    .unwrap()
+                    .expect("v3 retained boundary with an applied provisional tail");
+                assert_eq!(
+                    source.runtime_authority().head_canonical(),
+                    Some(&committed)
+                );
+                assert_eq!(source.committed_session().version(), 4);
+                assert_eq!(source.physical_session().version(), 4);
+                assert_eq!(source.physical_head().version, 3);
+                assert!(
+                    source.physical_head().message_count > committed.boundary_head().message_count
+                );
+                assert_eq!(source.physical_head_cas_token(), physical_token);
+                assert!(source.provisional_target_applied());
+                let restored_provisional = source.provisional_authority().unwrap();
+                assert_eq!(
+                    restored_provisional.base_committed_head_token(),
+                    boundary_token
+                );
+                assert_eq!(restored_provisional.physical_head_token(), physical_token);
+                assert_eq!(
+                    restored_provisional.physical_store_revision(),
+                    provisional.physical_store_revision()
+                );
+                let conn = open_runtime_connection(&path).unwrap();
+                let raw = conn
+                    .query_row(
+                        "SELECT h.version, h.head_json, h.cas_token, \
+                                a.boundary_head_json, a.committed_head_token \
+                         FROM session_heads h JOIN runtime_session_authority a \
+                           ON h.session_id = a.session_id WHERE h.session_id = ?1",
+                        params![session_id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                                row.get::<_, String>(2)?,
+                                row.get::<_, JsonColumnBytes>(3)?.into_bytes(),
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    raw,
+                    (
+                        3,
+                        physical_bytes,
+                        physical_token,
+                        boundary_bytes.clone(),
+                        boundary_token.clone()
+                    )
+                );
+                restored_provisional.clone()
+            } else {
+                provisional
+            };
             let observed_head = physical_store
                 .load_head(&session_id)
                 .await
@@ -19484,6 +19650,10 @@ ORDER BY runtime_id";
             resumed.push(Message::User(UserMessage::text("second provisional tail")));
             let second_tail =
                 PreparedHeadCanonicalMutation::prepare(&resumed, Some(observed_head)).unwrap();
+            assert_eq!(
+                second_tail.successor_head().version,
+                meerkat_core::SESSION_VERSION
+            );
             let second_candidate = resumed.clone();
             let second_prepared = PreparedHeadCanonicalProvisionalTail::prepare(
                 committed.clone(),
@@ -19524,6 +19694,25 @@ ORDER BY runtime_id";
                 .apply_prepared_head_canonical_mutation(&second_tail)
                 .await
                 .unwrap();
+            let source = runtime_store
+                .load_durable_tail_recovery_source(&runtime_id)
+                .await
+                .unwrap()
+                .expect("current successor with the original retained boundary");
+            assert_eq!(
+                source.runtime_authority().head_canonical(),
+                Some(&committed)
+            );
+            assert_eq!(
+                source.physical_head().version,
+                meerkat_core::SESSION_VERSION
+            );
+            assert_eq!(
+                source.physical_head_cas_token(),
+                second_tail.successor_head_token()
+            );
+            assert_eq!(source.provisional_authority(), Some(&second_provisional));
+            assert!(source.provisional_target_applied());
             let observed_head = physical_store
                 .load_head(&session_id)
                 .await

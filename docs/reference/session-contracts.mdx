@@ -484,7 +484,7 @@ Persistent session metadata is the source of truth for resumed durable session b
 
 ### Domain document and store authority
 
-The current Session envelope is version 3 and contains domain state only. It
+The current Session envelope is version 4 and contains domain state only. It
 does not authenticate itself and does not carry a persistence token. A
 deserialized `Session` cannot authorize a write, migration, or recovery
 operation.
@@ -496,6 +496,13 @@ The selected store profile issues the physical authority:
 - **HeadCanonical** — `session_id`, monotonic store revision, the committed
   boundary head, and its exact head token. The boundary head binds the
   message-row, rewrite, graph, component, and metadata prefixes.
+
+Version 3 remains a supported read format. The generated persistence version
+authority restores it to version 4 in memory; new Session and physical-head
+writes use version 4. HeadCanonical reads preserve the original persisted v3
+head and CAS token. Retained runtime boundaries and provisional references keep
+that exact identity until normal writes advance them. Reading alone does not
+rewrite the envelope.
 
 RuntimeStore also maintains a small catalog entry in the same atomic boundary
 as physical authority. The catalog can answer listing and lifecycle discovery,

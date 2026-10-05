@@ -403,11 +403,18 @@ async fn deferred_case(callback: bool) {
             staged["batch"]["deferred_failure"]["source_run_id"],
             staged["batch"]["run_id"]
         );
-        let restored: Session = serde_json::from_value(
-            serde_json::to_value(agent.session()).expect("serialize staged owner"),
-        )
-        .expect("restore staged owner");
+        let pending_bytes = agent
+            .session()
+            .to_persisted_bytes()
+            .expect("save pending callback and exact retained failure");
+        let restored = Session::from_persisted_bytes(&pending_bytes)
+            .expect("reopen pending callback through the persisted envelope owner");
         *agent.session_mut() = restored;
+        assert_eq!(
+            agent.session().metadata()["session_pending_callback_batch_v1"],
+            staged,
+            "Pending reopen preserves the complete sibling batch and failure identity"
+        );
         let before_bad = serde_json::to_value(agent.session()).expect("before invalid callback");
         assert!(
             agent
@@ -446,6 +453,17 @@ async fn deferred_case(callback: bool) {
         assert_eq!(
             serde_json::to_value(agent.session()).expect("redelivered batch"),
             after_apply
+        );
+        let applied_bytes = agent
+            .session()
+            .to_persisted_bytes()
+            .expect("save applied callback and exact retained failure");
+        *agent.session_mut() = Session::from_persisted_bytes(&applied_bytes)
+            .expect("reopen Applied before sibling settlement and model continuation");
+        assert_eq!(
+            serde_json::to_value(agent.session()).expect("reopened applied batch"),
+            after_apply,
+            "Applied reopen cannot forget the deferred stop or duplicate sibling effects"
         );
     }
 

@@ -1172,8 +1172,6 @@ struct State {
     instructions_append_texts: Vec<String>,
     /// Running count of owned thinking-append attempts seen on the wire.
     thinking_append_attempts: usize,
-    /// Bounded copy of the attempted thinking-append texts, for echo checks.
-    thinking_append_texts: Vec<String>,
     /// Owned instructions-lane appends the provider acknowledged (matched an
     /// owned client event id and was accepted).
     instructions_acknowledged: usize,
@@ -1371,7 +1369,6 @@ impl Journal {
                 session_input_texts: Vec::new(),
                 session_commentary_appends: Vec::new(),
                 thinking_append_attempts: 0,
-                thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
                 framed_summary_attempts: 0,
                 instructions_appends: HashMap::new(),
@@ -1743,9 +1740,6 @@ impl Journal {
             {
                 let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
                 state.thinking_append_attempts += 1;
-                if state.thinking_append_texts.len() < thinking_capture::Capture::MAX_EVENTS {
-                    state.thinking_append_texts.push(text.clone());
-                }
                 // Fragments of one thinking append share the token in their
                 // client event id (`meerkat-thinking-<token>-<index>`).
                 let token = client_event_id
@@ -1966,21 +1960,6 @@ impl Journal {
             thinking_acknowledged: state.thinking_acknowledged,
             framed_summaries: state.framed_summary_attempts,
         })
-    }
-
-    /// Texts of every owned thinking-append attempt so far. Pre-ACK causal
-    /// reassertions may trickle out for a while (the provider acknowledges
-    /// thinking appends at turn boundaries), so echo detection compares
-    /// content, not counts.
-    pub fn thinking_append_attempt_texts(&self) -> Result<Vec<String>, Fault> {
-        self.flush_wire()?;
-        Ok(self
-            .0
-            .state
-            .lock()
-            .map_err(|_| Fault::Poisoned)?
-            .thinking_append_texts
-            .clone())
     }
 
     pub fn require_attached(&self, channel: u32) -> Result<(), Fault> {

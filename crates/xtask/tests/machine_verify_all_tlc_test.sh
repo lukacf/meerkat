@@ -287,6 +287,26 @@ if run_part audits-a; then
   TLC_WORKERS="${tlc_workers}" "${live_worker_start_after_close_audit}" "${LIVE_WORKER_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-22}"
 fi
 
+# The queued heard-speech replays behind a late summary are delivered as one
+# causal-tail batch append over their exact cursor run (Turbo S S99). A
+# hand-written audit over the same generated model explores the batch edge
+# over every claimed tail set, the one-row edges, every resolve with every
+# cursor pair, and the shell's re-enqueue of carried rows after a rejected
+# batch; it requires a batch to cover only heard-speech replays and skip no
+# queued row, every resolve to use the pending append's recorded cursors, no
+# cursor to be delivered twice, and a batch authorized, delivered, rejected
+# and re-delivered after rejection, and refuses four seeded defects
+# (--mutants). 24 steps reach the deepest goal.
+live_causal_tail_batch_audit="${workspace_root}/specs/machines/meerkat_machine/live_context_causal_tail_batch_audit.sh"
+if [[ ! -x "${live_causal_tail_batch_audit}" ]]; then
+  echo "error: live-context causal-tail batch audit runner is missing from workspace runfiles: ${live_causal_tail_batch_audit}" >&2
+  exit 1
+fi
+if run_part audits-b; then
+  echo "running bounded live-context causal-tail batch TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_causal_tail_batch_audit}" "${LIVE_CONTEXT_CAUSAL_TAIL_BATCH_AUDIT_MAX_STEPS:-24}" --mutants
+fi
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier
@@ -334,7 +354,8 @@ run_machine_verify() {
 # bounds): audits-a = live unregister cleanup (168 s), run-start hold (92 s),
 # live worker start after close (14 s), live-context result barrier (9 s);
 # audits-b = durable in-turn steer (113 s), live media health (84 s),
-# live-context outbox (54 s), live delegation steer (23 s). A new audit joins
+# live-context outbox (54 s), live delegation steer (23 s), live-context
+# causal-tail batch (with --mutants). A new audit joins
 # the lighter shard. Shard of the two audits the `all` lane runs concurrently
 # with machine-verify below:
 durable_steer_shard="audits-b"

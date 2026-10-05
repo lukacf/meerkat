@@ -813,5 +813,17 @@ fn validate_update(
                 validate_update(u, fields, bindings, helpers, errors);
             }
         }
+        UpdateDef::ForEach {
+            binding,
+            over,
+            updates,
+        } => {
+            validate_expr(over, fields, bindings, helpers, errors);
+            let mut inner_bindings = bindings.clone();
+            inner_bindings.insert(binding.to_string());
+            for u in updates {
+                validate_update(u, fields, &inner_bindings, helpers, errors);
+            }
+        }
     }
 }

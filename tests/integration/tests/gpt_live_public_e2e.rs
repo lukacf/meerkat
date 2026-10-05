@@ -3197,19 +3197,34 @@ async fn s99_exchange(
 /// Owned thinking-append attempts that are causal tail: every attempt minus
 /// the fragments of the channels' late summaries (the summary is context
 /// data and legitimately names the historical facts it summarizes).
+/// Every owned thinking append after each channel's first (the late
+/// summary), reassembled from its wire fragments. Fragment boundaries fall at
+/// byte offsets that move with the transcript text, so content checks run on
+/// whole appends, never on single fragments.
 fn s99_causal_tail(evidence: &Journal) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let summaries: Vec<String> = (1..=evidence.current_channel()?)
-        .filter_map(|channel| evidence.first_owned_thinking_append(channel).transpose())
-        .collect::<Result<_, _>>()?;
-    Ok(evidence
-        .thinking_append_attempt_texts()?
-        .into_iter()
-        .filter(|text| {
-            !summaries
-                .iter()
-                .any(|summary| summary.contains(text.as_str()))
-        })
-        .collect())
+    let mut tail = Vec::new();
+    for channel in 1..=evidence.current_channel()? {
+        tail.extend(
+            evidence
+                .owned_thinking_appends(channel)?
+                .into_iter()
+                .skip(1),
+        );
+    }
+    Ok(tail)
+}
+
+/// True when one replayed assistant row names both current code words: the
+/// current-facts answer, which is spoken after the summary acknowledgement
+/// and must never be re-sent. Checked per row, so a typed assistant row and
+/// a later user correction framed together in one append do not count.
+fn s99_resends_current_answer(append: &str) -> bool {
+    append.lines().any(|row| {
+        let lower = row.to_lowercase();
+        row.contains("\"role\":\"assistant\"")
+            && lower.contains("cobalt")
+            && lower.contains("marigold")
+    })
 }
 
 async fn s99_wait_for_assistant_quiet(
@@ -3523,12 +3538,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         "the recalled vault phrase was re-sent as thinking context"
     );
     assert!(
-        !attempts.iter().any(|text| {
-            let lower = text.to_lowercase();
-            text.contains("\"role\":\"assistant\"")
-                && lower.contains("cobalt")
-                && lower.contains("marigold")
-        }),
+        !attempts
+            .iter()
+            .any(|text| s99_resends_current_answer(text)),
         "fresh post-acknowledgement assistant speech was re-sent as thinking context"
     );
     println!(
@@ -3627,12 +3639,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         "the recalled vault phrase was queued as thinking context"
     );
     assert!(
-        !attempts.iter().any(|text| {
-            let lower = text.to_lowercase();
-            text.contains("\"role\":\"assistant\"")
-                && lower.contains("cobalt")
-                && lower.contains("marigold")
-        }),
+        !attempts
+            .iter()
+            .any(|text| s99_resends_current_answer(text)),
         "post-acknowledgement assistant speech was queued as thinking context"
     );
     println!(

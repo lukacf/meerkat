@@ -5607,6 +5607,48 @@ mod tests {
             }
         }
     }
+
+    /// A `for` loop lowers to one fold per touched field, and each fold must
+    /// read the other fields as they were BEFORE the loop, as the sequential
+    /// kernel does within an iteration. Writing each fold back into the env
+    /// while lowering handed later folds an earlier field's post-loop value:
+    /// the causal-tail batch then looked up already-removed cursors and left
+    /// orphaned queued rows, which the generated outbox invariant caught. So
+    /// no fold of a loop may take another fold of the same loop as an
+    /// argument.
+    #[test]
+    fn a_for_each_fold_reads_the_other_fields_before_the_loop() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let mut checked = 0;
+        for line in model.lines() {
+            let Some(eq) = line.find("' = ") else {
+                continue;
+            };
+            let rhs = &line[eq + 4..];
+            let Some(open) = rhs.find('(') else {
+                continue;
+            };
+            let head = &rhs[..open];
+            let Some(pos) = head.find("_ForEach") else {
+                continue;
+            };
+            let digits: String = head[pos + "_ForEach".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            let same_loop = format!("{}_ForEach{digits}_", &head[..pos]);
+            assert!(
+                !rhs[open..].contains(&same_loop),
+                "a for-loop fold takes another fold of the same loop as an argument: {line}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "the MeerkatMachine model has for-loop folds to check"
+        );
+    }
     use meerkat_machine_schema::RustTypeAtom;
     use meerkat_machine_schema::catalog::dsl::{
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -11577,6 +11619,13 @@ impl<'a> MachineTlaCompiler<'a> {
                 self.helper_counter += 1;
                 let over_expr = self.render_expr_with_types(over, env, binding_env, binding_types);
                 let touched = collect_update_fields(updates);
+                // Every touched field's fold reads the other fields as they
+                // were BEFORE the loop: the loop below writes each fold back
+                // into `env` as it goes, so reading `env` there would hand a
+                // later field the earlier field's post-loop value (all of its
+                // iterations already applied), not the value an iteration
+                // reads in the sequential kernel.
+                let base_env = env.clone();
                 let referenced_bindings = collect_update_bindings(updates)
                     .into_iter()
                     .filter(|item| item != binding)
@@ -11584,12 +11633,15 @@ impl<'a> MachineTlaCompiler<'a> {
                 let referenced_fields = collect_update_fields_exprs(updates)
                     .into_iter()
                     .filter(|field| {
-                        touched.contains(field) || env.get(field.as_str()) != Some(field)
+                        touched.contains(field) || base_env.get(field.as_str()) != Some(field)
                     })
                     .collect::<BTreeSet<_>>();
 
                 for field in touched {
-                    let current = env.get(&field).cloned().unwrap_or_else(|| field.clone());
+                    let current = base_env
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| field.clone());
                     let helper_name = format!(
                         "{}_ForEach{}_{}",
                         tla_ident(transition_name),
@@ -11627,7 +11679,7 @@ impl<'a> MachineTlaCompiler<'a> {
                         if *ref_field == field {
                             continue;
                         }
-                        let current_expr = env
+                        let current_expr = base_env
                             .get(ref_field)
                             .cloned()
                             .unwrap_or_else(|| ref_field.clone());

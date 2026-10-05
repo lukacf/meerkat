@@ -541,6 +541,112 @@ machine TokenProbe {
         assert_eq!(def.terminal_phases.len(), 2);
     }
 
+    const FOR_EACH_MACHINE: &str = r#"
+machine BatchProbe {
+    version: 1,
+    rust: "test" / "batch_probe",
+
+    state {
+        phase: BatchPhase,
+        queued_by_cursor: Map<u64, String>,
+        pending: Set<u64>,
+    }
+
+    init(Open) {
+        queued_by_cursor = EmptyMap,
+        pending = EmptySet,
+    }
+
+    terminal []
+
+    phase BatchPhase {
+        Open,
+    }
+
+    input BatchInput {
+        Take { cursors: Set<u64> },
+    }
+
+    effect BatchEffect {
+        Taken { count: u64 },
+    }
+
+    disposition Taken => local seam NoOwnerRealization,
+
+    transition TakeBatch {
+        on input Take { cursors }
+        guard { for_all(cursor in cursors, self.queued_by_cursor.contains_key(cursor)) }
+        update {
+            for cursor in cursors {
+                self.queued_by_cursor.remove(cursor);
+                self.pending.remove(cursor);
+            }
+        }
+        to Open
+        emit Taken { count: cursors.len() }
+    }
+}
+"#;
+
+    /// `for binding in collection { updates }` in an update block parses to
+    /// UpdateDef::ForEach (with the Set/Map remove fix applied inside the
+    /// loop), lowers to the schema IR's Update::ForEach, and generates a loop
+    /// in the dispatch code.
+    #[test]
+    fn for_each_update_parses_lowers_and_generates_a_loop() {
+        let def = parse(FOR_EACH_MACHINE);
+        let transition = def
+            .transitions
+            .iter()
+            .find(|t| t.name == "TakeBatch")
+            .expect("TakeBatch");
+        let for_each = match &transition.updates[0] {
+            crate::ast::UpdateDef::ForEach {
+                binding, updates, ..
+            } => Some((binding.to_string(), updates.len())),
+            _ => None,
+        };
+        assert_eq!(
+            for_each,
+            Some(("cursor".to_owned(), 2)),
+            "expected a ForEach update over `cursor` with two inner updates"
+        );
+
+        let tokens: proc_macro2::TokenStream = FOR_EACH_MACHINE.parse().expect("tokenize");
+        let rendered = crate::expand_machine(tokens)
+            .expect("expand machine")
+            .to_string();
+        assert!(
+            rendered.contains("Update :: ForEach"),
+            "schema lowering must emit Update::ForEach: {rendered}"
+        );
+        assert!(
+            rendered.contains("for cursor in"),
+            "dispatch must generate the loop"
+        );
+        assert!(
+            rendered.contains("pending . remove"),
+            "a Set field's remove inside the loop is a set removal"
+        );
+    }
+
+    #[test]
+    fn for_each_update_binding_is_scoped_to_its_body() {
+        let leaked = FOR_EACH_MACHINE.replace(
+            "                self.pending.remove(cursor);\n            }",
+            "                self.pending.remove(cursor);\n            }\n            self.pending.insert(cursor);",
+        );
+        assert_ne!(
+            leaked, FOR_EACH_MACHINE,
+            "the probe must change the machine"
+        );
+        let tokens: proc_macro2::TokenStream = leaked.parse().expect("tokenize");
+        assert!(
+            crate::expand_machine(tokens).is_err(),
+            "a loop binding used outside its body must be rejected"
+        );
+    }
+
     #[test]
     fn schema_lowering_preserves_handoff_annotation() {
         let tokens: proc_macro2::TokenStream = ORDER_LIFECYCLE.parse().expect("tokenize");

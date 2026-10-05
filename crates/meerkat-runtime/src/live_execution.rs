@@ -4733,6 +4733,32 @@ impl LiveContextAppendAuthority {
         })
     }
 
+    /// Authority for one append carrying the contiguous causal tail
+    /// (previous, next] at the outbox head (generated edge
+    /// AuthorizeLiveContextCausalTailBatch): the head row's append identity
+    /// over the whole range, lowered as one quiet replay.
+    pub(crate) fn from_causal_tail_batch_effect(
+        head: &LiveContextQueuedRow,
+        previous_cursor: u64,
+        next_cursor: u64,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        Self::from_generated_effect(
+            head.binding.session_id(),
+            head.binding.channel_id(),
+            head.append_id(),
+            previous_cursor,
+            next_cursor,
+            effect,
+        )
+        .map(|authority| {
+            authority.map(|mut authority| {
+                authority.kind = LiveContextAppendKind::CausalReassertion;
+                authority
+            })
+        })
+    }
+
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         channel_id: &LiveChannelId,

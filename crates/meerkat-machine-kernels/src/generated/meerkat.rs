@@ -17510,6 +17510,17 @@ pub mod inputs {
         pub next_cursor: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveContextCausalTailBatch {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub append_id: String,
+        pub previous_cursor: u64,
+        pub next_cursor: u64,
+        pub tail_cursors: std::collections::BTreeSet<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueLiveContextRow {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -18513,6 +18524,7 @@ pub enum Input {
     ResolveLiveContextBootstrapAppend(inputs::ResolveLiveContextBootstrapAppend),
     FailLiveContextPreparation(inputs::FailLiveContextPreparation),
     AuthorizeLiveContextAppend(inputs::AuthorizeLiveContextAppend),
+    AuthorizeLiveContextCausalTailBatch(inputs::AuthorizeLiveContextCausalTailBatch),
     EnqueueLiveContextRow(inputs::EnqueueLiveContextRow),
     AdvanceLiveContextCanonicalCoverage(inputs::AdvanceLiveContextCanonicalCoverage),
     ResolveLiveContextAppend(inputs::ResolveLiveContextAppend),
@@ -19047,6 +19059,9 @@ impl Input {
             }
             Self::FailLiveContextPreparation(_) => InputKind::FailLiveContextPreparation,
             Self::AuthorizeLiveContextAppend(_) => InputKind::AuthorizeLiveContextAppend,
+            Self::AuthorizeLiveContextCausalTailBatch(_) => {
+                InputKind::AuthorizeLiveContextCausalTailBatch
+            }
             Self::EnqueueLiveContextRow(_) => InputKind::EnqueueLiveContextRow,
             Self::AdvanceLiveContextCanonicalCoverage(_) => {
                 InputKind::AdvanceLiveContextCanonicalCoverage
@@ -19490,6 +19505,7 @@ pub enum InputKind {
     ResolveLiveContextBootstrapAppend,
     FailLiveContextPreparation,
     AuthorizeLiveContextAppend,
+    AuthorizeLiveContextCausalTailBatch,
     EnqueueLiveContextRow,
     AdvanceLiveContextCanonicalCoverage,
     ResolveLiveContextAppend,
@@ -23915,6 +23931,9 @@ pub enum TransitionId {
     AuthorizeLiveContextAppendIdle,
     AuthorizeLiveContextAppendAttached,
     AuthorizeLiveContextAppendRunning,
+    AuthorizeLiveContextCausalTailBatchIdle,
+    AuthorizeLiveContextCausalTailBatchAttached,
+    AuthorizeLiveContextCausalTailBatchRunning,
     AuthorizeLiveContextAppendSupersededIdle,
     AuthorizeLiveContextAppendSupersededAttached,
     AuthorizeLiveContextAppendSupersededRunning,

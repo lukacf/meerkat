@@ -314,6 +314,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # unregistered.
 # live_media_health_audit.sh also requires a non-empty trace for each goal and
 # firing run, so the fake prints one trace state.
+# live_context_causal_tail_batch_audit.sh requires its four goals violated,
+# and with --mutants each seeded defect's property violated.
 # run_start_hold_audit.sh requires each of its seven reachability witnesses
 # to be reported violated.
 # live_delegation_worker_start_after_close_audit.sh requires its two goals to
@@ -333,6 +335,14 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalMissing is violated."' \
   'echo "Error: Invariant NotAuditWitnessRefused is violated."' \
   'echo "Error: Invariant AuditNeverDeliveredWithQueuedReplay is violated."' \
+  'echo "Error: Invariant AuditNeverBatchAuthorized is violated."' \
+  'echo "Error: Invariant AuditNeverBatchDelivered is violated."' \
+  'echo "Error: Invariant AuditNeverBatchRejected is violated."' \
+  'echo "Error: Invariant AuditNeverRedeliveredAfterReject is violated."' \
+  'echo "Error: Action property AuditPendingRunSkipsNoQueuedRow is violated."' \
+  'echo "Error: Action property AuditPendingRunCoversOnlyHeardSpeechReplays is violated."' \
+  'echo "Error: Action property AuditResolveIsPinned is violated."' \
+  'echo "Error: Invariant live_context_outbox_is_above_every_seed is violated."' \
   'echo "Error: Invariant NotAuditWitnessReleasedRuns is violated."' \
   'echo "Error: Invariant NotAuditWitnessRunFinishesThenRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetiredDrainRefused is violated."' \

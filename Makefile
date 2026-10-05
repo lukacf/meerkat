@@ -271,6 +271,7 @@ path-classifier-selftest:
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
 	@bash scripts/tests/ci_pr_classification_base_test.sh
 	@bash scripts/tests/buildbuddy_launcher_env_test.sh
+	@bash scripts/tests/buildbuddy_poc_exit_lag_test.sh
 	@bash scripts/tests/require_python_test.sh
 	@bash scripts/tests/require_bash_test.sh
 	@bash scripts/tests/live_gate_selftest.sh

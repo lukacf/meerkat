@@ -316,3 +316,42 @@ async fn sqlite_reopen_rehydrates_delivery_identity_sequence_and_cursor_without_
         .expect("next insert");
     assert_eq!(next.sequence, first.sequence + 1);
 }
+
+/// The commit generation names its runtimes: every runtime that received a
+/// new row is taken exactly once, across clones, and an exact replay records
+/// nothing.
+#[tokio::test]
+async fn committed_runtimes_are_taken_once_across_clones_and_skip_replays() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let inbox = RuntimeDeliveryInbox::new(store);
+    let producer = inbox.clone();
+    let first = LogicalRuntimeId::new("rt:test:committed-a");
+    let second = LogicalRuntimeId::new("rt:test:committed-b");
+    assert!(inbox.take_committed_runtimes().is_empty());
+
+    producer
+        .submit(&first, submission("job:a:terminal:1", b"a"))
+        .await
+        .expect("commit a");
+    producer
+        .submit(&second, submission("job:b:terminal:1", b"b"))
+        .await
+        .expect("commit b");
+    let mut taken = inbox.take_committed_runtimes();
+    taken.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(taken, vec![first.clone(), second]);
+    assert!(
+        inbox.take_committed_runtimes().is_empty(),
+        "taking empties the set"
+    );
+
+    let replay = producer
+        .submit(&first, submission("job:a:terminal:1", b"a"))
+        .await
+        .expect("replay a");
+    assert!(replay.deduplicated);
+    assert!(
+        inbox.take_committed_runtimes().is_empty(),
+        "an exact replay is not a new commit"
+    );
+}

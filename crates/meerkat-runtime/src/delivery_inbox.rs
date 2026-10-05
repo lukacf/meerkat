@@ -4,7 +4,8 @@
 //! assignment and ordered application. `RuntimeStore` implementations retain
 //! its exact state with CAS and atomically insert opaque inbox rows.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -312,6 +313,9 @@ struct SubmissionEnvelope {
 pub struct RuntimeDeliveryInbox {
     store: Arc<dyn RuntimeStore>,
     commits: Arc<crate::tokio::sync::watch::Sender<u64>>,
+    /// Runtimes that received a newly committed row since the last
+    /// [`Self::take_committed_runtimes`], shared by all clones.
+    committed_runtimes: Arc<Mutex<HashSet<LogicalRuntimeId>>>,
 }
 
 impl std::fmt::Debug for RuntimeDeliveryInbox {
@@ -327,6 +331,7 @@ impl RuntimeDeliveryInbox {
         Self {
             store,
             commits: Arc::new(commits),
+            committed_runtimes: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -341,6 +346,22 @@ impl RuntimeDeliveryInbox {
     /// example [`Self::runtimes_with_pending_deliveries`]).
     pub fn subscribe_commits(&self) -> crate::tokio::sync::watch::Receiver<u64> {
         self.commits.subscribe()
+    }
+
+    /// Take the runtimes that received a newly committed row through this
+    /// inbox (or a clone) since the previous call.
+    ///
+    /// A runtime is recorded before the commit generation advances, so a
+    /// consumer that observes a generation change and then takes the set
+    /// always sees the runtime of that commit. Taking empties the set: the
+    /// inbox has one delivery owner, and a second consumer would take rows
+    /// from it. Like the commit signal, this is in-process only.
+    pub fn take_committed_runtimes(&self) -> Vec<LogicalRuntimeId> {
+        let mut committed = self
+            .committed_runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        committed.drain().collect()
     }
 
     /// Whether `other` shares this inbox's commit signal, i.e. is the same
@@ -428,6 +449,10 @@ impl RuntimeDeliveryInbox {
                 .await?
             {
                 RuntimeDeliveryAuthorityCasOutcome::Applied(_) => {
+                    self.committed_runtimes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(runtime_id.clone());
                     self.commits
                         .send_modify(|generation| *generation = generation.wrapping_add(1));
                     return Ok(RuntimeDeliveryReceipt {

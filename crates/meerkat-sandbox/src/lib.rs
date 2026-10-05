@@ -6,6 +6,8 @@ use std::ffi::{OsStr, OsString};
 #[cfg(target_os = "macos")]
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 
 pub use meerkat_core::confinement::{ConfinementRefusal, ExecutionConfinement};
 
@@ -15,6 +17,10 @@ mod native;
 mod seatbelt;
 #[cfg(target_os = "macos")]
 pub use native::{NativeChild, SpawnIo, StdioMode};
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{SpawnIo, StdioMode};
 #[cfg(not(target_arch = "wasm32"))]
 mod child;
 #[cfg(not(target_arch = "wasm32"))]
@@ -22,16 +28,16 @@ pub use child::ProcessChild;
 
 /// Exact host-prepared launch data. Environment values are never inherited.
 pub struct ProcessLaunchSpec {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     program: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     arguments: Vec<OsString>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     directory: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     environment: BTreeMap<OsString, OsString>,
     // Preserve an opaque validated launch when no backend can retain its data.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     _unsupported: (),
 }
 
@@ -82,7 +88,7 @@ impl ProcessLaunchSpec {
                 return Err(ConfinementRefusal::UnsupportedRequirement);
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             Ok(Self {
                 program,
@@ -91,7 +97,7 @@ impl ProcessLaunchSpec {
                 environment,
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (program, arguments, directory, environment);
             Ok(Self { _unsupported: () })
@@ -117,8 +123,12 @@ pub struct PreparedConfinement {
     arguments: Vec<OsString>,
     #[cfg(target_os = "macos")]
     launch: ProcessLaunchSpec,
+    #[cfg(target_os = "linux")]
+    installation: linux::LinuxInstallation,
+    #[cfg(target_os = "linux")]
+    launch: ProcessLaunchSpec,
     // Compilation and binding always refuse when no supported backend exists.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     _unsupported: std::convert::Infallible,
 }
 
@@ -196,6 +206,57 @@ impl PreparedConfinement {
     pub async fn output(self) -> std::io::Result<std::process::Output> {
         self.spawn()?.wait_with_output().await
     }
+
+    /// Spawn the bound launch. The forked child installs the compiled
+    /// restrictions on itself, then executes the launch under the same PID.
+    #[cfg(target_os = "linux")]
+    pub fn spawn(self) -> std::io::Result<tokio::process::Child> {
+        self.spawn_with_io(SpawnIo::default())
+    }
+
+    /// Spawn with explicit host stdio handling. The operation owner retains
+    /// exclusive ownership of the resulting direct child.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_with_io(self, streams: SpawnIo) -> std::io::Result<tokio::process::Child> {
+        linux::spawn(
+            self.installation,
+            &self.launch.program,
+            &self.launch.arguments,
+            &self.launch.directory,
+            &self.launch.environment,
+            streams,
+            None,
+        )
+    }
+
+    /// Spawn behind a host-owned custody release pipe. The child installs the
+    /// restrictions first, then the fixed gate reads one release token from
+    /// descriptor 3, closes it, and executes the launch without changing PID
+    /// or process group. EOF or a different token exits with code 125 before
+    /// any target code runs.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_behind_gate(
+        self,
+        reader: std::os::fd::BorrowedFd<'_>,
+        release_token: &OsStr,
+        streams: SpawnIo,
+    ) -> std::io::Result<tokio::process::Child> {
+        linux::spawn(
+            self.installation,
+            &self.launch.program,
+            &self.launch.arguments,
+            &self.launch.directory,
+            &self.launch.environment,
+            streams,
+            Some((reader, release_token)),
+        )
+    }
+
+    /// Spawn and collect output using null stdin and piped stdout/stderr.
+    #[cfg(target_os = "linux")]
+    pub async fn output(self) -> std::io::Result<std::process::Output> {
+        self.spawn()?.wait_with_output().await
+    }
 }
 
 /// The backend profile which enforces this exact compiled requirement.
@@ -203,6 +264,8 @@ impl PreparedConfinement {
 #[non_exhaustive]
 pub enum ConfinementBackend {
     MacOsSeatbeltV1,
+    /// Landlock (ABI 6 or later) and seccomp, without user namespaces.
+    LinuxLandlockSeccompV1,
 }
 
 /// Mechanical setup support, not permission or evidence of a launched child.
@@ -241,6 +304,8 @@ pub struct CompiledConfinement {
     policy: OsString,
     #[cfg(target_os = "macos")]
     aliases: Vec<(&'static str, &'static str)>,
+    #[cfg(target_os = "linux")]
+    policy: Arc<linux::LinuxPolicy>,
 }
 
 impl std::fmt::Debug for CompiledConfinement {
@@ -270,7 +335,18 @@ impl CompiledConfinement {
                 aliases,
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            let policy = linux::compile(requirement)?;
+            Ok(Self {
+                capabilities: ConfinementCapabilityReport {
+                    backend: ConfinementBackend::LinuxLandlockSeccompV1,
+                    requirement: requirement.clone(),
+                },
+                policy,
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = requirement;
             Err(ConfinementRefusal::UnsupportedRequirement)
@@ -306,7 +382,17 @@ impl CompiledConfinement {
                 launch,
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            // Re-bind the immutable lowering to the objects its paths name
+            // now; nothing is lowered again.
+            let installation = linux::install(&self.policy)?;
+            Ok(PreparedConfinement {
+                installation,
+                launch,
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let ProcessLaunchSpec { _unsupported: () } = launch;
             Err(ConfinementRefusal::UnsupportedRequirement)

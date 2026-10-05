@@ -8710,6 +8710,10 @@ pub struct MeerkatMachineShared {
     native_work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
+    /// Serializes test-support joins of stopped owners' ops persistence
+    /// workers; a drain holds it until every taken worker is joined.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    stopped_ops_persistence_drain_gate: Arc<Mutex<()>>,
     #[cfg(not(target_arch = "wasm32"))]
     credential_release_observer:
         std::sync::OnceLock<Arc<credential_custody::NativeCredentialReleaseObserver>>,
@@ -10344,6 +10348,8 @@ impl MeerkatMachine {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 sessions: RwLock::new(HashMap::new()),
+                #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+                stopped_ops_persistence_drain_gate: Arc::new(Mutex::new(())),
                 #[cfg(not(target_arch = "wasm32"))]
                 credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
@@ -10495,6 +10501,8 @@ impl MeerkatMachine {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 sessions: RwLock::new(HashMap::new()),
+                #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+                stopped_ops_persistence_drain_gate: Arc::new(Mutex::new(())),
                 #[cfg(not(target_arch = "wasm32"))]
                 credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(

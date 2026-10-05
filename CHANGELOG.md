@@ -327,6 +327,29 @@ them.
   execution-mode and platform coverage remain separate work. See
   `docs/rust/native-authorization.mdx` for the integration boundary; measured
   representative authorization overhead still exceeds the target.
+- Required shell confinement on Linux: `meerkat_sandbox::ConfinementBackend::LinuxLandlockSeccompV1`
+  installs Landlock filesystem rules, the Landlock signal and abstract-socket
+  scopes and a seccomp filter in the forked child before it executes the
+  launch, so custody keeps the launched PID and the host thread is never
+  restricted. It needs Landlock ABI 6 or later, seccomp filters and
+  `close_range`; otherwise compilation returns `BackendUnavailable`. It does not
+  need user namespaces. Requirements Landlock cannot represent exactly are
+  refused with `UnsupportedRequirement` instead of widened: literal directories,
+  missing or symlinked grant paths, exclusions inside a grant or the baseline,
+  exact IP endpoints, `unix_connect` grants and descendant termination. Without
+  a `unix_connect` grant, AF_UNIX socket creation is denied and `socketpair`
+  is limited to AF_UNIX `SOCK_STREAM` (datagram pairs could address host
+  pathname sockets), so in-sandbox Unix servers such as Python's forkserver
+  fail. The Linux
+  `CommandRuntimeV1` baseline grants read and execute beneath `/usr` and its
+  merged aliases, a few credential-free system files (`ld.so.cache`, `passwd`,
+  `group`, `nsswitch.conf`, `localtime`), the CA trust anchors
+  (`/etc/ssl/certs`, `/etc/pki/tls/certs`, `/etc/pki/ca-trust/extracted`) and
+  the null, zero and random devices. It grants no `/proc`, home directory,
+  `/tmp`, private key directory, OpenSSL configuration or `/etc/gitconfig`;
+  workloads that need those use an explicit host grant or explicit
+  configuration such as `GIT_CONFIG_NOSYSTEM=1`. Bubblewrap is not part of
+  this profile.
 - The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
   single-connection profile with native input admission and a fixed callback
   catalog. It requires `default-features = false` plus `local-authorization`;

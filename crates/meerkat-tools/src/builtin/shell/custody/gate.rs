@@ -79,7 +79,7 @@ impl SpawnGate {
     }
 
     /// Borrow only the release channel and token for a sealed native launch.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(in crate::builtin::shell) fn launch_parts(
         &self,
     ) -> std::io::Result<(std::os::fd::BorrowedFd<'_>, &OsStr)> {

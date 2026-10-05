@@ -258,6 +258,58 @@ rust_test(
 )
 
 rust_test(
+    name = "linux_confinement_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "linux_confinement",
+    crate_root = "tests/linux_confinement.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/linux_confinement.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_BIN_NAME": "linux_confinement",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-sandbox",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-sandbox:meerkat_sandbox",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-sandbox",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "process_confinement_test",
     aliases = aliases(
         package_name = "crates/meerkat-sandbox",
@@ -314,6 +366,7 @@ test_suite(
     tests = [
         ":bootstrap_integrity_test",
         ":compiled_confinement_test",
+        ":linux_confinement_test",
         ":meerkat_sandbox_unit_test",
         ":process_confinement_test",
     ],

@@ -954,6 +954,120 @@ mod ops_persistence_worker_tests {
         OperationId, OperationKind, OperationSpec, OpsLifecycleError, OpsLifecycleRegistry,
     };
 
+    /// #1634 defect: dropping a machine left its ops persistence worker
+    /// holding a share of the execution claim, released later on that thread,
+    /// so an immediate same-process reopen could refuse with `Busy`. Once its
+    /// workers are joined, an already-stopped idle owner holds no background
+    /// claim after the drop, and no durable state changes. This proves
+    /// nothing about pending writes or concurrent producers.
+    #[tokio::test]
+    async fn stopped_owner_with_joined_ops_workers_releases_custody_before_reopen() {
+        struct IdleExecutor;
+
+        #[async_trait::async_trait]
+        impl meerkat_core::lifecycle::core_executor::CoreExecutor for IdleExecutor {
+            async fn apply(
+                &mut self,
+                _: meerkat_core::RunId,
+                _: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+            ) -> Result<
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+                meerkat_core::lifecycle::core_executor::CoreExecutorError,
+            > {
+                panic!("the worker-join fixture executes no input work")
+            }
+
+            async fn cancel_after_boundary(
+                &mut self,
+                _: String,
+            ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _: String,
+            ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let store: Arc<dyn RuntimeStore> = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                Arc::clone(&store),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            )
+            .expect("persistent machine"),
+        );
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register the session");
+        machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare durable bindings");
+        machine
+            .register_session_with_executor(session_id.clone(), Box::new(IdleExecutor))
+            .await
+            .expect("attach an executor, installing the ops persistence worker");
+        // An externally stopped fixture: the executor and its loop are stopped,
+        // the registration and its ops persistence worker remain.
+        machine
+            .stop_runtime_executor(&session_id, "worker-join fixture stop")
+            .await
+            .expect("stop the idle executor");
+        let runtime_id = {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions.get(&session_id).expect("registered entry");
+            assert!(
+                entry.ops_lifecycle_persistence_worker.is_some(),
+                "the stopped registration still owns its persistence worker"
+            );
+            entry.runtime_id.clone()
+        };
+        let state_before = crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load committed lifecycle before the join");
+
+        machine
+            .join_stopped_session_ops_persistence_workers_for_test()
+            .await
+            .expect("join the stopped owner's ops persistence workers");
+        {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions
+                .get(&session_id)
+                .expect("joining the workers unregisters nothing");
+            assert!(entry.ops_lifecycle_persistence_worker.is_none());
+        }
+        drop(machine);
+
+        // Exclusive custody needs every claim released: none may survive on
+        // a background thread of the dropped owner.
+        let custody = store
+            .execution_custody()
+            .expect("the in-memory store owns execution custody");
+        let exclusive = custody
+            .try_acquire_governed()
+            .expect("a stopped owner with joined workers holds no execution claim once dropped");
+        drop(exclusive);
+        assert_eq!(
+            crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+                .await
+                .expect("load committed lifecycle after the join"),
+            state_before,
+            "joining the workers changes no durable lifecycle"
+        );
+        MeerkatMachine::persistent(
+            Arc::clone(&store),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("the successor owner opens the same store");
+    }
+
     #[tokio::test]
     async fn cancelled_prepared_archive_candidate_never_starts_detached_persistence_worker() {
         let store: Arc<dyn RuntimeStore> = Arc::new(crate::store::InMemoryRuntimeStore::new());
@@ -1301,6 +1415,90 @@ async fn retire_ops_lifecycle_owner_for_unregister(
 }
 
 impl MeerkatMachine {
+    /// Test support for fixtures that stopped their executors themselves and
+    /// then reopen the same store in this process: join every registered
+    /// session's ops persistence worker so no share of the execution claim is
+    /// released later on a worker thread, where it can race the successor's
+    /// custody acquisition.
+    ///
+    /// This is not a process cut or a shutdown. It seals only the ops
+    /// persistence producers (no terminal synthesis, nothing persisted, no
+    /// unregister) and does not stop executors, drains or other producers.
+    /// It assumes an already-stopped idle owner with no concurrent
+    /// registration; drop the machine afterwards.
+    ///
+    /// Seals run off the async executor and outside the sessions lock (a
+    /// terminal transition can hold its registry while it waits for the store
+    /// acknowledgement). Worker handles are taken only after every seal
+    /// succeeded, then owned by one blocking drain together with the drain
+    /// gate, so a failed join, a panic or a cancelled caller still joins all of
+    /// them, and a retry waits for that drain before it can return.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    pub async fn join_stopped_session_ops_persistence_workers_for_test(
+        &self,
+    ) -> Result<(), RuntimeDriverError> {
+        let gate = Arc::clone(&self.stopped_ops_persistence_drain_gate)
+            .lock_owned()
+            .await;
+        let registries: Vec<(
+            SessionId,
+            Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+        )> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .filter(|(_, entry)| entry.ops_lifecycle_persistence_worker.is_some())
+                .map(|(session_id, entry)| (session_id.clone(), Arc::clone(&entry.ops_lifecycle)))
+                .collect()
+        };
+        let sealed = crate::tokio::task::spawn_blocking(move || {
+            for (session_id, registry) in &registries {
+                registry
+                    .seal_owner_for_reload_required_discard()
+                    .map_err(|error| {
+                        RuntimeDriverError::Internal(format!(
+                            "failed to seal ops-lifecycle owner for session {session_id}: {error}"
+                        ))
+                    })?;
+            }
+            Ok::<_, RuntimeDriverError>(registries)
+        })
+        .await
+        .map_err(|error| {
+            RuntimeDriverError::Internal(format!("ops lifecycle seal task failed: {error}"))
+        })??;
+        let workers: Vec<OpsLifecyclePersistenceWorker> = {
+            let mut sessions = self.sessions.write().await;
+            sealed
+                .iter()
+                .filter_map(|(session_id, registry)| {
+                    let entry = sessions.get_mut(session_id)?;
+                    Arc::ptr_eq(&entry.ops_lifecycle, registry)
+                        .then(|| entry.ops_lifecycle_persistence_worker.take())
+                        .flatten()
+                })
+                .collect()
+        };
+        // No await between taking the handles and handing them to the drain.
+        crate::tokio::task::spawn_blocking(move || {
+            let _gate = gate;
+            let mut panicked = false;
+            for worker in workers {
+                panicked |= worker.handle.join().is_err();
+            }
+            if panicked {
+                return Err(RuntimeDriverError::Internal(
+                    "ops lifecycle persistence worker panicked".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            RuntimeDriverError::Internal(format!("ops lifecycle persistence drain failed: {error}"))
+        })?
+    }
+
     /// Whether an assistant-producing run input of `session_id` still awaits
     /// its boundary commit on the session's current driver, under healthy
     /// durability.

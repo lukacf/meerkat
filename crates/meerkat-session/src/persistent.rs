@@ -37711,6 +37711,15 @@ mod tests {
                 .contains("publication receipts did not exactly match finalized outbox batch"),
             "unexpected stop failure: {stop_error}"
         );
+        // The stopped owner's ops persistence workers still hold a share of
+        // its execution claim; join them so the claim is released here, not
+        // later on a worker thread racing the successor's custody acquisition.
+        // Seals only ops persistence: the pending terminal and stored body
+        // stay exactly as committed.
+        before_restart
+            .join_stopped_session_ops_persistence_workers_for_test()
+            .await
+            .expect("join the stopped owner's ops persistence workers");
         drop(before_restart);
 
         let after_restart = meerkat_runtime::MeerkatMachine::persistent(

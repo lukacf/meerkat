@@ -1734,6 +1734,9 @@ async fn run_s97_client_context_vertical(
     })
     .await?;
     evidence.stage(EvidenceStage::Connected)?;
+    // The lag rule's input is recorded whether the phases pass or fail: a
+    // failing run must be classifiable as provider-degraded or valid.
+    let phases: Result<_, Box<dyn std::error::Error>> = async {
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -2001,6 +2004,25 @@ async fn run_s97_client_context_vertical(
         "durable delegated executor spawn did not materialize in canonical mob events"
     );
 
+        Ok((
+            provider_delegation_ref_digest,
+            delegation_index,
+            delegation_outputs,
+            commentary_acks,
+            worker_identity,
+        ))
+    }
+    .await;
+    if let Err(error) = peer.record_timeline().await {
+        eprintln!("S97: the browser timeline could not be recorded: {error}");
+    }
+    let (
+        provider_delegation_ref_digest,
+        delegation_index,
+        delegation_outputs,
+        commentary_acks,
+        worker_identity,
+    ) = phases?;
     rpc.call("live/close", json!({"channel_id":channel_id}), 30)
         .await?;
     peer.stop_evidence().await?;
@@ -3521,6 +3543,10 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
     s99_commit_followups(&mut live).await?;
+    // The outgoing channel's lag-rule input, before its peer is replaced.
+    if let Err(error) = live.peer.record_timeline().await {
+        eprintln!("S99: the browser timeline could not be recorded: {error}");
+    }
     live.reopen().await?;
     let obsolete = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &obsolete).await?;
@@ -3542,6 +3568,10 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // S99 asserts a fresh summarizer capture on each reopen.
     s99_forget_retained_summary(&mut live)?;
     s99_commit_followups(&mut live).await?;
+    // The outgoing channel's lag-rule input, before its peer is replaced.
+    if let Err(error) = live.peer.record_timeline().await {
+        eprintln!("S99: the browser timeline could not be recorded: {error}");
+    }
     live.reopen().await?;
     let replacement = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &replacement).await?;
@@ -3614,6 +3644,12 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     .catch_unwind()
     .await;
     let result = settle_scenario_body(&mut live, result).await;
+    // The current channel's lag-rule input, recorded whether the body passed
+    // or failed: a failing run must be classifiable as provider-degraded or
+    // valid.
+    if let Err(error) = live.peer.record_timeline().await {
+        eprintln!("S99: the browser timeline could not be recorded: {error}");
+    }
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;

@@ -789,6 +789,21 @@ impl BrowserPeer {
         Ok(serde_json::from_value(result["timeline"].clone())?)
     }
 
+    /// Record this peer's timeline in its journal (`Record::Timeline`, the
+    /// shape S103/S104 write): the input of the Turbo S lag rule, which pairs
+    /// each `fixture_start` (`detail.speech_ms`) with the next `input_final`
+    /// (`detail.t_ms`). A scenario records it whether its phases passed or
+    /// failed, so a failing run can be classified as provider-degraded or
+    /// valid. A peer without evidence records nothing.
+    pub async fn record_timeline(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some((journal, channel)) = self.evidence.clone() else {
+            return Ok(());
+        };
+        let entries = self.timeline().await?;
+        journal.record(evidence::Record::Timeline { channel, entries })?;
+        Ok(())
+    }
+
     /// Close the in-progress assistant response, so its `response_end`
     /// (with its text and `flushed: true`) is recorded, and return the
     /// timeline. A response otherwise ends only on new user speech, a

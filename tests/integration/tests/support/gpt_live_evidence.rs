@@ -2267,6 +2267,58 @@ mod tests {
         )));
     }
 
+    /// The timeline record S97 and S99 now write (`BrowserPeer::record_timeline`)
+    /// carries exactly what the lag rule's journal reader parses
+    /// (`/tmp/rb/journal-lag.py`): a `timeline` record whose entries pair a
+    /// `fixture_start`'s `t_ms + detail.speech_ms` with the next
+    /// `input_final`'s `detail.t_ms`.
+    #[test]
+    fn a_timeline_record_carries_the_lag_rule_inputs() {
+        use super::super::TimelineKind;
+        let root = root();
+        let journal = Journal::at(
+            &root.path().join("timeline"),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let entries = vec![
+            TimelineEntry {
+                t_ms: 1_000,
+                kind: TimelineKind::FixtureStart,
+                detail: serde_json::json!({"name": "greeting", "speech_ms": 2_000}),
+            },
+            TimelineEntry {
+                t_ms: 4_100,
+                kind: TimelineKind::InputFinal,
+                detail: serde_json::json!({"t_ms": 3_900, "text": "hello"}),
+            },
+        ];
+        journal
+            .record(Record::Timeline {
+                channel: 1,
+                entries,
+            })
+            .unwrap();
+        journal.finish(Outcome::Passed).unwrap();
+        let text = std::fs::read_to_string(journal.path()).unwrap();
+        let timeline = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|line| line["record"]["kind"] == "timeline")
+            .expect("a timeline record");
+        let entries = timeline["record"]["entries"].as_array().unwrap();
+        assert_eq!(timeline["record"]["channel"], 1);
+        assert_eq!(entries[0]["kind"], "fixture_start");
+        assert_eq!(entries[1]["kind"], "input_final");
+        // The reader's pairing: speech end, then the next input final.
+        let speech_end = entries[0]["t_ms"].as_i64().unwrap()
+            + entries[0]["detail"]["speech_ms"].as_i64().unwrap();
+        let input_final = entries[1]["detail"]["t_ms"].as_i64().unwrap();
+        assert_eq!(input_final - speech_end, 900);
+    }
+
     #[test]
     fn forced_failure_retains_whitelisted_evidence_after_scenario_cleanup() {
         let root = root();

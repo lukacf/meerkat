@@ -734,7 +734,7 @@ impl BrowserPeer {
     /// schedule id; the browser records `scheduled`, `anchor_fired`,
     /// `fixture_start`, and `fixture_end` timeline entries as it happens.
     pub async fn play_at(&mut self, spec: &PlayAt) -> Result<u64, Box<dyn std::error::Error>> {
-        self.provider_step(&format!("play_at:{}", spec.name));
+        self.provider_step(&play_at_step(&spec.name));
         let mut command = serde_json::to_value(spec)?;
         command["type"] = json!("play_at");
         let result = self.call(command).await?;
@@ -750,7 +750,7 @@ impl BrowserPeer {
         items: &[PlayAt],
     ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
         let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
-        self.provider_step(&format!("queue:{}", names.join(",")));
+        self.provider_step(&queue_step(&names));
         let result = self.call(json!({"type":"queue","items":items})).await?;
         Ok(serde_json::from_value(result["scheduled"].clone())?)
     }
@@ -1032,6 +1032,17 @@ impl TimelineEntry {
     pub fn schedule_id(&self) -> Option<u64> {
         self.detail_u64("id")
     }
+}
+
+/// The provider-stream step a `play_at` of fixture `name` records before it
+/// is scheduled. Oracles that window the provider stream use the same names.
+pub fn play_at_step(name: &str) -> String {
+    format!("play_at:{name}")
+}
+
+/// The provider-stream step a `queue` of fixtures `names` records.
+pub fn queue_step(names: &[&str]) -> String {
+    format!("queue:{}", names.join(","))
 }
 
 pub fn format_timeline(timeline: &[TimelineEntry]) -> String {

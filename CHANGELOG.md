@@ -1402,6 +1402,16 @@ them.
     within the last 100 ms). Otherwise it waits for the next burst start,
     instead of barging in during the end hysteresis of a finished burst
     (R6: armed 681 ms after the last active window).
+  - A planted monologue token that reaches none of the executor inputs is
+    classified from the provider's own evidence for the monologue (#1706).
+    When the provider never transcribed it and its reflected input caught up
+    on more than one 200 ms frame of audio in a single block that it
+    transcribed none of (control R6 on 555200d37: "Copenhagen" fell in a
+    5.8 s block reflected after a 6 s stall), the run is provider-degraded
+    and void (`ProviderDegradationCause::InputTranscriptOmission`). A token
+    the provider transcribed that no executor input carries is still a
+    failure, and so is a token it transcribed as something else with no
+    ingest stall, because that can come from our own prompt.
 - Shell tool commands and background jobs no longer inherit the host's
   stdin. In a stdio JSON-RPC host (`rkat-rpc`) stdin is the protocol
   transport, so a command that read stdin (`cat`, `head`, a prompt) could

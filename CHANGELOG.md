@@ -140,6 +140,14 @@ them.
   input breakpoints and no cache breakpoint claims, whoever set them. The
   factory no longer applies its own backend gate to the defaults.
 
+- The hand-written TLC audits' per-run watchdog
+  (`specs/machines/meerkat_machine/tlc_run_cap.sh`) no longer orphans its
+  `sleep`. When TLC ended first, the watchdog could be stopped between
+  starting its sleep and recording the sleep's pid, leaving a `sleep 900`
+  that held a caller's `$(...)` capture open. That intermittently stalled
+  `make path-classifier-selftest`, which PR CI runs, for the whole cap. The
+  watchdog is now its own process group, ended as a group, with its stdio on
+  `/dev/null`.
 - BuildBuddy runs no longer sit idle for 600 s after every build (#1744).
   Since the Bazel client started running under an environment allowlist,
   `scripts/buildbuddy-bazel-poc` put its stderr `tee` redirect on a call of a

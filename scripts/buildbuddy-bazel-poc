@@ -52,6 +52,9 @@ Examples:
 
 Use scripts/buildbuddy-changed-gate --dry-run <path> to inspect selected labels
 without running Bazel.
+
+A run fails, without a retry, when it outlasts Bazel's reported build time by
+more than BUILDBUDDY_MAX_EXIT_LAG_SECS (default 120; 0 disables the guard).
 EOF
 }
 
@@ -1099,6 +1102,17 @@ done < <(compgen -e | LC_ALL=C sort)
 bb_client_exec() {
   env -i "${bb_client_env[@]}" "${bb_bin}" "$@"
 }
+# The same client, with stderr also copied to a log. The tee redirect sits on
+# the simple `env -i` command here and must never be put on a call of a
+# function: bash keeps a process substitution's pipe open in the shell while a
+# function runs, the client inherits it as an extra descriptor, the Bazel
+# server it daemonizes keeps it for --max_idle_secs, and the `wait` for tee
+# below then blocked for 600 s after every build (#1744).
+bb_client_exec_logged() {
+  local log="$1"
+  shift
+  env -i "${bb_client_env[@]}" "${bb_bin}" "$@" 2> >(tee "${log}" >&2)
+}
 if [[ "${#extra_args[@]}" -gt 0 ]]; then
   bb_args+=("${extra_args[@]}")
 fi
@@ -1174,15 +1188,38 @@ fi
 
 run_log="$(mktemp "${TMPDIR:-/tmp}/meerkat-buildbuddy-run.XXXXXX")"
 
+# Post-build lag guard (#1744): the time from the client's start until its
+# output is fully drained, minus the build time Bazel reports, is client
+# startup plus teardown. When it exceeds the bound, something held the run
+# open after the build (600 s per invocation went unnoticed for days as
+# unrelated submitter timeouts), so the run fails loudly instead of passing.
+# Never retried. BUILDBUDDY_MAX_EXIT_LAG_SECS=0 disables the guard.
+max_exit_lag_secs="${BUILDBUDDY_MAX_EXIT_LAG_SECS:-120}"
+if ! [[ "${max_exit_lag_secs}" =~ ^[0-9]+$ ]]; then
+  echo "error: BUILDBUDDY_MAX_EXIT_LAG_SECS must be a whole number of seconds (got '${max_exit_lag_secs}')" >&2
+  exit 2
+fi
+
 status=0
 for attempt in 1 2; do
   : >"${run_log}"
   set +e
-  bb_client_exec "${bb_args[@]}" 2> >(tee "${run_log}" >&2)
+  started_at="$(date +%s)"
+  bb_client_exec_logged "${run_log}" "${bb_args[@]}"
   status="$?"
   # Let the tee process substitution finish flushing before the log is read.
   wait 2>/dev/null
+  drained_at="$(date +%s)"
   set -e
+  bazel_elapsed="$(sed -n 's/.*INFO: Elapsed time: \([0-9][0-9]*\)\(\.[0-9]*\)\{0,1\}s.*/\1/p' "${run_log}" | tail -n 1)"
+  if [[ "${max_exit_lag_secs}" -gt 0 && -n "${bazel_elapsed}" ]]; then
+    exit_lag=$(( drained_at - started_at - bazel_elapsed ))
+    if (( exit_lag > max_exit_lag_secs )); then
+      echo "error: buildbuddy-bazel-poc: the run took ${exit_lag} s beyond Bazel's reported ${bazel_elapsed} s build (bound ${max_exit_lag_secs} s, BUILDBUDDY_MAX_EXIT_LAG_SECS): something held it open after the build (#1744); failing without a retry" >&2
+      status=1
+      break
+    fi
+  fi
   if [[ "${status}" -eq 0 || "${attempt}" -eq 2 || -n "${BUILDBUDDY_NO_CACHE_REPAIR:-}" ]]; then
     break
   fi

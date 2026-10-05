@@ -83,6 +83,23 @@ them.
 
 ### Fixed
 
+- BuildBuddy runs no longer sit idle for 600 s after every build (#1744).
+  Since the Bazel client started running under an environment allowlist,
+  `scripts/buildbuddy-bazel-poc` put its stderr `tee` redirect on a call of a
+  shell function. Bash keeps a process substitution's pipe open while a
+  function runs, so the client inherited it, and the Bazel server it
+  daemonizes held it for `--max_idle_secs` (600 s). The script's `wait` for
+  `tee` then blocked that long after Bazel had already finished. That cost
+  about 10 minutes per invocation on the GCP graph and on the hosted release
+  builds, and pushed submitters over their timeouts. The redirect now sits on
+  the client command itself.
+  - A run that outlasts Bazel's reported build time by more than
+    `BUILDBUDDY_MAX_EXIT_LAG_SECS` (default 120 s) now fails loudly, without a
+    retry, so a stall like this shows up as itself.
+  - `scripts/tests/buildbuddy_poc_exit_lag_test.sh` covers this with a fake
+    client that leaves a daemon behind. It runs in
+    `make path-classifier-selftest`.
+
 - Examples: the Office demo (`examples/033-the-office-demo-sh`) works when
   served from a sub-path, not only from a site root. Its built page loaded
   `/assets/...` and the WASM runtime from `/meerkat-pkg/...` at the root;

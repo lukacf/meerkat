@@ -4729,6 +4729,14 @@ impl ExperimentalLiveDelegationCoordinator {
             operation_id.clone(),
             retained.runtime_binding.session_id().clone(),
         );
+        // The merge reply commits under the delegation's interaction (the
+        // delivery correlation below): a reopened channel replays it framed
+        // as this request's result, in the user's own words (S104 R3/R4).
+        self.runtime.record_post_close_result_title(
+            retained.runtime_binding.session_id(),
+            retained.operation.domain_correlation().interaction_id(),
+            narration_title(&retained.title),
+        );
         let Some(handle) = self
             .start_post_close_merge(retained, work, result_spec)
             .await
@@ -8805,10 +8813,20 @@ mod tests {
         );
 
         // No source handle in this fixture: the merge is refused at once and
-        // holds no entry of its own.
+        // holds no entry of its own. The request's title is recorded under
+        // the delegation's interaction before admission (S104 R3/R4): the
+        // merge reply commits under it.
         coordinator
             .merge_result_into_source(&retained, "the result")
             .await;
+        assert_eq!(
+            coordinator.runtime.post_close_result_title(
+                &session_id,
+                operation.domain_correlation().interaction_id(),
+            ),
+            Some(narration_title(&retained.title)),
+            "the merge records its request's title under the delegation's interaction"
+        );
         assert!(
             lock_unpoisoned(&coordinator.merges_awaiting_commit).is_empty(),
             "a merge that was not admitted is not awaited"

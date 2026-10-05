@@ -1302,6 +1302,21 @@ them.
 
 ### Fixed
 
+- A voice delegation's result that was merged into the session after its call
+  closed now replays on a reopened channel as the result of that request:
+  "Finished voice request: "<the user's own words>". It finished after the
+  call closed, so the user has not heard this result. The result follows.
+  If the user asked to have it read back, read it back word for word.",
+  still as quiet context at the same release point (the end of the user's
+  turn), so it adds no unprompted speech. Turbo S S104 R3/R4 on 10f4f053c:
+  the ode reached the reopened voice only as unattributed background work,
+  the executor's answer to "what happened while I was gone" claimed it had
+  been "read back", and the voice relayed that recap instead of reading the
+  ode. The link is typed. The live delegation coordinator records the
+  request's title under the delegation's interaction when it merges the
+  result (`MeerkatMachine::record_post_close_result_title`), the merge reply
+  commits under that interaction, and the runtime frames a runtime-work
+  replay whose row carries it (`live_execution::post_close_result_context`).
 - A durable voice job delegated just before its call closed could be lost
   (Turbo S S104, about 1 run in 10): the worker accepted its turn after the
   close, and publishing its start was refused because the closed channel's

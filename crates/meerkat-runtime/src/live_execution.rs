@@ -4041,6 +4041,20 @@ pub enum SupersededTypedRowRole {
 /// least one later heard-speech row queued, and sending the typed row without
 /// its correction is the failure this bundling exists to prevent (S99), so a
 /// caller must fail closed instead of sending it bare.
+/// A post-close merge reply replayed on a reopened channel, framed as the
+/// result of its own voice request: the delegation's title (the user's own
+/// words) and the typed fact that the result never reached the user, since
+/// a merge only runs for a result that did not cross the provider boundary
+/// before the close (Turbo S S104 R3/R4 on 10f4f053c: the executor's recap
+/// claimed the ode was "read back", and the voice relayed that recap instead
+/// of reading the replayed ode).
+#[must_use]
+pub fn post_close_result_context(title: &str, context: &str) -> String {
+    format!(
+        "Finished voice request: \"{title}\". It finished after the call closed, so the user has not heard this result. The result follows. If the user asked to have it read back, read it back word for word.\n{context}"
+    )
+}
+
 #[must_use]
 pub fn superseded_typed_row_context<'a>(
     typed: &str,
@@ -5451,6 +5465,28 @@ impl LiveDelegationResultDeliveryReceipt {
 
 #[cfg(test)]
 mod tests {
+
+    /// A post-close merge reply is framed as its voice request's result: the
+    /// user's own words, the typed fact that they have not heard it, and the
+    /// read-back clause every live result carries, ahead of the row.
+    #[test]
+    fn a_post_close_result_is_framed_as_its_voice_request() {
+        let framed = super::post_close_result_context(
+            "Start a job for me. Read it back to me.",
+            r#"{"role":"assistant","text":"O coffee"}"#,
+        );
+        assert!(
+            framed.starts_with(
+                "Finished voice request: \"Start a job for me. Read it back to me.\"."
+            )
+        );
+        assert!(framed.contains("the user has not heard this result"));
+        assert!(
+            framed.contains("If the user asked to have it read back, read it back word for word.")
+        );
+        assert!(framed.ends_with("\n{\"role\":\"assistant\",\"text\":\"O coffee\"}"));
+        assert!(!framed.to_lowercase().contains("delegat"));
+    }
     /// A superseded typed row is never composed without its correction: the
     /// empty set is typed as `None` so the drain fails closed.
     #[test]

@@ -282,9 +282,9 @@ pub(crate) fn restore_metadata(message: &mut ClientJsonRpcMessage) {
 
 /// Serialize once at the final transport boundary and enforce the encoded
 /// frame bound before any bytes are written or sent.
-pub(crate) fn serialize_bounded_message(mut message: ClientJsonRpcMessage) -> io::Result<Vec<u8>> {
-    restore_metadata(&mut message);
-    let bytes = serde_json::to_vec(&message).map_err(|_| invalid_frame())?;
+pub(crate) fn serialize_bounded_message(message: &mut ClientJsonRpcMessage) -> io::Result<Vec<u8>> {
+    restore_metadata(message);
+    let bytes = serde_json::to_vec(message).map_err(|_| invalid_frame())?;
     if bytes.len() > MAX_FRAME_BYTES {
         return Err(invalid_frame());
     }
@@ -410,8 +410,8 @@ struct ProtectedOutputCodec;
 impl Encoder<ClientJsonRpcMessage> for ProtectedOutputCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, item: ClientJsonRpcMessage, buffer: &mut BytesMut) -> io::Result<()> {
-        let bytes = serialize_bounded_message(item)?;
+    fn encode(&mut self, mut item: ClientJsonRpcMessage, buffer: &mut BytesMut) -> io::Result<()> {
+        let bytes = serialize_bounded_message(&mut item)?;
         buffer.extend_from_slice(&bytes);
         buffer.extend_from_slice(b"\n");
         Ok(())

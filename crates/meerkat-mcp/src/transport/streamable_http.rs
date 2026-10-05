@@ -282,7 +282,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
     async fn post_message(
         &self,
         uri: Arc<str>,
-        message: ClientJsonRpcMessage,
+        mut message: ClientJsonRpcMessage,
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
@@ -310,7 +310,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             request = request.header(HEADER_SESSION_ID, session_id.as_ref());
         }
         let mut request = request.build().map_err(StreamableHttpError::Client)?;
-        let bytes = serialize_bounded_message(message).map_err(|_| {
+        let bytes = serialize_bounded_message(&mut message).map_err(|_| {
             StreamableHttpError::UnexpectedServerResponse(
                 "invalid or oversized MCP JSON-RPC frame".into(),
             )

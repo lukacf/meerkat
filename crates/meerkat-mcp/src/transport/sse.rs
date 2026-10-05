@@ -270,7 +270,7 @@ impl SseClient for ReqwestSseClient {
     async fn post_message(
         &self,
         uri: Uri,
-        message: ClientJsonRpcMessage,
+        mut message: ClientJsonRpcMessage,
         auth_token: Option<String>,
     ) -> Result<(), SseTransportError<Self::Error>> {
         let protected = has_protected_metadata(&message);
@@ -279,7 +279,7 @@ impl SseClient for ReqwestSseClient {
         } else {
             &self.client
         };
-        let bytes = serialize_bounded_message(message)?;
+        let bytes = serialize_bounded_message(&mut message)?;
         let mut request_builder = client
             .post(uri.to_string())
             .header(CONTENT_TYPE, JSON_MIME_TYPE)

@@ -2,7 +2,7 @@
 # Bounded TLC audit of the live-context result barrier: a delegation result
 # is released after the bootstrap summary ACK, not after queued replays.
 #
-# usage: live_context_result_barrier_audit.sh <max-steps> [extra tlc args...]
+# usage: live_context_result_barrier_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
@@ -14,10 +14,27 @@
 # change regenerates ci.cfg and the audit follows it; an anchor this script
 # expects but cannot find fails the run instead of silently narrowing the
 # check.
+#
+# With --mutants it then seeds two defects into a copy of the generated model,
+# in every AuthorizeLiveDelegationResultDelivery* arm, and requires the
+# intended outcome from each:
+# - tail_drain_restored re-adds the pre-#1597 tail conjuncts (no queued
+#   append, no pending append for the channel) next to the summary ACK. The
+#   goal must then be unreachable: TLC exhausts the bounded space with no
+#   violation, so the goal run is what detects a readiness/authorization
+#   mismatch.
+# - summary_dropped removes the summary-ACK conjunct. Safety must then fail on
+#   AuditResultFollowsSummary.
 set -euo pipefail
 
-max_steps="${1:?usage: live_context_result_barrier_audit.sh <max-steps> [extra tlc args...]}"
+usage="usage: live_context_result_barrier_audit.sh <max-steps> [--mutants] [extra tlc args...]"
+max_steps="${1:?${usage}}"
 shift
+run_mutants=false
+if [[ "${1:-}" == "--mutants" ]]; then
+  run_mutants=true
+  shift
+fi
 if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 21 )); then
   echo "error: max-steps must be an integer >= 21 (the goal needs 21 steps)" >&2
   exit 2
@@ -74,16 +91,19 @@ workers="${TLC_WORKERS:-auto}"
 source "${spec_dir}/tlc_run_cap.sh"
 cd "${spec_dir}"
 
-# run_tlc <name> <cfg> -> leaves the log at ${work_dir}/<name>.log
+# run_tlc <name> <cfg> [model-dir] -> leaves the log at ${work_dir}/<name>.log
+# and the exit status in tlc_status. model-dir defaults to the spec directory.
 run_tlc() {
-  local name="$1" cfg="$2"
+  local name="$1" cfg="$2" model_dir="${3:-${spec_dir}}"
   local log="${work_dir}/${name}.log"
   tlc_status=0
+  cd "${model_dir}"
   # Goal runs end in a violation by design: -noGenerateSpecTE keeps TLC from
   # writing trace-explorer specs next to the model.
   tlc_run_capped live_context_result_barrier_audit "${name}" "${log}" \
     -workers "${workers}" -metadir "${work_dir}/${name}-states" -noGenerateSpecTE -config "${cfg}" "${extra_tlc_args[@]}" \
     live_context_result_barrier_audit.tla || tlc_status=$?
+  cd "${spec_dir}"
   grep -E 'states generated|distinct states|is violated|Error:' "${log}" | sed "s/^/[${name}] /" || true
 }
 extra_tlc_args=("$@")
@@ -97,6 +117,7 @@ if [[ "${tlc_status}" != "0" ]] \
 fi
 
 # Each goal must be reachable within the bound: TLC has to report it violated.
+goal_cfgs=()
 for goal in \
   "INVARIANT AuditNeverDeliveredWithQueuedReplay"; do
   kind="${goal%% *}"
@@ -104,6 +125,7 @@ for goal in \
   goal_cfg="${work_dir}/${name}.cfg"
   cp "${audit_cfg}" "${goal_cfg}"
   printf '%s\n  %s\n' "${kind}" "${name}" >> "${goal_cfg}"
+  goal_cfgs+=("${goal_cfg}")
   run_tlc "${name}" "${goal_cfg}"
   if ! grep -q "${name} is violated" "${work_dir}/${name}.log"; then
     cat "${work_dir}/${name}.log" >&2
@@ -111,4 +133,65 @@ for goal in \
     exit 1
   fi
 done
-echo "live-context result barrier audit passed at model_step_count <= ${max_steps} (1 goal reached)"
+
+if [[ "${run_mutants}" == "true" ]]; then
+  # The summary-ACK conjunct exactly as generated in every result-delivery
+  # authorization arm; each mutant rewrites it.
+  export SUMMARY_LINE='    /\ (IF ~((channel_id \in DOMAIN live_context_preparation_phase_by_channel)) THEN TRUE ELSE ((IF (channel_id \in DOMAIN live_context_preparation_phase_by_channel) THEN Some((IF channel_id \in DOMAIN live_context_preparation_phase_by_channel THEN live_context_preparation_phase_by_channel[channel_id] ELSE "None")) ELSE None) = Some("ProviderAcknowledged")))'
+
+  # usage: mutate <name> <replacement line>; copies the spec directory's
+  # modules and replaces the summary line once in each
+  # AuthorizeLiveDelegationResultDelivery* arm, failing unless there are
+  # exactly three arms with exactly one summary line each.
+  mutate() {
+    local name="$1"
+    mutant_dir="${work_dir}/mutant-${name}"
+    mkdir -p "${mutant_dir}"
+    cp "${spec_dir}"/*.tla "${mutant_dir}/"
+    MODEL="${mutant_dir}/model.tla" REPLACEMENT="$2" python3 - <<'PY'
+import os, re
+path = os.environ["MODEL"]
+summary = os.environ["SUMMARY_LINE"]
+replacement = os.environ["REPLACEMENT"]
+assert replacement != summary, "a mutant must change the summary-ACK conjunct"
+text = open(path).read()
+arms = list(re.finditer(r"^AuthorizeLiveDelegationResultDelivery\w*\(.*?\n\n", text, re.S | re.M))
+assert len(arms) == 3, f"expected 3 AuthorizeLiveDelegationResultDelivery arms, found {len(arms)}"
+for arm in reversed(arms):
+    lines = arm.group(0).split("\n")
+    hits = [i for i, line in enumerate(lines) if line == summary]
+    assert len(hits) == 1, f"expected one summary-ACK conjunct in {lines[0].split('(')[0]}, found {len(hits)}"
+    lines[hits[0]] = replacement
+    text = text[: arm.start()] + "\n".join(lines) + text[arm.end():]
+open(path, "w").write(text)
+PY
+  }
+
+  # The conjunct as generated before #1597 (bootstrap_and_causal_tail_are_delivered).
+  mutate tail_drain_restored '    /\ (IF ~((channel_id \in DOMAIN live_context_preparation_phase_by_channel)) THEN TRUE ELSE (((IF (channel_id \in DOMAIN live_context_preparation_phase_by_channel) THEN Some((IF channel_id \in DOMAIN live_context_preparation_phase_by_channel THEN live_context_preparation_phase_by_channel[channel_id] ELSE "None")) ELSE None) = Some("ProviderAcknowledged")) /\ (Cardinality(DOMAIN live_context_queued_append_by_cursor) = 0) /\ ~((channel_id \in DOMAIN live_context_pending_append_by_channel))))'
+  for goal_cfg in "${goal_cfgs[@]}"; do
+    name="mutant-tail_drain_restored-$(basename "${goal_cfg}" .cfg)"
+    run_tlc "${name}" "${goal_cfg}" "${mutant_dir}"
+    if [[ "${tlc_status}" != "0" ]] \
+      || ! grep -q "Model checking completed. No error has been found." "${work_dir}/${name}.log"; then
+      cat "${work_dir}/${name}.log" >&2
+      echo "error: mutant tail_drain_restored did not make goal $(basename "${goal_cfg}" .cfg) unreachable within bound ${max_steps} (tlc exit ${tlc_status})" >&2
+      exit 1
+    fi
+  done
+  echo "mutant tail_drain_restored: every goal unreachable within bound ${max_steps}"
+
+  mutate summary_dropped "    /\\ TRUE"
+  run_tlc mutant-summary_dropped "${audit_cfg}" "${mutant_dir}"
+  if ! grep -q "Invariant AuditResultFollowsSummary is violated" "${work_dir}/mutant-summary_dropped.log"; then
+    cat "${work_dir}/mutant-summary_dropped.log" >&2
+    echo "error: mutant summary_dropped was not refused by AuditResultFollowsSummary (tlc exit ${tlc_status})" >&2
+    exit 1
+  fi
+  echo "mutant summary_dropped refused by AuditResultFollowsSummary"
+fi
+mutants_note=""
+if [[ "${run_mutants}" == "true" ]]; then
+  mutants_note=", 2 mutants refused"
+fi
+echo "live-context result barrier audit passed at model_step_count <= ${max_steps} (1 goal reached${mutants_note})"

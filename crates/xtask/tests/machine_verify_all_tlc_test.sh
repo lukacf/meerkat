@@ -215,7 +215,10 @@ fi
 # delegation result, and explores the summary's ACK and result authorization
 # under every generated invariant plus "a result is authorized only after the
 # summary ACK", and requires a result authorized while the row is still
-# queued. 21 steps reach the goal.
+# queued. It also refuses two seeded defects (--mutants): restoring the old
+# tail-drain conjuncts in the authorization guard must make that goal
+# unreachable, and dropping the summary conjunct must break the ACK rule.
+# 21 steps reach the goal.
 live_result_barrier_audit="${workspace_root}/specs/machines/meerkat_machine/live_context_result_barrier_audit.sh"
 if [[ ! -x "${live_result_barrier_audit}" ]]; then
   echo "error: live-context result barrier audit runner is missing from workspace runfiles: ${live_result_barrier_audit}" >&2
@@ -223,7 +226,7 @@ if [[ ! -x "${live_result_barrier_audit}" ]]; then
 fi
 if run_part audits-a; then
   echo "running bounded live-context result barrier TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${live_result_barrier_audit}" "${LIVE_CONTEXT_RESULT_BARRIER_AUDIT_MAX_STEPS:-21}"
+  TLC_WORKERS="${tlc_workers}" "${live_result_barrier_audit}" "${LIVE_CONTEXT_RESULT_BARRIER_AUDIT_MAX_STEPS:-21}" --mutants
 fi
 
 # UnregisterSession against live channels (#1476): unregister is guarded on
@@ -352,7 +355,8 @@ run_machine_verify() {
 
 # Shard assignment balances measured audit cost (4 TLC workers, default
 # bounds): audits-a = live unregister cleanup (168 s), run-start hold (92 s),
-# live worker start after close (14 s), live-context result barrier (9 s);
+# live worker start after close (14 s), live-context result barrier with
+# --mutants (22 s);
 # audits-b = durable in-turn steer (113 s), live media health (84 s),
 # live-context outbox (54 s), live delegation steer (23 s), live-context
 # causal-tail batch (with --mutants). A new audit joins

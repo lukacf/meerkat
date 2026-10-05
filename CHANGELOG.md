@@ -44,6 +44,16 @@ them.
   meerkat-tools` stopped compiling on macOS. The fixture is now Linux-only;
   nothing changes on Linux.
 
+### Testing
+
+- The live-context result barrier TLC audit
+  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
+  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
+  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
+  must leave the audit's goal unreachable. Dropping the bootstrap-summary
+  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
+  previously checked only by hand (#1607).
+
 ## [0.8.51] - 2026-10-05
 
 ### Breaking

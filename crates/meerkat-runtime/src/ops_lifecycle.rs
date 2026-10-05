@@ -4212,6 +4212,141 @@ mod tests {
         assert!(registry.read_state().unwrap().wait_request_id.is_none());
     }
 
+    /// #1654 store contract: a terminal transition with persistence wired must
+    /// not wedge the runtime thread it runs on. The persistence worker writes
+    /// through the store while the transition holds the thread for its reply,
+    /// so the store's persist path must not wait on anything a task on that
+    /// thread can hold across an await: such a task never resumes to release
+    /// it, and no timer on the thread can fire either.
+    ///
+    /// Production shape: a current_thread caller runtime, the worker on its
+    /// own thread and runtime. `hold` is a task on the caller thread that
+    /// keeps whatever store state a runtime caller can hold across one await,
+    /// then releases it. The std-thread `recv_timeout` is only the harness's
+    /// hang guard.
+    fn assert_terminal_persist_does_not_wedge<S, H, F>(
+        make_store: impl FnOnce() -> S + Send + 'static,
+        hold: H,
+    ) where
+        S: crate::store::RuntimeStore + 'static,
+        H: FnOnce(Arc<S>, crate::tokio::sync::oneshot::Sender<()>) -> F + Send + 'static,
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let runtime = crate::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("caller runtime");
+            runtime.block_on(async move {
+                let store = Arc::new(make_store());
+                let registry = RuntimeOpsLifecycleRegistry::new();
+                let (tx, mut rx) =
+                    crate::tokio::sync::mpsc::unbounded_channel::<OpsLifecyclePersistenceRequest>();
+                registry.set_persistence_channel(
+                    tx,
+                    meerkat_core::RuntimeEpochId::new(),
+                    Arc::new(meerkat_core::EpochCursorState::new()),
+                );
+                let worker_store = Arc::clone(&store);
+                let runtime_id =
+                    crate::identifiers::LogicalRuntimeId::for_session(&SessionId::new());
+                std::thread::spawn(move || {
+                    let worker = crate::tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("worker runtime");
+                    worker.block_on(async move {
+                        while let Some(request) = rx.recv().await {
+                            let result = crate::store::RuntimeStore::persist_ops_lifecycle(
+                                worker_store.as_ref(),
+                                &runtime_id,
+                                request.snapshot(),
+                            )
+                            .await
+                            .map_err(|error| OpsLifecycleError::Internal(error.to_string()));
+                            request.complete(result);
+                        }
+                    });
+                });
+
+                let spec = background_spec("persist-behind-held-store-state");
+                let op_id = spec.id.clone();
+                registry.register_operation(spec).unwrap();
+                registry.provisioning_succeeded(&op_id).unwrap();
+
+                let (held_tx, held_rx) = crate::tokio::sync::oneshot::channel();
+                let holder = crate::tokio::spawn(hold(Arc::clone(&store), held_tx));
+                held_rx.await.expect("holder takes its store state");
+
+                registry
+                    .complete_operation(
+                        &op_id,
+                        OperationResult {
+                            id: op_id.clone(),
+                            content: "done".into(),
+                            is_error: false,
+                            duration_ms: 1,
+                            tokens_used: 0,
+                        },
+                    )
+                    .expect("durable terminal transition");
+                holder.await.expect("holder task");
+                let _ = done_tx.send(());
+            });
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the terminal transition must not wedge its runtime thread behind store state held by one of its tasks");
+    }
+
+    /// The in-memory store: a task holds the store's shared state lock across
+    /// one await (as any store operation does).
+    #[test]
+    fn in_memory_store_terminal_persist_does_not_wedge_behind_its_state_lock() {
+        assert_terminal_persist_does_not_wedge(
+            crate::store::InMemoryRuntimeStore::new,
+            |store, held| async move {
+                let guard = store.hold_state_lock_for_test().await;
+                let _ = held.send(());
+                crate::tokio::task::yield_now().await;
+                drop(guard);
+            },
+        );
+    }
+
+    /// The SQLite store: it keeps no async state of its own (every operation
+    /// opens its connection and runs its transaction inside one blocking
+    /// section), so the most a runtime task can hold across an await is a
+    /// store operation in flight on the blocking pool.
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn sqlite_store_terminal_persist_does_not_wedge_behind_an_in_flight_store_operation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("runtime.sqlite3");
+        assert_terminal_persist_does_not_wedge(
+            move || {
+                let _dir = dir;
+                crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store")
+            },
+            |store, held| async move {
+                let other = crate::identifiers::LogicalRuntimeId::for_session(&SessionId::new());
+                let in_flight = crate::tokio::spawn({
+                    let store = Arc::clone(&store);
+                    async move {
+                        crate::store::RuntimeStore::load_ops_lifecycle(store.as_ref(), &other).await
+                    }
+                });
+                let _ = held.send(());
+                crate::tokio::task::yield_now().await;
+                in_flight
+                    .await
+                    .expect("in-flight store operation")
+                    .expect("load ops lifecycle");
+            },
+        );
+    }
+
     #[tokio::test]
     async fn terminal_transition_rolls_back_publication_when_persistence_fails() {
         let registry = RuntimeOpsLifecycleRegistry::new();

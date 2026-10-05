@@ -4,7 +4,7 @@ use crate::transport::sse::{
     ReqwestSseClient, SseClient, SseClientConfig, SseClientTransport, SseTransportError,
 };
 use crate::transport::streamable_http::ReqwestStreamableHttpClient;
-use rmcp::model::{CallToolRequest, CallToolRequestParams};
+use rmcp::model::{CallToolRequest, CallToolRequestParams, NumberOrString};
 use rmcp::transport::streamable_http_client::{StreamableHttpClient, StreamableHttpError};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,7 +23,7 @@ fn message(protected: bool) -> ClientJsonRpcMessage {
     if protected {
         call.extensions.insert(ProtectedMetadata(metadata()));
     }
-    ClientJsonRpcMessage::request(call.into(), 1.into())
+    ClientJsonRpcMessage::request(call.into(), NumberOrString::Number(1))
 }
 fn response() -> Value {
     json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}})
@@ -142,6 +142,87 @@ impl HttpFixture {
         });
         Self { url, task }
     }
+}
+
+#[tokio::test]
+async fn ordinary_sse_data_is_untouched_before_rmcp_parses_it() {
+    let data = r#"  { "jsonrpc":"2.0", "id":1, "result":{"content":[]}, "future":[1e0] }  "#;
+    let stream_body = format!(
+        "event: message\nid: ordinary\nretry: 123\ndata: {data}\n\nevent: future-extension\ndata: not-json-rpc\n\n"
+    );
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::get(move || {
+            let body = stream_body.clone();
+            async move { ([("content-type", "text/event-stream")], body) }
+        }),
+    ))
+    .await;
+    let response = reqwest::get(&server.url).await.unwrap();
+    let events: Vec<_> = tokio::time::timeout(
+        LIMIT,
+        protected_sse_stream(response, ProtectedMetadataState::default(), false).collect(),
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = events.into_iter().collect::<Result<_, _>>().unwrap();
+    assert_eq!(
+        events,
+        vec![
+            sse_stream::Sse::default()
+                .event("message")
+                .id("ordinary")
+                .retry(123)
+                .data(data),
+            sse_stream::Sse::default()
+                .event("future-extension")
+                .data("not-json-rpc"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sse_starts_scrubbing_on_the_same_stream_after_metadata_registration() {
+    let mut value = response();
+    value["result"]["_meta"] = json!({KEY:SECRET, "public":"kept"});
+    value["result"]["content"][0]["_meta"] = json!({KEY:SECRET});
+    let data = format!("  {value}  ");
+    let stream_body = format!("data: {data}\n\ndata: {data}\n\n");
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::get(move || {
+            let body = stream_body.clone();
+            async move { ([("content-type", "text/event-stream")], body) }
+        }),
+    ))
+    .await;
+    let response = reqwest::get(&server.url).await.unwrap();
+    let state = ProtectedMetadataState::default();
+    let mut stream = protected_sse_stream(response, state.clone(), false);
+    let ordinary = tokio::time::timeout(LIMIT, stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(ordinary.data.as_deref(), Some(data.as_str()));
+
+    state.register(&metadata()).unwrap();
+    let protected = tokio::time::timeout(LIMIT, stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let scrubbed = protected.data.unwrap();
+    assert!(!scrubbed.contains(SECRET));
+    let scrubbed: Value = serde_json::from_str(&scrubbed).unwrap();
+    assert_eq!(scrubbed["result"]["_meta"]["public"], "kept");
+    assert_eq!(scrubbed["result"]["content"][0]["text"], "ok");
+    assert!(
+        tokio::time::timeout(LIMIT, stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

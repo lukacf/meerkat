@@ -97,12 +97,10 @@ impl Fixture {
             release: Arc::new(Semaphore::new(0)),
         };
         let stop = CancellationToken::new();
-        let config = StreamableHttpServerConfig {
-            stateful_mode: false,
-            json_response: true,
-            cancellation_token: stop.child_token(),
-            ..Default::default()
-        };
+        let mut config = StreamableHttpServerConfig::default();
+        config.stateful_mode = false;
+        config.json_response = true;
+        config.cancellation_token = stop.child_token();
         let handler = server.clone();
         let service = StreamableHttpService::new(
             move || Ok(handler.clone()),

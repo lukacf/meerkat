@@ -2,7 +2,6 @@ use super::protected::{
     ProtectedMetadataState, has_protected_metadata, protected_http_client, protected_sse_stream,
     read_bounded_body, restore_metadata,
 };
-use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::header::WWW_AUTHENTICATE;
 use http::{HeaderName, HeaderValue};
@@ -13,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use rmcp::model::{ClientJsonRpcMessage, JsonRpcMessage, ServerJsonRpcMessage};
+use rmcp::model::{ClientJsonRpcMessage, JsonRpcMessage};
 use rmcp::transport::common::http_header::{
     EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID, HEADER_MCP_PROTOCOL_VERSION, HEADER_SESSION_ID,
     JSON_MIME_TYPE,

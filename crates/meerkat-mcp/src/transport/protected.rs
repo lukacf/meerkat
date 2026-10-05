@@ -485,8 +485,8 @@ where
     }
 }
 
-/// Bound each SSE frame before the SSE parser buffers it, then sanitize its
-/// JSON data before rmcp can log its worker events or parse diagnostics.
+/// Bound each SSE frame before the SSE parser buffers it. Once protected calls
+/// register metadata, sanitize JSON before rmcp can log or parse those events.
 pub(crate) fn protected_sse_stream(
     response: reqwest::Response,
     state: ProtectedMetadataState,
@@ -534,6 +534,10 @@ pub(crate) fn protected_sse_stream(
         .filter_map(move |event| {
             let result = match event {
                 Err(error) => Some(Err(error)),
+                // Check each event: a stream can start before the first
+                // protected call. Ordinary data stays byte-identical and rmcp
+                // owns its parsing; the byte-level frame bound above always runs.
+                Ok(event) if !state.has_protected_calls() => Some(Ok(event)),
                 Ok(event) if preserve_endpoint && event.event.as_deref() == Some("endpoint") => {
                     Some(Ok(event))
                 }

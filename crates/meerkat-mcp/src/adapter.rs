@@ -11,7 +11,7 @@ use meerkat_core::{
     ExternalToolDelta, ExternalToolSurfaceBaseState, ExternalToolSurfaceFailureCause,
     ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp,
     ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry, ToolDef,
-    ToolResult, agent::AgentToolDispatcher,
+    agent::AgentToolDispatcher,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;

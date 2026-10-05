@@ -171,6 +171,10 @@ test-feature-matrix-lib:
 	$(CARGO) check -p meerkat --no-default-features --features skills
 	$(CARGO) check -p meerkat --no-default-features --features skills,comms
 	$(CARGO) check -p meerkat --features all-providers,comms,mcp
+	# Facade persistence without jsonl-store while meerkat-store/jsonl is on,
+	# as feature unification from any sibling crate does: the backend match
+	# must stay exhaustive with its typed refusal arm (E0004 otherwise).
+	$(CARGO) check -p meerkat --no-default-features --features session-store,meerkat-store/jsonl
 	$(CARGO) check -p meerkat-mob --no-default-features
 	$(CARGO) check -p meerkat-mob --no-default-features --features runtime-adapter
 	$(CARGO) nextest run -p meerkat --features all-providers,comms,mcp

@@ -193,9 +193,14 @@ session-store = [
     # Session persistence owns the built-in Memory and SQLite realm variants.
     # Keeping Memory aligned with this facade feature prevents target/dev
     # feature unification from exposing an enum variant that the persistence
-    # bundle cannot realize. Jsonl remains separately opt-in.
+    # bundle cannot realize. The Jsonl variant is always compiled here too, so
+    # its presence never depends on which sibling crate unifies
+    # `meerkat-store/jsonl`; realizing it stays opt-in behind `jsonl-store`,
+    # and without it the bundle refuses a Jsonl realm with the typed
+    # `StoreError::UnsupportedRealmBackend`.
     "meerkat-store/memory",
     "meerkat-store/sqlite",
+    "meerkat-store/jsonl",
     "meerkat-tools/sqlite",
 ]
 session-compaction = ["meerkat-session/session-compaction"]

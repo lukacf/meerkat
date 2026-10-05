@@ -423,6 +423,14 @@ them.
 
 ### Fixed
 
+- The `meerkat` facade compiles when another crate in the build turns on
+  `meerkat-store/jsonl` while the facade's own `jsonl-store` is off (E0004,
+  `RealmBackend::Jsonl` not covered in the disk store set). `session-store`
+  now always compiles the Jsonl variant, as it already does Memory and
+  SQLite, and without `jsonl-store` the facade refuses a Jsonl realm with the
+  typed `StoreError::UnsupportedRealmBackend`. `make test-feature-matrix-lib`
+  checks that combination.
+
 - Python and TypeScript SDK `HookFailed` events now retain the canonical typed
   `reason` and derive the existing `error` display field from it. Legacy flat
   error events remain compatible; consumers should use `reason` for typed

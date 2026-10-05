@@ -1236,6 +1236,16 @@ pub(crate) fn open_disk_store_set(
     };
 
     match manifest.backend {
+        // `session-store` always compiles the Jsonl variant; without
+        // `jsonl-store` this facade cannot realize it, so the realm is refused
+        // with the same typed error an unparsed backend gets.
+        #[cfg(not(feature = "jsonl-store"))]
+        RealmBackend::Jsonl => Err(PersistenceError::Store(
+            StoreError::UnsupportedRealmBackend {
+                realm_id: ctx.locator.realm.as_str().to_string(),
+                backend: RealmBackend::Jsonl.as_str().to_string(),
+            },
+        )),
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => {
             let session_store: Arc<dyn SessionStore> =

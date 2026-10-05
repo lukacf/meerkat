@@ -1302,6 +1302,14 @@ them.
 
 ### Fixed
 
+- The `meerkat` facade compiles when another crate in the build turns on
+  `meerkat-store/jsonl` while the facade's own `jsonl-store` is off (E0004,
+  `RealmBackend::Jsonl` not covered in the disk store set). `session-store`
+  now always compiles the Jsonl variant, as it already does Memory and
+  SQLite, and without `jsonl-store` the facade refuses a Jsonl realm with the
+  typed `StoreError::UnsupportedRealmBackend`. `make test-feature-matrix-lib`
+  checks that combination.
+
 - GPT Live Turbo S S97 and S99 journals now carry the browser timeline
   (`fixture_start` with `speech_ms`, `input_final` with `t_ms`), one record
   per channel, written whether the scenario passed or failed. The lag rule

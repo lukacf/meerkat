@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.51] - 2026-10-05
+
 ### Breaking
 
 - `meerkat_runtime::live_execution::superseded_typed_row_context` takes a
@@ -19293,7 +19295,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.50...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.51...HEAD
+[0.8.51]: https://github.com/lukacf/meerkat/compare/v0.8.50...v0.8.51
 [0.8.50]: https://github.com/lukacf/meerkat/compare/v0.8.49...v0.8.50
 [0.8.49]: https://github.com/lukacf/meerkat/compare/v0.8.48...v0.8.49
 [0.8.48]: https://github.com/lukacf/meerkat/compare/v0.8.47...v0.8.48

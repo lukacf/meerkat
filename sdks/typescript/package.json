@@ -1,6 +1,6 @@
 {
   "name": "@rkat/sdk",
-  "version": "0.8.50",
+  "version": "0.8.51",
   "description": "TypeScript SDK for Meerkat agent runtime",
   "homepage": "https://docs.rkat.ai/sdks/typescript/overview",
   "repository": {

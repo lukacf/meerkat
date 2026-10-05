@@ -781,6 +781,19 @@ def _pascal_case(name: str) -> str:
     return "".join(part.capitalize() for part in re.split(r"[^0-9A-Za-z]+", name) if part)
 
 
+def _emitted_union_aliases(schema: dict[str, Any], emitted: set[str]) -> set[str]:
+    """Local defs of `schema` that are already-emitted `oneOf`/`anyOf` aliases."""
+    defs = schema.get("$defs", {})
+    if not isinstance(defs, dict):
+        return set()
+    return {
+        name
+        for name in emitted
+        if isinstance(defs.get(name), dict)
+        and ("oneOf" in defs[name] or "anyOf" in defs[name])
+    }
+
+
 def _schema_root_with_local_defs(root_schema: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     schema_root = dict(root_schema)
     schema_root["$defs"] = {
@@ -3415,8 +3428,12 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
         doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
+        # An already-emitted union alias is referenced by name: inlining a
+        # tagged union widens its arms into anonymous dicts.
         local_defs = (
-            set(schema.get("$defs", {}).keys()) - emitted_python_dataclasses
+            set(schema.get("$defs", {}).keys())
+            - emitted_python_dataclasses
+            - _emitted_union_aliases(schema, emitted_python_named_types)
             if isinstance(schema, dict)
             else set()
         )
@@ -4361,8 +4378,12 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         schema = _lookup_named_schema(root_schema, name)
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        # An already-emitted union alias is referenced by name: inlining a
+        # tagged union widens its arms into anonymous dicts.
         local_defs = (
-            set(schema.get("$defs", {}).keys()) - emitted_typescript_interfaces
+            set(schema.get("$defs", {}).keys())
+            - emitted_typescript_interfaces
+            - _emitted_union_aliases(schema, emitted_typescript_named_types)
             if isinstance(schema, dict)
             else set()
         )

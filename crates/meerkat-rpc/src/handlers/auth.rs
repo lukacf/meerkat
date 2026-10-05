@@ -2759,6 +2759,55 @@ mod tests {
         config
     }
 
+    #[test]
+    fn connector_errors_map_refusals_to_invalid_params_and_failures_to_internal() {
+        use meerkat::{ConnectorLoginError, HostAuthError};
+        use meerkat_core::auth::token_store::CredentialSlotRefusal;
+        let code = |error: HostAuthError| {
+            host_auth_error_response(Some(RpcId::Num(1)), error)
+                .error
+                .expect("error response")
+                .code
+        };
+        for failure in [
+            OAuthFlowError::PersistenceFailed {
+                operation: "admit_oauth_browser_flow",
+                detail: "disk".into(),
+            },
+            OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_browser_flow",
+                detail: "rejected".into(),
+            },
+            OAuthFlowError::StateGenerationFailed,
+            OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify",
+            },
+        ] {
+            assert_eq!(
+                code(HostAuthError::Connector(ConnectorLoginError::Flow(failure))),
+                error::INTERNAL_ERROR
+            );
+        }
+        assert_eq!(
+            code(HostAuthError::Connector(
+                ConnectorLoginError::RefreshFailed("closure rejected".into())
+            )),
+            error::INTERNAL_ERROR
+        );
+        for refusal in [
+            ConnectorLoginError::Flow(OAuthFlowError::Missing),
+            ConnectorLoginError::Slot(CredentialSlotRefusal::Occupied),
+            ConnectorLoginError::Verification(
+                meerkat_providers::connector_oauth::ConnectorOAuthRefusal::MissingScopes,
+            ),
+        ] {
+            assert_eq!(
+                code(HostAuthError::Connector(refusal)),
+                error::INVALID_PARAMS
+            );
+        }
+    }
+
     fn auth_status_state(resp: RpcResponse) -> String {
         assert!(
             resp.error.is_none(),

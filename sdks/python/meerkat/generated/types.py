@@ -577,7 +577,7 @@ admitted with. `strategy_id` names an account strategy installed on the
 host (`oidc-userinfo-v1` by default). Login is host-driven: the
 authorize URL and state are host-channel data and must never reach an
 agent, tool result, transcript or log."""
-    account_selection: dict[str, Any] | dict[str, Literal['discover']]
+    account_selection: WireConnectorAccountSelection
     client: str
     issuer: str
     resource: str
@@ -1215,7 +1215,7 @@ class InstructionActivationRequest:
     """Explicit request to append one immutable instruction revision transition."""
     activation_id: str
     body: str
-    expectation: dict[str, Any]
+    expectation: InstructionActivationExpectation
     revision: dict[str, Any]
     supersedes: Optional[str] = None
 
@@ -1223,7 +1223,7 @@ class InstructionActivationRequest:
 @dataclass
 class InstructionActivationReceipt:
     """Reproducible receipt returned by the safe-boundary activation facade."""
-    disposition: Literal['applied', 'duplicate']
+    disposition: InstructionActivationDisposition
     record: InstructionActivationRecord
 
 
@@ -5123,7 +5123,7 @@ speech and assistant audio overlap instead, and `restore` ends the duck. The run
 the provider's reflected input and output audio on the provider's audio
 clock; a client that ignores them plays as before."""
     channel_id: str
-    hint: Literal['duck', 'restore']
+    hint: LiveAssistantPlaybackHint
 
 
 @dataclass
@@ -5257,7 +5257,7 @@ JSON blob with the typed `status` discriminator. Clients route on
 
 See [`LiveRefreshStatus`] for the variant set and the contract on
 asynchronous adapter-pump application."""
-    status: Literal['queued']
+    status: LiveRefreshStatus
 
 
 # Typed public result class for `live/close`.
@@ -5272,7 +5272,7 @@ class LiveCloseResult:
     """Response payload for `live/close`.
 
 Clients route on the typed `status` discriminator."""
-    status: Literal['closed']
+    status: LiveCloseStatus
 
 
 # Typed public result class for `live/send_input`.
@@ -5287,7 +5287,7 @@ class LiveSendInputResult:
     """Response payload for `live/send_input`.
 
 Clients route on the typed `status` discriminator."""
-    status: Literal['sent']
+    status: LiveSendInputStatus
 
 
 # Typed public result class for `live/commit_input`.
@@ -5302,7 +5302,7 @@ class LiveCommitInputResult:
     """Response payload for `live/commit_input`.
 
 Clients route on the typed `status` discriminator."""
-    status: Literal['committed']
+    status: LiveCommitInputStatus
 
 
 # Typed public result class for `live/interrupt`.
@@ -5317,7 +5317,7 @@ class LiveInterruptResult:
     """Response payload for `live/interrupt`.
 
 Clients route on the typed `status` discriminator."""
-    status: Literal['interrupted']
+    status: LiveInterruptStatus
 
 
 # Typed public result class for `live/truncate`.
@@ -5332,7 +5332,7 @@ class LiveTruncateResult:
     """Response payload for `live/truncate`.
 
 Clients route on the typed `status` discriminator."""
-    status: Literal['truncated']
+    status: LiveTruncateStatus
 
 
 # Wire projection of LivePlaybackCompleteStatus (today: only `completed`).

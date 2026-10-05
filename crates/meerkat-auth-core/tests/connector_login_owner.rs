@@ -15,8 +15,8 @@ use axum::routing::{get, post};
 use axum::{Form, Json, Router};
 use meerkat_auth_core::auth_oauth::OAuthTokenResult;
 use meerkat_auth_core::auth_store::{
-    CredentialSlotRefusal, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence, TokenKey,
-    TokenStore,
+    CredentialMutationError, CredentialSlotRefusal, PersistedAuthMode, PersistedTokens,
+    ProviderAuthPersistence, RefreshCoordinator, TokenKey, TokenStore,
 };
 use meerkat_auth_core::connector_login::{
     ConnectorAccountStrategy, ConnectorAuthPhase, ConnectorLoginError, ConnectorOAuthAuthority,
@@ -44,6 +44,8 @@ struct Issuer {
     codes: Mutex<HashMap<String, (String, Option<String>, Option<String>)>>,
     /// The next refresh response: (access token, refresh token, scope).
     refresh: Mutex<Option<(String, Option<String>, Option<String>)>>,
+    /// Refuse the next refresh as a permanent `invalid_grant`.
+    refresh_rejected: std::sync::atomic::AtomicBool,
     expires_in: Mutex<u64>,
 }
 
@@ -59,7 +61,17 @@ async fn metadata(State((issuer, _)): State<(String, Arc<Issuer>)>) -> Json<Valu
 async fn token(
     State((_, state)): State<(String, Arc<Issuer>)>,
     Form(form): Form<HashMap<String, String>>,
-) -> Json<Value> {
+) -> (axum::http::StatusCode, Json<Value>) {
+    if form.get("grant_type").map(String::as_str) == Some("refresh_token")
+        && state
+            .refresh_rejected
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_grant" })),
+        );
+    }
     let (access, refresh, scope) = match form.get("grant_type").map(String::as_str) {
         Some("authorization_code") => state
             .codes
@@ -81,7 +93,7 @@ async fn token(
     if let Some(scope) = scope {
         body["scope"] = json!(scope);
     }
-    Json(body)
+    (axum::http::StatusCode::OK, Json(body))
 }
 
 /// Fixture provider evidence: access token -> subject. A token that is not
@@ -133,7 +145,7 @@ struct Fixture {
     issuer: String,
     state: Arc<Issuer>,
     authority: ConnectorOAuthAuthority,
-    store: Arc<EphemeralTokenStore>,
+    store: Arc<dyn TokenStore>,
     subjects: Arc<Mutex<HashMap<String, String>>>,
     nonces: Arc<Mutex<Vec<Option<String>>>>,
     strategy: Arc<FixtureStrategy>,
@@ -142,6 +154,17 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with(
+        Arc::new(EphemeralTokenStore::new()),
+        Arc::new(InMemoryCoordinator::new()),
+    )
+    .await
+}
+
+async fn fixture_with(
+    store: Arc<dyn TokenStore>,
+    coordinator: Arc<dyn RefreshCoordinator>,
+) -> Fixture {
     let state = Arc::new(Issuer {
         expires_in: Mutex::new(3600),
         ..Issuer::default()
@@ -155,9 +178,7 @@ async fn fixture() -> Fixture {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let store = Arc::new(EphemeralTokenStore::new());
-    let persistence =
-        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new()));
+    let persistence = ProviderAuthPersistence::new(store.clone(), coordinator);
     let lifecycle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
     let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
         std::time::Duration::from_secs(300),
@@ -672,7 +693,12 @@ async fn a_refresh_that_narrows_a_required_scope_is_refused_without_change() {
     fx.subjects
         .lock()
         .insert("access-a2".into(), "subject-a".into());
-    assert!(fx.authority.bearer_token(&work).await.is_err());
+    assert!(matches!(
+        fx.authority.bearer_token(&work).await,
+        Err(ConnectorLoginError::Verification(
+            ConnectorOAuthRefusal::MissingScopes
+        ))
+    ));
     assert_eq!(fx.stored(&work).await.unwrap(), before);
 }
 
@@ -686,7 +712,12 @@ async fn a_refresh_for_another_subject_is_refused_without_change() {
     fx.subjects
         .lock()
         .insert("access-b".into(), "subject-b".into());
-    assert!(fx.authority.bearer_token(&work).await.is_err());
+    assert!(matches!(
+        fx.authority.bearer_token(&work).await,
+        Err(ConnectorLoginError::Verification(
+            ConnectorOAuthRefusal::AccountMismatch
+        ))
+    ));
     assert_eq!(fx.stored(&work).await.unwrap(), before);
 }
 
@@ -775,20 +806,258 @@ async fn other_publication_paths_never_overwrite_a_connector_credential() {
         fx.flows.as_ref(),
     )
     .unwrap();
+    let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(
+        &AuthCredentialIdentity::Account(work.clone()),
+    );
+    let lifecycle_before = lease.snapshot(&lease_key);
     let refused = meerkat_auth_core::save_tokens_and_publish_lifecycle(
         fx.persistence.clone(),
-        lease,
+        lease.clone(),
         AuthCredentialIdentity::Account(work.clone()),
         PersistedTokens::api_key("direct-secret"),
     )
     .await;
     assert!(matches!(
         refused,
-        Err(
-            meerkat_auth_core::auth_store::CredentialMutationError::SlotRefused(
-                CredentialSlotRefusal::ModeMismatch
-            )
-        )
+        Err(CredentialMutationError::SlotRefused(
+            CredentialSlotRefusal::ModeMismatch
+        ))
     ));
     assert_eq!(fx.stored(&work).await.unwrap(), before);
+
+    // A same-mode connector row through the generic path is refused too,
+    // whatever it changes (account, context, scopes, secret), and so is a
+    // connector row into an empty slot: only a verified completion publishes.
+    let mut forged = before.clone();
+    forged.account_id = Some("subject-forged".into());
+    forged.primary_secret = Some("forged-secret".into());
+    forged.scopes = vec!["admin".into(), "files.read".into()];
+    let mut metadata = ConnectorCredentialMetadata::from_tokens(&before).unwrap();
+    metadata.client = "forged-client".into();
+    metadata.requested_scopes.insert("admin".into());
+    forged.metadata = metadata.to_value();
+    let empty = slot("tenant-a", "empty");
+    for (target, previous) in [(work.clone(), Some(before.clone())), (empty, None)] {
+        let refused = meerkat_auth_core::save_tokens_and_publish_lifecycle(
+            fx.persistence.clone(),
+            lease.clone(),
+            AuthCredentialIdentity::Account(target.clone()),
+            forged.clone(),
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(CredentialMutationError::SlotRefused(
+                CredentialSlotRefusal::UnverifiedConnectorPublication
+            ))
+        ));
+        assert_eq!(fx.stored(&target).await, previous);
+    }
+    assert_eq!(lease.snapshot(&lease_key), lifecycle_before);
+}
+
+/// Fails every `clear`, so a permanent refresh rejection cannot remove the
+/// durable bytes.
+struct FailClearStore(EphemeralTokenStore);
+
+#[async_trait]
+impl TokenStore for FailClearStore {
+    async fn load(
+        &self,
+        key: &TokenKey,
+    ) -> Result<Option<PersistedTokens>, meerkat_auth_core::auth_store::TokenStoreError> {
+        self.0.load(key).await
+    }
+    async fn save(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        self.0.save(key, tokens).await
+    }
+    async fn clear(
+        &self,
+        _key: &TokenKey,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        Err(meerkat_auth_core::auth_store::TokenStoreError::Io(
+            "injected clear failure".into(),
+        ))
+    }
+    async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
+        self.0.list().await
+    }
+    fn backend_name(&self) -> &'static str {
+        "fail-clear"
+    }
+}
+
+#[tokio::test]
+async fn status_follows_lifecycle_admission_after_a_failed_clear() {
+    let fx = fixture_with(
+        Arc::new(FailClearStore(EphemeralTokenStore::new())),
+        Arc::new(InMemoryCoordinator::new()),
+    )
+    .await;
+    let work = slot("tenant-a", "drive-work");
+    login_expiring(&fx, &work).await;
+    fx.state
+        .refresh_rejected
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // The token endpoint permanently rejects the refresh and the clear fails:
+    // the bytes stay, but the lifecycle requires reauthentication.
+    assert!(matches!(
+        fx.authority.bearer_token(&work).await,
+        Err(ConnectorLoginError::TokenStore(_))
+    ));
+    assert!(
+        fx.stored(&work).await.is_some(),
+        "the failed clear kept the bytes"
+    );
+    let status = fx.authority.status(&work).await.unwrap();
+    assert_eq!(status.phase, ConnectorAuthPhase::ReauthRequired);
+    assert_eq!(status.verified_account.unwrap().subject, "subject-a");
+    assert!(status.scope_evidence.is_none() && status.scopes.is_empty());
+    assert!(fx.authority.bearer_token(&work).await.is_err());
+}
+
+#[tokio::test]
+async fn status_refuses_an_unmarked_connector_row() {
+    let fx = fixture().await;
+    let work = slot("tenant-a", "drive-work");
+    fx.grant("code-a", "access-a", "subject-a", Some("files.read"));
+    fx.login(&work, AccountSelection::Discover, "code-a")
+        .await
+        .unwrap();
+    // The same bytes without the AuthMachine lifecycle marker.
+    let mut unmarked = fx.stored(&work).await.unwrap();
+    let mut metadata = unmarked.metadata.as_object().unwrap().clone();
+    metadata.retain(|key, _| key == "connector");
+    unmarked.metadata = Value::Object(metadata);
+    let other = slot("tenant-a", "drive-unmarked");
+    fx.store
+        .save(
+            &TokenKey::from_credential_identity(&AuthCredentialIdentity::Account(other.clone())),
+            &unmarked,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.authority.status(&other).await.unwrap().phase,
+        ConnectorAuthPhase::ReauthRequired
+    );
+    assert!(matches!(
+        fx.authority.bearer_token(&other).await,
+        Err(ConnectorLoginError::ReauthRequired)
+    ));
+}
+
+type Hook = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Runs one injected step after a bearer call admitted its credential and
+/// before the coordinator's refresh reload: the interleaving point.
+struct InterleavingCoordinator {
+    inner: InMemoryCoordinator,
+    before_refresh: Mutex<Option<Hook>>,
+}
+
+#[async_trait]
+impl RefreshCoordinator for InterleavingCoordinator {
+    async fn with_exclusive_mutation(
+        &self,
+        key: TokenKey,
+        mutation_fn: meerkat_auth_core::auth_store::CredentialMutationFn,
+    ) -> Result<meerkat_auth_core::auth_store::CredentialMutationOutcome, CredentialMutationError>
+    {
+        self.inner.with_exclusive_mutation(key, mutation_fn).await
+    }
+
+    async fn with_refresh(
+        &self,
+        key: TokenKey,
+        refresh_fn: meerkat_auth_core::auth_store::RefreshFn,
+    ) -> Result<PersistedTokens, meerkat_auth_core::auth_store::RefreshError> {
+        let hook = self.before_refresh.lock().take();
+        if let Some(hook) = hook {
+            hook.await;
+        }
+        self.inner.with_refresh(key, refresh_fn).await
+    }
+}
+
+/// Admit an expiring credential for subject-a, then replace the slot
+/// (logout + discover) before the refresh reload runs.
+async fn bearer_across_a_replacement(
+    replacement_subject: &str,
+    replacement_client: &str,
+) -> (
+    Result<Option<String>, ConnectorLoginError>,
+    Fixture,
+    CredentialAccountRef,
+) {
+    let coordinator = Arc::new(InterleavingCoordinator {
+        inner: InMemoryCoordinator::new(),
+        before_refresh: Mutex::new(None),
+    });
+    let fx = fixture_with(Arc::new(EphemeralTokenStore::new()), coordinator.clone()).await;
+    let work = slot("tenant-a", "drive-work");
+    login_expiring(&fx, &work).await;
+    fx.grant(
+        "code-r",
+        "access-r",
+        replacement_subject,
+        Some("files.read"),
+    );
+    let mut target = fx.target(&work, AccountSelection::Discover);
+    target.client = replacement_client.to_owned();
+    let authority = fx.authority.clone();
+    let hook_slot = work.clone();
+    *coordinator.before_refresh.lock() = Some(Box::pin(async move {
+        authority.logout(&hook_slot).await.unwrap();
+        let start = authority
+            .login_start(&target, &redirect(41009))
+            .await
+            .unwrap();
+        authority
+            .login_complete(
+                &hook_slot,
+                ConnectorOAuthCallback {
+                    redirect_uri: redirect(41009),
+                    state: start.state,
+                    code: "code-r".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }));
+    let result = fx.authority.bearer_token(&work).await;
+    (result, fx, work)
+}
+
+#[tokio::test]
+async fn bearer_holds_to_the_admitted_binding_across_a_slot_replacement() {
+    // Same subject, same context: still the admitted binding.
+    let (result, _, _) = bearer_across_a_replacement("subject-a", "connector-client").await;
+    assert_eq!(result.unwrap().as_deref(), Some("access-r"));
+
+    // Same subject, another client: refused; a later call admits it.
+    let (result, fx, work) = bearer_across_a_replacement("subject-a", "another-client").await;
+    assert!(matches!(
+        result,
+        Err(ConnectorLoginError::Slot(
+            CredentialSlotRefusal::ContextMismatch
+        ))
+    ));
+    assert_eq!(
+        fx.authority.bearer_token(&work).await.unwrap().as_deref(),
+        Some("access-r")
+    );
+
+    // Another subject: refused.
+    let (result, _, _) = bearer_across_a_replacement("subject-b", "connector-client").await;
+    assert!(matches!(
+        result,
+        Err(ConnectorLoginError::Verification(
+            ConnectorOAuthRefusal::AccountMismatch
+        ))
+    ));
 }

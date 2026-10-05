@@ -262,15 +262,36 @@ impl ConnectorLoginError {
             Self::UnknownStrategy
             | Self::InvalidRedirect
             | Self::Verification(_)
-            | Self::Flow(_)
             | Self::Slot(_)
             | Self::ReauthRequired => true,
+            Self::Flow(error) => flow_error_is_refusal(error),
             Self::DiscoveryFailed(_)
             | Self::TokenExchangeFailed
             | Self::RefreshFailed(_)
             | Self::TokenStore(_)
             | Self::AuthLifecycle(_) => false,
         }
+    }
+}
+
+/// Whether a flow-owner error refuses the caller's attempt (unknown,
+/// mismatched or expired state) rather than reporting a flow-owner
+/// persistence or lifecycle failure.
+fn flow_error_is_refusal(error: &OAuthFlowError) -> bool {
+    match error {
+        OAuthFlowError::Missing
+        | OAuthFlowError::BrowserIdentityMismatch
+        | OAuthFlowError::Connector(_)
+        | OAuthFlowError::ProviderMismatch { .. }
+        | OAuthFlowError::RedirectUriMismatch
+        | OAuthFlowError::TargetMismatch { .. }
+        | OAuthFlowError::DevicePollInProgress
+        | OAuthFlowError::DeviceCodeAlreadyAdmitted
+        | OAuthFlowError::DeviceExpiryOutOfRange => true,
+        OAuthFlowError::RegistryProjectionMissing { .. }
+        | OAuthFlowError::StateGenerationFailed
+        | OAuthFlowError::LifecycleRejected { .. }
+        | OAuthFlowError::PersistenceFailed { .. } => false,
     }
 }
 
@@ -621,60 +642,98 @@ impl ConnectorOAuthAuthority {
             .map_err(map_mutation_error)
     }
 
-    /// Secret-free status of `slot`, projected from its durable credential.
-    /// It performs no refresh and no network I/O.
+    /// Secret-free status of `slot`, projected through the same marker,
+    /// AuthMachine projection and use admission as
+    /// [`bearer_token`](Self::bearer_token), so status never reports a
+    /// credential that bearer would refuse. It performs no refresh and no
+    /// network I/O.
     pub async fn status(
         &self,
         slot: &CredentialAccountRef,
     ) -> Result<ConnectorAuthStatus, ConnectorLoginError> {
         let identity = AuthCredentialIdentity::Account(slot.clone());
-        let stored = self
-            .persistence
-            .token_store()
-            .load(&TokenKey::from_credential_identity(&identity))
-            .await
-            .map_err(|error| ConnectorLoginError::TokenStore(error.to_string()))?;
-        let Some((tokens, metadata)) = stored.and_then(|tokens| {
-            let metadata = ConnectorCredentialMetadata::from_tokens(&tokens)?;
-            (tokens.primary_secret.is_some()).then_some((tokens, metadata))
-        }) else {
-            return Ok(ConnectorAuthStatus {
-                slot: slot.clone(),
-                phase: ConnectorAuthPhase::AuthorizationRequired,
-                verified_account: None,
-                scopes: Vec::new(),
-                scope_evidence: None,
-                expires_at: None,
-                has_refresh_token: false,
-            });
+        let key = TokenKey::from_credential_identity(&identity);
+        let lease_key = LeaseKey::from_credential_identity(&identity);
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+        let (phase, tokens) = match self.load_admitted(&identity, &key).await {
+            Ok(None) => (ConnectorAuthPhase::AuthorizationRequired, None),
+            Ok(Some(admitted)) => {
+                let phase = match admitted.disposition {
+                    CredentialUseDisposition::RefreshRequired
+                        if admitted.tokens.refresh_token.is_none() =>
+                    {
+                        ConnectorAuthPhase::ReauthRequired
+                    }
+                    _ => ConnectorAuthPhase::Authorized,
+                };
+                (phase, Some(admitted.tokens))
+            }
+            // Not usable: report which account the slot is bound to, so the
+            // host can re-authorize it with a Known login.
+            Err(ConnectorLoginError::ReauthRequired) => {
+                let stored = self
+                    .persistence
+                    .token_store()
+                    .load(&key)
+                    .await
+                    .map_err(|error| ConnectorLoginError::TokenStore(error.to_string()))?
+                    .filter(|tokens| tokens.auth_mode == PersistedAuthMode::ConnectorOauth);
+                (ConnectorAuthPhase::ReauthRequired, stored)
+            }
+            Err(error) => return Err(error),
         };
-        let expired = tokens.expires_at.is_some_and(|at| at <= Utc::now());
-        let phase = if (expired && tokens.refresh_token.is_none()) || tokens.account_id.is_none() {
-            ConnectorAuthPhase::ReauthRequired
-        } else {
-            ConnectorAuthPhase::Authorized
-        };
+        let metadata = tokens
+            .as_ref()
+            .and_then(ConnectorCredentialMetadata::from_tokens);
+        let usable = phase == ConnectorAuthPhase::Authorized;
         Ok(ConnectorAuthStatus {
             slot: slot.clone(),
             phase,
-            verified_account: tokens
-                .account_id
-                .clone()
-                .map(|subject| ConnectorVerifiedAccount {
-                    issuer: metadata.issuer.clone(),
-                    strategy_id: metadata.strategy_id.clone(),
-                    subject,
-                }),
-            scopes: tokens.scopes.clone(),
-            scope_evidence: Some(metadata.scope_evidence),
-            expires_at: tokens.expires_at,
-            has_refresh_token: tokens.refresh_token.is_some(),
+            verified_account: match (&tokens, &metadata) {
+                (Some(tokens), Some(metadata)) => {
+                    tokens
+                        .account_id
+                        .clone()
+                        .map(|subject| ConnectorVerifiedAccount {
+                            issuer: metadata.issuer.clone(),
+                            strategy_id: metadata.strategy_id.clone(),
+                            subject,
+                        })
+                }
+                _ => None,
+            },
+            scopes: tokens
+                .as_ref()
+                .filter(|_| usable)
+                .map(|tokens| tokens.scopes.clone())
+                .unwrap_or_default(),
+            scope_evidence: metadata
+                .as_ref()
+                .filter(|_| usable)
+                .map(|metadata| metadata.scope_evidence),
+            expires_at: tokens
+                .as_ref()
+                .filter(|_| usable)
+                .and_then(|tokens| tokens.expires_at),
+            has_refresh_token: usable
+                && tokens
+                    .as_ref()
+                    .is_some_and(|tokens| tokens.refresh_token.is_some()),
         })
     }
 
     /// The slot's access token for native use, refreshed through the
     /// AuthMachine-owned lifecycle when it needs it. `None` when the slot
     /// holds no connector credential. The token never leaves the host.
+    ///
+    /// Contract: the credential admitted at the start of this call is
+    /// binding. A refresh, including one another waiter ran or one the
+    /// coordinator's reload ran on a replacement credential (for example
+    /// after a logout and a new login into the slot), is returned only if it
+    /// is still bound to the admitted account and stable context (issuer,
+    /// client, resource, strategy). Otherwise the call is refused:
+    /// `AccountMismatch` for another subject, `ContextMismatch` for the same
+    /// subject under another context. A later call admits the replacement.
     pub async fn bearer_token(
         &self,
         slot: &CredentialAccountRef,
@@ -697,6 +756,8 @@ impl ConnectorOAuthAuthority {
                 let refresh_identity = identity.clone();
                 let refresh_key = key.clone();
                 let bound = admitted.tokens.account_id.clone();
+                let admitted_context = ConnectorCredentialMetadata::from_tokens(&admitted.tokens)
+                    .map(|metadata| metadata.stable_context);
                 let refreshed = self
                     .persistence
                     .refresh_coordinator()
@@ -712,12 +773,21 @@ impl ConnectorOAuthAuthority {
                     )
                     .await
                     .map_err(map_refresh_error)?;
-                // A coordinator may return another waiter's result: recheck
-                // the bound account on that exact result before use.
+                // A coordinator may return another waiter's result or a
+                // replacement's: recheck the admitted binding on that exact
+                // result before use.
                 if refreshed.account_id != bound
                     || refreshed.auth_mode != PersistedAuthMode::ConnectorOauth
                 {
                     return Err(ConnectorOAuthRefusal::AccountMismatch.into());
+                }
+                if ConnectorCredentialMetadata::from_tokens(&refreshed)
+                    .map(|metadata| metadata.stable_context)
+                    != admitted_context
+                {
+                    return Err(ConnectorLoginError::Slot(
+                        CredentialSlotRefusal::ContextMismatch,
+                    ));
                 }
                 Ok(refreshed.primary_secret)
             }
@@ -951,10 +1021,7 @@ impl ConnectorOAuthAuthority {
         };
         if !metadata.requested_scopes.is_subset(&granted) {
             return Err(self
-                .refresh_failed(
-                    &lease_key,
-                    "refresh narrowed the grant below the required scopes",
-                )
+                .refused_after_closure(&lease_key, RefreshError::RequiredScopesNotGranted)
                 .await);
         }
         // Subject: the refreshed token must still be the bound account.
@@ -968,9 +1035,14 @@ impl ConnectorOAuthAuthority {
             .await
         {
             Ok(observation) if observation.account == bound => {}
-            Ok(_) | Err(_) => {
+            Ok(_) => {
                 return Err(self
-                    .refresh_failed(&lease_key, "refreshed subject is not the bound account")
+                    .refused_after_closure(&lease_key, RefreshError::CredentialIdentityMismatch)
+                    .await);
+            }
+            Err(_) => {
+                return Err(self
+                    .refresh_failed(&lease_key, "refreshed subject could not be observed")
                     .await);
             }
         }
@@ -1052,6 +1124,23 @@ impl ConnectorOAuthAuthority {
                 .await);
         }
         Ok(published)
+    }
+
+    /// Close a begun refresh for a use refusal: the credential keeps its prior
+    /// durable state, and the typed refusal survives only if AuthMachine
+    /// accepted the closure.
+    async fn refused_after_closure(
+        &self,
+        lease_key: &LeaseKey,
+        refusal: RefreshError,
+    ) -> RefreshError {
+        let observation = meerkat_core::RefreshFailureObservation::transient();
+        refusal_after_closure(
+            self.auth_lease
+                .refresh_failed(lease_key, observation)
+                .map_err(|error| error.to_string()),
+            refusal,
+        )
     }
 
     /// Close a begun refresh as a transient failure: the credential keeps
@@ -1319,10 +1408,24 @@ fn map_mutation_error(error: CredentialMutationError) -> ConnectorLoginError {
     }
 }
 
+/// The typed refusal when the refresh closure was accepted; an
+/// infrastructure failure, never a refusal, when it was not.
+fn refusal_after_closure(closure: Result<(), String>, refusal: RefreshError) -> RefreshError {
+    match closure {
+        Ok(()) => refusal,
+        Err(error) => RefreshError::Refresh(format!(
+            "{refusal}; AuthMachine refresh_failed rejected closure: {error}"
+        )),
+    }
+}
+
 fn refresh_error_from_login(error: ConnectorLoginError) -> RefreshError {
     match error {
         ConnectorLoginError::Verification(ConnectorOAuthRefusal::AccountMismatch) => {
             RefreshError::CredentialIdentityMismatch
+        }
+        ConnectorLoginError::Verification(ConnectorOAuthRefusal::MissingScopes) => {
+            RefreshError::RequiredScopesNotGranted
         }
         ConnectorLoginError::ReauthRequired => RefreshError::ReauthRequired(error.to_string()),
         other => RefreshError::Refresh(other.to_string()),
@@ -1333,6 +1436,9 @@ fn map_refresh_error(error: RefreshError) -> ConnectorLoginError {
     if matches!(error, RefreshError::CredentialIdentityMismatch) {
         return ConnectorOAuthRefusal::AccountMismatch.into();
     }
+    if matches!(error, RefreshError::RequiredScopesNotGranted) {
+        return ConnectorOAuthRefusal::MissingScopes.into();
+    }
     if let RefreshError::DurableTerminalCommit { message, .. } = &error {
         return ConnectorLoginError::TokenStore(message.clone());
     }
@@ -1342,5 +1448,65 @@ fn map_refresh_error(error: RefreshError) -> ConnectorLoginError {
         ConnectorLoginError::ReauthRequired
     } else {
         ConnectorLoginError::RefreshFailed(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_owner_failures_are_infrastructure_and_attempt_errors_are_refusals() {
+        for error in [
+            OAuthFlowError::RegistryProjectionMissing { operation: "x" },
+            OAuthFlowError::StateGenerationFailed,
+            OAuthFlowError::LifecycleRejected {
+                operation: "x",
+                detail: "y".into(),
+            },
+            OAuthFlowError::PersistenceFailed {
+                operation: "x",
+                detail: "y".into(),
+            },
+        ] {
+            assert!(!ConnectorLoginError::Flow(error).is_refusal());
+        }
+        for error in [
+            OAuthFlowError::Missing,
+            OAuthFlowError::BrowserIdentityMismatch,
+            OAuthFlowError::RedirectUriMismatch,
+            OAuthFlowError::Connector(ConnectorOAuthRefusal::DescriptorMismatch),
+        ] {
+            assert!(ConnectorLoginError::Flow(error).is_refusal());
+        }
+    }
+
+    #[test]
+    fn a_rejected_refresh_closure_is_never_reported_as_a_refusal() {
+        assert!(matches!(
+            map_refresh_error(refusal_after_closure(
+                Ok(()),
+                RefreshError::RequiredScopesNotGranted
+            )),
+            ConnectorLoginError::Verification(ConnectorOAuthRefusal::MissingScopes)
+        ));
+        assert!(matches!(
+            map_refresh_error(refusal_after_closure(
+                Ok(()),
+                RefreshError::CredentialIdentityMismatch
+            )),
+            ConnectorLoginError::Verification(ConnectorOAuthRefusal::AccountMismatch)
+        ));
+        for refusal in [
+            RefreshError::RequiredScopesNotGranted,
+            RefreshError::CredentialIdentityMismatch,
+        ] {
+            let error = map_refresh_error(refusal_after_closure(
+                Err("transition rejected".into()),
+                refusal,
+            ));
+            assert!(matches!(error, ConnectorLoginError::RefreshFailed(_)));
+            assert!(!error.is_refusal());
+        }
     }
 }

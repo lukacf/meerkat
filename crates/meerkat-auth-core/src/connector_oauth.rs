@@ -579,6 +579,11 @@ impl OAuthBrowserFlowCompletion {
         tokens: &PersistedTokens,
     ) -> Result<(), crate::auth_store::CredentialSlotRefusal> {
         use crate::auth_store::{CredentialSlotRefusal, PersistedAuthMode};
+        if tokens.auth_mode == PersistedAuthMode::ConnectorOauth
+            && !matches!(self, Self::Connector(_))
+        {
+            return Err(CredentialSlotRefusal::UnverifiedConnectorPublication);
+        }
         let Some(previous) = previous else {
             return Ok(());
         };

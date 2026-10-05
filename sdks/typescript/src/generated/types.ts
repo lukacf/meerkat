@@ -435,7 +435,7 @@ export interface WireConnectorAccountSelectionDiscover {
 export type WireConnectorAccountSelection = WireConnectorAccountSelectionKnown | WireConnectorAccountSelectionDiscover;
 
 export interface WireConnectorAuthTarget {
-  account_selection: Record<string, unknown> | { mode: "discover" };
+  account_selection: WireConnectorAccountSelection;
   client: string;
   issuer: string;
   resource: string;
@@ -960,13 +960,13 @@ export interface InstructionActivationRecord {
 export interface InstructionActivationRequest {
   activation_id: string;
   body: string;
-  expectation: Record<string, unknown>;
+  expectation: InstructionActivationExpectation;
   revision: Record<string, unknown>;
   supersedes?: string | null;
 }
 
 export interface InstructionActivationReceipt {
-  disposition: "applied" | "duplicate";
+  disposition: InstructionActivationDisposition;
   record: InstructionActivationRecord;
 }
 
@@ -5410,7 +5410,7 @@ export type LiveAssistantPlaybackHint = "duck" | "restore";
 
 export interface LiveAssistantPlaybackHintParams {
   channel_id: string;
-  hint: "duck" | "restore";
+  hint: LiveAssistantPlaybackHint;
 }
 
 export interface LiveMediaHealthParams {
@@ -5474,37 +5474,37 @@ export interface LiveCommitInputParams {
 export type LiveRefreshStatus = "queued";
 
 export interface LiveRefreshResult {
-  status: "queued";
+  status: LiveRefreshStatus;
 }
 
 export type LiveCloseStatus = "closed";
 
 export interface LiveCloseResult {
-  status: "closed";
+  status: LiveCloseStatus;
 }
 
 export type LiveSendInputStatus = "sent";
 
 export interface LiveSendInputResult {
-  status: "sent";
+  status: LiveSendInputStatus;
 }
 
 export type LiveCommitInputStatus = "committed";
 
 export interface LiveCommitInputResult {
-  status: "committed";
+  status: LiveCommitInputStatus;
 }
 
 export type LiveInterruptStatus = "interrupted";
 
 export interface LiveInterruptResult {
-  status: "interrupted";
+  status: LiveInterruptStatus;
 }
 
 export type LiveTruncateStatus = "truncated";
 
 export interface LiveTruncateResult {
-  status: "truncated";
+  status: LiveTruncateStatus;
 }
 
 export type LivePlaybackCompleteStatus = "completed";
@@ -6052,7 +6052,7 @@ export interface CatalogModelEntry {
   profile?: Record<string, unknown> | null;
   release_stage?: "stable" | "experimental" | "operator_defined";
   server_id?: string | null;
-  tier: "recommended" | "supported";
+  tier: WireModelTier;
 }
 
 export interface ProviderCatalog {

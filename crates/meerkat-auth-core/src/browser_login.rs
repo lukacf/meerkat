@@ -421,17 +421,22 @@ pub async fn save_oauth_tokens_and_consume_device_flow(
     }
 }
 
-/// A connector credential slot is replaced only through a connector browser
-/// completion (see `OAuthBrowserFlowCompletion::admit_into_slot`): no other
-/// publication path may overwrite it.
+/// Generic publication paths (direct and device-flow saves) never touch a
+/// connector credential: a connector credential is published only by a
+/// verified connector browser completion through
+/// `OAuthBrowserFlowCompletion::admit_into_slot`, and a slot holding one is
+/// never overwritten here.
 fn refuse_replacing_connector_credential(
     previous: Option<&PersistedTokens>,
     tokens: &PersistedTokens,
 ) -> Result<(), CredentialMutationError> {
     use meerkat_core::auth::token_store::{CredentialSlotRefusal, PersistedAuthMode};
-    if previous.is_some_and(|previous| previous.auth_mode == PersistedAuthMode::ConnectorOauth)
-        && tokens.auth_mode != PersistedAuthMode::ConnectorOauth
-    {
+    if tokens.auth_mode == PersistedAuthMode::ConnectorOauth {
+        return Err(CredentialMutationError::SlotRefused(
+            CredentialSlotRefusal::UnverifiedConnectorPublication,
+        ));
+    }
+    if previous.is_some_and(|previous| previous.auth_mode == PersistedAuthMode::ConnectorOauth) {
         return Err(CredentialMutationError::SlotRefused(
             CredentialSlotRefusal::ModeMismatch,
         ));

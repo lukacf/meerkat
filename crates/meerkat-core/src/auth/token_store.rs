@@ -356,6 +356,10 @@ pub enum RefreshError {
     },
     #[error("refresh requires interactive reauthorization: {0}")]
     ReauthRequired(String),
+    /// The refresh response granted fewer scopes than the credential
+    /// requires. A use refusal: the credential keeps its prior state.
+    #[error("refresh response does not grant the required scopes")]
+    RequiredScopesNotGranted,
     #[error("refresh in progress was cancelled")]
     Cancelled,
     #[error("cross-process lock acquisition failed: {0}")]
@@ -438,6 +442,7 @@ impl RefreshError {
             Self::ReauthRequired(_) => RefreshFailureObservation::local_credential_unusable(),
             Self::Refresh(_)
             | Self::CredentialIdentityMismatch
+            | Self::RequiredScopesNotGranted
             | Self::Cancelled
             | Self::LockFailed(_) => RefreshFailureObservation::transient(),
         }
@@ -452,6 +457,7 @@ impl RefreshError {
             | Self::DurableTerminalCommit { disposition, .. } => Some(*disposition),
             Self::Refresh(_)
             | Self::CredentialIdentityMismatch
+            | Self::RequiredScopesNotGranted
             | Self::Observed { .. }
             | Self::ReauthRequired(_)
             | Self::Cancelled
@@ -502,6 +508,10 @@ pub enum CredentialSlotRefusal {
     /// The slot's credential was issued under an incompatible context.
     #[error("the credential slot is bound to an incompatible context")]
     ContextMismatch,
+    /// A connector credential is published only by a verified connector
+    /// browser completion, never by a generic save path.
+    #[error("a connector credential requires a verified connector completion")]
+    UnverifiedConnectorPublication,
 }
 
 /// Typed durable result of one exclusive credential mutation.

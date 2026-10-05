@@ -1956,6 +1956,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn connector_errors_map_refusals_to_400_and_failures_to_500() {
+        use meerkat::{ConnectorLoginError, HostAuthError};
+        use meerkat_core::auth::token_store::CredentialSlotRefusal;
+        let status = |error: HostAuthError| host_auth_error_response(error).status();
+        for failure in [
+            OAuthFlowError::PersistenceFailed {
+                operation: "admit_oauth_browser_flow",
+                detail: "disk".into(),
+            },
+            OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_browser_flow",
+                detail: "rejected".into(),
+            },
+            OAuthFlowError::StateGenerationFailed,
+            OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify",
+            },
+        ] {
+            assert_eq!(
+                status(HostAuthError::Connector(ConnectorLoginError::Flow(failure))),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+        for refusal in [
+            ConnectorLoginError::Flow(OAuthFlowError::Missing),
+            ConnectorLoginError::Slot(CredentialSlotRefusal::Occupied),
+            ConnectorLoginError::Verification(
+                meerkat_providers::connector_oauth::ConnectorOAuthRefusal::AccountMismatch,
+            ),
+        ] {
+            assert_eq!(
+                status(HostAuthError::Connector(refusal)),
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
     fn generated_auth_transition_for_test(
         lease_key: &LeaseKey,
         expires_at: u64,

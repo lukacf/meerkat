@@ -263,15 +263,16 @@ cargo-agent-gate: rust-lane-doctor
 	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"
 	@scripts/cargo-agent-gate $(AGENT_GATE_ARGS)
 
+agent-gate: SHELL := /bin/bash
 agent-gate:
-	@. ./scripts/build-backend-env; \
+	@set -e; . ./scripts/build-backend-env; \
 	if meerkat_buildbuddy_enabled; then \
 		$(MAKE) buildbuddy-doctor; \
 	else \
 		$(MAKE) rust-lane-doctor; \
 	fi
 	@$(MAKE) docs-check
-	@echo "$(GREEN)Running agent changed-path gate...$(NC)"
+	@printf '%b\n' "$(GREEN)Running agent changed-path gate...$(NC)"
 	@scripts/agent-gate $(AGENT_GATE_ARGS)
 
 buildbuddy-install:

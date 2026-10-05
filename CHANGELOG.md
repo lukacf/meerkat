@@ -113,9 +113,6 @@ them.
   5.5 already did. Anthropic documents that Sonnet 5.5 rejects forced tool use
   with a 400, so the request no longer spends a provider round trip that is
   documented to fail. `auto` and `none` are unchanged.
-
-### Fixed
-
 - A runtime with the in-memory runtime store (`RealmBackend::Memory`, and
   the in-memory store the RPC server and runtime-backed surfaces use) could
   wedge a runtime thread for good when an operation finished. A terminal ops

@@ -4787,10 +4787,21 @@ fn yield_segments(
 /// cannot see. One with no words in its transcript window is journaled and
 /// owes the same yield as speech: it must end within `TALK_OVER_BOUND_MS` of
 /// its own start.
+///
+/// A worded start is talk-over only when the user heard more than one
+/// provider frame of it (audible `duration_ms` > `PROVIDER_FRAME_MS`, on the
+/// peer's post-duck energy). One frame is the barge-in duck's reaction time
+/// (#1651): the broker ducks at the user's next reflected voiced frame, one
+/// provider frame after the assistant became audible, so a start held to one
+/// frame is the duck working, not talk-over the user heard. It is journaled
+/// (`held_by_duck`). Turbo S S103 soak 65b7a5c3 R4: the provider's reply to
+/// the previous utterance started 699 ms into the correction, audible 0 ms
+/// (#1710).
 #[derive(Debug, Default, PartialEq)]
 struct TalkOverStarts {
     violations: Vec<String>,
     wordless: Vec<String>,
+    held_by_duck: Vec<String>,
 }
 
 fn talk_over_starts(
@@ -4829,10 +4840,17 @@ fn talk_over_starts(
                 ));
             }
         } else if !evidence::is_backchannel(&burst) {
-            starts.violations.push(format!(
-                "the assistant started talking over the user {into_ms} ms into the utterance ({duration_ms} ms, said {:?})",
-                burst.window_text
-            ));
+            if duration_ms as i64 > PROVIDER_FRAME_MS {
+                starts.violations.push(format!(
+                    "the assistant started talking over the user {into_ms} ms into the utterance ({duration_ms} ms, said {:?})",
+                    burst.window_text
+                ));
+            } else {
+                starts.held_by_duck.push(format!(
+                    "into_ms={into_ms} duration_ms={duration_ms} said={:?}",
+                    burst.window_text
+                ));
+            }
         }
     }
     Ok(starts)
@@ -4961,6 +4979,15 @@ fn talk_over_violations(
                         scenario,
                         "wordless_burst_during_utterance",
                         format!("label={label} {wordless}"),
+                    )?;
+                }
+                for held in starts.held_by_duck {
+                    record_metric(
+                        evidence,
+                        channel,
+                        scenario,
+                        "duck_held_start_during_utterance",
+                        format!("label={label} {held}"),
                     )?;
                 }
                 violations.extend(
@@ -12636,6 +12663,50 @@ mod config_tests {
                 }}),
             ),
         ])
+    }
+
+    /// #1710: a worded start during the utterance is talk-over only when the
+    /// user heard more than one provider frame of it (the duck's reaction
+    /// time). Duck soak 65b7a5c3 R4 (0 ms audible) is held by the duck; the
+    /// pre-duck tlb-guard R1 correction (2304 ms) and bargesoak R1 barge-in
+    /// (700 ms) still fail; 200 ms is the exclusive bound.
+    #[test]
+    fn a_start_held_by_the_duck_to_one_provider_frame_is_not_talk_over() {
+        let start_of = |duration_ms: u64, text: &str| {
+            let timeline = barge_in_with_bursts(
+                serde_json::json!([
+                    // One energy window (100 ms) overlaps the user even when the
+                    // duck holds the burst to it (duck R4: duration 0).
+                    {"started_ms": 11_000, "last_active_ms": 11_000 + duration_ms, "ended": true,
+                        "overlap_ms": duration_ms + 100}
+                ]),
+                serde_json::json!([{"t_ms": 11_000, "text": text}]),
+                serde_json::json!([12_800]),
+            );
+            super::talk_over_starts(&timeline, 7, 10_250, &|audible, _| audible as i64).unwrap()
+        };
+        // Worded and not a backchannel (duck R4 itself said " and Okay.", which
+        // the live classifier did not take as a backchannel there).
+        let held = start_of(0, " switching the kickoff to Friday then.");
+        assert!(held.violations.is_empty(), "{held:?}");
+        assert_eq!(held.held_by_duck.len(), 1, "{held:?}");
+        let boundary = start_of(200, " switching the kickoff to Friday then.");
+        assert!(
+            boundary.violations.is_empty(),
+            "exclusive bound: {boundary:?}"
+        );
+        let guard = start_of(2304, " Okay, switching it to Thursday. Right. Friday.");
+        assert!(
+            matches!(guard.violations.as_slice(), [s] if s.contains("2304 ms")),
+            "{guard:?}"
+        );
+        let bargesoak = start_of(700, " I'm working on it and checking the brief now.");
+        assert!(
+            matches!(bargesoak.violations.as_slice(), [s] if s.contains("700 ms")),
+            "{bargesoak:?}"
+        );
+        let just_over = start_of(300, " switching the kickoff to Friday then.");
+        assert_eq!(just_over.violations.len(), 1, "{just_over:?}");
     }
 
     /// Talk-over that starts after the onset, while the user is still

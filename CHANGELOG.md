@@ -173,9 +173,10 @@ them.
 - `.config/nextest.toml`: the three `downstream_*` tests of
   `meerkat`'s `agent_builder_policy_canary` each run a nested Cargo build
   that takes every core, and now run one at a time (`downstream-cargo-canary`
-  test group). `e2e_fast_lane` joins the macOS real-loopback comms group: its
-  `cross_host_*` and `multi_host_*` modules use the same comms support as the
-  cross-host binaries already serialized there.
+  test group). The `cross_host_live_member` and `multi_host_*` modules of
+  `e2e_fast_lane` join the macOS real-loopback comms group: they use the same
+  comms support as the cross-host binaries already serialized there; the rest
+  of that binary stays parallel.
 - `meerkat-memory` `released_v2_store_with_empty_rows_is_purged_on_open` no
   longer treats approximate HNSW search recall as an exact oracle. Its final
   reopen check asserted three hits for one query and failed 5 of 200 serial

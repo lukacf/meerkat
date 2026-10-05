@@ -1088,7 +1088,7 @@ export class MeerkatClient {
     });
 
     this.rl = createInterface({ input: this.process.stdout! });
-    this.rl.on("line", (line: string) => this.handleLine(line));
+    this.rl.on("line", (line: string) => this.handleLine(line, child));
 
     // Handshake — `initialize` returns the generated `ServerCapabilities`
     // contract; fields are validated below.
@@ -1149,6 +1149,10 @@ export class MeerkatClient {
     }
     const process = this.process;
     this.process = null;
+    // Retire this connection's work before yielding. A reconnect can admit
+    // new work while the original child is still being reaped.
+    this.rejectPendingRequests(new MeerkatError("CLIENT_CLOSED", "Client closed"));
+    this.closeQueues();
     if (process) {
       process.stdin?.end();
       const closed = once(process, "close").catch(() => []);
@@ -1163,8 +1167,6 @@ export class MeerkatClient {
       process.stdout?.destroy();
       process.stderr?.destroy();
     }
-    this.rejectPendingRequests(new MeerkatError("CLIENT_CLOSED", "Client closed"));
-    this.closeQueues();
   }
 
   private rejectPendingRequests(reason: unknown): void {
@@ -4566,7 +4568,8 @@ export class MeerkatClient {
 
   // -- Transport ----------------------------------------------------------
 
-  private handleLine(line: string): void {
+  private handleLine(line: string, child = this.process): void {
+    if (this.process !== child) return;
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(line);
@@ -4586,7 +4589,7 @@ export class MeerkatClient {
 
     // Server→client callback request (has both id and method).
     if ("id" in data && "method" in data) {
-      this.handleCallbackRequest(data);
+      this.handleCallbackRequest(data, child);
       return;
     }
 
@@ -7862,7 +7865,7 @@ export class MeerkatClient {
     return raw as unknown as McpLiveOpResponse;
   }
 
-  private handleCallbackRequest(data: Record<string, unknown>): void {
+  private handleCallbackRequest(data: Record<string, unknown>, child: ChildProcess | null): void {
     const requestId = data.id;
     const method = String(data.method ?? "");
     const params = (data.params ?? {}) as Record<string, unknown>;
@@ -7876,16 +7879,16 @@ export class MeerkatClient {
         handler
           .handler(args)
           .then((content) => {
-            this.writeCallbackResponse(requestId, { content, is_error: false });
+            this.writeCallbackResponse(child, requestId, { content, is_error: false });
           })
           .catch((err: unknown) => {
-            this.writeCallbackResponse(requestId, {
+            this.writeCallbackResponse(child, requestId, {
               content: `Tool error: ${err}`,
               is_error: true,
             });
           });
       } else {
-        this.writeCallbackResponse(requestId, {
+        this.writeCallbackResponse(child, requestId, {
           content: `Unknown tool: ${toolName}`,
           is_error: true,
         });
@@ -7897,16 +7900,19 @@ export class MeerkatClient {
         id: requestId,
         error: { code: -32601, message: `Method not supported: ${method}` },
       };
-      this.process?.stdin?.write(JSON.stringify(response) + "\n");
+      if (this.process === child) child?.stdin?.write(JSON.stringify(response) + "\n");
     }
   }
 
   private writeCallbackResponse(
+    child: ChildProcess | null,
     requestId: unknown,
     result: { content: string | ContentBlock[]; is_error: boolean },
   ): void {
     const response = { jsonrpc: "2.0", id: requestId, result };
-    this.process?.stdin?.write(JSON.stringify(response) + "\n");
+    // Callback ids are scoped to the originating process. A late completion
+    // must never answer a replacement process that reuses the same id.
+    if (this.process === child) child?.stdin?.write(JSON.stringify(response) + "\n");
   }
 
   private static buildCreateParams(

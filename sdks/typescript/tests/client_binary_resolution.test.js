@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { EventEmitter } from "node:events";
 import {
   chmodSync,
   mkdirSync,
@@ -11,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { MeerkatClient } from "../dist/client.js";
+import { CONTRACT_VERSION } from "../dist/generated/types.js";
 
 describe("MeerkatClient binary resolution", () => {
   it("respects MEERKAT_BIN_PATH when set", async () => {
@@ -163,4 +165,150 @@ describe("MeerkatClient binary resolution", () => {
       ["--live-webrtc", "--live-tool-timeout-ms", "180000"],
     );
   });
+});
+
+describe("MeerkatClient callback connection lifetime", () => {
+  it("retires pending work before awaiting close so cleanup cannot reject a replacement", async () => {
+    const client = new MeerkatClient();
+    const original = Object.assign(new EventEmitter(), {
+      stdin: { write() {}, end() {}, destroy() {} },
+      kill() {}, exitCode: null, signalCode: null,
+    });
+    client.process = original;
+    const originalWork = client.request("old", {});
+    const originalClosed = assert.rejects(originalWork, /Client closed/);
+    const closing = client.close();
+    const replacement = { stdin: { write() {} } };
+    client.process = replacement;
+    let outcome;
+    const replacementWork = client.request("current", {}).then(
+      (value) => { outcome = value; },
+      (error) => { outcome = error; },
+    );
+    const replacementId = client.requestId;
+    original.emit("close", 0, null);
+    await closing;
+    await originalClosed;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(outcome, undefined, "original close rejected replacement work");
+    client.handleLine(JSON.stringify({ id: replacementId, result: "current reply" }));
+    await replacementWork;
+    assert.equal(outcome, "current reply");
+    assert.equal(client.process, replacement);
+  });
+
+  it("ignores retired reader frames without completing or failing replacement work", async () => {
+    const client = new MeerkatClient();
+    const original = {};
+    const replacement = { kill: () => assert.fail("retired corruption killed replacement") };
+    let response;
+    let calls = 0;
+    client.registerTool("delayed", "Delayed", { type: "object" }, async () => { calls += 1; return "old"; });
+    client.process = replacement;
+    client.pendingRequests.set(77, {
+      resolve: (value) => { response = value; },
+      reject: () => assert.fail("retired frame failed replacement work"),
+    });
+    client.handleLine('{"id":77,"result":"old"}', original);
+    assert.equal(response, undefined);
+    client.handleLine('{"id":"cb-old","method":"tool/execute","params":{"name":"delayed"}}', original);
+    client.handleLine("corrupted old frame", original);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls, 0);
+    assert.equal(client.process, replacement);
+    client.handleLine('{"id":77,"result":"current"}', replacement);
+    assert.equal(response, "current");
+  });
+
+  for (const oldOutcome of ["success", "error"]) {
+    it(`drops an old callback ${oldOutcome} after reconnect with a reused callback id`, { timeout: 10_000 }, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), "meerkat-ts-callback-"));
+      const bin = path.join(root, "rkat-rpc.cjs");
+      writeFileSync(bin, `#!/usr/bin/env node
+const rl = require("node:readline").createInterface({ input: process.stdin });
+const received = [];
+let callbackRequest;
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "test/callback") {
+    callbackRequest = msg.id;
+    send({ jsonrpc: "2.0", id: "cb-reused", method: "tool/execute",
+      params: { name: "delayed", arguments: msg.params } });
+  } else if (msg.method) {
+    const result = msg.method === "initialize"
+      ? { contract_version: ${JSON.stringify(CONTRACT_VERSION)}, methods: [] }
+      : msg.method === "capabilities/get" ? { capabilities: [] }
+      : msg.method === "test/received" ? received : { registered: 1 };
+    send({ jsonrpc: "2.0", id: msg.id, result });
+  } else {
+    received.push(msg);
+    if (callbackRequest !== undefined) {
+      send({ jsonrpc: "2.0", id: callbackRequest, result: msg });
+      callbackRequest = undefined;
+    }
+  }
+});
+`);
+      chmodSync(bin, 0o755);
+      const client = new MeerkatClient(bin);
+      let releaseOld;
+      let releaseCurrent;
+      let enteredOld;
+      let enteredCurrent;
+      const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+      const currentGate = new Promise((resolve) => { releaseCurrent = resolve; });
+      const oldEntered = new Promise((resolve) => { enteredOld = resolve; });
+      const currentEntered = new Promise((resolve) => { enteredCurrent = resolve; });
+      const blocks = [{ type: "text", text: "current result" },
+        { type: "image", media_type: "image/png", source: "blob", blob_id: "current-blob" }];
+      client.registerTool("delayed", "Delayed", { type: "object" }, async ({ origin }) => {
+        if (origin === "old") {
+          enteredOld();
+          await oldGate;
+          if (oldOutcome === "error") throw new Error("old failure");
+          return "old result";
+        }
+        if (origin === "current") {
+          enteredCurrent();
+          await currentGate;
+          return blocks;
+        }
+        if (origin === "control-error") throw new Error("original error control");
+        return "original connection works";
+      });
+      try {
+        await client.connect();
+        const original = await client.request("test/callback", { origin: "control" });
+        assert.equal(original.result.content, "original connection works");
+        const originalError = await client.request("test/callback", { origin: "control-error" });
+        assert.deepEqual(originalError.result, {
+          content: "Tool error: Error: original error control", is_error: true,
+        });
+        const oldWork = client.request("test/callback", { origin: "old" });
+        const oldClosed = assert.rejects(oldWork, /Client closed/);
+        await oldEntered;
+        await client.close();
+        await oldClosed;
+        await client.connect();
+        const currentWork = client.request("test/callback", { origin: "current" });
+        currentWork.catch(() => {});
+        await currentEntered;
+        releaseOld();
+        await new Promise((resolve) => setImmediate(resolve));
+        // This request is a pipe-order barrier after the old promise settled.
+        assert.deepEqual(await client.request("test/received", {}), [],
+          "a retired callback must not answer the replacement process's reused id");
+        releaseCurrent();
+        const current = await currentWork;
+        assert.deepEqual(current.result, { content: blocks, is_error: false });
+        assert.equal((await client.request("test/received", {})).length, 1);
+      } finally {
+        releaseOld();
+        releaseCurrent();
+        await client.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
 });

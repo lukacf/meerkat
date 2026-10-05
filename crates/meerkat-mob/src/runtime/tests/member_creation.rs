@@ -107,7 +107,12 @@ async fn member_creation_unproven_boundary_and_context_forks_are_not_roots() {
         .await
         .unwrap();
     let context = handle
-        .member_creation_for_session(context.bridge_session_id().unwrap())
+        .member_creation_for_session(
+            &handle
+                .resolve_bridge_session_id(&context.agent_identity)
+                .await
+                .unwrap(),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -125,7 +130,10 @@ async fn member_creation_runtime_fork_spawn_and_respawn_keep_exact_authority() {
     let mut parent_spec = SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone());
     parent_spec.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly);
     let parent = handle.spawn_spec(parent_spec).await.unwrap();
-    let parent_session = parent.bridge_session_id().unwrap().clone();
+    let parent_session = handle
+        .resolve_bridge_session_id(&parent.agent_identity)
+        .await
+        .unwrap();
     let parent_proof = handle
         .member_creation_for_session(&parent_session)
         .await
@@ -148,7 +156,10 @@ async fn member_creation_runtime_fork_spawn_and_respawn_keep_exact_authority() {
         )
         .await
         .unwrap();
-    let child_session = child.bridge_session_id().unwrap().clone();
+    let child_session = handle
+        .resolve_bridge_session_id(&child.agent_identity)
+        .await
+        .unwrap();
     let child_proof = handle
         .member_creation_for_session(&child_session)
         .await
@@ -304,6 +315,94 @@ async fn member_creation_cross_mob_delegate_has_source_proof_without_comms() {
     target.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn member_creation_cold_resume_projects_recovered_binding_immediately() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let definition = with_unique_mob_id(sample_definition(), "creation-recovery");
+    let mob_id = definition.id.clone();
+    let handle = MobBuilder::new(definition, storage.clone())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .unwrap();
+    let identity = AgentIdentity::from("recovered-worker");
+    let member = handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .unwrap();
+    let original_session = member.bridge_session_id().unwrap().clone();
+    let original = handle
+        .member_creation_for_session(&original_session)
+        .await
+        .unwrap()
+        .unwrap();
+    crash_stop_and_release_routes(handle).await;
+    MobSessionService::discard_live_session(service.as_ref(), &original_session)
+        .await
+        .unwrap();
+    service.delete_persisted_session(&original_session).await;
+    let replacement = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".into(),
+            prompt: "recovered head".into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(format!("{mob_id}/worker/{identity}")),
+                mob_member_binding: Some(original.member_binding.clone()),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .unwrap();
+    let retained = Arc::new(RwLock::new(None));
+    let observed = Arc::clone(&retained);
+    let hook: MobBeforeActivation = Arc::new(move |handle| {
+        let observed = Arc::clone(&observed);
+        Box::pin(async move {
+            *observed.write().await = Some(handle);
+            Ok(())
+        })
+    });
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service)
+        .before_activation(hook)
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .unwrap();
+    let preview = retained.read().await.clone().unwrap();
+    for handle in [&resumed, &preview] {
+        assert_eq!(
+            handle.resolve_bridge_session_id(&identity).await.unwrap(),
+            replacement.session_id
+        );
+        let recovered = handle
+            .member_creation_for_session(&replacement.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.creation.creation_id,
+            original.creation.creation_id
+        );
+        assert_eq!(recovered.birth_cursor, original.birth_cursor);
+        assert!(matches!(
+            recovered.creation.provenance,
+            MemberCreationProvenance::Successor { predecessor_session_id, .. }
+                if predecessor_session_id == original_session
+        ));
+    }
+    resumed.shutdown().await.unwrap();
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn member_creation_sqlite_restart_retains_retired_parent_and_child_tokens() {
@@ -339,7 +438,10 @@ async fn member_creation_sqlite_restart_retains_retired_parent_and_child_tokens(
         )
         .await
         .unwrap();
-    let child_session = child.bridge_session_id().unwrap().clone();
+    let child_session = handle
+        .resolve_bridge_session_id(&child.agent_identity)
+        .await
+        .unwrap();
     let parent_before = handle
         .member_creation_for_session(&parent_session)
         .await

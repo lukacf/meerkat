@@ -443,6 +443,46 @@ SDK spawn requests, helpers, and standing profiles cannot set
 `resume_from_role`. The private member-host materialization protocol carries it
 only as part of the trusted remote-host resume path.
 
+## Member creation provenance and host activation
+
+The canonical `MemberSpawnedEvent.creation` record carries a runtime-issued
+`MemberCreationId` and typed provenance. A fresh, unrelated member receives a
+new token even if it reuses a retired member's display identity. Cold restore
+preserves the token. An explicit runtime-authorized successor preserves the
+original token and birth cursor and records its exact predecessor binding.
+
+| Provenance | Meaning |
+|---|---|
+| `Root` | The runtime attests an independent creation with no delegated ancestor. |
+| `Spawn` | An exact source session, typed member binding, creation token and captured effective tool policy establish a spawn edge. |
+| `Fork` | The existing `fork_source` owns the source endpoint; the creation record adds its token and captured effective tool policy. |
+| `Successor` | An exact predecessor proves continuity of the same logical member, not a new delegation edge. |
+| `LegacyUnknown` | The runtime cannot prove complete ancestry. An absent old field never becomes a root. |
+
+Historical creation facts remain in the existing journal-backed roster
+projection after retirement. `MobHandle::member_creation_for_session` reads
+the facts for an exact session, and `member_creation_journal_cursor` exposes
+the committed journal position. These reads do not authenticate a current
+caller. Hosts must independently validate its current session/member binding.
+Conflicting history is an error, not evidence that an ancestor is absent.
+
+`MobHandle::capture_member_creation_source` issues a sealed process-local
+`MemberCreationSourceWitness` after checking the current binding and persisted
+effective tool policy. Agent arguments, transcript text and comms labels cannot
+construct that witness. Unsupported source authority remains unknown. A
+delegation edge records an authority ceiling; it never grants execution rights
+or resource access. Current tool execution policy and host access policy still
+apply to every call.
+
+Trusted hosts can install `MobBuilder::before_activation` to bind optional
+services before fresh or restored members execute. The `MobBeforeActivation`
+callback receives a handle backed by the same roster and lifecycle watch as
+the eventual public handle. Read-only direct authority queries are available;
+the callback must not wait for actor commands because the actor has not started.
+A callback error aborts bootstrap. Hosts must discard provisional service
+bindings if a later bootstrap step fails. With no callback configured, no host
+hook runs.
+
 ## Compaction contract
 
 Compaction is optional. Ordinary recoverable failures preserve uncompacted

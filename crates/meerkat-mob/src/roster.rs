@@ -201,9 +201,9 @@ impl Roster {
 
     /// Apply a single event to update roster state.
     pub fn apply(&mut self, event: &MobEvent) {
-        std::sync::Arc::make_mut(&mut self.creation_history).observe(event);
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
+                std::sync::Arc::make_mut(&mut self.creation_history).observe(event);
                 // Fail closed on a malformed spawn event: a member with no
                 // bridge member ref cannot be admitted with a real backend
                 // identity, so skip the projection rather than fabricate a

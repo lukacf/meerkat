@@ -90,22 +90,6 @@ them.
   `pre-push-prune-lanes.sh` falls back to `$$` when `BASHPID` is unset, and
   `mapfile` uses in the semver scripts became read loops.
   `scripts/tests/require_bash_test.sh` runs in `make path-classifier-selftest`.
-### Testing
-
-- The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
-  - Four workers spawn at once while a member's turn runs.
-  - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
-  - The mob then shuts down mid-turn under a 30 s deadline. Shutdown must return within that deadline and report an explicit outcome for every member.
-
-### Testing
-
-- The live-context result barrier TLC audit
-  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
-  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
-  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
-  must leave the audit's goal unreachable. Dropping the bootstrap-summary
-  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
-  previously checked only by hand (#1607).
 - Model catalog: Claude Sonnet 5 (`claude-sonnet-5`) is catalogued. It is a
   legacy but still available Anthropic model (retirement not sooner than June
   30, 2027) that the catalog never registered, so builds that named it without
@@ -116,6 +100,21 @@ them.
   5.5 it accepts forced `tool_choice` and does not support mid-conversation
   system messages. Provider inference stays an exact catalog match: other
   uncatalogued `claude-*` IDs still fail loudly.
+
+### Testing
+
+- The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
+  - Four workers spawn at once while a member's turn runs.
+  - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
+  - The mob then shuts down mid-turn under a 30 s deadline. Shutdown must return within that deadline and report an explicit outcome for every member.
+
+- The live-context result barrier TLC audit
+  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
+  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
+  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
+  must leave the audit's goal unreachable. Dropping the bootstrap-summary
+  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
+  previously checked only by hand (#1607).
 
 ## [0.8.51] - 2026-10-05
 

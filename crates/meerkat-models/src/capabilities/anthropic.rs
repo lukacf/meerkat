@@ -524,7 +524,11 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(120),
-        supports_forced_tool_choice: true,
+        // Forced `tool_choice` (`any`/`tool`) returns 400 on Sonnet 5.5,
+        // including on token counting (what's new and the migration guide,
+        // "Forced tool use is not supported"); refuse it locally, as for
+        // claude-opus-5-5.
+        supports_forced_tool_choice: false,
     },
     // Claude Sonnet 4.6
     //

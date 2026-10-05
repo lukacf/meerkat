@@ -85,6 +85,7 @@ mod tests {
     fn supports_temperature_uses_catalog_rows() {
         assert!(!supports_temperature("claude-opus-4-8"));
         assert!(!supports_temperature("claude-sonnet-5-5"));
+        assert!(!supports_temperature("claude-sonnet-5"));
         assert!(supports_temperature("claude-sonnet-4-6"));
     }
 
@@ -101,6 +102,10 @@ mod tests {
         assert!(supports_mid_conversation_system_messages("claude-opus-4-8"));
         assert!(supports_mid_conversation_system_messages(
             "claude-sonnet-5-5"
+        ));
+        // Sonnet 5 keeps instructions in the top-level system field.
+        assert!(!supports_mid_conversation_system_messages(
+            "claude-sonnet-5"
         ));
         assert!(!supports_mid_conversation_system_messages(
             "claude-haiku-4-5-20251001"

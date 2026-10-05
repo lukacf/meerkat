@@ -90,14 +90,23 @@ them.
   `pre-push-prune-lanes.sh` falls back to `$$` when `BASHPID` is unset, and
   `mapfile` uses in the semver scripts became read loops.
   `scripts/tests/require_bash_test.sh` runs in `make path-classifier-selftest`.
+- Model catalog: Claude Sonnet 5 (`claude-sonnet-5`) is catalogued. It is a
+  legacy but still available Anthropic model (retirement not sooner than June
+  30, 2027) that the catalog never registered, so builds that named it without
+  an explicit provider failed with "Cannot infer provider from model". The row
+  is `Supported`, with 1M context, 128K output (300K on the Batch API with the
+  `output-300k-2026-03-24` beta), adaptive thinking, low..max effort, no
+  sampling parameters, compaction and structured outputs. Unlike Claude Sonnet
+  5.5 it accepts forced `tool_choice` and does not support mid-conversation
+  system messages. Provider inference stays an exact catalog match: other
+  uncatalogued `claude-*` IDs still fail loudly.
+
 ### Testing
 
 - The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
   - Four workers spawn at once while a member's turn runs.
   - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
   - The mob then shuts down mid-turn under a 30 s deadline. Shutdown must return within that deadline and report an explicit outcome for every member.
-
-### Testing
 
 - The live-context result barrier TLC audit
   (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)

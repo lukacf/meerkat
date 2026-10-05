@@ -114,8 +114,9 @@ fn catalog_facts_match_the_live_probes() {
     };
     assert_eq!(forced("claude-opus-5-5"), Some(false));
     assert_eq!(forced("claude-haiku-4-5-20251001"), Some(true));
-    // claude-sonnet-5 is not a catalog row: the call is attempted.
-    assert_ne!(forced("claude-sonnet-5"), Some(false));
+    // claude-sonnet-5 is now a catalog row; the live probe accepted forced
+    // choices, and its model documentation agrees.
+    assert_eq!(forced("claude-sonnet-5"), Some(true));
 }
 
 /// Anthropic's own 400 for an unsupported forced choice, on a request that

@@ -97,6 +97,17 @@ pub(super) fn narration_title(transcript: &str) -> String {
     truncate_chars(transcript, NARRATION_TITLE_CHARS)
 }
 
+/// The user's words for a request at the post-close bound: a result merged
+/// after the call closed replays on the reopened channel under them, and a
+/// read-back request sits at the end of a long request ("... make sure the
+/// last line mentions a lantern. Read it back to me."), past the narration
+/// bound (S104 on the first post-close framing build).
+const POST_CLOSE_REQUEST_CHARS: usize = 400;
+
+pub(super) fn post_close_request(transcript: &str) -> String {
+    truncate_chars(transcript, POST_CLOSE_REQUEST_CHARS)
+}
+
 /// The user words a delegation's narrations quote: the user's last turn
 /// before the delegation, not the whole executor window.
 ///

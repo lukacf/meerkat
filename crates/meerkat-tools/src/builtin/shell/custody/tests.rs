@@ -1426,20 +1426,39 @@ async fn custody_foreign_namespace_host_role() {
 #[tokio::test]
 async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
     // Unprivileged user and pid namespaces may be unavailable (for example
-    // restricted by AppArmor); the test then has nothing to exercise.
-    let unshare = |args: &[&str]| Command::new("unshare").args(args).output();
-    match unshare(&["-Urpf", "--kill-child", "true"]) {
+    // restricted by AppArmor); the test then has nothing to exercise, and
+    // says why.
+    match Command::new("unshare")
+        .args(["-Urpf", "--kill-child", "true"])
+        .output()
+    {
         Ok(output) if output.status.success() => {}
-        _ => return,
+        Ok(output) => {
+            eprintln!(
+                "skipped: user+pid namespaces unavailable: unshare probe ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!("skipped: user+pid namespaces unavailable: unshare probe: {error}");
+            return;
+        }
     }
     let root = TempDir::new().unwrap();
     let scope = scope();
-    let status = Command::new("mkfifo")
-        .arg(root.path().join("ready.fifo"))
-        .status()
-        .unwrap();
+    let fifo_path = root.path().join("ready.fifo");
+    let status = Command::new("mkfifo").arg(&fifo_path).status().unwrap();
     assert!(status.success());
-    let mut host = Command::new("unshare")
+    // Read-write and non-blocking: opening never waits for a writer, so no
+    // blocking thread outlives a failed start (a blocked FIFO open used to
+    // keep the test runtime from shutting down after the readiness timeout).
+    let fifo = tokio::net::unix::pipe::OpenOptions::new()
+        .read_write(true)
+        .open_receiver(&fifo_path)
+        .unwrap();
+    let mut host = tokio::process::Command::new("unshare")
         .args(["-Urpf", "--kill-child"])
         .arg(std::env::current_exe().unwrap())
         .args([
@@ -1451,25 +1470,55 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
         ])
         .env(UNSHARE_ROOT_ENV, root.path())
         .env(UNSHARE_SCOPE_ENV, scope.as_str())
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let fifo = root.path().join("ready.fifo");
-    let ready = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
-    )
-    .await;
-    let ready = match ready {
-        Ok(joined) => joined.unwrap().unwrap(),
-        Err(_) => {
-            let _ = host.kill();
-            let _ = host.wait();
-            panic!("the foreign-namespace host never became ready");
-        }
+    let mut host_stderr = host.stderr.take().unwrap();
+    let stderr_task = tokio::spawn(async move {
+        let mut text = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut host_stderr, &mut text).await;
+        text
+    });
+    // The host's stderr once it has ended (bounded: a lingering descendant
+    // holding the pipe must not hang the failure report).
+    let collect_stderr = |task: tokio::task::JoinHandle<String>| async move {
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .map_or_else(
+                |_| "<stderr still open after 10 s>".to_owned(),
+                |joined| joined.unwrap(),
+            )
     };
-    assert_eq!(ready.trim(), "ready");
+    let mut ready_lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(fifo));
+    tokio::select! {
+        line = ready_lines.next_line() => {
+            let line = line.unwrap().expect("the read-write FIFO never reaches end of file");
+            assert_eq!(line.trim(), "ready");
+        }
+        exited = host.wait() => {
+            let status = exited.unwrap();
+            let stderr = collect_stderr(stderr_task).await;
+            // Only unshare's own setup failure, before it execs the host,
+            // means the namespaces are unavailable here.
+            if stderr.starts_with("unshare:") {
+                eprintln!(
+                    "skipped: user+pid namespaces unavailable: unshare failed before the host started ({status}): {}",
+                    stderr.trim()
+                );
+                return;
+            }
+            panic!("the foreign-namespace host exited before it became ready ({status}); stderr:\n{stderr}");
+        }
+        () = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
+            let _ = host.start_kill();
+            let _ = host.wait().await;
+            let stderr = collect_stderr(stderr_task).await;
+            panic!("the foreign-namespace host never became ready within 120 s; stderr:\n{stderr}");
+        }
+    }
 
     // Alive in its own namespace: its lock is held.
     let error = ProcessCustody::recover_and_open(root.path(), scope.clone())
@@ -1487,8 +1536,7 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
     );
 
     // Tear the namespace down with its host.
-    host.kill().unwrap();
-    host.wait().unwrap();
+    host.kill().await.unwrap();
     let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
         .await
         .unwrap();

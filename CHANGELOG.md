@@ -249,6 +249,14 @@ them.
 
 ### Testing
 
+- The Rust changed-path selector no longer treats the per-crate license
+  symlinks (`crates/*/LICENSE-MIT`, `LICENSE-APACHE`) as embedded compile
+  inputs. Since those links landed, the repo-root license files mapped to
+  whichever crate came first in path order (`meerkat-agent-build-authority`),
+  so a license edit selected that crate in the agent gates and the CI
+  classifier, and `rust-lane-doctor`'s selector selftest (part of
+  `make agent-gate`) failed on a clean main. License links are package
+  metadata and select no package. The selftest pins that exemption.
 - `.config/nextest.toml`: the three `downstream_*` tests of
   `meerkat`'s `agent_builder_policy_canary` each run a nested Cargo build
   that takes every core, and now run one at a time (`downstream-cargo-canary`

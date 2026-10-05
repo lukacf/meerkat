@@ -454,6 +454,180 @@ pub enum HostAuthError {
     ConnectorTarget(String),
 }
 
+/// Fixed public text for an infrastructure failure. The internal detail
+/// (store paths, persistence errors) stays in protected diagnostics.
+const INFRASTRUCTURE_PUBLIC_MESSAGE: &str = "auth infrastructure failure";
+
+impl HostAuthError {
+    /// The typed public reason of this error: the one mapping every auth
+    /// surface projects. Exhaustive on purpose, so a new native error must
+    /// choose its reason.
+    pub fn reason(&self) -> meerkat_contracts::WireAuthErrorReason {
+        use meerkat_contracts::WireAuthErrorReason as R;
+        match self {
+            Self::Target(error) => connection_target_reason(error),
+            Self::WriteOwner(error) => match error {
+                WriteOwnerError::Inherited { .. } => R::BindingInherited,
+                WriteOwnerError::Unknown { .. } => R::BindingNotFound,
+                WriteOwnerError::Chain(_) => R::InvalidTarget,
+            },
+            Self::OAuthTarget(_) | Self::ConnectorTarget(_) => R::InvalidTarget,
+            Self::OAuthFlow(error) => oauth_flow_reason(error),
+            Self::OAuthExchange(_) => R::UpstreamFailure,
+            Self::CredentialMutation(error) => credential_mutation_reason(error),
+            Self::TokenStore(_)
+            | Self::Factory(_)
+            | Self::PersistenceUnavailable
+            | Self::Lifecycle(_)
+            | Self::StatusRehydrate(_) => R::Infrastructure,
+            Self::BrowserFlowUnsupported(_) | Self::DeviceFlowUnsupported(_) => R::FlowUnsupported,
+            Self::McpOAuth(error) => mcp_oauth_reason(error),
+            Self::McpTarget(refusal) => match refusal {
+                HostMcpTargetRefusal::UnknownServer { .. } => R::McpServerNotConfigured,
+                HostMcpTargetRefusal::UrlMismatch { .. }
+                | HostMcpTargetRefusal::NotOAuthCapable { .. } => R::McpServerMismatch,
+                HostMcpTargetRefusal::AccountMismatch { .. } => R::AccountMismatch,
+                HostMcpTargetRefusal::ConfigUnavailable(_) => R::ConfigurationInvalid,
+            },
+            Self::Connector(error) => connector_reason(error),
+        }
+    }
+
+    /// The error text a public surface may show. Infrastructure failures use
+    /// fixed text; their detail goes only to protected diagnostics.
+    pub fn public_message(&self) -> String {
+        match self.reason() {
+            meerkat_contracts::WireAuthErrorReason::Infrastructure => {
+                INFRASTRUCTURE_PUBLIC_MESSAGE.to_owned()
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
+fn connection_target_reason(
+    error: &meerkat_core::ConnectionTargetError,
+) -> meerkat_contracts::WireAuthErrorReason {
+    use meerkat_contracts::WireAuthErrorReason as R;
+    use meerkat_core::ConnectionTargetError as E;
+    match error {
+        E::UnknownRealm(_) => R::RealmNotFound,
+        E::MissingDefaultBinding { .. } => R::BindingNotFound,
+        E::BindingInvalid { .. } => R::BindingInvalid,
+        E::RealmConfigInvalid { .. } => R::ConfigurationInvalid,
+        E::MissingRealm
+        | E::InvalidRealmId { .. }
+        | E::InvalidBindingId { .. }
+        | E::ProviderMismatch { .. }
+        | E::AmbiguousCredentialAccountBindings { .. }
+        | E::RealmChain(_) => R::InvalidTarget,
+    }
+}
+
+fn oauth_flow_reason(error: &OAuthFlowError) -> meerkat_contracts::WireAuthErrorReason {
+    use meerkat_contracts::WireAuthErrorReason as R;
+    match error {
+        OAuthFlowError::Missing => R::AttemptMissing,
+        OAuthFlowError::BrowserIdentityMismatch
+        | OAuthFlowError::ProviderMismatch { .. }
+        | OAuthFlowError::RedirectUriMismatch
+        | OAuthFlowError::TargetMismatch { .. } => R::AttemptMismatch,
+        OAuthFlowError::Connector(refusal) => connector_refusal_reason(*refusal),
+        OAuthFlowError::DevicePollInProgress => R::DevicePollInProgress,
+        OAuthFlowError::DeviceCodeAlreadyAdmitted => R::DeviceCodeAlreadyAdmitted,
+        OAuthFlowError::DeviceExpiryOutOfRange => R::DeviceExpiryInvalid,
+        OAuthFlowError::RegistryProjectionMissing { .. }
+        | OAuthFlowError::StateGenerationFailed
+        | OAuthFlowError::LifecycleRejected { .. }
+        | OAuthFlowError::PersistenceFailed { .. } => R::Infrastructure,
+    }
+}
+
+fn connector_refusal_reason(
+    refusal: meerkat_providers::connector_oauth::ConnectorOAuthRefusal,
+) -> meerkat_contracts::WireAuthErrorReason {
+    use meerkat_contracts::WireAuthErrorReason as R;
+    use meerkat_providers::connector_oauth::ConnectorOAuthRefusal as C;
+    match refusal {
+        C::InvalidDescriptor => R::InvalidTarget,
+        C::DescriptorMismatch => R::AttemptMismatch,
+        C::AccountMismatch => R::AccountMismatch,
+        C::MissingScopes => R::MissingScopes,
+        C::CredentialMismatch => R::CredentialMismatch,
+        C::VerificationUnavailable => R::VerificationUnavailable,
+    }
+}
+
+fn slot_refusal_reason(
+    refusal: meerkat_providers::auth_store::CredentialSlotRefusal,
+) -> meerkat_contracts::WireAuthErrorReason {
+    use meerkat_contracts::WireAuthErrorReason as R;
+    use meerkat_providers::auth_store::CredentialSlotRefusal as S;
+    match refusal {
+        S::Occupied => R::SlotOccupied,
+        S::AccountMismatch => R::SlotAccountMismatch,
+        S::ContextMismatch => R::SlotContextMismatch,
+        S::ModeMismatch => R::SlotModeMismatch,
+        S::UnverifiedConnectorPublication => R::UnverifiedConnectorPublication,
+    }
+}
+
+fn credential_mutation_reason(
+    error: &CredentialMutationError,
+) -> meerkat_contracts::WireAuthErrorReason {
+    match error {
+        CredentialMutationError::SlotRefused(refusal) => slot_refusal_reason(*refusal),
+        CredentialMutationError::Operation(_)
+        | CredentialMutationError::TokenStore(_)
+        | CredentialMutationError::AuthLifecycle(_)
+        | CredentialMutationError::Cancelled
+        | CredentialMutationError::LockFailed(_) => {
+            meerkat_contracts::WireAuthErrorReason::Infrastructure
+        }
+    }
+}
+
+fn mcp_oauth_reason(error: &McpOAuthError) -> meerkat_contracts::WireAuthErrorReason {
+    use meerkat_contracts::WireAuthErrorReason as R;
+    match error {
+        McpOAuthError::InvalidAccountSelection
+        | McpOAuthError::UnsupportedAccountSelection
+        | McpOAuthError::TokenKey { .. } => R::InvalidTarget,
+        McpOAuthError::AccountSelectionRequired => R::AccountSelectionRequired,
+        McpOAuthError::Verification(refusal) => connector_refusal_reason(*refusal),
+        McpOAuthError::Flow(error) => oauth_flow_reason(error),
+        McpOAuthError::MissingStoredToken { .. }
+        | McpOAuthError::HumanAuthorizationRequired { .. } => R::AuthorizationRequired,
+        McpOAuthError::Callback { .. } => R::CallbackUnavailable,
+        McpOAuthError::DiscoveryFailed { .. }
+        | McpOAuthError::RegistrationFailed { .. }
+        | McpOAuthError::TokenExchangeFailed { .. }
+        | McpOAuthError::RefreshFailed { .. } => R::UpstreamFailure,
+        McpOAuthError::ReauthRequired { .. } => R::ReauthRequired,
+        McpOAuthError::TokenStore(_)
+        | McpOAuthError::MissingStoredMetadata { .. }
+        | McpOAuthError::AuthLifecycle { .. } => R::Infrastructure,
+    }
+}
+
+fn connector_reason(error: &ConnectorLoginError) -> meerkat_contracts::WireAuthErrorReason {
+    use meerkat_contracts::WireAuthErrorReason as R;
+    match error {
+        ConnectorLoginError::UnknownStrategy => R::UnknownStrategy,
+        ConnectorLoginError::InvalidRedirect => R::InvalidTarget,
+        ConnectorLoginError::Verification(refusal) => connector_refusal_reason(*refusal),
+        ConnectorLoginError::Flow(error) => oauth_flow_reason(error),
+        ConnectorLoginError::Slot(refusal) => slot_refusal_reason(*refusal),
+        ConnectorLoginError::DiscoveryFailed(_)
+        | ConnectorLoginError::TokenExchangeFailed
+        | ConnectorLoginError::RefreshFailed(_) => R::UpstreamFailure,
+        ConnectorLoginError::ReauthRequired => R::ReauthRequired,
+        ConnectorLoginError::TokenStore(_) | ConnectorLoginError::AuthLifecycle(_) => {
+            R::Infrastructure
+        }
+    }
+}
+
 /// Injectable native-host authentication facade.
 #[derive(Clone)]
 pub struct HostAuthService {

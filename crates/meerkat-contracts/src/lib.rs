@@ -439,6 +439,7 @@ pub use wire::{
     WireAuthBindingRef,
     // Phase 4c — auth-binding wire types.
     WireAuthError,
+    WireAuthErrorReason,
     WireAuthProfile,
     WireAuthProfileCleared,
     WireAuthProfileCreated,

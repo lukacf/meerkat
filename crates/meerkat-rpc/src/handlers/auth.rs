@@ -111,7 +111,17 @@ fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthErr
         meerkat::HostAuthError::Connector(_) => error::INTERNAL_ERROR,
         meerkat::HostAuthError::ConnectorTarget(_) => error::INVALID_PARAMS,
     };
-    RpcResponse::error(id, code, error_value.to_string())
+    let reason = error_value.reason();
+    if reason == meerkat_contracts::WireAuthErrorReason::Infrastructure {
+        // Protected diagnostics only: the public text is fixed.
+        tracing::warn!(target: "meerkat::auth", error = %error_value, "auth infrastructure failure");
+    }
+    RpcResponse::error_with_data(
+        id,
+        code,
+        error_value.public_message(),
+        serde_json::json!({ "reason": reason }),
+    )
 }
 
 /// Effective config the auth-resolution read path consumes.
@@ -2760,6 +2770,35 @@ mod tests {
     }
 
     #[test]
+    fn every_auth_error_reason_is_carried_in_rpc_error_data() {
+        use meerkat::test_fixtures::auth_errors::{
+            INTERNAL_DETAIL_CANARY, all_reasons, reason_examples,
+        };
+        let examples = reason_examples();
+        for reason in all_reasons() {
+            assert!(
+                examples.iter().any(|(_, expected)| *expected == reason),
+                "{reason:?} has an example"
+            );
+        }
+        for (error, expected) in examples {
+            let display = error.to_string();
+            let response = host_auth_error_response(Some(RpcId::Num(1)), error);
+            let error = response.error.expect("error response");
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("reason")),
+                Some(&serde_json::to_value(expected).unwrap()),
+                "{display}"
+            );
+            assert!(!error.message.contains(INTERNAL_DETAIL_CANARY));
+            if expected == meerkat_contracts::WireAuthErrorReason::Infrastructure {
+                assert_eq!(error.code, error::INTERNAL_ERROR);
+                assert_eq!(error.message, "auth infrastructure failure");
+            }
+        }
+    }
+
+    #[test]
     fn connector_errors_map_refusals_to_invalid_params_and_failures_to_internal() {
         use meerkat::{ConnectorLoginError, HostAuthError};
         use meerkat_core::auth::token_store::CredentialSlotRefusal;
@@ -2790,7 +2829,7 @@ mod tests {
         }
         assert_eq!(
             code(HostAuthError::Connector(
-                ConnectorLoginError::RefreshFailed("closure rejected".into())
+                ConnectorLoginError::RefreshFailed("token endpoint refused the refresh".into())
             )),
             error::INTERNAL_ERROR
         );
@@ -4154,11 +4193,13 @@ mod tests {
             .error
             .expect("missing provider auth persistence should fail");
         assert_eq!(error.code, crate::error::INTERNAL_ERROR);
-        assert!(
-            error
-                .message
-                .contains("provider auth persistence is not configured")
+        // Typed, not prose: the public text of an infrastructure failure is
+        // fixed and its detail stays in protected diagnostics.
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("reason")),
+            Some(&serde_json::json!("infrastructure"))
         );
+        assert_eq!(error.message, "auth infrastructure failure");
         let flow = runtime
             .oauth_flow_authority()
             .consume(

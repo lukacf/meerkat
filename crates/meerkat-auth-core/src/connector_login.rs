@@ -244,6 +244,7 @@ pub enum ConnectorLoginError {
     DiscoveryFailed(String),
     #[error("connector OAuth token exchange failed")]
     TokenExchangeFailed,
+    /// The token endpoint reported a refresh failure.
     #[error("connector OAuth token refresh failed: {0}")]
     RefreshFailed(String),
     #[error("connector OAuth stored credential requires reauthentication")]
@@ -1445,9 +1446,23 @@ fn map_refresh_error(error: RefreshError) -> ConnectorLoginError {
     if matches!(&error, RefreshError::ReauthRequired(_))
         || error.refresh_failure_disposition() == Some(RefreshFailureDisposition::ReauthRequired)
     {
-        ConnectorLoginError::ReauthRequired
-    } else {
-        ConnectorLoginError::RefreshFailed(error.to_string())
+        return ConnectorLoginError::ReauthRequired;
+    }
+    match &error {
+        // A failure the token endpoint reported: an upstream failure.
+        RefreshError::Classified { .. } | RefreshError::Observed { .. } => {
+            ConnectorLoginError::RefreshFailed(error.to_string())
+        }
+        // A local lifecycle, lock or closure failure: infrastructure.
+        RefreshError::Refresh(_)
+        | RefreshError::Cancelled
+        | RefreshError::LockFailed(_)
+        | RefreshError::CredentialIdentityMismatch
+        | RefreshError::RequiredScopesNotGranted
+        | RefreshError::ReauthRequired(_)
+        | RefreshError::DurableTerminalCommit { .. } => {
+            ConnectorLoginError::AuthLifecycle(error.to_string())
+        }
     }
 }
 
@@ -1505,7 +1520,7 @@ mod tests {
                 Err("transition rejected".into()),
                 refusal,
             ));
-            assert!(matches!(error, ConnectorLoginError::RefreshFailed(_)));
+            assert!(matches!(error, ConnectorLoginError::AuthLifecycle(_)));
             assert!(!error.is_refusal());
         }
     }

@@ -3737,6 +3737,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias(
         "WireScopeEvidence", wire_schema, "Owner-assigned evidence for a connector's granted scopes."
     )
+    append_python_alias(
+        "WireAuthErrorReason", wire_schema, "Typed reason of an auth error (RPC error.data.reason, REST reason)."
+    )
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_python_alias(name, alias_root, f"Wire payload for {name}.")
@@ -4564,6 +4567,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireConnectorAuthTarget", wire_schema)
     append_typescript_interface("WireConnectorVerifiedAccount", wire_schema)
     append_typescript_alias("WireScopeEvidence", wire_schema)
+    append_typescript_alias("WireAuthErrorReason", wire_schema)
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_typescript_alias(name, alias_root)

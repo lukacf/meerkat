@@ -1497,6 +1497,8 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
         line = ready_lines.next_line() => {
             let line = line.unwrap().expect("the read-write FIFO never reaches end of file");
             assert_eq!(line.trim(), "ready");
+            // A green run of this test is never mistaken for a skipped one.
+            eprintln!("exercised: foreign-namespace host ready");
         }
         exited = host.wait() => {
             let status = exited.unwrap();

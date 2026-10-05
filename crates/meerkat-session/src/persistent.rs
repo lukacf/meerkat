@@ -14718,7 +14718,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         };
         self.reject_if_archived_session(id, &session).await?;
         let status = session
-            .append_system_message_idempotent(
+            .append_system_message_control_idempotent(
                 req.content.render_text(),
                 req.source,
                 req.idempotency_key,

@@ -391,7 +391,7 @@ impl SessionAgent for FactoryAgent {
     {
         self.agent
             .session_mut()
-            .append_system_message_idempotent(
+            .append_system_message_control_idempotent(
                 req.content.render_text(),
                 req.source,
                 req.idempotency_key,

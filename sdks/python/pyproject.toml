@@ -6,9 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "meerkat-sdk"
 version = "0.8.50"
 description = "Python SDK for Meerkat agent runtime"
+readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT OR Apache-2.0"}
 dependencies = ["websockets>=12,<16"]
+
+[project.urls]
+Homepage = "https://github.com/lukacf/meerkat"
+Documentation = "https://docs.rkat.ai/sdks/python/overview"
+Repository = "https://github.com/lukacf/meerkat"
+Changelog = "https://github.com/lukacf/meerkat/blob/main/CHANGELOG.md"
+Issues = "https://github.com/lukacf/meerkat/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "tomli; python_version < '3.11'"]

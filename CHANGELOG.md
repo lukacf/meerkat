@@ -1334,6 +1334,18 @@ them.
   Unit tests pin the exact asset name and URL for every published target;
   `MEERKAT_SDK_NETWORK_TESTS=1` also checks a published asset over the
   network.
+- Python SDK packaging: the PyPI page for `meerkat-sdk` shows the SDK README
+  and project links (homepage, documentation, repository, changelog,
+  issues). `pyproject.toml` declared neither `readme` nor `[project.urls]`, so
+  published releases had an empty description.
+- TypeScript SDK packaging: `require("@rkat/sdk")` resolves. The exports map's
+  `require` condition named `dist/index.cjs`, which the ESM-only `tsc` build
+  never produced, so CommonJS consumers failed with `MODULE_NOT_FOUND`. The
+  map now lists `types`, `import` and `default` (all shipped files), so Node
+  versions that can `require()` an ES module load the package that way. A
+  test checks that `npm pack` contains every file the entry points name.
+  `package.json` now declares `repository` (with `directory`), `homepage`
+  and `bugs`, so the npm page links back to the docs, source and issues.
 - The `meerkat` facade compiles when another crate in the build turns on
   `meerkat-store/jsonl` while the facade's own `jsonl-store` is off (E0004,
   `RealmBackend::Jsonl` not covered in the disk store set). `session-store`

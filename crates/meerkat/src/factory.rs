@@ -9839,6 +9839,33 @@ mod tests {
         );
     }
 
+    /// Regression: the still-available legacy `claude-sonnet-5` was
+    /// uncatalogued, so a build without an explicit provider failed with
+    /// "Cannot infer provider". It resolves through its catalog row; an
+    /// uncatalogued neighbour still fails loudly (no prefix inference).
+    #[test]
+    fn claude_sonnet_5_resolves_anthropic_without_an_explicit_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let registry = factory
+            .model_registry(&Config::default())
+            .expect("registry");
+
+        let (provider, server_id) = factory
+            .resolve_provider_from_registry(&registry, &AgentBuildConfig::new("claude-sonnet-5"))
+            .expect("claude-sonnet-5 is a catalog model");
+        assert_eq!(provider, Provider::Anthropic);
+        assert_eq!(server_id, None);
+
+        let err = factory
+            .resolve_provider_from_registry(&registry, &AgentBuildConfig::new("claude-sonnet-6"))
+            .expect_err("an uncatalogued claude id must not resolve by prefix");
+        assert!(
+            matches!(err, BuildAgentError::UnknownProvider { ref model } if model == "claude-sonnet-6"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn explicit_provider_override_allows_uncatalogued_model_without_catalog_owner() {
         let temp = tempfile::tempdir().unwrap();

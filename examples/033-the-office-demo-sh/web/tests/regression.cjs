@@ -663,7 +663,7 @@ async function main() {
     const provider = createProviderFixture({ maxRequests });
     const p = await page("/dist/index.html", provider);
     const lifecycle = await p.eval(`(async()=>{
-      const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
+      const wasm=await import(new URL("./meerkat-pkg/meerkat_web_runtime.js",location.href).href);
       await wasm.default();
       await wasm.init_runtime_from_config(JSON.stringify({model:"claude-sonnet-4-6",anthropic_api_key:"synthetic-not-a-key"}));
       const id=String(await wasm.mob_create(JSON.stringify({id:"lifecycle-probe",profiles:{worker:{model:"claude-sonnet-4-6",runtime_mode:"autonomous_host",tools:{comms:true},external_addressable:true}},wiring:{},flows:{}})));
@@ -756,7 +756,7 @@ async function main() {
         if (line.textContent !== "Wiring comms topology...") return;
         observer.disconnect();
         window.wiringDiagnostic = (async()=>{
-          const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
+          const wasm=await import(new URL("./meerkat-pkg/meerkat_web_runtime.js",location.href).href);
           const members=JSON.parse(await wasm.mob_list_members("the-office"));
           const status=JSON.parse(await wasm.mob_status("the-office"));
           const snapshots=[], subscriptions=[];
@@ -785,7 +785,7 @@ async function main() {
     const wiringState = await p.eval(`window.wiringDiagnostic ?? null`);
     if (badge !== "LIVE") {
       const failed = await p.eval(`(async()=>{
-        const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
+        const wasm=await import(new URL("./meerkat-pkg/meerkat_web_runtime.js",location.href).href);
         let cleaned=false;try{await wasm.mob_list_members("the-office");}catch{cleaned=true;}
         return {badge:document.getElementById("statusBadge").textContent,status:document.getElementById("statusLine").textContent,
           retryVisible:!!document.getElementById("startBtn").getClientRects().length,retryEnabled:!document.getElementById("startBtn").disabled,cleaned};
@@ -804,7 +804,7 @@ async function main() {
     }
     console.log("PASS F-W4-01 static policy in all ten real initial system prefixes");
     const real = await p.eval(`(async()=>{
-      const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
+      const wasm=await import(new URL("./meerkat-pkg/meerkat_web_runtime.js",location.href).href);
       const members=JSON.parse(await wasm.mob_list_members("the-office"));
       const status=JSON.parse(await wasm.mob_status("the-office"));
       const targets=await Promise.all(members.map(m=>wasm.mob_member_peer_target("the-office",m.agent_identity)));
@@ -830,7 +830,7 @@ async function main() {
     badge = await p.waitFor(terminalBadge(["STOPPED", "ERROR"]));
     assert.equal(badge, "STOPPED", await p.eval(`document.getElementById("statusLine").textContent`));
     const stopped = await p.eval(`(async()=>{
-      const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
+      const wasm=await import(new URL("./meerkat-pkg/meerkat_web_runtime.js",location.href).href);
       const status=JSON.parse(await wasm.mob_status("the-office"));
       let rejected=false;try{await wasm.mob_member_send("the-office","triage",JSON.stringify({content:"Synthetic stopped-admission probe",handling_mode:"queue"}));}catch{rejected=true;}
       return {status:status.status,rejected,disabled:document.getElementById("chatSend").disabled};
@@ -841,7 +841,7 @@ async function main() {
     badge = await p.waitFor(terminalBadge(["LIVE", "ERROR"]));
     assert.equal(badge, "LIVE", await p.eval(`document.getElementById("statusLine").textContent`));
     const resumed = await p.eval(`(async()=>{
-      const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
+      const wasm=await import(new URL("./meerkat-pkg/meerkat_web_runtime.js",location.href).href);
       const status=JSON.parse(await wasm.mob_status("the-office"));
       const members=JSON.parse(await wasm.mob_list_members("the-office"));
       const subscriptions=[];

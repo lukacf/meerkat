@@ -1350,6 +1350,11 @@ them.
   result (`MeerkatMachine::record_post_close_result_title`), the merge reply
   commits under that interaction, and the runtime frames a runtime-work
   replay whose row carries it (`live_execution::post_close_result_context`).
+- TypeScript SDK callback replies stay bound to the subprocess that requested
+  them. A delayed success or error after reconnect cannot answer a reused
+  callback ID on the replacement process; stale reader frames are ignored.
+  Closing a retired child cannot reject work admitted by its replacement.
+
 - A durable voice job delegated just before its call closed could be lost
   (Turbo S S104, about 1 run in 10): the worker accepted its turn after the
   close, and publishing its start was refused because the closed channel's

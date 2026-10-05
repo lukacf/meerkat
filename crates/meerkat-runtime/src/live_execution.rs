@@ -4736,7 +4736,9 @@ impl LiveContextAppendAuthority {
     /// Authority for one append carrying the contiguous causal tail
     /// (previous, next] at the outbox head (generated edge
     /// AuthorizeLiveContextCausalTailBatch): the head row's append identity
-    /// over the whole range, lowered as one quiet replay.
+    /// over the whole range, lowered as one quiet replay. Live-only, like its
+    /// one caller (the outbox drain).
+    #[cfg(feature = "live")]
     pub(crate) fn from_causal_tail_batch_effect(
         head: &LiveContextQueuedRow,
         previous_cursor: u64,

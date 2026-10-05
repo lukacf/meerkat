@@ -221,6 +221,8 @@ async fn enumerate(
                     vec![],
                     Default::default(),
                 ),
+                connection_id: crate::McpConnectionId::allocate().unwrap(),
+                protected_metadata: Default::default(),
                 service: service.into(),
                 stdio_child: None,
             };

@@ -719,6 +719,8 @@ pub struct ToolDispatchContext {
     run_id: Option<crate::RunId>,
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
+    // Monotonic restriction set by the core execution policy owner.
+    read_only_execution_required: bool,
 }
 
 /// Process-local live bridge authority carried to the last actual tool
@@ -984,6 +986,10 @@ impl std::fmt::Debug for ToolDispatchContext {
             .field("run_id", &self.run_id)
             .field("streaming", &self.streaming)
             .field("live_bridge_admission", &self.live_bridge_admission)
+            .field(
+                "read_only_execution_required",
+                &self.read_only_execution_required,
+            )
             .finish()
     }
 }
@@ -997,6 +1003,7 @@ impl PartialEq for ToolDispatchContext {
             && self.run_id == other.run_id
             && self.streaming == other.streaming
             && self.live_bridge_admission == other.live_bridge_admission
+            && self.read_only_execution_required == other.read_only_execution_required
     }
 }
 
@@ -1006,6 +1013,16 @@ impl Eq for ToolDispatchContext {}
 pub const TOOL_DISPATCH_OBJECTIVE_ID_KEY: &str = "meerkat.objective_id";
 
 impl ToolDispatchContext {
+    /// Whether an enclosing execution policy requires a positive read-only
+    /// declaration at the actual tool binding. This restriction is monotonic.
+    pub const fn read_only_execution_required(&self) -> bool {
+        self.read_only_execution_required
+    }
+
+    pub(crate) fn require_read_only_execution(&mut self) {
+        self.read_only_execution_required = true;
+    }
+
     pub fn from_current_turn_input(input: &crate::types::ContentInput) -> Self {
         let blocks = match input {
             crate::types::ContentInput::Text(_) => None,
@@ -1019,6 +1036,7 @@ impl ToolDispatchContext {
             run_id: None,
             streaming: None,
             live_bridge_admission: None,
+            read_only_execution_required: false,
         }
     }
 

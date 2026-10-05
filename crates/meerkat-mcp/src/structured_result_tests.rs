@@ -92,6 +92,8 @@ async fn invoke(surface: Surface, reply: Reply, text_only: bool) -> Result<Outpu
                     vec![],
                     Default::default(),
                 ),
+                connection_id: crate::McpConnectionId::allocate().unwrap(),
+                protected_metadata: Default::default(),
                 service: service.into(),
                 stdio_child: None,
             };

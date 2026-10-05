@@ -1,8 +1,12 @@
+use super::protected::{
+    ProtectedMetadataState, has_protected_metadata, protected_http_client, protected_sse_stream,
+    restore_metadata,
+};
 use futures::StreamExt;
 use futures::{Future, stream::BoxStream};
 use http::Uri;
 use reqwest::header::{ACCEPT, HeaderMap};
-use sse_stream::{Error as SseError, Sse, SseStream};
+use sse_stream::{Error as SseError, Sse};
 use std::sync::Arc;
 
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
@@ -67,6 +71,7 @@ impl Default for SseClientConfig {
 pub struct SseClientTransport<C: SseClient> {
     client: C,
     message_endpoint: Uri,
+    source_endpoint: Uri,
     stream: Option<BoxStream<'static, Result<Sse, SseError>>>,
 }
 
@@ -97,7 +102,15 @@ impl<C: SseClient> Transport<RoleClient> for SseClientTransport<C> {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let client = self.client.clone();
         let uri = self.message_endpoint.clone();
-        async move { client.post_message(uri, item, None).await }
+        let source = self.source_endpoint.clone();
+        async move {
+            if has_protected_metadata(&item) && !same_origin(&source, &uri) {
+                return Err(SseTransportError::Io(std::io::Error::other(
+                    "protected MCP message endpoint changed origin",
+                )));
+            }
+            client.post_message(uri, item, None).await
+        }
     }
 
     async fn close(&mut self) -> Result<(), Self::Error> {
@@ -136,9 +149,26 @@ impl<C: SseClient> SseClientTransport<C> {
         Ok(Self {
             client,
             message_endpoint,
+            source_endpoint: sse_endpoint,
             stream: Some(sse_stream),
         })
     }
+}
+
+fn same_origin(left: &Uri, right: &Uri) -> bool {
+    fn port(uri: &Uri) -> Option<u16> {
+        uri.port_u16().or_else(|| match uri.scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        })
+    }
+    left.scheme_str() == right.scheme_str()
+        && left
+            .host()
+            .zip(right.host())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        && port(left) == port(right)
 }
 
 fn message_endpoint<E: std::error::Error + Send + Sync + 'static>(
@@ -178,6 +208,7 @@ fn message_endpoint<E: std::error::Error + Send + Sync + 'static>(
 pub(crate) struct ReqwestSseClient {
     client: reqwest::Client,
     headers: HeaderMap,
+    protected_metadata: ProtectedMetadataState,
 }
 
 impl std::fmt::Debug for ReqwestSseClient {
@@ -198,13 +229,23 @@ impl ReqwestSseClient {
         Self {
             client: DEFAULT_SSE_CLIENT.clone(),
             headers,
+            protected_metadata: Default::default(),
         }
     }
 
     /// Create an SSE client with a custom reqwest::Client
     #[allow(dead_code)]
     pub(crate) fn with_client(client: reqwest::Client, headers: HeaderMap) -> Self {
-        Self { client, headers }
+        Self {
+            client,
+            headers,
+            protected_metadata: Default::default(),
+        }
+    }
+
+    pub(crate) fn with_protected_metadata(mut self, state: ProtectedMetadataState) -> Self {
+        self.protected_metadata = state;
+        self
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -227,18 +268,29 @@ impl SseClient for ReqwestSseClient {
     async fn post_message(
         &self,
         uri: Uri,
-        message: ClientJsonRpcMessage,
+        mut message: ClientJsonRpcMessage,
         auth_token: Option<String>,
     ) -> Result<(), SseTransportError<Self::Error>> {
-        let mut request_builder = self.client.post(uri.to_string()).json(&message);
+        let protected = has_protected_metadata(&message);
+        let client = if protected {
+            protected_http_client()?
+        } else {
+            &self.client
+        };
+        restore_metadata(&mut message);
+        let mut request_builder = client.post(uri.to_string()).json(&message);
         request_builder = self.apply_headers(request_builder);
         if let Some(auth_header) = auth_token {
             request_builder = request_builder.bearer_auth(auth_header);
         }
-        request_builder
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
+        let response = request_builder.send().await?;
+        if protected && response.status().is_redirection() {
+            return Err(SseTransportError::Io(std::io::Error::other(
+                "protected MCP redirect refused",
+            )));
+        }
+        response
+            .error_for_status()
             .map_err(SseTransportError::from)
             .map(drop)
     }
@@ -274,7 +326,7 @@ impl SseClient for ReqwestSseClient {
                 return Err(SseTransportError::UnexpectedContentType(None));
             }
         }
-        let event_stream = SseStream::from_byte_stream(response.bytes_stream()).boxed();
+        let event_stream = protected_sse_stream(response, self.protected_metadata.clone(), true);
         Ok(event_stream)
     }
 }

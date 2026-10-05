@@ -1323,6 +1323,17 @@ them.
 
 ### Fixed
 
+- Python and TypeScript SDKs: the automatic `rkat-rpc` download fetches the
+  asset the release actually publishes. Both SDKs requested
+  `rkat-rpc-v<version>-<target>.<ext>`, but every release names it
+  `rkat-rpc-<version>-<target>.<ext>` (the `v` belongs only to the tag), so
+  the download was a 404. Without `rkat-rpc` on `PATH` and without
+  `MEERKAT_BIN_PATH`, `connect()` failed with `BINARY_NOT_FOUND` or fell back
+  to a legacy `rkat` on `PATH`. Intel macOS now maps to the published
+  `x86_64-apple-darwin` asset instead of refusing with `UNSUPPORTED_PLATFORM`.
+  Unit tests pin the exact asset name and URL for every published target;
+  `MEERKAT_SDK_NETWORK_TESTS=1` also checks a published asset over the
+  network.
 - The `meerkat` facade compiles when another crate in the build turns on
   `meerkat-store/jsonl` while the facade's own `jsonl-store` is off (E0004,
   `RealmBackend::Jsonl` not covered in the disk store set). `session-store`

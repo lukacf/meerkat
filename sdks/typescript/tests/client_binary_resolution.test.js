@@ -167,6 +167,55 @@ describe("MeerkatClient binary resolution", () => {
   });
 });
 
+const RELEASE_BASE = "https://github.com/lukacf/meerkat/releases/download";
+
+describe("MeerkatClient release asset", () => {
+  it("matches the published naming", () => {
+    // Release assets carry no "v" before the version; the tag does.
+    assert.deepEqual(
+      MeerkatClient.releaseAsset("0.8.50", "x86_64-unknown-linux-gnu", "tar.gz"),
+      {
+        asset: "rkat-rpc-0.8.50-x86_64-unknown-linux-gnu.tar.gz",
+        url: `${RELEASE_BASE}/v0.8.50/rkat-rpc-0.8.50-x86_64-unknown-linux-gnu.tar.gz`,
+      },
+    );
+  });
+
+  for (const [platform, arch, expected] of [
+    ["linux", "x64", "rkat-rpc-0.8.50-x86_64-unknown-linux-gnu.tar.gz"],
+    ["linux", "arm64", "rkat-rpc-0.8.50-aarch64-unknown-linux-gnu.tar.gz"],
+    ["darwin", "arm64", "rkat-rpc-0.8.50-aarch64-apple-darwin.tar.gz"],
+    ["darwin", "x64", "rkat-rpc-0.8.50-x86_64-apple-darwin.tar.gz"],
+    ["win32", "x64", "rkat-rpc-0.8.50-x86_64-pc-windows-msvc.zip"],
+  ]) {
+    it(`maps ${platform}/${arch} to its release asset`, () => {
+      const { target, archiveExt } = MeerkatClient.platformTarget(platform, arch);
+      assert.deepEqual(MeerkatClient.releaseAsset("0.8.50", target, archiveExt), {
+        asset: expected,
+        url: `${RELEASE_BASE}/v0.8.50/${expected}`,
+      });
+    });
+  }
+
+  it("maps Intel macOS to the x86_64 darwin asset", () => {
+    assert.deepEqual(MeerkatClient.platformTarget("darwin", "x64"), {
+      target: "x86_64-apple-darwin",
+      archiveExt: "tar.gz",
+      binaryName: "rkat-rpc",
+    });
+  });
+
+  it(
+    "exists as a published asset",
+    { skip: process.env.MEERKAT_SDK_NETWORK_TESTS !== "1" && "set MEERKAT_SDK_NETWORK_TESTS=1 to check the published asset over the network" },
+    async () => {
+      const { url } = MeerkatClient.releaseAsset("0.8.50", "x86_64-unknown-linux-gnu", "tar.gz");
+      const response = await fetch(url, { method: "HEAD", redirect: "follow" });
+      assert.equal(response.status, 200);
+    },
+  );
+});
+
 describe("MeerkatClient callback connection lifetime", () => {
   it("retires pending work before awaiting close so cleanup cannot reject a replacement", async () => {
     const client = new MeerkatClient();

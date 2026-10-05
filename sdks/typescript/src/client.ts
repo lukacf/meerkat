@@ -8002,24 +8002,43 @@ export class MeerkatClient {
     return MeerkatClient.commandPath(commandOrPath);
   }
 
-  private static platformTarget(): PlatformTarget {
-    const architecture = os.arch();
-    if (process.platform === "darwin") {
+  private static platformTarget(
+    platform: NodeJS.Platform = process.platform,
+    architecture: string = os.arch(),
+  ): PlatformTarget {
+    if (platform === "darwin") {
       if (architecture === "arm64") {
         return { target: "aarch64-apple-darwin", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
       }
+      if (architecture === "x64") {
+        return { target: "x86_64-apple-darwin", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
+      }
       throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported macOS architecture '${architecture}'.`);
     }
-    if (process.platform === "linux") {
+    if (platform === "linux") {
       if (architecture === "x64") return { target: "x86_64-unknown-linux-gnu", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
       if (architecture === "arm64") return { target: "aarch64-unknown-linux-gnu", archiveExt: "tar.gz", binaryName: "rkat-rpc" };
       throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported Linux architecture '${architecture}'.`);
     }
-    if (process.platform === "win32") {
+    if (platform === "win32") {
       if (architecture === "x64") return { target: "x86_64-pc-windows-msvc", archiveExt: "zip", binaryName: "rkat-rpc.exe" };
       throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported Windows architecture '${architecture}'.`);
     }
-    throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported platform '${process.platform}'.`);
+    throw new MeerkatError("UNSUPPORTED_PLATFORM", `Unsupported platform '${platform}'.`);
+  }
+
+  /**
+   * The release asset name and download URL for one target. Release assets
+   * are `rkat-rpc-<version>-<target>.<ext>` (no `v`) under the `v<version>`
+   * tag.
+   */
+  private static releaseAsset(
+    version: string,
+    target: string,
+    archiveExt: PlatformTarget["archiveExt"],
+  ): { asset: string; url: string } {
+    const asset = `${MEERKAT_RELEASE_BINARY}-${version}-${target}.${archiveExt}`;
+    return { asset, url: `https://github.com/${MEERKAT_REPO}/releases/download/v${version}/${asset}` };
   }
 
   private static async runCommand(command: string, args: string[]): Promise<void> {
@@ -8050,8 +8069,7 @@ export class MeerkatClient {
   private static async ensureDownloadedBinary(): Promise<string> {
     const { target, archiveExt, binaryName } = MeerkatClient.platformTarget();
     const version = CONTRACT_VERSION;
-    const asset = `${MEERKAT_RELEASE_BINARY}-v${version}-${target}.${archiveExt}`;
-    const url = `https://github.com/${MEERKAT_REPO}/releases/download/v${version}/${asset}`;
+    const { asset, url } = MeerkatClient.releaseAsset(version, target, archiveExt);
     const baseDir = path.join(MEERKAT_BINARY_CACHE_ROOT, `v${version}`, target);
     mkdirSync(baseDir, { recursive: true });
     const cached = path.join(baseDir, binaryName);

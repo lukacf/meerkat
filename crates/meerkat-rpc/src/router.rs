@@ -6077,6 +6077,33 @@ mod tests {
             .ensure_runtime_executor(&session_id)
             .await
             .expect("the production spawn path must attach a runtime loop");
+        // Wait until that loop is parked with no run in flight: its startup
+        // recovery and any queued work are done, so nothing will take the
+        // session gate after the durability fault below. A loop that takes
+        // the gate of a degraded session detaches its own attachment, which
+        // would leave the abort below with no task to kill.
+        let mut parked = router.runtime_adapter.runtime_loop_parked();
+        loop {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                parked.wait_for(|sessions| sessions.contains(&session_id)),
+            )
+            .await
+            .expect("the spawned runtime loop parks")
+            .expect("runtime-loop park watch");
+            if router
+                .runtime_adapter
+                .current_run(&session_id)
+                .await
+                .is_none()
+            {
+                break;
+            }
+            router
+                .runtime_adapter
+                .wait_current_run_settled(&session_id)
+                .await;
+        }
 
         let live = health_now().await;
         assert_eq!(

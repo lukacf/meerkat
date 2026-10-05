@@ -52,16 +52,6 @@ them.
   work. The base is now decided by the destination ref (`refs/heads/*`), and
   tags stay fail-closed on the empty tree. `scripts/test-pre-push-dispatch.sh`
   covers the `HEAD:refs/heads/<branch>` push.
-
-### Testing
-
-- The live-context result barrier TLC audit
-  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
-  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
-  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
-  must leave the audit's goal unreachable. Dropping the bootstrap-summary
-  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
-  previously checked only by hand (#1607).
 - Repository scripts, hooks and Make targets that need Python 3.11 now pick
   it explicitly and refuse an older interpreter up front. They used whatever
   `python3` came first in `PATH`, so on macOS, where Apple's Python 3.9 can
@@ -71,7 +61,7 @@ them.
   `hashlib.sha256()` (still verifying the digest before extracting), so it
   runs on the release scripts' Python >= 3.10 floor, and refuses anything
   older up front. The new `scripts/require-python
-  MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.13 through
+  MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.14 through
   python3.11 over `python3`, and fails with "WHO needs Python >= MIN; found
   <version> (<path>)". It replaces the per-script copies of that selection,
   which had no version check, in 15 scripts plus `release-hook.sh` (still
@@ -100,6 +90,16 @@ them.
   `pre-push-prune-lanes.sh` falls back to `$$` when `BASHPID` is unset, and
   `mapfile` uses in the semver scripts became read loops.
   `scripts/tests/require_bash_test.sh` runs in `make path-classifier-selftest`.
+
+### Testing
+
+- The live-context result barrier TLC audit
+  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
+  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
+  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
+  must leave the audit's goal unreachable. Dropping the bootstrap-summary
+  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
+  previously checked only by hand (#1607).
 
 ## [0.8.51] - 2026-10-05
 

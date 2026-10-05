@@ -148,6 +148,19 @@ them.
   `make path-classifier-selftest`, which PR CI runs, for the whole cap. The
   watchdog is now its own process group, ended as a group, with its stdio on
   `/dev/null`.
+- Resuming a callback-pending turn with an ordinary `Input::Continuation`
+  now completes on runtime-backed services (#1772). Before this fix it
+  failed with `DSL authority (RunCompleted): guard rejected transition from
+  Running`. Such a continuation carries no conversation appends, so the
+  runtime loop treated it like the transient-context class and signalled no
+  turn start. The agent then found the previous run's terminal turn state,
+  started the resumed run under a fresh identity of its own, and rebound the
+  machine's `current_run_id` away from the runtime's run. The runtime now
+  applies `StartConversationRun` (content shape `Empty`) for this exact run
+  whenever the staged primitive's execution kind is `ResumePending`. Other
+  appends-empty primitives still start no turn. A new runtime-backed test
+  covers the whole path: callback-pending, then `stage_tool_results`, then an
+  ordinary continuation, then completion.
 - BuildBuddy runs no longer sit idle for 600 s after every build (#1744).
   Since the Bazel client started running under an environment allowlist,
   `scripts/buildbuddy-bazel-poc` put its stderr `tee` redirect on a call of a

@@ -1059,6 +1059,72 @@ class MeerkatClient:
             {"mcp": _mcp_auth_target(server_name, server_url, oauth_account)},
         )
 
+    async def auth_connector_login_start(
+        self,
+        target: dict[str, Any],
+        redirect_uri: str,
+    ) -> dict[str, Any]:
+        """Start host-driven connector OAuth via `auth/login/start`.
+
+        `target` is `{slot: {realm_id, slot_id}, issuer, client, resource,
+        scopes, strategy_id, account_selection}` where `account_selection` is
+        `{"mode": "known", "account": ...}` or `{"mode": "discover"}`. A
+        discover login binds the provider-verified account to the slot and
+        publishes only into an empty slot. `redirect_uri` must be an http
+        loopback URL you bind yourself. The authorize URL and state are
+        host-channel data: never pass them to an agent, tool result,
+        transcript or log. Finish with `auth_connector_login_complete`, or
+        retire the attempt with `auth_connector_login_cancel`.
+        """
+        return await self._request(
+            "auth/login/start",
+            {"connector": target, "redirect_uri": redirect_uri},
+        )
+
+    async def auth_connector_login_complete(
+        self,
+        target: dict[str, Any],
+        *,
+        code: str,
+        state: str,
+        redirect_uri: str,
+    ) -> dict[str, Any]:
+        """Complete host-driven connector OAuth via `auth/login/complete`.
+        `target` must equal the started target. Returns the slot, the
+        provider-verified account and the scope evidence; no secrets."""
+        return await self._request(
+            "auth/login/complete",
+            {
+                "connector": target,
+                "code": code,
+                "state": state,
+                "redirect_uri": redirect_uri,
+            },
+        )
+
+    async def auth_connector_login_cancel(
+        self,
+        realm_id: str,
+        slot_id: str,
+        state: str,
+    ) -> dict[str, Any]:
+        """Retire a pending connector OAuth attempt by its `state` via
+        `auth/login/cancel`."""
+        return await self._request(
+            "auth/login/cancel",
+            {"connector": {"realm_id": realm_id, "slot_id": slot_id}, "state": state},
+        )
+
+    async def auth_connector_status(self, realm_id: str, slot_id: str) -> dict[str, Any]:
+        """Status of a connector slot via `auth/status/get`: `{connector,
+        phase, verified_account?, scopes, scope_evidence?, expires_at?,
+        has_refresh_token}`. The slot is a storage address, never account
+        proof; `verified_account` is the provider-verified subject."""
+        return await self._request(
+            "auth/status/get",
+            {"connector": {"realm_id": realm_id, "slot_id": slot_id}},
+        )
+
     async def auth_login_device_start(
         self,
         provider: str,

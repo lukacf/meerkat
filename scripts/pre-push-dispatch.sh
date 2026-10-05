@@ -7,6 +7,8 @@
 # "failed to push some refs", so an unattributed exit leaves the operator with
 # no way to tell a failing hook from a failing dispatcher.
 set -euo pipefail
+# Bash >= 4.4 (see scripts/lib/require-bash.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/require-bash.sh"
 
 dispatch_step="parsing hook arguments"
 
@@ -384,9 +386,12 @@ if [[ "$remote_sha" == "$ZERO_SHA" ]]; then
   # A newly created branch still has a proven diff base. Use the fetched
   # remote default branch when available so pre-commit does not reinterpret
   # branch creation as "every repository file changed" and launch unrelated
-  # machine/TLC lanes. Tags remain fail-closed on the empty tree unless their
-  # exact tree already has reusable evidence from the branch push.
-  if [[ "$local_ref" == refs/heads/* ]]; then
+  # machine/TLC lanes. Branch creation is decided by the destination ref, not
+  # by how the local side was spelled: `HEAD:refs/heads/x` reports
+  # local_ref=HEAD for the same pushed commit. Tags remain fail-closed on the
+  # empty tree unless their exact tree already has reusable evidence from the
+  # branch push.
+  if [[ "$remote_ref" == refs/heads/* ]]; then
     remote_default_ref="$(
       git -C "$SOURCE_ROOT" symbolic-ref --quiet \
         "refs/remotes/${REMOTE_NAME}/HEAD" 2>/dev/null || true

@@ -21,7 +21,7 @@ set -euo pipefail
 
 SCRIPT_REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="${1:-$SCRIPT_REPO}"
-PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+PYTHON="$("$(dirname "${BASH_SOURCE[0]}")/require-python" 3.11 "$(basename "${BASH_SOURCE[0]}")")" || exit 1
 CARGO="${CARGO:-$SCRIPT_REPO/scripts/repo-cargo}"
 
 RED='\033[0;31m'

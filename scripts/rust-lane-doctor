@@ -211,6 +211,16 @@ else
   pass "GitHub workflow Rust entrypoints use the repo Cargo wrapper"
 fi
 
+# Bash >= 4.4 for the repository scripts (`#!/usr/bin/env bash`); see
+# scripts/lib/require-bash.sh. Check what `env bash` resolves to.
+env_bash_versinfo="$(env bash -c 'printf "%s %s %s" "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}" "${BASH_VERSION:-unknown}"' 2>/dev/null || true)"
+read -r env_bash_major env_bash_minor env_bash_version <<<"${env_bash_versinfo:-0 0 missing}"
+if [[ "${env_bash_major}" -gt 4 || ( "${env_bash_major}" -eq 4 && "${env_bash_minor}" -ge 4 ) ]]; then
+  pass "env bash ${env_bash_version} satisfies >= 4.4"
+else
+  bad "env bash is ${env_bash_version}; repository scripts need Bash >= 4.4 (macOS: brew install bash, ahead of /bin in PATH)"
+fi
+
 rust_channel="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
 default_rustc_release=""
 if [[ -x "${default_rustc}" ]]; then

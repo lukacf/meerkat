@@ -4,18 +4,37 @@
 
 The 0.9 coordinator leads the cross-repository work. Native
 [PR1730](https://github.com/lukacf/meerkat/pull/1730) is the current publication
-checkpoint. At the 18:44 UTC remote check it remained a draft at
-`afb79ea29d8cdf30689345d884b43bc6c5baa428`. The integrated runtime baseline is
+checkpoint. At the 19:24 UTC remote check it remained a draft at
+`afb79ea29d8cdf30689345d884b43bc6c5baa428`. The previous integrated baseline is
 `64349561d898d0a9e3ad279fa1a7d286ff7b302f`, tree
 `2041118ca2f545541a1a05cccccb908765307589`. It integrates main through
 `98e26901ba24c0b2154192e17590cdb3773eb3b5`, the custody fixture correction,
 the accepted model-review/consent ADR, and a test-only OAuth fixture migration.
-The current publication work additionally refreshes this record and the Codex
-source comparison. The upstream memory-test correction described below must
-land and be integrated before the next qualification; it changes no production
-behavior.
+Documentation commit `c982b3b52ca7f0dff3d25328bb73caeeb3baf3e1` additionally
+refreshed this record and the Codex source comparison. At the coordinator's
+direction, the current checkpoint integrates main through
+`be2932374793ae84d3b844129cf58229509a1f0c`, including connector OAuth. The upstream
+memory-test correction described below must also land and be integrated before
+the next qualification; that correction changes no production behavior.
 The local candidate's normal push and CI are still pending; earlier published
 results do not qualify the integrated candidate.
+
+The connector merge needed four integration repairs: preserve typed stale
+preparation, use coordinated mode-constrained logout, adapt the generated
+refresh transition return type, and reuse the held lifecycle guard during cold
+credential recovery. The mode check and credential clear share the existing
+coordinator transaction and guard; foreign-mode credentials remain untouched.
+Two tests were written first using a fresh runtime owner over a real committed
+credential. Both failed on the intended five-second deadlock timeout. That RED
+command took 185.39 seconds, including 2m54s compilation and 10.031 seconds of
+test execution. After guard reuse, eight selected controls passed across two
+binaries in 14.36 seconds, including 13.59 seconds compilation and 0.071 seconds
+of test execution. They cover cold status/bearer, foreign-row logout protection,
+failed-clear status, scope/account refresh refusals and infrastructure error
+classification. Raw logs are
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-connector-cold-red.log` and
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-connector-cold-green.log`.
+These are focused integration results, not full candidate qualification.
 
 The native integration regression was executed before its repair: acquisition
 incorrectly accepted a builder-seeded runtime owner from a different store.
@@ -66,7 +85,8 @@ reproduced the assertion on current main and owns the upstream correction in
 and durable-text checks, preserving the earlier search assertions. Root withdrew
 its duplicate hunk and retained it at
 `/private/tmp/adr-001-envelope-v4-r1/superseded-local-memory-oracle.patch`.
-PR1759 was still open at the 19:19 UTC check. Its normal upstream merge and fresh
+PR1759 was still open at the 19:48 UTC check. GCP reported runner shutdown as the
+cause of cancelled CI jobs and owns their normal retry. Its upstream merge and fresh
 candidate qualification remain pending; the local trial is not an executed pass
 of the upstream variant.
 

@@ -258,13 +258,13 @@ of this full catalog.
 | `auth/profile/get` | Auth | `BindingIdParams` | `WireAuthProfileDetail` | Resolve one binding's auth profile with an optional profile override |
 | `auth/profile/create` | Auth | `CreateProfileParams` | `WireAuthProfileCreated` | Store direct credentials for a configured auth binding |
 | `auth/profile/delete` | Auth | `BindingIdParams` | `WireAuthProfileCleared` | Clear credentials for a configured auth binding |
-| `auth/login/start` | Auth | `LoginStartParams` | `WireLoginStart` | Begin an OAuth login for a provider binding or an MCP server (`{"mcp": {...}}`); returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent |
-| `auth/login/complete` | Auth | `LoginCompleteParams` | `WireLoginReady` | Exchange authorization code for tokens; persists to TokenStore. For an MCP target, issuer, client and resource come from the admitted attempt named by `state` |
-| `auth/login/cancel` | Auth | `LoginCancelParams` | `WireLoginCancelled` | Retire a pending MCP OAuth attempt by its state |
+| `auth/login/start` | Auth | `LoginStartParams` | `WireLoginStart` | Begin an OAuth login for a provider binding, an MCP server (`{"mcp": {...}}`) or a connector slot (`{"connector": {...}}`); returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent |
+| `auth/login/complete` | Auth | `LoginCompleteParams` | `WireLoginReady` | Exchange authorization code for tokens; persists to TokenStore. For an MCP target, issuer, client and resource come from the admitted attempt named by `state`; a connector target must equal the admitted attempt's descriptor |
+| `auth/login/cancel` | Auth | `LoginCancelParams` | `WireLoginCancelled` | Retire a pending MCP or connector OAuth attempt by its state |
 | `auth/login/device_start` | Auth | `DeviceStartParams` | `WireDeviceStart` | Begin device-code OAuth; returns user_code + verification URL |
 | `auth/login/device_complete` | Auth | `DeviceCompleteParams` | `WireDeviceCompleteResult` | Single-poll completion for a device-code OAuth login |
 | `auth/login/provision_api_key` | Auth | `ProvisionApiKeyParams` | `WireProvisionApiKeyResult` | Console-OAuth → API key provisioning (Anthropic oauth_to_api_key) |
-| `auth/status/get` | Auth | `AuthStatusParams` | `WireAuthStatusResult` | Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target (`{"mcp": {...}}`) |
+| `auth/status/get` | Auth | `AuthStatusParams` | `WireAuthStatusResult` | Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target (`{"mcp": {...}}`) or a connector slot (`{"connector": {...}}`) |
 | `auth/logout` | Auth | `BindingIdParams` | `WireAuthProfileCleared` | Revoke + remove persisted credentials |
 | `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
 | `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |

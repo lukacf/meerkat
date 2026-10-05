@@ -918,7 +918,15 @@ async fn queued_reload_and_predecessor_settle_before_topology_acquires_graph_fen
             .borrow()
             .explicit_resume_topology_pending
     );
-    comms.park_trust_mutations(Arc::clone(&topology_gate));
+    // Gate topology's own trust wiring only. Member 1's comms drain may
+    // still be re-hydrating the supervisor's response route from its startup
+    // (a supervisor-publish trust mutation) after readiness settles; that is
+    // not topology (see
+    // `resume_readiness_settles_while_a_drain_startup_supervisor_publish_is_withheld`).
+    comms.park_trust_mutations_from(
+        Arc::clone(&topology_gate),
+        [meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring],
+    );
     mob.probe(Duration::from_secs(1))
         .await
         .expect("query progresses while topology waits");
@@ -970,6 +978,115 @@ async fn queued_reload_and_predecessor_settle_before_topology_acquires_graph_fen
         .expect("predecessor completes")
         .expect("task")
         .expect("delivery");
+}
+
+/// Member readiness binds the member's comms drain (`ensure_mob_comms_drain`:
+/// "Bind (or re-bind) the member's mob comms drain onto its runtime session.
+/// Idempotent"); it does not wait for the drain's startup, which re-hydrates
+/// the supervisor's response route into the comms runtime with a
+/// supervisor-publish trust mutation. Supervisor bridge commands ensure that
+/// route on demand before replying, so nothing that acts on readiness depends
+/// on the startup hydration. This pins the ordering: readiness settles while
+/// member one's drain-startup supervisor publish is withheld. It is why the
+/// topology-ordering test above gates only topology's own trust source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_readiness_settles_while_a_drain_startup_supervisor_publish_is_withheld() {
+    use meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind as TrustSource;
+    let mut definition = turn_driven_definition();
+    definition.wiring.role_wiring = vec![RoleWiringRule {
+        a: ProfileName::from("worker"),
+        b: ProfileName::from("worker"),
+    }];
+    let mob = reconstructed_isolation_mob_with_definition(2, definition).await;
+    let construction = mob
+        .service
+        .park_session_creation(mob.session(0).clone())
+        .await;
+    let release_construction = ReleaseConstructionGate(Arc::clone(&construction));
+    let resume = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.resume().await }
+    });
+    wait_until(
+        "constructor zero holds resume before readiness",
+        Duration::from_secs(5),
+        || async { construction.boundary_calls.load(Ordering::Acquire) > 0 },
+    )
+    .await;
+    wait_until(
+        "member one construction settled",
+        Duration::from_secs(5),
+        || async {
+            mob.service
+                .sessions
+                .read()
+                .await
+                .contains_key(mob.session(1))
+                && !mob
+                    .handle
+                    .machine_state_watch_rx
+                    .borrow()
+                    .explicit_resume_member_work
+                    .contains_key(&mob_dsl::AgentIdentity::from_domain(mob.member(1)))
+        },
+    )
+    .await;
+    let comms = mob
+        .service
+        .sessions
+        .read()
+        .await
+        .get(mob.session(1))
+        .cloned()
+        .expect("peer comms");
+    // Readiness has not started (member zero's construction is held), so
+    // member one's drain startup has not published yet: withhold it.
+    let publish = Arc::new(TestRuntimeControlBarrier::new());
+    let release_publish = ReleaseConstructionGate(Arc::clone(&publish));
+    comms.park_trust_mutations_from(
+        Arc::clone(&publish),
+        [TrustSource::MeerkatMachineSupervisorPublish],
+    );
+
+    drop(release_construction);
+    tokio::time::timeout(Duration::from_secs(5), publish.boundary_entered.notified())
+        .await
+        .expect("member one's comms drain starts and its supervisor publish is withheld");
+    let mut state = mob.handle.machine_state_watch_rx.clone();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        state.wait_for(|state| state.explicit_resume_readiness_settled),
+    )
+    .await
+    .expect("readiness settles while the drain-startup publish is withheld")
+    .expect("machine state watch");
+    assert_eq!(
+        publish.boundary_calls.load(Ordering::Acquire),
+        1,
+        "the supervisor publish is still withheld when readiness settles"
+    );
+
+    // Negative control: an all-source gate (what the topology-ordering test
+    // installed before #1748) parks and counts this non-topology publish, so
+    // it read a late drain-startup publish as topology; topology's own source
+    // does not include it.
+    let all_sources = TrustMutationGate {
+        barrier: Arc::clone(&publish),
+        sources: None,
+    };
+    let topology_only = TrustMutationGate {
+        barrier: Arc::clone(&publish),
+        sources: Some(vec![TrustSource::MobMachineMemberTrustWiring]),
+    };
+    assert!(all_sources.parks(TrustSource::MeerkatMachineSupervisorPublish));
+    assert!(!topology_only.parks(TrustSource::MeerkatMachineSupervisorPublish));
+
+    drop(release_publish);
+    tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("resume settles once the publish is released")
+        .expect("resume task")
+        .expect("resume succeeds");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

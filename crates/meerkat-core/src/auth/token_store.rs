@@ -181,6 +181,9 @@ pub enum PersistedAuthMode {
     Vertex,
     Foundry,
     McpOauth,
+    /// Generic connector OAuth credential owned by the connector login
+    /// owner. Disjoint from `McpOauth`: each loader refuses the other's rows.
+    ConnectorOauth,
     ExternalTokens,
     ExternalAuthorizer,
     Command,
@@ -357,6 +360,10 @@ pub enum RefreshError {
     },
     #[error("refresh requires interactive reauthorization: {0}")]
     ReauthRequired(String),
+    /// The refresh response granted fewer scopes than the credential
+    /// requires. A use refusal: the credential keeps its prior state.
+    #[error("refresh response does not grant the required scopes")]
+    RequiredScopesNotGranted,
     #[error("refresh in progress was cancelled")]
     Cancelled,
     #[error("cross-process lock acquisition failed: {0}")]
@@ -439,6 +446,7 @@ impl RefreshError {
             Self::ReauthRequired(_) => RefreshFailureObservation::local_credential_unusable(),
             Self::Refresh(_)
             | Self::CredentialIdentityMismatch
+            | Self::RequiredScopesNotGranted
             | Self::Cancelled
             | Self::LockFailed(_)
             | Self::StalePreparation => RefreshFailureObservation::transient(),
@@ -454,6 +462,7 @@ impl RefreshError {
             | Self::DurableTerminalCommit { disposition, .. } => Some(*disposition),
             Self::Refresh(_)
             | Self::CredentialIdentityMismatch
+            | Self::RequiredScopesNotGranted
             | Self::Observed { .. }
             | Self::ReauthRequired(_)
             | Self::Cancelled
@@ -486,6 +495,31 @@ pub enum CredentialMutationError {
     Cancelled,
     #[error("cross-process credential mutation lock acquisition failed: {0}")]
     LockFailed(String),
+    /// The credential slot refused the publication. Its previous credential
+    /// and lifecycle are untouched.
+    #[error("credential slot refused the publication: {0}")]
+    SlotRefused(CredentialSlotRefusal),
+}
+
+/// Why a credential slot refused a publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CredentialSlotRefusal {
+    /// A discovery login publishes only into an empty slot.
+    #[error("the credential slot is occupied")]
+    Occupied,
+    /// The slot holds a credential of another persisted mode.
+    #[error("the credential slot holds a credential of another mode")]
+    ModeMismatch,
+    /// The slot's credential is bound to a different verified account.
+    #[error("the credential slot is bound to a different account")]
+    AccountMismatch,
+    /// The slot's credential was issued under an incompatible context.
+    #[error("the credential slot is bound to an incompatible context")]
+    ContextMismatch,
+    /// A connector credential is published only by a verified connector
+    /// browser completion, never by a generic save path.
+    #[error("a connector credential requires a verified connector completion")]
+    UnverifiedConnectorPublication,
 }
 
 /// Typed durable result of one exclusive credential mutation.

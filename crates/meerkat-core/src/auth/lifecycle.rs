@@ -108,7 +108,8 @@ pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -
         | PersistedAuthMode::OauthToApiKey
         | PersistedAuthMode::GoogleOauth
         | PersistedAuthMode::GithubCopilotOauth
-        | PersistedAuthMode::McpOauth => true,
+        | PersistedAuthMode::McpOauth
+        | PersistedAuthMode::ConnectorOauth => true,
         PersistedAuthMode::ApiKey
         | PersistedAuthMode::StaticBearer
         | PersistedAuthMode::Adc
@@ -403,6 +404,41 @@ pub async fn clear_tokens_and_publish_lifecycle_released_coordinated_for_identit
     handle: GeneratedAuthLeaseHandle,
     credential_identity: AuthCredentialIdentity,
 ) -> Result<(), CredentialMutationError> {
+    clear_tokens_and_publish_lifecycle_released_coordinated_with_mode(
+        persistence,
+        handle,
+        credential_identity,
+        None,
+    )
+    .await
+}
+
+/// Clear only a credential of the expected mode. The mode check, lifecycle
+/// stage, durable clear and compensation share one coordinator transaction and
+/// lease guard, so a replacement cannot enter between validation and removal.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn clear_tokens_and_publish_lifecycle_released_coordinated_for_mode(
+    persistence: ProviderAuthPersistence,
+    handle: GeneratedAuthLeaseHandle,
+    credential_identity: AuthCredentialIdentity,
+    expected_mode: PersistedAuthMode,
+) -> Result<(), CredentialMutationError> {
+    clear_tokens_and_publish_lifecycle_released_coordinated_with_mode(
+        persistence,
+        handle,
+        credential_identity,
+        Some(expected_mode),
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn clear_tokens_and_publish_lifecycle_released_coordinated_with_mode(
+    persistence: ProviderAuthPersistence,
+    handle: GeneratedAuthLeaseHandle,
+    credential_identity: AuthCredentialIdentity,
+    expected_mode: Option<PersistedAuthMode>,
+) -> Result<(), CredentialMutationError> {
     let key = TokenKey::from_credential_identity(&credential_identity);
     let store = persistence.token_store();
     let refresh_coordinator = persistence.refresh_coordinator();
@@ -413,6 +449,19 @@ pub async fn clear_tokens_and_publish_lifecycle_released_coordinated_for_identit
                 Box::pin(async move {
                     let lease_key = LeaseKey::from_credential_identity(&credential_identity);
                     let guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    if let Some(expected_mode) = expected_mode {
+                        let key = TokenKey::from_credential_identity(&credential_identity);
+                        if let Some(tokens) = store
+                            .load(&key)
+                            .await
+                            .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?
+                            && tokens.auth_mode != expected_mode
+                        {
+                            return Err(CredentialMutationError::SlotRefused(
+                                super::token_store::CredentialSlotRefusal::ModeMismatch,
+                            ));
+                        }
+                    }
                     rehydrate_durable_predecessor_for_mutation_for_identity(
                         store.as_ref(),
                         &handle,
@@ -874,6 +923,7 @@ mod tests {
             PersistedAuthMode::GoogleOauth,
             PersistedAuthMode::GithubCopilotOauth,
             PersistedAuthMode::McpOauth,
+            PersistedAuthMode::ConnectorOauth,
         ] {
             assert!(
                 !persisted_auth_mode_is_directly_creatable(mode),

@@ -25,9 +25,79 @@ pub struct ConnectorOAuthParameters {
     pub resource: String,
     pub scopes: BTreeSet<String>,
     pub redirect_uri: String,
-    pub expected_account: String,
+    /// Which provider account the attempt must prove: a known account, or
+    /// discovery of the account the provider verifies. Wire form: the account
+    /// string for `Known`, `null` for `Discover`.
+    pub expected_account: AccountSelection,
     pub strategy_id: String,
 }
+
+/// Account selection of one connector browser attempt.
+///
+/// `Known` binds the provider account before the attempt starts and refuses
+/// any other verified account. `Discover` admits the attempt with no account;
+/// the provider-verified account is bound to the credential at the commit,
+/// which publishes only into an empty credential slot.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum AccountSelection {
+    Known(String),
+    Discover,
+}
+
+impl AccountSelection {
+    /// The selected account, when the attempt names one.
+    pub fn known(&self) -> Option<&str> {
+        match self {
+            Self::Known(account) => Some(account),
+            Self::Discover => None,
+        }
+    }
+
+    pub fn is_discover(&self) -> bool {
+        matches!(self, Self::Discover)
+    }
+}
+
+impl From<String> for AccountSelection {
+    fn from(account: String) -> Self {
+        Self::Known(account)
+    }
+}
+
+impl From<&str> for AccountSelection {
+    fn from(account: &str) -> Self {
+        Self::Known(account.to_owned())
+    }
+}
+
+impl fmt::Debug for AccountSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Known(_) => f.write_str("Known(..)"),
+            Self::Discover => f.write_str("Discover"),
+        }
+    }
+}
+
+impl Serialize for AccountSelection {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.known().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AccountSelection {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            Some(account) => Self::Known(account),
+            None => Self::Discover,
+        })
+    }
+}
+
+/// Framed into the attempt key in place of an account for `Discover`. It
+/// contains a control character, which no valid account can, so a Discover
+/// key never equals a Known key.
+const DISCOVER_KEY_TAG: &str = "\u{0}connector-account-discover-v1";
 
 /// Immutable validated facts bound to one browser attempt. These are host
 /// inputs, not a provider selected by agent text and not verified account data.
@@ -78,7 +148,10 @@ impl TryFrom<ConnectorOAuthParameters> for ConnectorOAuthDescriptor {
             || !valid_url(&value.resource, false)
             || !valid_url(&value.redirect_uri, true)
             || !valid_atom(&value.client)
-            || !valid_atom(&value.expected_account)
+            || value
+                .expected_account
+                .known()
+                .is_some_and(|account| !valid_atom(account))
             || !valid_atom(&value.strategy_id)
             || value.scopes.is_empty()
             || value.scopes.len() > 256
@@ -109,21 +182,53 @@ impl ConnectorOAuthDescriptor {
     pub fn binding_key(&self) -> String {
         let mut hash = Sha256::new();
         for value in [
-            &self.0.issuer,
+            self.0.issuer.as_str(),
             &self.0.client,
             &self.0.resource,
             &self.0.redirect_uri,
-            &self.0.expected_account,
+            self.0.expected_account.known().unwrap_or(DISCOVER_KEY_TAG),
             &self.0.strategy_id,
         ]
         .into_iter()
-        .chain(self.0.scopes.iter())
+        .chain(self.0.scopes.iter().map(String::as_str))
         {
             hash.update(value.len().to_string().as_bytes());
             hash.update(b":");
             hash.update(value.as_bytes());
         }
         format!("connector:{:x}", hash.finalize())
+    }
+
+    /// Fingerprint of the facts that must stay equal for a credential slot
+    /// to accept a reconnect: issuer, client, resource and strategy. The
+    /// redirect URI (loopback port) and the requested scopes are attempt
+    /// facts, not part of it.
+    pub fn stable_context(&self) -> ConnectorStableContext {
+        let mut hash = Sha256::new();
+        for value in [
+            self.0.issuer.as_str(),
+            &self.0.client,
+            &self.0.resource,
+            &self.0.strategy_id,
+        ] {
+            hash.update(value.len().to_string().as_bytes());
+            hash.update(b":");
+            hash.update(value.as_bytes());
+        }
+        ConnectorStableContext(format!("connector-context:{:x}", hash.finalize()))
+    }
+
+    /// Scopes the native owner derives from a token-endpoint response: its
+    /// `scope` field, or the requested scopes when the response omits it
+    /// (RFC 6749 section 5.1).
+    pub fn granted_scopes_from_response(
+        &self,
+        exchanged: &crate::auth_oauth::OAuthTokenResult,
+    ) -> BTreeSet<String> {
+        match exchanged.scope.as_deref() {
+            Some(scope) => scope.split_whitespace().map(str::to_owned).collect(),
+            None => self.0.scopes.clone(),
+        }
     }
 
     pub fn verify_account(
@@ -135,8 +240,14 @@ impl ConnectorOAuthDescriptor {
         if exchanged.access_token.is_empty() {
             return Err(ConnectorOAuthRefusal::CredentialMismatch);
         }
+        // Granted scopes are authorized only by the response the owner's
+        // own exchange parsed; a strategy cannot widen or relabel them.
+        if observation.granted_scopes != self.granted_scopes_from_response(exchanged) {
+            return Err(ConnectorOAuthRefusal::CredentialMismatch);
+        }
         Ok(VerifiedConnectorAccount {
             descriptor: self.clone(),
+            scope_evidence: ScopeEvidence::TokenEndpointResponse,
             observation,
             credential_fingerprint: secret_fingerprint(
                 Some(&exchanged.access_token),
@@ -150,8 +261,15 @@ impl ConnectorOAuthDescriptor {
         &self,
         observation: &ConnectorAccountObservation,
     ) -> Result<(), ConnectorOAuthRefusal> {
-        if observation.account != self.0.expected_account {
-            return Err(ConnectorOAuthRefusal::AccountMismatch);
+        match &self.0.expected_account {
+            AccountSelection::Known(account) if observation.account != *account => {
+                return Err(ConnectorOAuthRefusal::AccountMismatch);
+            }
+            AccountSelection::Known(_) => {}
+            AccountSelection::Discover if !valid_atom(&observation.account) => {
+                return Err(ConnectorOAuthRefusal::VerificationUnavailable);
+            }
+            AccountSelection::Discover => {}
         }
         if !self.0.scopes.is_subset(&observation.granted_scopes) {
             return Err(ConnectorOAuthRefusal::MissingScopes);
@@ -183,10 +301,102 @@ impl fmt::Debug for ConnectorAccountObservation {
     }
 }
 
+/// Stable-context fingerprint of a connector credential (see
+/// [`ConnectorOAuthDescriptor::stable_context`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConnectorStableContext(String);
+
+impl ConnectorStableContext {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What authorizes a connector credential's granted scopes. The native
+/// owner assigns it; no host or strategy input can name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScopeEvidence {
+    /// Parsed by the owner from the token-endpoint response that issued this
+    /// access token (the requested scopes when that response omits `scope`,
+    /// RFC 6749 section 5.1).
+    TokenEndpointResponse,
+    /// A refresh response without `scope` kept the original grant, recorded
+    /// by reference and never relabelled as new evidence.
+    RetainedOnRefresh { from: ScopeEvidenceRef },
+}
+
+/// Reference to the token-endpoint response that originally granted a
+/// credential's scopes: the second it was committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeEvidenceRef {
+    pub granted_at_epoch_secs: i64,
+}
+
+/// Facts a `ConnectorOauth` credential is stored with, under the
+/// `connector` member of its token metadata. They rebuild the refresh
+/// request and decide slot compatibility; they are not secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorCredentialMetadata {
+    pub issuer: String,
+    pub client: String,
+    pub resource: String,
+    pub strategy_id: String,
+    /// Scopes the login requested (the required set refreshes keep).
+    pub requested_scopes: BTreeSet<String>,
+    pub token_endpoint: String,
+    pub stable_context: ConnectorStableContext,
+    pub scope_evidence: ScopeEvidence,
+    /// When the scopes' original token-endpoint grant was committed.
+    pub granted_at_epoch_secs: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredConnectorMetadata {
+    connector: ConnectorCredentialMetadata,
+}
+
+impl ConnectorCredentialMetadata {
+    /// The metadata of a `ConnectorOauth` credential, if it carries it.
+    pub fn from_tokens(tokens: &PersistedTokens) -> Option<Self> {
+        if tokens.auth_mode != crate::auth_store::PersistedAuthMode::ConnectorOauth {
+            return None;
+        }
+        serde_json::from_value::<StoredConnectorMetadata>(tokens.metadata.clone())
+            .ok()
+            .map(|stored| stored.connector)
+    }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::json!({ "connector": self })
+    }
+
+    /// The scope evidence a successful refresh records: the refresh
+    /// response's own `scope` when present, else the original grant kept by
+    /// reference.
+    pub fn refreshed_scope_evidence(&self, response_has_scope: bool) -> ScopeEvidence {
+        if response_has_scope {
+            ScopeEvidence::TokenEndpointResponse
+        } else {
+            ScopeEvidence::RetainedOnRefresh {
+                from: match self.scope_evidence {
+                    ScopeEvidence::RetainedOnRefresh { from } => from,
+                    ScopeEvidence::TokenEndpointResponse => ScopeEvidenceRef {
+                        granted_at_epoch_secs: self.granted_at_epoch_secs,
+                    },
+                },
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedConnectorAccount {
     descriptor: ConnectorOAuthDescriptor,
     observation: ConnectorAccountObservation,
+    scope_evidence: ScopeEvidence,
     credential_fingerprint: [u8; 32],
 }
 
@@ -218,8 +428,26 @@ impl VerifiedConnectorAccount {
     pub fn granted_scopes(&self) -> &BTreeSet<String> {
         &self.observation.granted_scopes
     }
+    pub fn scope_evidence(&self) -> ScopeEvidence {
+        self.scope_evidence
+    }
 
     pub fn verify_tokens(&self, tokens: &PersistedTokens) -> Result<(), ConnectorOAuthRefusal> {
+        if tokens.auth_mode == crate::auth_store::PersistedAuthMode::ConnectorOauth {
+            let metadata = ConnectorCredentialMetadata::from_tokens(tokens)
+                .ok_or(ConnectorOAuthRefusal::CredentialMismatch)?;
+            let facts = self.descriptor.parameters();
+            if metadata.stable_context != self.descriptor.stable_context()
+                || metadata.issuer != facts.issuer
+                || metadata.client != facts.client
+                || metadata.resource != facts.resource
+                || metadata.strategy_id != facts.strategy_id
+                || metadata.requested_scopes != facts.scopes
+                || metadata.scope_evidence != self.scope_evidence
+            {
+                return Err(ConnectorOAuthRefusal::CredentialMismatch);
+            }
+        }
         let scopes = tokens.scopes.iter().cloned().collect::<BTreeSet<_>>();
         if tokens.account_id.as_deref() != Some(self.account())
             || scopes != self.observation.granted_scopes
@@ -333,6 +561,62 @@ impl OAuthBrowserFlowCompletion {
             Self::Connector(evidence) => evidence.verify_tokens(tokens),
         }
     }
+
+    /// Whether `previous`, the credential currently in the slot, may be
+    /// replaced by this completion's `tokens`. Decided inside the slot's
+    /// exclusive mutation, so racing completions are serialized.
+    ///
+    /// - Any publication into an empty slot is admitted.
+    /// - A `ConnectorOauth` credential is replaced only by a `Known`
+    ///   connector completion for the same verified account and stable
+    ///   context. A `Discover` completion never replaces anything, even the
+    ///   same account and context with an independent grant.
+    /// - Other modes keep their existing replacement rules, but never
+    ///   replace a `ConnectorOauth` credential.
+    pub fn admit_into_slot(
+        &self,
+        previous: Option<&PersistedTokens>,
+        tokens: &PersistedTokens,
+    ) -> Result<(), crate::auth_store::CredentialSlotRefusal> {
+        use crate::auth_store::{CredentialSlotRefusal, PersistedAuthMode};
+        if tokens.auth_mode == PersistedAuthMode::ConnectorOauth
+            && !matches!(self, Self::Connector(_))
+        {
+            return Err(CredentialSlotRefusal::UnverifiedConnectorPublication);
+        }
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        let previous_is_connector = previous.auth_mode == PersistedAuthMode::ConnectorOauth;
+        let connector = match self {
+            Self::Connector(evidence) if tokens.auth_mode == PersistedAuthMode::ConnectorOauth => {
+                evidence
+            }
+            Self::Provider(_) | Self::Connector(_) => {
+                return if previous_is_connector {
+                    Err(CredentialSlotRefusal::ModeMismatch)
+                } else {
+                    Ok(())
+                };
+            }
+        };
+        let AccountSelection::Known(account) = &connector.descriptor.parameters().expected_account
+        else {
+            return Err(CredentialSlotRefusal::Occupied);
+        };
+        if !previous_is_connector {
+            return Err(CredentialSlotRefusal::ModeMismatch);
+        }
+        let previous_context = ConnectorCredentialMetadata::from_tokens(previous)
+            .map(|metadata| metadata.stable_context);
+        if previous_context.as_ref() != Some(&connector.descriptor.stable_context()) {
+            return Err(CredentialSlotRefusal::ContextMismatch);
+        }
+        if previous.account_id.as_deref() != Some(account.as_str()) {
+            return Err(CredentialSlotRefusal::AccountMismatch);
+        }
+        Ok(())
+    }
 }
 impl From<OAuthProviderIdentity> for OAuthBrowserFlowCompletion {
     fn from(value: OAuthProviderIdentity) -> Self {
@@ -405,6 +689,105 @@ mod tests {
             assert_ne!(original, changed);
             assert_ne!(original.binding_key(), changed.binding_key());
         }
+    }
+
+    /// The pre-`AccountSelection` key algorithm, inlined: a Known attempt
+    /// admitted before the change keeps matching after it.
+    fn legacy_binding_key(value: &ConnectorOAuthParameters, account: &str) -> String {
+        let mut hash = Sha256::new();
+        for field in [
+            value.issuer.as_str(),
+            &value.client,
+            &value.resource,
+            &value.redirect_uri,
+            account,
+            &value.strategy_id,
+        ]
+        .into_iter()
+        .chain(value.scopes.iter().map(String::as_str))
+        {
+            hash.update(field.len().to_string().as_bytes());
+            hash.update(b":");
+            hash.update(field.as_bytes());
+        }
+        format!("connector:{:x}", hash.finalize())
+    }
+
+    #[test]
+    fn known_keys_are_unchanged_and_discover_keys_never_equal_a_known_key() {
+        let known: ConnectorOAuthDescriptor = parameters().try_into().unwrap();
+        assert_eq!(
+            known.binding_key(),
+            legacy_binding_key(&parameters(), "account-a")
+        );
+        let mut value = parameters();
+        value.expected_account = AccountSelection::Discover;
+        let discover: ConnectorOAuthDescriptor = value.clone().try_into().unwrap();
+        assert_ne!(discover.binding_key(), known.binding_key());
+        // No valid account can spell the Discover tag: it has a control char.
+        value.expected_account = AccountSelection::Known(DISCOVER_KEY_TAG.to_owned());
+        assert_eq!(
+            ConnectorOAuthDescriptor::try_from(value),
+            Err(ConnectorOAuthRefusal::InvalidDescriptor)
+        );
+        assert_eq!(discover.stable_context(), known.stable_context());
+    }
+
+    #[test]
+    fn account_selection_wire_form_is_the_account_string_or_null() {
+        let known: ConnectorOAuthDescriptor = parameters().try_into().unwrap();
+        let json = serde_json::to_value(&known).unwrap();
+        assert_eq!(json["expected_account"], "account-a");
+        let mut value = parameters();
+        value.expected_account = AccountSelection::Discover;
+        let discover: ConnectorOAuthDescriptor = value.try_into().unwrap();
+        let json = serde_json::to_value(&discover).unwrap();
+        assert!(json["expected_account"].is_null());
+        assert_eq!(
+            serde_json::from_value::<ConnectorOAuthDescriptor>(json).unwrap(),
+            discover
+        );
+    }
+
+    #[test]
+    fn discover_accepts_any_verified_account_but_not_an_empty_one() {
+        let mut value = parameters();
+        value.expected_account = AccountSelection::Discover;
+        let descriptor: ConnectorOAuthDescriptor = value.try_into().unwrap();
+        let evidence = descriptor
+            .verify_account(
+                ConnectorAccountObservation {
+                    account: "account-z".into(),
+                    granted_scopes: ["mcp.read".into()].into(),
+                },
+                &exchanged(),
+            )
+            .unwrap();
+        assert_eq!(evidence.account(), "account-z");
+        assert_eq!(
+            descriptor.verify_account(
+                ConnectorAccountObservation {
+                    account: String::new(),
+                    granted_scopes: ["mcp.read".into()].into(),
+                },
+                &exchanged()
+            ),
+            Err(ConnectorOAuthRefusal::VerificationUnavailable)
+        );
+    }
+
+    #[test]
+    fn stable_context_ignores_redirect_and_scopes_but_not_client() {
+        let original: ConnectorOAuthDescriptor = parameters().try_into().unwrap();
+        let mut moved = parameters();
+        moved.redirect_uri = "http://127.0.0.1:23456/callback".into();
+        moved.scopes.insert("mcp.write".into());
+        let moved: ConnectorOAuthDescriptor = moved.try_into().unwrap();
+        assert_eq!(original.stable_context(), moved.stable_context());
+        let mut other = parameters();
+        other.client = "other-client".into();
+        let other: ConnectorOAuthDescriptor = other.try_into().unwrap();
+        assert_ne!(original.stable_context(), other.stable_context());
     }
 
     #[test]

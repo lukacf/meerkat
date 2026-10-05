@@ -15,11 +15,12 @@ use meerkat_contracts::{
     AuthStatusParams, BindingIdParams, CreateProfileParams, DeviceCompleteParams,
     DeviceStartParams, LoginCancelParams, LoginCompleteParams, LoginStartParams,
     ProvisionApiKeyParams, RealmIdParams, WireAuthProfile, WireAuthStatusDetail,
-    WireAuthStatusResult, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
-    WireLoginCancelled, WireLoginReady, WireLoginReadyTarget, WireLoginStart, WireLoginStartTarget,
-    WireLoginTarget, WireMcpLoginReady, WireMcpLoginStart, WireMcpLoginTarget, WireProviderBinding,
-    WireProviderLoginReady, WireProviderLoginStart, WireProvisionApiKeyResult,
-    WireRealmConnectionSet,
+    WireAuthStatusResult, WireBackendProfile, WireBindingIdentity, WireConnectorLoginTarget,
+    WireConnectorSlotTarget, WireDeviceCompleteResult, WireLoginCancelled,
+    WireLoginCancelledTarget, WireLoginReady, WireLoginReadyTarget, WireLoginStart,
+    WireLoginStartTarget, WireLoginTarget, WireMcpLoginReady, WireMcpLoginStart,
+    WireMcpLoginTarget, WireProviderBinding, WireProviderLoginReady, WireProviderLoginStart,
+    WireProvisionApiKeyResult, WireRealmConnectionSet,
 };
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
@@ -104,6 +105,11 @@ fn host_auth_error_response(id: Option<RpcId>, error_value: meerkat::HostAuthErr
         meerkat::HostAuthError::McpOAuth(_) => error::INTERNAL_ERROR,
         meerkat::HostAuthError::McpTarget(refusal) if refusal.is_refusal() => error::INVALID_PARAMS,
         meerkat::HostAuthError::McpTarget(_) => error::INTERNAL_ERROR,
+        meerkat::HostAuthError::Connector(connector) if connector.is_refusal() => {
+            error::INVALID_PARAMS
+        }
+        meerkat::HostAuthError::Connector(_) => error::INTERNAL_ERROR,
+        meerkat::HostAuthError::ConnectorTarget(_) => error::INVALID_PARAMS,
     };
     RpcResponse::error(id, code, error_value.to_string())
 }
@@ -1562,6 +1568,30 @@ pub async fn handle_auth_login_start(
                 },
             );
         }
+        WireLoginTarget::Connector(WireConnectorLoginTarget { connector }) => {
+            let started = match meerkat::connector_target_from_wire(&connector) {
+                Ok(target) => {
+                    service
+                        .connector_login_start(&target, &parsed.redirect_uri)
+                        .await
+                }
+                Err(error_value) => Err(error_value),
+            };
+            return match started {
+                Ok(started) => RpcResponse::success(
+                    id,
+                    WireLoginStart {
+                        authorize_url: started.authorize_url,
+                        state: started.state,
+                        redirect_uri: started.redirect_uri,
+                        target: WireLoginStartTarget::Connector(WireConnectorSlotTarget {
+                            connector: connector.slot,
+                        }),
+                    },
+                ),
+                Err(error_value) => host_auth_error_response(id, error_value),
+            };
+        }
     };
     let target = match host_auth_target(
         provider_target.provider.identity(),
@@ -1653,6 +1683,37 @@ pub async fn handle_auth_login_complete(
                 },
             );
         }
+        WireLoginTarget::Connector(WireConnectorLoginTarget { connector }) => {
+            let completed = match meerkat::connector_target_from_wire(&connector) {
+                Ok(target) => {
+                    service
+                        .connector_login_complete(
+                            &target,
+                            meerkat::ConnectorOAuthCallback {
+                                redirect_uri: parsed.redirect_uri,
+                                state: parsed.state,
+                                code: parsed.code,
+                            },
+                        )
+                        .await
+                }
+                Err(error_value) => Err(error_value),
+            };
+            return match completed {
+                Ok(completed) => {
+                    tracing::info!(
+                        target: "meerkat::auth::audit",
+                        connector_realm = %connector.slot.realm_id,
+                        connector_slot = %connector.slot.slot_id,
+                        action = "login_connector_oauth_complete",
+                        has_refresh_token = %completed.has_refresh_token,
+                        "connector OAuth login completed via RPC"
+                    );
+                    RpcResponse::success(id, meerkat::connector_ready_to_wire(&completed))
+                }
+                Err(error_value) => host_auth_error_response(id, error_value),
+            };
+        }
     };
     let target = match host_auth_target(
         provider_target.provider.identity(),
@@ -1717,19 +1778,35 @@ pub async fn handle_auth_login_cancel(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let target = match configured_mcp_target(runtime, &parsed.mcp).await {
-        Ok(target) => target,
-        Err(error_value) => return host_auth_error_response(id, error_value),
-    };
     let service = match host_auth_service(runtime) {
         Ok(service) => service,
         Err(error_value) => return host_auth_error_response(id, error_value),
     };
-    match service.mcp_login_cancel_by_state(&target, &parsed.state) {
-        Ok(()) => RpcResponse::success(
+    let cancelled = match parsed {
+        LoginCancelParams::Mcp(parsed) => {
+            let target = match configured_mcp_target(runtime, &parsed.mcp).await {
+                Ok(target) => target,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            service
+                .mcp_login_cancel_by_state(&target, &parsed.state)
+                .map(|()| WireLoginCancelledTarget::Mcp(WireMcpLoginTarget { mcp: parsed.mcp }))
+        }
+        LoginCancelParams::Connector(parsed) => {
+            meerkat::connector_slot_from_wire(&parsed.connector)
+                .and_then(|slot| service.connector_login_cancel(&slot, &parsed.state))
+                .map(|()| {
+                    WireLoginCancelledTarget::Connector(WireConnectorSlotTarget {
+                        connector: parsed.connector,
+                    })
+                })
+        }
+    };
+    match cancelled {
+        Ok(target) => RpcResponse::success(
             id,
             WireLoginCancelled {
-                mcp: parsed.mcp,
+                target,
                 cancelled: true,
             },
         ),
@@ -2031,6 +2108,23 @@ pub async fn handle_auth_status_get(
             };
             return match service.mcp_status(&target).await {
                 Ok(status) => RpcResponse::success(id, WireAuthStatusResult::Mcp(status.to_wire())),
+                Err(error_value) => host_auth_error_response(id, error_value),
+            };
+        }
+        AuthStatusParams::Connector(WireConnectorSlotTarget { connector }) => {
+            let service = match host_auth_service(runtime) {
+                Ok(service) => service,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            let status = match meerkat::connector_slot_from_wire(&connector) {
+                Ok(slot) => service.connector_status(&slot).await,
+                Err(error_value) => Err(error_value),
+            };
+            return match status {
+                Ok(status) => RpcResponse::success(
+                    id,
+                    WireAuthStatusResult::Connector(meerkat::connector_status_to_wire(&status)),
+                ),
                 Err(error_value) => host_auth_error_response(id, error_value),
             };
         }
@@ -2678,6 +2772,55 @@ mod tests {
         config
     }
 
+    #[test]
+    fn connector_errors_map_refusals_to_invalid_params_and_failures_to_internal() {
+        use meerkat::{ConnectorLoginError, HostAuthError};
+        use meerkat_core::auth::token_store::CredentialSlotRefusal;
+        let code = |error: HostAuthError| {
+            host_auth_error_response(Some(RpcId::Num(1)), error)
+                .error
+                .expect("error response")
+                .code
+        };
+        for failure in [
+            OAuthFlowError::PersistenceFailed {
+                operation: "admit_oauth_browser_flow",
+                detail: "disk".into(),
+            },
+            OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_browser_flow",
+                detail: "rejected".into(),
+            },
+            OAuthFlowError::StateGenerationFailed,
+            OAuthFlowError::RegistryProjectionMissing {
+                operation: "verify",
+            },
+        ] {
+            assert_eq!(
+                code(HostAuthError::Connector(ConnectorLoginError::Flow(failure))),
+                error::INTERNAL_ERROR
+            );
+        }
+        assert_eq!(
+            code(HostAuthError::Connector(
+                ConnectorLoginError::RefreshFailed("closure rejected".into())
+            )),
+            error::INTERNAL_ERROR
+        );
+        for refusal in [
+            ConnectorLoginError::Flow(OAuthFlowError::Missing),
+            ConnectorLoginError::Slot(CredentialSlotRefusal::Occupied),
+            ConnectorLoginError::Verification(
+                meerkat_providers::connector_oauth::ConnectorOAuthRefusal::MissingScopes,
+            ),
+        ] {
+            assert_eq!(
+                code(HostAuthError::Connector(refusal)),
+                error::INVALID_PARAMS
+            );
+        }
+    }
+
     fn auth_status_state(resp: RpcResponse) -> String {
         assert!(
             resp.error.is_none(),
@@ -3159,6 +3302,152 @@ mod tests {
             resp.error
         );
         serde_json::from_str(resp.result.expect("RPC result").get()).unwrap()
+    }
+
+    /// Connector OAuth over `auth/login/*` and `auth/status/get`: a discover
+    /// login binds the provider-verified account to the host-named slot,
+    /// status reports slot and account apart, a second discover into the
+    /// occupied slot is refused, and cancel retires an attempt. Logs hold
+    /// none of the attempts' secrets.
+    #[tokio::test]
+    async fn connector_oauth_rpc_binds_verified_account_to_slot_and_keeps_secrets_out_of_logs() {
+        use meerkat::test_fixtures::mcp_oauth::{
+            CODE_CANARY, ISSUED_SECRET_CANARIES, McpOAuthFixture, SUBJECT,
+        };
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let logs = CanaryLogBuffer::default();
+        let writer = logs.clone();
+        let _capture = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish()
+            .set_default();
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let runtime = test_runtime();
+        let slot = serde_json::json!({ "realm_id": "tenant-a", "slot_id": "drive-work" });
+        let connector = serde_json::json!({
+            "slot": slot,
+            "issuer": fixture.base(),
+            "client": "connector-client",
+            "resource": "https://api.service.example",
+            "scopes": ["openid"],
+            "strategy_id": "oidc-userinfo-v1",
+            "account_selection": { "mode": "discover" },
+        });
+        let redirect = "http://127.0.0.1:1/connector/oauth/callback";
+        let mut canaries: Vec<String> = ISSUED_SECRET_CANARIES
+            .iter()
+            .map(|canary| (*canary).to_owned())
+            .collect();
+
+        let start = |id: i64| {
+            let connector = connector.clone();
+            let runtime = &runtime;
+            async move {
+                rpc_result(
+                    handle_auth_login_start(
+                        Some(RpcId::Num(id)),
+                        Some(
+                            raw_params(serde_json::json!({
+                                "connector": connector,
+                                "redirect_uri": redirect,
+                            }))
+                            .as_ref(),
+                        ),
+                        runtime,
+                    )
+                    .await,
+                )
+            }
+        };
+        let complete = |id: i64, state: String| {
+            let connector = connector.clone();
+            let runtime = &runtime;
+            async move {
+                handle_auth_login_complete(
+                    Some(RpcId::Num(id)),
+                    Some(
+                        raw_params(serde_json::json!({
+                            "connector": connector,
+                            "code": CODE_CANARY,
+                            "state": state,
+                            "redirect_uri": redirect,
+                        }))
+                        .as_ref(),
+                    ),
+                    runtime,
+                )
+                .await
+            }
+        };
+
+        // Cancel path.
+        let started = start(1).await;
+        assert_eq!(started["connector"], slot);
+        let state = started["state"].as_str().unwrap().to_owned();
+        canaries.push(state.clone());
+        canaries.push(started["authorize_url"].as_str().unwrap().to_owned());
+        let cancelled = rpc_result(
+            handle_auth_login_cancel(
+                Some(RpcId::Num(2)),
+                Some(raw_params(serde_json::json!({ "connector": slot, "state": state })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(cancelled["cancelled"], true);
+        assert_eq!(cancelled["connector"], slot);
+
+        // Discover login into the empty slot.
+        let started = start(3).await;
+        let state = started["state"].as_str().unwrap().to_owned();
+        canaries.push(state.clone());
+        canaries.push(started["authorize_url"].as_str().unwrap().to_owned());
+        let ready = rpc_result(complete(4, state).await);
+        assert_eq!(ready["connector"], slot);
+        assert_eq!(ready["verified_account"]["subject"], SUBJECT);
+        assert_eq!(ready["verified_account"]["strategy_id"], "oidc-userinfo-v1");
+        assert_eq!(ready["scope_evidence"]["kind"], "token_endpoint_response");
+
+        let status = rpc_result(
+            handle_auth_status_get(
+                Some(RpcId::Num(5)),
+                Some(raw_params(serde_json::json!({ "connector": slot })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(status["phase"], "authorized");
+        assert_eq!(status["connector"], slot);
+        assert_eq!(status["verified_account"]["subject"], SUBJECT);
+        assert_eq!(status["has_refresh_token"], true);
+
+        // A second discover into the occupied slot is refused.
+        let started = start(6).await;
+        let state = started["state"].as_str().unwrap().to_owned();
+        canaries.push(state.clone());
+        canaries.push(started["authorize_url"].as_str().unwrap().to_owned());
+        let refused = complete(7, state).await;
+        let error = refused
+            .error
+            .expect("occupied slot refuses a discover login");
+        assert_eq!(error.code, error::INVALID_PARAMS);
+        assert!(error.message.contains("occupied"), "{}", error.message);
+
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("connector OAuth login completed via RPC"),
+            "positive control: tracing events are captured"
+        );
+        for canary in &canaries {
+            assert!(
+                !captured.contains(canary.as_str()),
+                "logs must not contain an attempt secret"
+            );
+        }
     }
 
     /// RPC entry point of the MCP OAuth canary (ADR-001 secret-canary requirement):

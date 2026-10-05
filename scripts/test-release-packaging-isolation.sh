@@ -220,6 +220,8 @@ mutated_checker="$TEST_ROOT/check-rust-release-packaging-shared-target.sh"
 sed 's|target_dir="$TARGET_ROOT/$crate"|target_dir="$TARGET_ROOT"|' \
   "$CHECKER" > "$mutated_checker"
 chmod +x "$mutated_checker"
+# The runner resolves its interpreter helper next to itself.
+cp "$REPO_ROOT/scripts/require-python" "$TEST_ROOT/require-python"
 if cmp -s "$CHECKER" "$mutated_checker"; then
   fail "the shared-target mutation did not modify the packaging runner"
 fi

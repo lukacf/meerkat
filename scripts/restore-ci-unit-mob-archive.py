@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Restore only a digest-verified unit archive from successful exact-commit CI."""
 
+import sys
+
+if sys.version_info < (3, 10):
+    sys.exit(
+        "restore-ci-unit-mob-archive.py needs Python >= 3.10; "
+        f"found Python {sys.version.split()[0]} ({sys.executable})"
+    )
+
 import argparse
 import hashlib
 import json
@@ -9,7 +17,6 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import zipfile
 
@@ -45,8 +52,13 @@ def select_artifact(rows, commit, run_id):
 
 
 def extract_verified_archive(download, digest, destination):
+    # Chunked rather than hashlib.file_digest (3.11+): same digest, on the
+    # release scripts' Python >= 3.10 floor. Verified before any extraction.
+    hasher = hashlib.sha256()
     with download.open("rb") as source:
-        actual = hashlib.file_digest(source, "sha256").hexdigest()
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            hasher.update(chunk)
+    actual = hasher.hexdigest()
     if f"sha256:{actual}" != digest:
         raise ValueError("CI artifact ZIP digest does not match GitHub metadata")
     with zipfile.ZipFile(download) as archive:

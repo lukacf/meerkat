@@ -144292,6 +144292,96 @@
         ],
         "type": "object"
       },
+      "WireConnectorAuthStatus": {
+        "description": "`auth/status/get` result for a connector slot. The slot and the verified\naccount are separate facts: the slot name is never account proof.",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_refresh_token": {
+            "type": "boolean"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireMcpAuthPhase"
+          },
+          "scope_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireScopeEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verified_account": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireConnectorVerifiedAccount"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "connector",
+          "phase",
+          "has_refresh_token"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
+      "WireConnectorVerifiedAccount": {
+        "additionalProperties": false,
+        "description": "The provider account bound to a connector credential, qualified by the\nissuer and the strategy that verified it.",
+        "properties": {
+          "issuer": {
+            "type": "string"
+          },
+          "strategy_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer",
+          "strategy_id",
+          "subject"
+        ],
+        "type": "object"
+      },
       "WireMcpAuthPhase": {
         "description": "Secret-free authorization phase of an MCP server target.",
         "oneOf": [
@@ -144359,6 +144449,43 @@
           "server_url"
         ],
         "type": "object"
+      },
+      "WireScopeEvidence": {
+        "description": "What authorizes a connector credential's granted scopes. Assigned by the\nnative owner from its own parsed token response, never by a caller.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Parsed from the token-endpoint response that issued the access token.",
+            "properties": {
+              "kind": {
+                "const": "token_endpoint_response",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A refresh response without `scope` kept the original grant, committed\nat `granted_at` (RFC 3339).",
+            "properties": {
+              "granted_at": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "retained_on_refresh",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "granted_at"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -144369,6 +144496,9 @@
       },
       {
         "$ref": "#/$defs/WireMcpAuthStatus"
+      },
+      {
+        "$ref": "#/$defs/WireConnectorAuthStatus"
       }
     ],
     "title": "WireAuthStatusResult"
@@ -144633,6 +144763,329 @@
     ],
     "title": "WireCallbackPendingStatus",
     "type": "string"
+  },
+  "WireConnectorAccountSelection": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Which provider account a connector login must prove.\n\n`known` refuses any other verified account. `discover` admits the login\nwith no account and binds the provider-verified account at completion;\nit publishes only into an empty slot.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "mode": {
+            "const": "known",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "account"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "const": "discover",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireConnectorAccountSelection"
+  },
+  "WireConnectorAuthStatus": {
+    "$defs": {
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
+      "WireConnectorVerifiedAccount": {
+        "additionalProperties": false,
+        "description": "The provider account bound to a connector credential, qualified by the\nissuer and the strategy that verified it.",
+        "properties": {
+          "issuer": {
+            "type": "string"
+          },
+          "strategy_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer",
+          "strategy_id",
+          "subject"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthPhase": {
+        "description": "Secret-free authorization phase of an MCP server target.",
+        "oneOf": [
+          {
+            "enum": [
+              "authorized",
+              "reauth_required"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "authorization_required",
+            "description": "No usable credential: awaiting human authorization through the host.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireScopeEvidence": {
+        "description": "What authorizes a connector credential's granted scopes. Assigned by the\nnative owner from its own parsed token response, never by a caller.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Parsed from the token-endpoint response that issued the access token.",
+            "properties": {
+              "kind": {
+                "const": "token_endpoint_response",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A refresh response without `scope` kept the original grant, committed\nat `granted_at` (RFC 3339).",
+            "properties": {
+              "granted_at": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "retained_on_refresh",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "granted_at"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/status/get` result for a connector slot. The slot and the verified\naccount are separate facts: the slot name is never account proof.",
+    "properties": {
+      "connector": {
+        "$ref": "#/$defs/WireConnectorSlot"
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "has_refresh_token": {
+        "type": "boolean"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireMcpAuthPhase"
+      },
+      "scope_evidence": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireScopeEvidence"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "scopes": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "verified_account": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireConnectorVerifiedAccount"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "connector",
+      "phase",
+      "has_refresh_token"
+    ],
+    "title": "WireConnectorAuthStatus",
+    "type": "object"
+  },
+  "WireConnectorAuthTarget": {
+    "$defs": {
+      "WireConnectorAccountSelection": {
+        "description": "Which provider account a connector login must prove.\n\n`known` refuses any other verified account. `discover` admits the login\nwith no account and binds the provider-verified account at completion;\nit publishes only into an empty slot.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "mode": {
+                "const": "known",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "account"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "discover",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Generic connector OAuth target addressed by `auth/login/start` and\n`auth/login/complete`: the slot plus the descriptor facts the attempt is\nadmitted with. `strategy_id` names an account strategy installed on the\nhost (`oidc-userinfo-v1` by default). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+    "properties": {
+      "account_selection": {
+        "$ref": "#/$defs/WireConnectorAccountSelection"
+      },
+      "client": {
+        "type": "string"
+      },
+      "issuer": {
+        "type": "string"
+      },
+      "resource": {
+        "type": "string"
+      },
+      "scopes": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "slot": {
+        "$ref": "#/$defs/WireConnectorSlot"
+      },
+      "strategy_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "slot",
+      "issuer",
+      "client",
+      "resource",
+      "scopes",
+      "strategy_id",
+      "account_selection"
+    ],
+    "title": "WireConnectorAuthTarget",
+    "type": "object"
+  },
+  "WireConnectorSlot": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+    "properties": {
+      "realm_id": {
+        "type": "string"
+      },
+      "slot_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "realm_id",
+      "slot_id"
+    ],
+    "title": "WireConnectorSlot",
+    "type": "object"
+  },
+  "WireConnectorVerifiedAccount": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "The provider account bound to a connector credential, qualified by the\nissuer and the strategy that verified it.",
+    "properties": {
+      "issuer": {
+        "type": "string"
+      },
+      "strategy_id": {
+        "type": "string"
+      },
+      "subject": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "issuer",
+      "strategy_id",
+      "subject"
+    ],
+    "title": "WireConnectorVerifiedAccount",
+    "type": "object"
   },
   "WireContentBlock": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -161334,6 +161787,36 @@
   },
   "WireLoginCancelled": {
     "$defs": {
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlotTarget": {
+        "additionalProperties": false,
+        "description": "A connector slot addressed by `auth/status/get`, `auth/login/cancel` and\nthe start/complete results.",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          }
+        },
+        "required": [
+          "connector"
+        ],
+        "type": "object"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
         "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
@@ -161356,20 +161839,37 @@
           "server_url"
         ],
         "type": "object"
+      },
+      "WireMcpLoginTarget": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`WireLoginTarget`].",
+        "properties": {
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`auth/login/cancel` success body.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireMcpLoginTarget"
+      },
+      {
+        "$ref": "#/$defs/WireConnectorSlotTarget"
+      }
+    ],
     "properties": {
       "cancelled": {
         "type": "boolean"
-      },
-      "mcp": {
-        "$ref": "#/$defs/WireMcpAuthTarget"
       }
     },
     "required": [
-      "mcp",
       "cancelled"
     ],
     "title": "WireLoginCancelled",
@@ -161412,6 +161912,64 @@
         "required": [
           "realm",
           "binding"
+        ],
+        "type": "object"
+      },
+      "WireConnectorLoginReady": {
+        "description": "Connector arm of [`WireLoginReadyTarget`]: the slot and the verified\naccount as separate facts, plus the owner-assigned scope evidence.",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          },
+          "scope_evidence": {
+            "$ref": "#/$defs/WireScopeEvidence"
+          },
+          "verified_account": {
+            "$ref": "#/$defs/WireConnectorVerifiedAccount"
+          }
+        },
+        "required": [
+          "connector",
+          "verified_account",
+          "scope_evidence"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
+      "WireConnectorVerifiedAccount": {
+        "additionalProperties": false,
+        "description": "The provider account bound to a connector credential, qualified by the\nissuer and the strategy that verified it.",
+        "properties": {
+          "issuer": {
+            "type": "string"
+          },
+          "strategy_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer",
+          "strategy_id",
+          "subject"
         ],
         "type": "object"
       },
@@ -161493,6 +162051,43 @@
           "provider"
         ],
         "type": "object"
+      },
+      "WireScopeEvidence": {
+        "description": "What authorizes a connector credential's granted scopes. Assigned by the\nnative owner from its own parsed token response, never by a caller.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Parsed from the token-endpoint response that issued the access token.",
+            "properties": {
+              "kind": {
+                "const": "token_endpoint_response",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A refresh response without `scope` kept the original grant, committed\nat `granted_at` (RFC 3339).",
+            "properties": {
+              "granted_at": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "retained_on_refresh",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "granted_at"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -161503,6 +162098,9 @@
       },
       {
         "$ref": "#/$defs/WireMcpLoginReady"
+      },
+      {
+        "$ref": "#/$defs/WireConnectorLoginReady"
       }
     ],
     "properties": {
@@ -161537,6 +162135,36 @@
   },
   "WireLoginStart": {
     "$defs": {
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlotTarget": {
+        "additionalProperties": false,
+        "description": "A connector slot addressed by `auth/status/get`, `auth/login/cancel` and\nthe start/complete results.",
+        "properties": {
+          "connector": {
+            "$ref": "#/$defs/WireConnectorSlot"
+          }
+        },
+        "required": [
+          "connector"
+        ],
+        "type": "object"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
         "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
@@ -161617,6 +162245,9 @@
       },
       {
         "$ref": "#/$defs/WireMcpLoginStart"
+      },
+      {
+        "$ref": "#/$defs/WireConnectorSlotTarget"
       }
     ],
     "properties": {
@@ -169457,6 +170088,45 @@
     ],
     "title": "WireScopeDeniedDetail",
     "type": "object"
+  },
+  "WireScopeEvidence": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What authorizes a connector credential's granted scopes. Assigned by the\nnative owner from its own parsed token response, never by a caller.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Parsed from the token-endpoint response that issued the access token.",
+        "properties": {
+          "kind": {
+            "const": "token_endpoint_response",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A refresh response without `scope` kept the original grant, committed\nat `granted_at` (RFC 3339).",
+        "properties": {
+          "granted_at": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "retained_on_refresh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "granted_at"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireScopeEvidence"
   },
   "WireScopedModelOverride": {
     "$defs": {

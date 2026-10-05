@@ -9,7 +9,17 @@ XTASK_TREE_KEY := $(shell printf '%s' "$(CURDIR)" | shasum | cut -c1-12)
 XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target-$(XTASK_TREE_KEY)
 XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
 CARGO ?= ./scripts/repo-cargo
-PYTHON ?= $(shell command -v python3.11 2>/dev/null || command -v python3)
+# Python >= 3.11 for the repo's scripts and SDK tooling (tomllib,
+# hashlib.file_digest). scripts/require-python prefers python3.13..3.11 over a
+# PATH python3 (macOS can put Apple's 3.9 first). If none qualifies, any target
+# that expands $(PYTHON) stops with that reason instead of failing mid-recipe.
+PYTHON ?= $(shell scripts/require-python 3.11 make 2>/dev/null)
+ifeq ($(strip $(PYTHON)),)
+PYTHON = $(error $(shell scripts/require-python 3.11 make 2>&1 >/dev/null))
+endif
+# Package installs go into a venv: uv-, Homebrew- and distro-managed
+# interpreters refuse pip installs (PEP 668).
+SDK_PYTHON_VENV ?= $(CURDIR)/sdks/python/.venv
 
 # Colors for terminal output
 GREEN := \033[0;32m
@@ -117,10 +127,10 @@ test-all:
 # Python SDK test suite
 test-sdk-python:
 	@echo "$(GREEN)Running Python SDK tests...$(NC)"
-	@(cd sdks/python && \
-		$(PYTHON) -m pip install --upgrade pip && \
-		$(PYTHON) -m pip install -e ".[dev]" && \
-		$(PYTHON) -m pytest -q tests)
+	@py="$$(PYTHON='$(PYTHON)' scripts/python-venv '$(SDK_PYTHON_VENV)' 3.11 test-sdk-python)" && \
+		cd sdks/python && \
+		"$$py" -m pip install -e ".[dev]" && \
+		"$$py" -m pytest -q tests
 
 # TypeScript SDK test suite
 test-sdk-typescript:
@@ -265,6 +275,8 @@ path-classifier-selftest:
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
 	@bash scripts/tests/ci_pr_classification_base_test.sh
 	@bash scripts/tests/buildbuddy_launcher_env_test.sh
+	@bash scripts/tests/require_python_test.sh
+	@bash scripts/tests/require_bash_test.sh
 	@bash scripts/tests/live_gate_selftest.sh
 
 cargo-agent-gate: rust-lane-doctor
@@ -836,12 +848,13 @@ release-web-sdk:
 # Dry-run publish for Python SDK (build + twine check only)
 publish-dry-run-python:
 	@echo "$(GREEN)Checking Python SDK publish readiness...$(NC)"
-	@(cd sdks/python && \
-		$(PYTHON) -m pip install --upgrade build twine && \
+	@py="$$(PYTHON='$(PYTHON)' scripts/python-venv '$(SDK_PYTHON_VENV)' 3.11 publish-dry-run-python)" && \
+		cd sdks/python && \
+		"$$py" -m pip install --upgrade build twine && \
 		rm -rf dist *.egg-info && \
-		$(PYTHON) -m build && \
-		$(PYTHON) -m twine check dist/* && \
-		rm -rf dist *.egg-info build)
+		"$$py" -m build && \
+		"$$py" -m twine check dist/* && \
+		rm -rf dist *.egg-info build
 
 # Dry-run publish for TypeScript SDK (npm --dry-run)
 publish-dry-run-typescript:
@@ -862,17 +875,18 @@ publish-dry-run-web:
 
 smoke-sdk-python-artifact:
 	@echo "$(GREEN)Running Python SDK artifact smoke test...$(NC)"
-	@(cd sdks/python && \
-		$(PYTHON) -m pip install --upgrade build twine && \
+	@py="$$(PYTHON='$(PYTHON)' scripts/python-venv '$(SDK_PYTHON_VENV)' 3.11 smoke-sdk-python-artifact)" && \
+		cd sdks/python && \
+		"$$py" -m pip install --upgrade build twine && \
 		rm -rf dist *.egg-info build && \
-		$(PYTHON) -m build && \
-		$(PYTHON) -m twine check dist/* && \
+		"$$py" -m build && \
+		"$$py" -m twine check dist/* && \
 		VENV_DIR=$$(mktemp -d) && \
-		$(PYTHON) -m venv "$$VENV_DIR" && \
+		"$$py" -m venv "$$VENV_DIR" && \
 		"$$VENV_DIR/bin/python" -m pip install --upgrade pip && \
 		"$$VENV_DIR/bin/python" -m pip install dist/*.whl && \
 		"$$VENV_DIR/bin/python" -c "from meerkat import CONTRACT_VERSION, MeerkatClient; print(CONTRACT_VERSION); print(MeerkatClient.__name__)" && \
-		rm -rf "$$VENV_DIR")
+		rm -rf "$$VENV_DIR"
 
 smoke-sdk-typescript-artifact:
 	@echo "$(GREEN)Running TypeScript SDK artifact smoke test...$(NC)"

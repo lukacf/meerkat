@@ -186,6 +186,90 @@ pub struct WireMcpAuthTarget {
     pub oauth_account: Option<String>,
 }
 
+/// Credential slot of a connector credential: a realm-scoped storage
+/// address chosen by the trusted host. It is not proof of any provider
+/// account; the provider-verified account is reported separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireConnectorSlot {
+    pub realm_id: String,
+    pub slot_id: String,
+}
+
+/// Which provider account a connector login must prove.
+///
+/// `known` refuses any other verified account. `discover` admits the login
+/// with no account and binds the provider-verified account at completion;
+/// it publishes only into an empty slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireConnectorAccountSelection {
+    Known { account: String },
+    Discover,
+}
+
+/// Generic connector OAuth target addressed by `auth/login/start` and
+/// `auth/login/complete`: the slot plus the descriptor facts the attempt is
+/// admitted with. `strategy_id` names an account strategy installed on the
+/// host (`oidc-userinfo-v1` by default). Login is host-driven: the
+/// authorize URL and state are host-channel data and must never reach an
+/// agent, tool result, transcript or log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireConnectorAuthTarget {
+    pub slot: WireConnectorSlot,
+    pub issuer: String,
+    pub client: String,
+    pub resource: String,
+    pub scopes: Vec<String>,
+    pub strategy_id: String,
+    pub account_selection: WireConnectorAccountSelection,
+}
+
+/// Connector arm of [`WireLoginTarget`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireConnectorLoginTarget {
+    pub connector: WireConnectorAuthTarget,
+}
+
+/// A connector slot addressed by `auth/status/get`, `auth/login/cancel` and
+/// the start/complete results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireConnectorSlotTarget {
+    pub connector: WireConnectorSlot,
+}
+
+/// The provider account bound to a connector credential, qualified by the
+/// issuer and the strategy that verified it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireConnectorVerifiedAccount {
+    pub issuer: String,
+    pub strategy_id: String,
+    pub subject: String,
+}
+
+/// What authorizes a connector credential's granted scopes. Assigned by the
+/// native owner from its own parsed token response, never by a caller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireScopeEvidence {
+    /// Parsed from the token-endpoint response that issued the access token.
+    TokenEndpointResponse,
+    /// A refresh response without `scope` kept the original grant, committed
+    /// at `granted_at` (RFC 3339).
+    RetainedOnRefresh { granted_at: String },
+}
+
 /// Provider binding addressed by `auth/login/*`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -198,8 +282,9 @@ pub struct WireProviderLoginTarget {
     pub profile_id: Option<String>,
 }
 
-/// Login target: a provider binding (the original flat fields) or an MCP
-/// server (`{"mcp": {...}}`). Exactly one shape is accepted.
+/// Login target: a provider binding (the original flat fields), an MCP
+/// server (`{"mcp": {...}}`) or a connector (`{"connector": {...}}`).
+/// Exactly one shape is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
@@ -207,6 +292,7 @@ pub struct WireProviderLoginTarget {
 pub enum WireLoginTarget {
     Provider(WireProviderLoginTarget),
     Mcp(WireMcpLoginTarget),
+    Connector(WireConnectorLoginTarget),
 }
 
 /// MCP arm of [`WireLoginTarget`].
@@ -250,20 +336,58 @@ impl std::fmt::Debug for LoginCompleteParams {
     }
 }
 
-/// Request payload for `auth/login/cancel`: retire the pending MCP attempt
-/// admitted under `state` for this configured server. `Debug` redacts `state`.
+/// Request payload for `auth/login/cancel`: retire the pending attempt
+/// admitted under `state` for a configured MCP server (`{"mcp": {...}}`) or
+/// a connector slot (`{"connector": {...}}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(transform = untagged_target_one_of))]
+pub enum LoginCancelParams {
+    Mcp(McpLoginCancelParams),
+    Connector(ConnectorLoginCancelParams),
+}
+
+impl LoginCancelParams {
+    pub fn state(&self) -> &str {
+        match self {
+            Self::Mcp(params) => &params.state,
+            Self::Connector(params) => &params.state,
+        }
+    }
+}
+
+/// MCP arm of [`LoginCancelParams`]. `Debug` redacts `state`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct LoginCancelParams {
+pub struct McpLoginCancelParams {
     pub mcp: WireMcpAuthTarget,
     pub state: String,
 }
 
-impl std::fmt::Debug for LoginCancelParams {
+impl std::fmt::Debug for McpLoginCancelParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoginCancelParams")
+        f.debug_struct("McpLoginCancelParams")
             .field("mcp", &self.mcp)
+            .field("state", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Connector arm of [`LoginCancelParams`]. `Debug` redacts `state`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorLoginCancelParams {
+    pub connector: WireConnectorSlot,
+    pub state: String,
+}
+
+impl std::fmt::Debug for ConnectorLoginCancelParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectorLoginCancelParams")
+            .field("connector", &self.connector)
             .field("state", &"<redacted>")
             .finish()
     }
@@ -273,12 +397,24 @@ impl std::fmt::Debug for LoginCancelParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireLoginCancelled {
-    pub mcp: WireMcpAuthTarget,
+    #[serde(flatten)]
+    pub target: WireLoginCancelledTarget,
     pub cancelled: bool,
 }
 
+/// Target echo of [`WireLoginCancelled`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(transform = untagged_target_one_of))]
+pub enum WireLoginCancelledTarget {
+    Mcp(WireMcpLoginTarget),
+    Connector(WireConnectorSlotTarget),
+}
+
 /// Request payload for `auth/status/get`: a provider binding (the original
-/// flat fields) or an MCP server (`{"mcp": {...}}`).
+/// flat fields), an MCP server (`{"mcp": {...}}`) or a connector slot
+/// (`{"connector": {...}}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
@@ -286,6 +422,7 @@ pub struct WireLoginCancelled {
 pub enum AuthStatusParams {
     Binding(BindingIdParams),
     Mcp(WireMcpLoginTarget),
+    Connector(WireConnectorSlotTarget),
 }
 
 /// Request payload for `auth/login/device_start`.
@@ -630,6 +767,7 @@ impl std::fmt::Debug for WireLoginStart {
 pub enum WireLoginStartTarget {
     Provider(WireProviderLoginStart),
     Mcp(WireMcpLoginStart),
+    Connector(WireConnectorSlotTarget),
 }
 
 /// Provider arm of [`WireLoginStartTarget`].
@@ -688,6 +826,17 @@ pub struct WireLoginReady {
 pub enum WireLoginReadyTarget {
     Provider(WireProviderLoginReady),
     Mcp(WireMcpLoginReady),
+    Connector(WireConnectorLoginReady),
+}
+
+/// Connector arm of [`WireLoginReadyTarget`]: the slot and the verified
+/// account as separate facts, plus the owner-assigned scope evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireConnectorLoginReady {
+    pub connector: WireConnectorSlot,
+    pub verified_account: WireConnectorVerifiedAccount,
+    pub scope_evidence: WireScopeEvidence,
 }
 
 /// Provider arm of [`WireLoginReadyTarget`].
@@ -840,6 +989,25 @@ pub struct WireMcpAuthStatus {
 pub enum WireAuthStatusResult {
     Binding(WireAuthStatusDetail),
     Mcp(WireMcpAuthStatus),
+    Connector(WireConnectorAuthStatus),
+}
+
+/// `auth/status/get` result for a connector slot. The slot and the verified
+/// account are separate facts: the slot name is never account proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireConnectorAuthStatus {
+    pub connector: WireConnectorSlot,
+    pub phase: WireMcpAuthPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_account: Option<WireConnectorVerifiedAccount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_evidence: Option<WireScopeEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub has_refresh_token: bool,
 }
 
 /// Deserialize a flattened login/status target by its shape: an `mcp`
@@ -865,9 +1033,17 @@ impl<'de> Deserialize<'de> for AuthStatusParams {
                 .map(Self::Mcp)
                 .map_err(D::Error::custom);
         }
-        if let Some(misspelled) = object.keys().find(|key| key.eq_ignore_ascii_case("mcp")) {
+        if object.contains_key("connector") {
+            return serde_json::from_value(value)
+                .map(Self::Connector)
+                .map_err(D::Error::custom);
+        }
+        if let Some(misspelled) = object
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case("mcp") || key.eq_ignore_ascii_case("connector"))
+        {
             return Err(D::Error::custom(format!(
-                "unknown field `{misspelled}`, expected `mcp`"
+                "unknown field `{misspelled}`, expected `mcp` or `connector`"
             )));
         }
         serde_json::from_value(value)
@@ -876,8 +1052,10 @@ impl<'de> Deserialize<'de> for AuthStatusParams {
     }
 }
 
-macro_rules! target_by_mcp_member {
-    ($name:ident, $mcp:ident, $other:ident) => {
+/// Select a flattened target arm by its member: `mcp`, then `connector`,
+/// anything else the provider/binding arm (when the type has one).
+macro_rules! target_by_member {
+    ($name:ident, $mcp:ident, $connector:ident, $other:ident) => {
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
@@ -885,11 +1063,15 @@ macro_rules! target_by_mcp_member {
             {
                 use serde::de::Error as _;
                 let value = serde_json::Value::deserialize(deserializer)?;
-                let is_mcp = value
-                    .as_object()
-                    .is_some_and(|object| object.contains_key("mcp"));
-                if is_mcp {
+                let has = |member: &str| {
+                    value
+                        .as_object()
+                        .is_some_and(|object| object.contains_key(member))
+                };
+                if has("mcp") {
                     serde_json::from_value(value).map(Self::$mcp)
+                } else if has("connector") {
+                    serde_json::from_value(value).map(Self::$connector)
                 } else {
                     serde_json::from_value(value).map(Self::$other)
                 }
@@ -897,12 +1079,40 @@ macro_rules! target_by_mcp_member {
             }
         }
     };
+    ($name:ident, $mcp:ident, $connector:ident) => {
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                use serde::de::Error as _;
+                let value = serde_json::Value::deserialize(deserializer)?;
+                let has = |member: &str| {
+                    value
+                        .as_object()
+                        .is_some_and(|object| object.contains_key(member))
+                };
+                if has("mcp") {
+                    serde_json::from_value(value).map(Self::$mcp)
+                } else if has("connector") {
+                    serde_json::from_value(value).map(Self::$connector)
+                } else {
+                    Err(serde_json::Error::custom(
+                        "expected an `mcp` or a `connector` target",
+                    ))
+                }
+                .map_err(D::Error::custom)
+            }
+        }
+    };
 }
 
-target_by_mcp_member!(WireLoginTarget, Mcp, Provider);
-target_by_mcp_member!(WireLoginStartTarget, Mcp, Provider);
-target_by_mcp_member!(WireLoginReadyTarget, Mcp, Provider);
-target_by_mcp_member!(WireAuthStatusResult, Mcp, Binding);
+target_by_member!(WireLoginTarget, Mcp, Connector, Provider);
+target_by_member!(WireLoginStartTarget, Mcp, Connector, Provider);
+target_by_member!(WireLoginReadyTarget, Mcp, Connector, Provider);
+target_by_member!(WireAuthStatusResult, Mcp, Connector, Binding);
+target_by_member!(LoginCancelParams, Mcp, Connector);
+target_by_member!(WireLoginCancelledTarget, Mcp, Connector);
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

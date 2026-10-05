@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Create (or reuse) a virtual environment at DIR from a Python >= MIN and print
+# its interpreter path. Installing packages into a uv-, Homebrew- or
+# distro-managed interpreter is refused under PEP 668; a venv never is.
+#
+#   python-venv DIR [MIN] [WHO]
+set -euo pipefail
+
+dir="${1:?usage: python-venv DIR [MIN] [WHO]}"
+min="${2:-3.11}"
+who="${3:-python-venv}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -x "${dir}/bin/python" ]] \
+  && PYTHON="${dir}/bin/python" "${script_dir}/require-python" "${min}" "${who}" >/dev/null 2>&1; then
+  printf '%s\n' "${dir}/bin/python"
+  exit 0
+fi
+base="$("${script_dir}/require-python" "${min}" "${who}")"
+rm -rf "${dir}"
+"${base}" -m venv "${dir}" >&2
+"${dir}/bin/python" -m pip install --quiet --upgrade pip >&2
+printf '%s\n' "${dir}/bin/python"

@@ -337,8 +337,6 @@ SYSTEM_NOTICE_NESTED_ALIAS_TYPES = [
 ]
 
 PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
-    "LoginCancelParams",
-    "WireLoginCancelled",
     "ActivateInstructionParams",
     "ApprovalDecideParams",
     "ApprovalGetParams",
@@ -430,15 +428,18 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireInputTerminalOutcome",
     "WireDeviceCompleteResult",
     "AuthStatusParams",
+    "LoginCancelParams",
     "LoginCompleteParams",
     "LoginStartParams",
     "WireAuthStatusResult",
+    "WireLoginCancelled",
 ]
 
 # Request unions (serde-untagged, flattened targets) whose schemas live in the
 # params roster rather than the wire roster.
 PARAMS_UNION_ALIAS_TYPES = {
     "AuthStatusParams",
+    "LoginCancelParams",
     "LoginCompleteParams",
     "LoginStartParams",
 }
@@ -3456,6 +3457,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_python_dataclasses: set[str] = {"WireToolResult"}
     emitted_python_named_types: set[str] = {"WireToolResult"}
+    emitted_python_alias_schemas: dict[str, str] = {}
     emitted_from_wire_parsers: set[str] = set()
 
     def append_python_dataclass(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
@@ -3475,6 +3477,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         schema_root["$defs"] = {
             **root_schema.get("$defs", {}),
             **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
+        # A same-named alias may have been emitted from another schema root.
+        # Reuse it only when it represents this local definition's structure.
+        local_defs -= {
+            local_name for local_name in local_defs
+            if emitted_python_alias_schemas.get(local_name)
+            == _canonical_schema_key(schema_root, schema_root["$defs"][local_name])
         }
         types_content += f"\n@dataclass\nclass {name}:\n"
         types_content += f'    """{doc}"""\n'
@@ -3524,6 +3533,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         if name in emitted_python_named_types:
             return
         schema = _lookup_named_schema(root_schema, name)
+        emitted_python_alias_schemas[name] = _canonical_schema_key(
+            _schema_root_with_local_defs(root_schema, schema), schema
+        )
         root_ref_name = (
             _resolve_schema_ref_name(str(schema["$ref"]))
             if isinstance(schema, dict) and "$ref" in schema
@@ -3770,9 +3782,24 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     # `config/set` accepts a bare config object or a wrapped
     # `{config, expected_generation}` envelope (untagged union).
     append_python_alias("ConfigSetParams", wire_schema, "Request payload for config/set.")
-    # Auth target unions reference the MCP target by name.
+    # Auth target unions reference the MCP and connector targets by name.
     append_python_dataclass(
         "WireMcpAuthTarget", wire_schema, "MCP server target for auth/login/* and auth/status/get."
+    )
+    append_python_dataclass(
+        "WireConnectorSlot", wire_schema, "Connector credential slot: a realm-scoped storage address."
+    )
+    append_python_alias(
+        "WireConnectorAccountSelection", wire_schema, "Account selection of a connector login."
+    )
+    append_python_dataclass(
+        "WireConnectorAuthTarget", wire_schema, "Connector target for auth/login/start and complete."
+    )
+    append_python_dataclass(
+        "WireConnectorVerifiedAccount", wire_schema, "Provider account bound to a connector slot."
+    )
+    append_python_alias(
+        "WireScopeEvidence", wire_schema, "Owner-assigned evidence for a connector's granted scopes."
     )
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
@@ -4408,6 +4435,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_typescript_interfaces: set[str] = {"WireToolResult"}
     emitted_typescript_named_types: set[str] = {"WireToolResult"}
+    emitted_typescript_alias_schemas: dict[str, str] = {}
 
     def append_typescript_interface(name: str, root_schema: dict[str, Any]) -> None:
         nonlocal types_content
@@ -4425,6 +4453,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         schema_root["$defs"] = {
             **root_schema.get("$defs", {}),
             **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
+        # Preserve aliases only across structurally matching schema roots,
+        # as in the Python emitter above.
+        local_defs -= {
+            local_name for local_name in local_defs
+            if emitted_typescript_alias_schemas.get(local_name)
+            == _canonical_schema_key(schema_root, schema_root["$defs"][local_name])
         }
         types_content += f"\nexport interface {name} {{\n"
         for field_name, field_schema in properties.items():
@@ -4453,6 +4488,9 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         if name in emitted_typescript_named_types:
             return
         schema = _lookup_named_schema(root_schema, name)
+        emitted_typescript_alias_schemas[name] = _canonical_schema_key(
+            _schema_root_with_local_defs(root_schema, schema), schema
+        )
         root_ref_name = (
             _resolve_schema_ref_name(str(schema["$ref"]))
             if isinstance(schema, dict) and "$ref" in schema
@@ -4602,8 +4640,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_alias("ConfigSetParams", wire_schema)
-    # Auth target unions reference the MCP target by name.
+    # Auth target unions reference the MCP and connector targets by name.
     append_typescript_interface("WireMcpAuthTarget", wire_schema)
+    append_typescript_interface("WireConnectorSlot", wire_schema)
+    append_typescript_alias("WireConnectorAccountSelection", wire_schema)
+    append_typescript_interface("WireConnectorAuthTarget", wire_schema)
+    append_typescript_interface("WireConnectorVerifiedAccount", wire_schema)
+    append_typescript_alias("WireScopeEvidence", wire_schema)
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_typescript_alias(name, alias_root)

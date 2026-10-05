@@ -535,6 +535,74 @@ The browser flow is split for native UI:
 3. Pass the callback's `state` and `code` to `login_complete`.
 4. Use `status` and `logout` for secret-free UI projections and sign-out.
 
+## Connector OAuth
+
+Connector OAuth stores a credential for a SaaS provider that is neither an
+LLM provider binding nor an MCP server. The trusted host names a **credential
+slot**, a realm-scoped storage address such as `{realm_id: "tenant-a",
+slot_id: "drive-work"}`, plus the connector's descriptor: issuer, client,
+resource, scopes, account strategy and account selection. The slot is not
+proof of any account. The provider-verified account is bound to the stored
+credential at completion and reported separately.
+
+- **Account selection.** `known` names the provider account up front and
+  refuses any other verified account. `discover` admits the login without an
+  account and binds the account the strategy verifies. A discover login
+  publishes only into an **empty** slot: a slot that holds any credential
+  refuses it (`occupied`), even for the same account, so two racing logins
+  cannot swap grants. To re-authorize an occupied slot, log in with `known`
+  and the account that status reports. A `known` reconnect replaces the slot's
+  credential only for the same account and the same issuer, client, resource
+  and strategy; the loopback port and the requested scopes may change.
+  Every refusal leaves the slot's credential untouched.
+- **Account strategies.** The default strategy, `oidc-userinfo-v1`, proves the
+  OIDC subject through the issuer's UserInfo endpoint. Hosts with other
+  provider evidence install a `ConnectorAccountStrategy`
+  (`HostAuthService::with_connector_strategy`). A strategy that verifies
+  signed ID tokens declares `requires_nonce`: the owner mints a nonce per
+  attempt, puts it in the authorize URL, keeps it with the attempt and hands
+  it to the strategy at completion.
+- **Scopes.** Granted scopes come from the token-endpoint response the owner
+  parsed itself (`scope_evidence: token_endpoint_response`). A refresh
+  response without `scope` keeps the original grant
+  (`retained_on_refresh`); one that narrows a required scope, or whose
+  subject is not the bound account, is refused and the credential is
+  unchanged.
+- **Endpoints.** The issuer's endpoints come from its RFC 8414 metadata or
+  OpenID Connect discovery. Its `issuer` must match, PKCE S256 must be
+  advertised and every endpoint must be https or loopback. Clients are
+  public (PKCE, no client secret).
+- **Native hosts** use `HostAuthService::connector_login_start`,
+  `connector_login_complete`, `connector_login_cancel`, `connector_status`
+  and `connector_logout` (which disconnects a slot so it can take another
+  account). `connector_oauth_authority().bearer_token(slot)` returns
+  the access token for native use, refreshing it through the AuthMachine
+  lifecycle; tokens never cross a wire surface.
+- **RPC and REST hosts** use `auth/login/start` and `auth/login/complete` with
+  a `connector` target, `auth/login/cancel` with `{connector: slot, state}`
+  and (RPC) `auth/status/get` with `{connector: slot}`:
+
+  ```json
+  {"connector": {
+     "slot": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+     "issuer": "https://accounts.example.com",
+     "client": "connector-client-id",
+     "resource": "https://api.example.com",
+     "scopes": ["openid", "files.read"],
+     "strategy_id": "oidc-userinfo-v1",
+     "account_selection": {"mode": "discover"}},
+   "redirect_uri": "http://127.0.0.1:53682/connector/oauth/callback"}
+  ```
+
+  Completion repeats the same target with the callback's `code`, `state` and
+  `redirect_uri`; the admitted attempt's descriptor must equal it. The result
+  and status carry the slot, `verified_account` (issuer, strategy and
+  subject) and `scope_evidence` as separate fields.
+
+The same host obligations as browser logins apply: the authorize URL, `state`
+and `code` are bearer material for one attempt and must never reach an agent,
+tool result, transcript or log.
+
 ## Refresh coordination
 
 For managed credentials, refresh semantics are owned by the `AuthMachine`

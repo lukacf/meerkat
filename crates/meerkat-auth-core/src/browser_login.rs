@@ -76,6 +76,7 @@ pub async fn save_tokens_and_publish_lifecycle(
                                 "durable credential predecessor rehydrate failed: {error}"
                             ))
                         })?;
+                    refuse_replacing_connector_credential(previous.as_ref(), &tokens)?;
                     let previous_lifecycle_restore =
                         auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
                     let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
@@ -198,14 +199,21 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                             "durable credential predecessor rehydrate failed: {error}"
                         ))
                     })?;
+                    let completion = flow.completion;
                     flow.authority
                         .consume(
                             &flow.state,
                             &credential_identity,
-                            flow.completion,
+                            completion.clone(),
                             &flow.redirect_uri,
                         )
                         .map_err(flow_error)?;
+                    // The attempt stays consumed on refusal: its code was
+                    // already exchanged. Nothing has been published yet, so
+                    // the slot keeps its credential and lifecycle.
+                    completion
+                        .admit_into_slot(previous.as_ref(), &tokens)
+                        .map_err(CredentialMutationError::SlotRefused)?;
 
                     let previous_lifecycle_restore =
                         auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
@@ -335,6 +343,7 @@ pub async fn save_oauth_tokens_and_consume_device_flow(
                                 "durable credential predecessor rehydrate failed: {error}"
                             ))
                         })?;
+                    refuse_replacing_connector_credential(previous.as_ref(), &tokens)?;
                     poll.consume().map_err(flow_error)?;
 
                     let previous_lifecycle_restore =
@@ -413,6 +422,29 @@ pub async fn save_oauth_tokens_and_consume_device_flow(
             "device-login transaction returned cleared outcome".to_string(),
         )),
     }
+}
+
+/// Generic publication paths (direct and device-flow saves) never touch a
+/// connector credential: a connector credential is published only by a
+/// verified connector browser completion through
+/// `OAuthBrowserFlowCompletion::admit_into_slot`, and a slot holding one is
+/// never overwritten here.
+fn refuse_replacing_connector_credential(
+    previous: Option<&PersistedTokens>,
+    tokens: &PersistedTokens,
+) -> Result<(), CredentialMutationError> {
+    use meerkat_core::auth::token_store::{CredentialSlotRefusal, PersistedAuthMode};
+    if tokens.auth_mode == PersistedAuthMode::ConnectorOauth {
+        return Err(CredentialMutationError::SlotRefused(
+            CredentialSlotRefusal::UnverifiedConnectorPublication,
+        ));
+    }
+    if previous.is_some_and(|previous| previous.auth_mode == PersistedAuthMode::ConnectorOauth) {
+        return Err(CredentialMutationError::SlotRefused(
+            CredentialSlotRefusal::ModeMismatch,
+        ));
+    }
+    Ok(())
 }
 
 fn flow_error(error: OAuthFlowError) -> CredentialMutationError {

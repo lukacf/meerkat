@@ -11,6 +11,14 @@
 //! With the map released, nothing in the spawn path may wait on the
 //! coordinator's turn; a lock the coordinator's turn holds anywhere in the
 //! spawn (supervisor trust included) fails this test.
+//!
+//! Seating before the turn ends is not enough: a stage can stall well below
+//! a spawn timeout and still convoy (historically up to 53 s with zero
+//! timeouts). So several workers spawn at once, and each worker's
+//! bridge-session and supervisor-trust stages must each finish within
+//! [`STAGE_STALL_BOUND`]. Then the mob shuts down while the coordinator's
+//! turn is still running: Shutdown must return within its deadline, with an
+//! explicit outcome for every member.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -31,11 +39,21 @@ use meerkat_mob::{
 };
 
 const COORDINATOR: &str = "ob3-coordinator";
-const WORKER: &str = "ob3-review-worker";
+const WORKERS: [&str; 4] = [
+    "ob3-review-worker-1",
+    "ob3-review-worker-2",
+    "ob3-review-worker-3",
+    "ob3-review-worker-4",
+];
 const FINISHED: &str = "ob3-finished-worker";
 const HELD_PROMPT: &str = "spawn the review workers";
 /// Bounds a failure only; the passing path never waits for it.
 const FAILURE_BOUND: Duration = Duration::from_secs(60);
+/// The longest one spawn stage may take while the coordinator's turn runs:
+/// a stall threshold, well below any spawn or tool timeout.
+const STAGE_STALL_BOUND: Duration = Duration::from_secs(5);
+/// Shutdown's own deadline, below a process supervisor's termination grace.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The coordinator's first request waits for the test (its turn stays in
 /// flight); every other request answers at once.
@@ -198,15 +216,97 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
     }
 }
 
+/// One spawn-stage event, stamped when it was emitted.
+#[derive(Clone, Debug)]
+struct StageEvent {
+    at: std::time::Instant,
+    message: String,
+    /// `agent_identity` or `bridge_session_id`, whichever the event names.
+    key: String,
+}
+
+/// Stamps the start and end events of the measured spawn stages.
+#[derive(Clone, Default)]
+struct StageClock(Arc<Mutex<Vec<StageEvent>>>);
+
+const BRIDGE_SESSION_START: &str = "SessionBackend::provision_member stamped eager turn metadata";
+const BRIDGE_SESSION_END: &str = "SessionBackend::provision_member created session service session";
+const TRUST_START: &str = "spawn admission installing supervisor private trust";
+const TRUST_END: &str = "spawn admission installed supervisor private trust";
+
+#[derive(Default)]
+struct StageFields {
+    message: String,
+    key: Option<String>,
+}
+
+impl tracing::field::Visit for StageFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "message" => self.message = format!("{value:?}"),
+            "agent_identity" | "bridge_session_id" => self.key = Some(format!("{value:?}")),
+            _ => {}
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StageClock {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = StageFields::default();
+        event.record(&mut fields);
+        let measured = [
+            BRIDGE_SESSION_START,
+            BRIDGE_SESSION_END,
+            TRUST_START,
+            TRUST_END,
+        ];
+        if let (true, Some(key)) = (measured.contains(&fields.message.as_str()), fields.key) {
+            self.0.lock().unwrap().push(StageEvent {
+                at: std::time::Instant::now(),
+                message: fields.message,
+                key,
+            });
+        }
+    }
+}
+
+impl StageClock {
+    /// The duration from the first `start` to the first later `end` for
+    /// `key`, or `None` when the stage did not run to completion.
+    fn stage(&self, key: &str, start: &str, end: &str) -> Option<Duration> {
+        let events = self.0.lock().unwrap();
+        let began = events
+            .iter()
+            .find(|event| event.key == key && event.message == start)?
+            .at;
+        let ended = events
+            .iter()
+            .find(|event| event.key == key && event.message == end && event.at >= began)?
+            .at;
+        Some(ended - began)
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn comms_member_spawn_completes_while_the_coordinator_turn_runs() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
     let logs = LogCapture::default();
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(
-            "meerkat_mob::runtime::actor=debug",
+    let clock = StageClock::default();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            "meerkat_mob::runtime::actor=debug,meerkat_mob::runtime::provisioner=debug",
         ))
-        .with_writer(logs.clone())
-        .with_ansi(false)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(logs.clone())
+                .with_ansi(false),
+        )
+        .with(clock.clone())
         .init();
 
     let temp = tempfile::tempdir().expect("temp dir");
@@ -289,31 +389,74 @@ async fn comms_member_spawn_completes_while_the_coordinator_turn_runs() {
         async move { handle.retire(finished).await }
     });
 
-    let worker = AgentIdentity::from(WORKER);
-    tokio::time::timeout(
-        FAILURE_BOUND,
-        handle.spawn_spec(SpawnMemberSpec::new("worker", worker.clone())),
-    )
-    .await
-    .expect("the worker spawn must not wait for the coordinator's turn to end")
-    .expect("spawn the worker");
-    assert!(
-        handle.get_member(&worker).await.unwrap().is_some(),
-        "the worker is seated"
-    );
+    // Several workers spawn at once, as a coordinator fanning out does.
+    let workers: Vec<AgentIdentity> = WORKERS.iter().copied().map(AgentIdentity::from).collect();
+    let spawns = futures::future::join_all(workers.iter().map(|worker| {
+        let handle = handle.clone();
+        let worker = worker.clone();
+        async move {
+            tokio::time::timeout(
+                FAILURE_BOUND,
+                handle.spawn_spec(SpawnMemberSpec::new("worker", worker.clone())),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("the {worker} spawn must not wait for the coordinator's turn to end")
+            })
+            .unwrap_or_else(|error| panic!("spawn {worker}: {error}"))
+        }
+    }))
+    .await;
+    assert_eq!(spawns.len(), WORKERS.len());
+    for worker in &workers {
+        assert!(
+            handle.get_member(worker).await.unwrap().is_some(),
+            "{worker} is seated"
+        );
+    }
     assert!(
         !parked.is_finished(),
         "the coordinator's turn is still running, so the parked command is still pending"
     );
     {
         let captured = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
-        assert!(
-            captured.lines().any(|line| {
-                line.contains("finalize_spawn_admit installed supervisor private trust")
-                    && line.contains(WORKER)
-            }),
-            "the worker spawn ran the supervisor private-trust stage"
-        );
+        for worker in &workers {
+            assert!(
+                captured.lines().any(|line| {
+                    line.contains("finalize_spawn_admit installed supervisor private trust")
+                        && line.contains(worker.as_str())
+                }),
+                "the {worker} spawn ran the supervisor private-trust stage"
+            );
+        }
+    }
+
+    // Bounded stalls: no stage of any worker's spawn may stall, even well
+    // below the spawn timeout.
+    for worker in &workers {
+        let bridge_session = handle
+            .resolve_bridge_session_id(worker)
+            .await
+            .expect("worker session")
+            .to_string();
+        let stages = [
+            (
+                "bridge-session",
+                clock.stage(&bridge_session, BRIDGE_SESSION_START, BRIDGE_SESSION_END),
+            ),
+            (
+                "supervisor-trust",
+                clock.stage(worker.as_str(), TRUST_START, TRUST_END),
+            ),
+        ];
+        for (stage, took) in stages {
+            let took = took.unwrap_or_else(|| panic!("{worker}: the {stage} stage was measured"));
+            assert!(
+                took < STAGE_STALL_BOUND,
+                "{worker}: the {stage} stage took {took:?} while the coordinator's turn ran \
+                 (bound {STAGE_STALL_BOUND:?})"
+            );
+        }
     }
 
     tokio::time::timeout(FAILURE_BOUND, retiring)
@@ -322,11 +465,46 @@ async fn comms_member_spawn_completes_while_the_coordinator_turn_runs() {
         .expect("retire task")
         .expect("retire the finished member");
 
+    // Shut down while the coordinator's turn is still running: Shutdown must
+    // return within its own deadline and account for every member.
+    let roster: Vec<AgentIdentity> = std::iter::once(coordinator.clone())
+        .chain(workers.iter().cloned())
+        .collect();
+    let started = std::time::Instant::now();
+    let report = tokio::time::timeout(
+        SHUTDOWN_DEADLINE + Duration::from_secs(5),
+        handle.shutdown_with_report(
+            meerkat_mob::ShutdownOptions::default()
+                .with_deadline(meerkat_core::time_compat::Instant::now() + SHUTDOWN_DEADLINE),
+        ),
+    )
+    .await
+    .expect("Shutdown returns within its deadline while a member turn runs")
+    .expect("shutdown");
+    assert!(
+        started.elapsed() < SHUTDOWN_DEADLINE + Duration::from_secs(5),
+        "Shutdown self-exits within its deadline"
+    );
+    for member in &roster {
+        assert!(
+            report.members.contains_key(member),
+            "Shutdown reports an explicit outcome for {member}: {:?}",
+            report.members
+        );
+    }
+    for worker in &workers {
+        assert!(
+            matches!(
+                report.members.get(worker),
+                Some(meerkat_mob::MemberShutdownOutcome::Unregistered)
+            ),
+            "idle worker {worker} is unregistered cleanly: {:?}",
+            report.members.get(worker)
+        );
+    }
+
     client.release.notify_one();
-    tokio::time::timeout(FAILURE_BOUND, turn.wait())
-        .await
-        .expect("the coordinator turn completes once released")
-        .expect("the coordinator turn");
+    let _ = tokio::time::timeout(FAILURE_BOUND, turn.wait()).await;
     let _ = parked.await;
     let _ = std::io::stdout().flush();
 }

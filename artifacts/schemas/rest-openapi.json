@@ -8397,6 +8397,23 @@
         ],
         "type": "string"
       },
+      "ConnectorLoginCancelParams": {
+        "additionalProperties": false,
+        "description": "Connector arm of [`LoginCancelParams`]. `Debug` redacts `state`.",
+        "properties": {
+          "connector": {
+            "$ref": "#/components/schemas/WireConnectorSlot"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector",
+          "state"
+        ],
+        "type": "object"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -10932,22 +10949,16 @@
         "type": "object"
       },
       "LoginCancelParams": {
-        "additionalProperties": false,
-        "description": "Request payload for `auth/login/cancel`: retire the pending MCP attempt\nadmitted under `state` for this configured server. `Debug` redacts `state`.",
-        "properties": {
-          "mcp": {
-            "$ref": "#/components/schemas/WireMcpAuthTarget"
+        "description": "Request payload for `auth/login/cancel`: retire the pending attempt\nadmitted under `state` for a configured MCP server (`{\"mcp\": {...}}`) or\na connector slot (`{\"connector\": {...}}`).",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/McpLoginCancelParams"
           },
-          "state": {
-            "type": "string"
+          {
+            "$ref": "#/components/schemas/ConnectorLoginCancelParams"
           }
-        },
-        "required": [
-          "mcp",
-          "state"
         ],
-        "title": "LoginCancelParams",
-        "type": "object"
+        "title": "LoginCancelParams"
       },
       "LoginCompleteParams": {
         "description": "Request payload for `auth/login/complete`. For an MCP target, issuer,\nclient and resource come from the admitted attempt named by `state`;\nnothing else is echoed. `Debug` redacts `code` and `state`.",
@@ -10957,6 +10968,9 @@
           },
           {
             "$ref": "#/components/schemas/WireMcpLoginTarget"
+          },
+          {
+            "$ref": "#/components/schemas/WireConnectorLoginTarget"
           }
         ],
         "properties": {
@@ -10986,6 +11000,9 @@
           },
           {
             "$ref": "#/components/schemas/WireMcpLoginTarget"
+          },
+          {
+            "$ref": "#/components/schemas/WireConnectorLoginTarget"
           }
         ],
         "properties": {
@@ -11216,6 +11233,23 @@
           "reload"
         ],
         "type": "string"
+      },
+      "McpLoginCancelParams": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`LoginCancelParams`]. `Debug` redacts `state`.",
+        "properties": {
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mcp",
+          "state"
+        ],
+        "type": "object"
       },
       "McpReloadParams": {
         "description": "Request payload for optional `mcp/reload`.",
@@ -20283,6 +20317,167 @@
           }
         ]
       },
+      "WireConnectorAccountSelection": {
+        "description": "Which provider account a connector login must prove.\n\n`known` refuses any other verified account. `discover` admits the login\nwith no account and binds the provider-verified account at completion;\nit publishes only into an empty slot.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "mode": {
+                "const": "known",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "account"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "discover",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireConnectorAccountSelection"
+      },
+      "WireConnectorAuthTarget": {
+        "additionalProperties": false,
+        "description": "Generic connector OAuth target addressed by `auth/login/start` and\n`auth/login/complete`: the slot plus the descriptor facts the attempt is\nadmitted with. `strategy_id` names an account strategy installed on the\nhost (`oidc-userinfo-v1` by default). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "account_selection": {
+            "$ref": "#/components/schemas/WireConnectorAccountSelection"
+          },
+          "client": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "slot": {
+            "$ref": "#/components/schemas/WireConnectorSlot"
+          },
+          "strategy_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot",
+          "issuer",
+          "client",
+          "resource",
+          "scopes",
+          "strategy_id",
+          "account_selection"
+        ],
+        "title": "WireConnectorAuthTarget",
+        "type": "object"
+      },
+      "WireConnectorLoginReady": {
+        "description": "Connector arm of [`WireLoginReadyTarget`]: the slot and the verified\naccount as separate facts, plus the owner-assigned scope evidence.",
+        "properties": {
+          "connector": {
+            "$ref": "#/components/schemas/WireConnectorSlot"
+          },
+          "scope_evidence": {
+            "$ref": "#/components/schemas/WireScopeEvidence"
+          },
+          "verified_account": {
+            "$ref": "#/components/schemas/WireConnectorVerifiedAccount"
+          }
+        },
+        "required": [
+          "connector",
+          "verified_account",
+          "scope_evidence"
+        ],
+        "type": "object"
+      },
+      "WireConnectorLoginTarget": {
+        "additionalProperties": false,
+        "description": "Connector arm of [`WireLoginTarget`].",
+        "properties": {
+          "connector": {
+            "$ref": "#/components/schemas/WireConnectorAuthTarget"
+          }
+        },
+        "required": [
+          "connector"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlot": {
+        "additionalProperties": false,
+        "description": "Credential slot of a connector credential: a realm-scoped storage\naddress chosen by the trusted host. It is not proof of any provider\naccount; the provider-verified account is reported separately.",
+        "properties": {
+          "realm_id": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "slot_id"
+        ],
+        "type": "object"
+      },
+      "WireConnectorSlotTarget": {
+        "additionalProperties": false,
+        "description": "A connector slot addressed by `auth/status/get`, `auth/login/cancel` and\nthe start/complete results.",
+        "properties": {
+          "connector": {
+            "$ref": "#/components/schemas/WireConnectorSlot"
+          }
+        },
+        "required": [
+          "connector"
+        ],
+        "type": "object"
+      },
+      "WireConnectorVerifiedAccount": {
+        "additionalProperties": false,
+        "description": "The provider account bound to a connector credential, qualified by the\nissuer and the strategy that verified it.",
+        "properties": {
+          "issuer": {
+            "type": "string"
+          },
+          "strategy_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer",
+          "strategy_id",
+          "subject"
+        ],
+        "type": "object"
+      },
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
         "oneOf": [
@@ -21985,16 +22180,20 @@
       },
       "WireLoginCancelled": {
         "description": "`auth/login/cancel` success body.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WireMcpLoginTarget"
+          },
+          {
+            "$ref": "#/components/schemas/WireConnectorSlotTarget"
+          }
+        ],
         "properties": {
           "cancelled": {
             "type": "boolean"
-          },
-          "mcp": {
-            "$ref": "#/components/schemas/WireMcpAuthTarget"
           }
         },
         "required": [
-          "mcp",
           "cancelled"
         ],
         "title": "WireLoginCancelled",
@@ -22008,6 +22207,9 @@
           },
           {
             "$ref": "#/components/schemas/WireMcpLoginReady"
+          },
+          {
+            "$ref": "#/components/schemas/WireConnectorLoginReady"
           }
         ],
         "properties": {
@@ -22048,6 +22250,9 @@
           },
           {
             "$ref": "#/components/schemas/WireMcpLoginStart"
+          },
+          {
+            "$ref": "#/components/schemas/WireConnectorSlotTarget"
           }
         ],
         "properties": {
@@ -23959,6 +24164,43 @@
           "destroyed"
         ],
         "type": "string"
+      },
+      "WireScopeEvidence": {
+        "description": "What authorizes a connector credential's granted scopes. Assigned by the\nnative owner from its own parsed token response, never by a caller.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Parsed from the token-endpoint response that issued the access token.",
+            "properties": {
+              "kind": {
+                "const": "token_endpoint_response",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A refresh response without `scope` kept the original grant, committed\nat `granted_at` (RFC 3339).",
+            "properties": {
+              "granted_at": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "retained_on_refresh",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "granted_at"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
@@ -25922,7 +26164,7 @@
             "description": "Error response"
           }
         },
-        "summary": "Retire a pending MCP OAuth attempt by its state"
+        "summary": "Retire a pending MCP or connector OAuth attempt by its state"
       }
     },
     "/auth/login/complete": {

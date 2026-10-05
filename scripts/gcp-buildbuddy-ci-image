@@ -46,7 +46,10 @@ make_context() {
       cp "${repo_path}" "${context_dir}/${repo_path}"
     done
 
-  python3 - "${context_dir}" <<'PY'
+  # tomllib: Python 3.11+.
+  local python_bin
+  python_bin="$("${workspace_root}/scripts/require-python" 3.11 "gcp-buildbuddy-ci-image")" || exit 1
+  "${python_bin}" - "${context_dir}" <<'PY'
 import pathlib
 import sys
 import tomllib

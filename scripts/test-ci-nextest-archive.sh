@@ -330,7 +330,13 @@ assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "gcp-buildbuddy
 assert_file_contains "$RELEASE_WORKFLOW" '.component_results.gcp_buildbuddy == "success"'
 assert_file_contains "$RELEASE_WORKFLOW" '.component_results.github_hosted_dense_mob == "success"'
 
-python3 "$ROOT/scripts/test_restore_ci_unit_mob_archive.py"
+# The restore helper runs on the release scripts' Python >= 3.10 floor.
+restore_python="$("$ROOT/scripts/require-python" 3.10 "the nextest archive restore test")" || exit 1
+"$restore_python" "$ROOT/scripts/test_restore_ci_unit_mob_archive.py"
+# Also on the oldest supported interpreter, when one is installed.
+if oldest_python="$(command -v python3.10 2>/dev/null)"; then
+  "$oldest_python" "$ROOT/scripts/test_restore_ci_unit_mob_archive.py"
+fi
 
 unit_job="$(sed -n '/^  unit:$/,/^  int-archives:$/p' "$WORKFLOW")"
 [[ "$unit_job" == *'      - unit-archive'* ]] || {

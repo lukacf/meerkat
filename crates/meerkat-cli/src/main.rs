@@ -21494,6 +21494,7 @@ mod tests {
                 provider,
                 redirect_uri: redirect_uri.to_string(),
                 pkce_verifier: "pkce-verifier".into(),
+                nonce: None,
                 created_at: std::time::Instant::now(),
             })
         }

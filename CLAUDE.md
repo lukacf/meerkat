@@ -524,6 +524,47 @@ same hooks; a push without that `SKIP` re-runs them.
 - `pre-commit run --hook-stage manual agent-check-changed` (runs `scripts/agent-gate --staged`)
 - `scripts/test-changed-crates.sh`
 
+**Avoid duplicate final qualification**:
+
+Run the change-specific regression and required stress checks during development.
+For a candidate proceeding through normal commit hooks and one normal push, use
+that push for overlapping final lint, governance and deterministic tests instead
+of prepending another standalone `make test` or `make agent-gate`. If no normal
+push will run, retain an appropriate standalone gate before declaring the work
+qualified. This changes scheduling, not required coverage or hook behavior.
+
+Only deduplicate an inventory actually covered by the selected push backend,
+paths, test targets and features. The Cargo push lint hook uses
+`agent-gate --committed --clippy-only`; its governance and generated-contract
+ratchets still run. Its path base is `CARGO_AGENT_BASE` or `origin/main` (then
+`main`/HEAD), which can differ from the dispatcher's remote-ref range. Check that
+the committed selection includes the intended delta. The deterministic push
+lane covers workspace default-feature `kind(lib)` and `kind(test)` inventories,
+plus HeadCanonical `test-support` and `e2e-fast`. It does not prove package-only
+feature isolation, binary-target unit tests, required-feature targets absent
+from that inventory, doctests, ignored/live/system lanes, platform checks or the
+feature matrix. Retain each distinct requirement; all-feature Clippy is not an
+all-feature test result. BuildBuddy-specific test requirements also stay distinct.
+
+`make agent-gate` additionally runs `docs-check` and the selected lane doctor;
+the push does not call that Make wrapper. Keep `docs-check` for changed docs or
+validator inputs and whenever applicable docs evidence is missing. Run the
+selected doctor for new or changed environments/lanes, or uncertain setup. Keep
+explicit task, CI and release validation requirements unchanged.
+
+Use the repository-installed hook and push one named destination branch from
+the checked-out branch, for example
+`git push origin refs/heads/my-branch:refs/heads/my-branch` or
+`git push origin HEAD:refs/heads/my-branch`. The dispatcher picks the diff base
+from the destination ref: a new branch is compared with the remote default
+branch's merge-base, an existing branch with its previous remote commit, and a
+tag stays on the all-files empty tree. Keep normal hooks enabled; this guidance
+does not authorize `SKIP` or `--no-verify`.
+Record the exact commit/tree, push outcome and distinct acceptance receipts.
+Existing full-tree or source-test cache reuse is reported as reuse, not fresh
+execution; lock-only source-test reuse does not re-test the new dependency graph.
+A hook failure or interrupted push is incomplete qualification, not a waiver.
+
 ### Version Parity Contract
 
 Six files must agree on the same version:
@@ -632,7 +673,7 @@ The canonical publish order lives in `scripts/release-rust-crates.sh` (46 crates
 
 - **Never bump `workspace.package.version` without also running `scripts/bump-sdk-versions.sh`** — the CI gate will catch drift
 - **Never change types in `meerkat-contracts` without running `make regen-schemas`** — schema artifacts and SDK types will be stale
-- **Always run `make test` or the narrower `make agent-gate` before committing** — set `MEERKAT_BUILDBUDDY=1` when BuildBuddy is available
+- **Use the final qualification sequence above** - run change-specific required checks, then normal commit hooks and one normal push for the overlapping inventory; retain standalone and explicit checks for coverage the push does not supply
 - **`ContractVersion::CURRENT` must equal `workspace.package.version`** — they are lock-stepped
 - **Never change `Cargo.lock` without refreshing `MODULE.bazel.lock`** - the lock is a crate_universe extension input; `make buildbuddy-lock-update` regenerates it, and `make verify-bazel-locks` proves it
 - **Never hand-maintain a second list of workspace crates** - `scripts/release-rust-crates.sh` is the one hand-ordered enumeration; the patch config derives from it and `make check-rust-release-config` fails when the documented order, count, or patch map disagrees

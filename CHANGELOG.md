@@ -35,6 +35,68 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Connector OAuth (#1631; see Added) changes these Rust types:
+  - `PersistedAuthMode` gains `ConnectorOauth`.
+  - `CredentialMutationError` gains `SlotRefused(CredentialSlotRefusal)`.
+  - `RefreshError` gains `RequiredScopesNotGranted`.
+  - `ConnectorLoginError` gains `StalePreparation`, preserving changed
+    credential preparation as an infrastructure outcome rather than a refusal.
+  - `ConnectorOAuthParameters::expected_account` is an `AccountSelection`
+    (`Known(account)` or `Discover`). `From<String>`/`From<&str>` build
+    `Known`, and the wire form of a Known account is unchanged.
+  - `OAuthFlowRecord` and `PersistedOAuthBrowserFlow` gain `nonce`.
+  - `OAuthFlowRegistry::insert_browser_flow_with_pruned` takes the nonce,
+    and `insert_restored_browser_flow` takes the whole `OAuthFlowRecord`.
+  - `LoginCancelParams` and `WireLoginCancelled` become target unions
+    (`Mcp` or `Connector`).
+
+  The JSON of MCP cancel requests and results is unchanged.
+
+
+### Added
+
+- Generic connector OAuth (#1631). A trusted host names a credential slot
+  (`{realm_id, slot_id}`, a storage address, never account proof) and a
+  connector descriptor (issuer, client, resource, scopes, strategy and
+  account selection).
+  - The owner discovers the issuer's endpoints, admits PKCE (plus an OIDC
+    nonce for ID-token strategies), exchanges the code and has the strategy
+    verify the provider account.
+  - It stores the credential as `ConnectorOauth` under the slot, with the
+    verified account bound to it.
+  - `discover` logins publish only into an empty slot, so racing logins never
+    swap grants, even for the same account. `known` reconnects replace a
+    slot's credential only for the same account, issuer, client, resource and
+    strategy; the loopback port and requested scopes may change.
+  - Granted scopes are owner-parsed from the token response
+    (`scope_evidence`). Refresh keeps the original grant when the response
+    omits `scope`, rotates refresh tokens atomically, and refuses narrowing
+    or a different subject without changing the credential.
+  - Native hosts use `HostAuthService::connector_*` and
+    `ConnectorOAuthAuthority`; `connector_logout` disconnects a slot so it
+    can take another account. RPC and REST hosts use a `connector` target on
+    `auth/login/start`, `complete` and `cancel`, and (RPC) `auth/status/get`;
+    the result and status report the slot and the verified account as
+    separate fields.
+  - New Python `auth_connector_*` methods and TypeScript
+    `authConnectorStatus`.
+
+### Fixed
+
+- Connector credential status and bearer reads reuse their held lifecycle
+  guard when restoring a committed credential into a fresh runtime owner.
+  Cold reads no longer wait on their own guard. Connector logout uses the
+  coordinated credential mutation path with an atomic mode check, preserving
+  foreign-mode credentials and the existing rollback behavior.
+- Model catalog: Claude Sonnet 5.5 (`claude-sonnet-5-5`) now refuses a forced
+  `tool_choice` (`required` or a named tool) locally with the typed
+  `ModelDoesNotSupportForcedToolChoice` before the provider call, as Claude Opus
+  5.5 already did. Anthropic documents that Sonnet 5.5 rejects forced tool use
+  with a 400, so the request no longer spends a provider round trip that is
+  documented to fail. `auto` and `none` are unchanged.
+
 ### Fixed
 
 - `meerkat-tools` tests compile on macOS again. The custody foreign-namespace
@@ -43,6 +105,78 @@ them.
   receiver, which exists only on Linux and Android, so `cargo test -p
   meerkat-tools` stopped compiling on macOS. The fixture is now Linux-only;
   nothing changes on Linux.
+- A push that creates a branch as `git push origin HEAD:refs/heads/<branch>`
+  no longer runs every pre-push hook over all files. The pre-push dispatcher
+  gave a new branch the remote default branch's merge-base as its diff base
+  only when the local ref was spelled `refs/heads/...`. Git reports
+  `local_ref=HEAD` for the `HEAD:` form, so that push fell back to the
+  empty tree (`--all-files`) and selected unrelated machine-codegen and TLC
+  work. The base is now decided by the destination ref (`refs/heads/*`), and
+  tags stay fail-closed on the empty tree. `scripts/test-pre-push-dispatch.sh`
+  covers the `HEAD:refs/heads/<branch>` push.
+- Repository scripts, hooks and Make targets that need Python 3.11 now pick
+  it explicitly and refuse an older interpreter up front. They used whatever
+  `python3` came first in `PATH`, so on macOS, where Apple's Python 3.9 can
+  come first, the pre-push nextest archive contract failed mid-hook with an
+  `AttributeError` on `hashlib.file_digest`. That helper,
+  `scripts/restore-ci-unit-mob-archive.py`, now hashes in chunks with
+  `hashlib.sha256()` (still verifying the digest before extracting), so it
+  runs on the release scripts' Python >= 3.10 floor, and refuses anything
+  older up front. The new `scripts/require-python
+  MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.14 through
+  python3.11 over `python3`, and fails with "WHO needs Python >= MIN; found
+  <version> (<path>)". It replaces the per-script copies of that selection,
+  which had no version check, in 15 scripts plus `release-hook.sh` (still
+  >= 3.10), `buildbuddy-doctor`, `gcp-buildbuddy-ci-image` (`tomllib`) and
+  the archive contract test, which selects >= 3.10 and also runs the restore
+  test on `python3.10` when one is installed. When no interpreter
+  qualifies, `PYTHON` in the Makefile becomes a lazy error, so only targets
+  that use Python stop, with that reason.
+- `make test-sdk-python`, `publish-dry-run-python` and
+  `smoke-sdk-python-artifact` install into a venv (`SDK_PYTHON_VENV`, default
+  `sdks/python/.venv`, created by `scripts/python-venv`) instead of the base
+  interpreter. uv-, Homebrew- and distro-managed Pythons refuse those
+  installs under PEP 668, which failed `make test-sdk-suites` in the 0.8.51
+  release gate.
+  `make path-classifier-selftest` runs `scripts/tests/require_python_test.sh`.
+- Repository scripts now require Bash >= 4.4 up front and say so. On macOS,
+  where `/usr/bin/env bash` can resolve to the system Bash 3.2, the pre-push
+  lane-retention contract died on `BASHPID: unbound variable`, and other
+  scripts rely on `mapfile`, associative arrays and expanding empty arrays
+  under `set -u`. `scripts/lib/require-bash.sh`, written in Bash 3.2 syntax,
+  stops the pre-push dispatcher, `release-hook.sh`,
+  `pre-push-prune-lanes.sh`, `check-semver-breaks.sh` and
+  `semver-rustdoc-json.sh` with "needs Bash >= 4.4; found <version>".
+  `rust-lane-doctor` and `release-doctor` report the version of `env bash`,
+  and `release-doctor` selects its Python through `require-python`.
+  `pre-push-prune-lanes.sh` falls back to `$$` when `BASHPID` is unset, and
+  `mapfile` uses in the semver scripts became read loops.
+  `scripts/tests/require_bash_test.sh` runs in `make path-classifier-selftest`.
+- Model catalog: Claude Sonnet 5 (`claude-sonnet-5`) is catalogued. It is a
+  legacy but still available Anthropic model (retirement not sooner than June
+  30, 2027) that the catalog never registered, so builds that named it without
+  an explicit provider failed with "Cannot infer provider from model". The row
+  is `Supported`, with 1M context, 128K output (300K on the Batch API with the
+  `output-300k-2026-03-24` beta), adaptive thinking, low..max effort, no
+  sampling parameters, compaction and structured outputs. Unlike Claude Sonnet
+  5.5 it accepts forced `tool_choice` and does not support mid-conversation
+  system messages. Provider inference stays an exact catalog match: other
+  uncatalogued `claude-*` IDs still fail loudly.
+
+### Testing
+
+- The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
+  - Four workers spawn at once while a member's turn runs.
+  - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
+  - The mob then shuts down mid-turn under a 30 s deadline. Shutdown must return within that deadline and report an explicit outcome for every member.
+
+- The live-context result barrier TLC audit
+  (`specs/machines/meerkat_machine/live_context_result_barrier_audit.sh`)
+  gains `--mutants`, and the canonical TLC lane runs it. Restoring the
+  pre-#1597 tail-drain conjuncts in the result-delivery authorization guard
+  must leave the audit's goal unreachable. Dropping the bootstrap-summary
+  conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
+  previously checked only by hand (#1607).
 
 ## [0.8.51] - 2026-10-05
 

@@ -343,7 +343,9 @@ import type {
   WireAuthProfileDetail as RpcWireAuthProfileDetail,
   WireAuthProfilesList as RpcWireAuthProfilesList,
   WireAuthStatusDetail as RpcWireAuthStatusDetail,
+  WireAuthStatusResultConnectorAuthStatus as RpcWireAuthStatusResultConnectorAuthStatus,
   WireAuthStatusResultMcpAuthStatus as RpcWireAuthStatusResultMcpAuthStatus,
+  WireConnectorSlot as RpcWireConnectorSlot,
   WireMcpAuthTarget as RpcWireMcpAuthTarget,
   WireDeviceStart as RpcWireDeviceStart,
   WireLoginCancelled as RpcWireLoginCancelled,
@@ -4532,10 +4534,13 @@ export class MeerkatClient {
   }
 
   /**
-   * Begin an OAuth login for a provider binding or an MCP server
+   * Begin an OAuth login for a provider binding, an MCP server
    * (`{ mcp: { server_name, server_url, oauth_account? }, redirect_uri }`,
    * where `redirect_uri` is an http loopback URL; `disposition` is `joined`
-   * when an attempt was already pending).
+   * when an attempt was already pending), or a connector (`{ connector: {
+   * slot, issuer, client, resource, scopes, strategy_id, account_selection },
+   * redirect_uri }`). A connector `discover` login binds the provider-verified
+   * account to the slot and publishes only into an empty slot.
    * The authorize URL and state are host-channel data: open the URL only in
    * a browser no agent tool can observe, and never pass these values to an
    * agent, tool result, transcript or log.
@@ -4554,7 +4559,8 @@ export class MeerkatClient {
   }
 
   /**
-   * Retire a pending MCP OAuth attempt by its `state`.
+   * Retire a pending MCP (`{ mcp, state }`) or connector
+   * (`{ connector: slot, state }`) OAuth attempt by its `state`.
    */
   async authLoginCancel(params: RpcLoginCancelParams): Promise<RpcWireLoginCancelled> {
     return this.request("auth/login/cancel", params);
@@ -4574,6 +4580,23 @@ export class MeerkatClient {
       );
     }
     return result as RpcWireAuthStatusResultMcpAuthStatus;
+  }
+
+  /**
+   * Status of a connector credential slot via `auth/status/get`. The slot
+   * and the provider-verified account are separate fields.
+   */
+  async authConnectorStatus(
+    connector: RpcWireConnectorSlot,
+  ): Promise<RpcWireAuthStatusResultConnectorAuthStatus> {
+    const result = await this.request("auth/status/get", { connector });
+    if (!("phase" in result) || !("connector" in result)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "auth/status/get returned a different status for a connector slot",
+      );
+    }
+    return result as RpcWireAuthStatusResultConnectorAuthStatus;
   }
 
   async authLoginDeviceStart(

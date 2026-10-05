@@ -30,6 +30,7 @@ pub use lifecycle::{
     AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
     clear_tokens_and_publish_lifecycle_released_coordinated,
     clear_tokens_and_publish_lifecycle_released_coordinated_for_identity,
+    clear_tokens_and_publish_lifecycle_released_coordinated_for_mode,
     rehydrate_durable_predecessor_for_mutation,
     rehydrate_durable_predecessor_for_mutation_for_identity, rehydrate_marked_tokens_for_status,
     rehydrate_marked_tokens_for_status_for_identity,
@@ -59,8 +60,8 @@ pub use principal::{
 };
 pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{
-    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedAuthMode,
-    PersistedTokens, ProviderAuthPersistence, ProviderAuthPersistenceId, RefreshCoordinator,
-    RefreshError, RefreshFailureDisposition, RefreshFailureObservation, RefreshFn, TokenKey,
-    TokenStore, TokenStoreError,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome,
+    CredentialSlotRefusal, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence,
+    ProviderAuthPersistenceId, RefreshCoordinator, RefreshError, RefreshFailureDisposition,
+    RefreshFailureObservation, RefreshFn, TokenKey, TokenStore, TokenStoreError,
 };

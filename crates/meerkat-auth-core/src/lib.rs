@@ -22,6 +22,9 @@ pub mod authorizers;
 #[cfg(not(target_arch = "wasm32"))]
 mod browser_login;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "oauth")]
+pub mod connector_login;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod connector_oauth;
 pub mod github_copilot;
 #[cfg(not(target_arch = "wasm32"))]

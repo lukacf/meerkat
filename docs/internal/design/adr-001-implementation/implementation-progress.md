@@ -5,14 +5,17 @@
 The 0.9 coordinator leads the cross-repository work. Native
 [PR1730](https://github.com/lukacf/meerkat/pull/1730) is the current publication
 checkpoint. At the 18:44 UTC remote check it remained a draft at
-`afb79ea29d8cdf30689345d884b43bc6c5baa428`. The local runtime/test candidate is
+`afb79ea29d8cdf30689345d884b43bc6c5baa428`. The integrated runtime baseline is
 `64349561d898d0a9e3ad279fa1a7d286ff7b302f`, tree
 `2041118ca2f545541a1a05cccccb908765307589`. It integrates main through
 `98e26901ba24c0b2154192e17590cdb3773eb3b5`, the custody fixture correction,
 the accepted model-review/consent ADR, and a test-only OAuth fixture migration.
-This documentation refresh does not change that runtime/test source. The local
-candidate's normal push and CI are still pending; earlier published results do
-not qualify the integrated candidate.
+The current publication work additionally refreshes this record and the Codex
+source comparison. The upstream memory-test correction described below must
+land and be integrated before the next qualification; it changes no production
+behavior.
+The local candidate's normal push and CI are still pending; earlier published
+results do not qualify the integrated candidate.
 
 The native integration regression was executed before its repair: acquisition
 incorrectly accepted a builder-seeded runtime owner from a different store.
@@ -34,17 +37,46 @@ The command took 36.61 seconds, including 34.94 seconds compilation and a
 Normal commit hooks passed. These nine selected passes do not establish complete
 surface coverage or replace the pending normal publication gate.
 
-The next broad cohort belongs to PR1730 after the combined runtime-correctness
-checkpoint finishes and its owned processes drain. That separate candidate is
+The combined runtime-correctness candidate
 `e27338d97be661c1eb4e7670809020b91cba37f7`, tree
-`c92a3ef7ceded9e1d475bfa7ba4916a537604383`. Its second normal push passed lint,
-machine, generated-header and Bazel freshness checks, finished workspace
-compilation, and started unit execution at 18:35:05 UTC. It has no terminal
-workspace result at this checkpoint. Its raw log is
+`c92a3ef7ceded9e1d475bfa7ba4916a537604383`, failed its second normal push at
+19:05:07 UTC after 6474.52 seconds. Lint, machine, generated-header, Bazel
+freshness and workspace compilation passed. Both unit attempts timed out at
+900 seconds. The first ran 7,070 of 12,407 selected tests: 7,068 passed, one
+memory assertion failed and one test was terminated; 14 were skipped and
+5,337 selected tests never ran. The retry ran 6,891: 6,890 passed, one was
+terminated, 14 were skipped and 5,516 selected tests never ran. Integration,
+HeadCanonical and E2E did not start, and no push occurred. The raw log is
 `/private/tmp/adr-001-envelope-v4-r1/runtime-checkpoint-normal-push-r2.log`.
-Root publication does not require merging that separate branch first. One broad
-test cohort remains active at a time because socket and timing tests share host
-resources; independent source review and documentation continue in parallel.
+
+The real memory failure also applies to the native candidate: the source is
+identical. The released-v2 purge/reopen test had confirmed three durable rows,
+then required approximate HNSW search to return all three and received two.
+The local trial correction retained all earlier migration, staging, finalize
+and search checks, verified the exact three durable texts through scoped
+enumeration, and checked that lazy rebuild indexes three points. It also checked
+nonempty, nonblank reopened search results. The affected test passed in the root
+worktree's own target in 118.03 seconds, including 1m57s compilation and a
+0.033-second test body; 65 unrelated tests were unselected. Its raw log is
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-memory-reopen-oracle.log`.
+That targeted pass does not qualify the failed broad inventory. GCP independently
+reproduced the assertion on current main and owns the upstream correction in
+[PR1759](https://github.com/lukacf/meerkat/pull/1759), inspected at
+`915fdab04714e318a8ccd148de7a4f934507196d`. The PR uses the same exact index-count
+and durable-text checks, preserving the earlier search assertions. Root withdrew
+its duplicate hunk and retained it at
+`/private/tmp/adr-001-envelope-v4-r1/superseded-local-memory-oracle.patch`.
+PR1759 was still open at the 19:19 UTC check. Its normal upstream merge and fresh
+candidate qualification remain pending; the local trial is not an executed pass
+of the upstream variant.
+
+The combined cohort's owned processes drained. After integrating the upstream
+test correction, PR1730 has the next normal push, using the existing isolated
+detached target and a 1,800-second unit timeout
+within the unchanged two-hour overall bound. Publication does not require
+merging the separate runtime-correctness branch first. One broad test cohort
+remains active at a time because socket and timing tests share host resources;
+independent source review and documentation continue in parallel.
 
 The [model-review and consent amendment](../adr-001-model-review-and-consent.md)
 incorporates the inspected Codex implementation and the accepted host deltas.

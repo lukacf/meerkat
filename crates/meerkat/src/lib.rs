@@ -193,7 +193,7 @@ pub use job_delivery::{
     JobDeliveryContent, JobDeliverySink, JobNotificationDeliveryPayload, JobOutboxProjectionError,
     JobOutboxProjectionPass, JobOutboxProjector, JobRuntimeDeliveryApplier,
     JobTerminalDeliveryPayload, PreparedJobDelivery, ProjectedJobDelivery, RuntimeJobDeliveryDrain,
-    SkippedJobOutboxEntry,
+    SkippedJobOutboxEntry, job_delivery_event_input, job_delivery_notification_request,
 };
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime_delivery_owner;

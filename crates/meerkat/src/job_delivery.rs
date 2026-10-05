@@ -247,6 +247,105 @@ impl JobRuntimeDeliveryApplier {
     }
 }
 
+/// Idempotency key of one subscription's application of one delivery.
+fn job_delivery_idempotency_key(
+    job_id: &JobId,
+    delivery_sequence: u64,
+    subscription: &JobSubscription,
+) -> String {
+    format!(
+        "job:{job_id}:{delivery_sequence}:{}",
+        subscription.subscription_id()
+    )
+}
+
+/// The ordered System message a `Notification` subscription delivery appends:
+/// turn-free, and idempotent per (job, delivery sequence, subscription).
+pub fn job_delivery_notification_request(
+    job_id: &JobId,
+    delivery_sequence: u64,
+    subscription: &JobSubscription,
+    content: &JobDeliveryContent,
+) -> meerkat_core::service::AppendSystemContextRequest {
+    let text = match content {
+        JobDeliveryContent::Notification(notification) => format!(
+            "Detached job {job_id}: {}\n\n{}",
+            notification.title(),
+            notification.body()
+        ),
+        JobDeliveryContent::Terminal(result) => {
+            format!("Detached job {job_id} reached terminal state: {result:?}")
+        }
+    };
+    let mut request = meerkat_core::service::AppendSystemContextRequest::from_text(text);
+    request.source = Some(format!("detached_job:{job_id}"));
+    request.idempotency_key = Some(job_delivery_idempotency_key(
+        job_id,
+        delivery_sequence,
+        subscription,
+    ));
+    request
+}
+
+/// The runtime input an `Event` subscription delivery admits: a durable
+/// external event under the subscription's handling mode, keyed per (job,
+/// delivery sequence, subscription) so a replayed delivery is deduplicated by
+/// the runtime, and correlated with the job's interaction lineage.
+pub fn job_delivery_event_input(
+    job_id: &JobId,
+    delivery_sequence: u64,
+    subscription: &JobSubscription,
+    interaction_lineage_id: &InteractionLineageId,
+    handling_mode: meerkat_core::HandlingMode,
+    content: &JobDeliveryContent,
+) -> meerkat_runtime::Input {
+    let (event_type, content_value) = match content {
+        JobDeliveryContent::Notification(notification) => (
+            "job.notification",
+            serde_json::json!({
+                "kind": "notification",
+                "notification": notification,
+            }),
+        ),
+        JobDeliveryContent::Terminal(result) => (
+            "job.terminal",
+            serde_json::json!({
+                "kind": "terminal",
+                "result": result,
+            }),
+        ),
+    };
+    let payload = serde_json::json!({
+        "job_id": job_id.to_string(),
+        "delivery_sequence": delivery_sequence,
+        "content": content_value,
+    });
+    meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+        objective_id: None,
+        header: meerkat_runtime::InputHeader {
+            id: meerkat_core::lifecycle::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: meerkat_runtime::InputOrigin::External {
+                source_name: event_type.to_string(),
+            },
+            durability: meerkat_runtime::InputDurability::Durable,
+            visibility: meerkat_runtime::InputVisibility::default(),
+            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(
+                job_delivery_idempotency_key(job_id, delivery_sequence, subscription),
+            )),
+            supersession_key: None,
+            correlation_id: uuid::Uuid::parse_str(interaction_lineage_id.as_str())
+                .ok()
+                .map(meerkat_runtime::CorrelationId::from_uuid),
+        },
+        event_type: event_type.to_string(),
+        payload,
+        blocks: None,
+        handling_mode,
+        render_metadata: None,
+    })
+}
+
 async fn apply_subscriptions(
     sink: &dyn JobDeliverySink,
     job_id: JobId,

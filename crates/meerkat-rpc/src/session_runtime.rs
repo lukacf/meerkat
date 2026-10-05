@@ -2271,21 +2271,20 @@ impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
                 delivery_sequence,
                 subscription,
                 content,
-            } => {
-                let mut request = AppendSystemContextRequest::from_text(render_job_delivery_text(
-                    &job_id, &content,
-                ));
-                request.source = Some(format!("detached_job:{job_id}"));
-                request.idempotency_key = Some(format!(
-                    "job:{job_id}:{delivery_sequence}:{}",
-                    subscription.subscription_id()
-                ));
-                self.runtime
-                    .append_system_context(subscription.session_id(), request)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.message)
-            }
+            } => self
+                .runtime
+                .append_system_context(
+                    subscription.session_id(),
+                    meerkat::job_delivery_notification_request(
+                        &job_id,
+                        delivery_sequence,
+                        &subscription,
+                        &content,
+                    ),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.message),
             JobDeliveryApplication::Event {
                 job_id,
                 delivery_sequence,
@@ -2294,65 +2293,28 @@ impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
                 handling_mode,
                 content,
             } => {
-                let event_type = match &content {
-                    meerkat::JobDeliveryContent::Notification(_) => "job.notification",
-                    meerkat::JobDeliveryContent::Terminal(_) => "job.terminal",
-                };
-                let content_value = match &content {
-                    meerkat::JobDeliveryContent::Notification(notification) => {
-                        serde_json::json!({
-                            "kind": "notification",
-                            "notification": notification,
-                        })
-                    }
-                    meerkat::JobDeliveryContent::Terminal(result) => serde_json::json!({
-                        "kind": "terminal",
-                        "result": result,
-                    }),
-                };
-                let payload = serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "delivery_sequence": delivery_sequence,
-                    "content": content_value,
-                });
-                let correlation_id = uuid::Uuid::parse_str(interaction_lineage_id.as_str())
-                    .ok()
-                    .map(meerkat_runtime::CorrelationId::from_uuid);
+                // An event requests runtime work, so it is admitted through
+                // the waking path: an idle origin session starts a turn.
+                let session_id = subscription.session_id();
+                let input = meerkat::job_delivery_event_input(
+                    &job_id,
+                    delivery_sequence,
+                    &subscription,
+                    &interaction_lineage_id,
+                    handling_mode,
+                    &content,
+                );
                 self.runtime
-                    .accept_external_event_via_runtime_with_context(
-                        subscription.session_id(),
-                        event_type.to_string(),
-                        payload,
-                        None,
-                        ExternalEventRuntimeContext {
-                            handling_mode,
-                            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(format!(
-                                "job:{job_id}:{delivery_sequence}:{}",
-                                subscription.subscription_id()
-                            ))),
-                            correlation_id,
-                        },
-                    )
+                    .prepare_cold_attach(session_id)
+                    .await
+                    .map_err(|error| error.message)?;
+                let adapter = Arc::clone(&self.runtime.runtime_adapter);
+                self.runtime
+                    .accept_runtime_input_with_active_admission(&adapter, session_id, input)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.message)
             }
-        }
-    }
-}
-
-fn render_job_delivery_text(
-    job_id: &meerkat::JobId,
-    content: &meerkat::JobDeliveryContent,
-) -> String {
-    match content {
-        meerkat::JobDeliveryContent::Notification(notification) => format!(
-            "Detached job {job_id}: {}\n\n{}",
-            notification.title(),
-            notification.body()
-        ),
-        meerkat::JobDeliveryContent::Terminal(result) => {
-            format!("Detached job {job_id} reached terminal state: {result:?}")
         }
     }
 }
@@ -14312,6 +14274,70 @@ mod tests {
             meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
         ))
+    }
+
+    /// An `Event` subscription delivery requests runtime work: applied to an
+    /// idle origin session it is admitted through the waking path and runs to
+    /// a terminal, instead of waiting queued behind some later unrelated turn.
+    #[tokio::test]
+    async fn job_event_delivery_wakes_an_idle_origin_session() {
+        use meerkat::JobDeliverySink as _;
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create_session");
+
+        let job_id = meerkat::JobId::new("job-event-wake").expect("job id");
+        let subscription = meerkat::JobSubscription::new(
+            meerkat::JobSubscriptionId::new("watcher").expect("subscription id"),
+            session_id.clone(),
+            meerkat::JobDeliveryKind::Event {
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+            },
+        );
+        let sink = SessionRuntimeJobDeliverySink {
+            runtime: Arc::clone(&runtime),
+        };
+        sink.apply(meerkat::JobDeliveryApplication::Event {
+            job_id: job_id.clone(),
+            delivery_sequence: 1,
+            subscription,
+            interaction_lineage_id: meerkat::InteractionLineageId::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            content: meerkat::JobDeliveryContent::Terminal(meerkat::JobTerminalResult::Succeeded {
+                result_ref: None,
+            }),
+        })
+        .await
+        .expect("event delivery applies");
+
+        let admitted = runtime
+            .runtime_adapter()
+            .input_state_by_idempotency_key(&session_id, &format!("job:{job_id}:1:watcher"))
+            .await
+            .expect("idempotency lookup")
+            .expect("the event input is admitted under its delivery key");
+        let wait = tokio::time::timeout(
+            TEST_ASYNC_WITNESS_TIMEOUT,
+            runtime
+                .runtime_adapter()
+                .wait_input_terminal_receipt(&session_id, &admitted.state.input_id),
+        )
+        .await
+        .expect("the woken session runs the event input to a terminal")
+        .expect("terminal receipt wait");
+        assert!(
+            matches!(
+                wait,
+                Some(meerkat_runtime::terminal_status::InputTerminalReceiptWait::Resolved(_))
+            ),
+            "the event input reached its terminal receipt: {wait:?}"
+        );
     }
 
     fn make_runtime_with_runtime_store(

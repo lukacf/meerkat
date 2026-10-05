@@ -68,6 +68,17 @@ impl RosterAuthority {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    pub(crate) fn record_creation_event(&mut self, event: &MobEvent) {
+        self.roster.creation_history.observe(event);
+    }
+
+    pub(crate) fn member_creation_for_session(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<Option<crate::MemberCreationSnapshot>, crate::MemberCreationError> {
+        self.roster.creation_history.get(session_id)
+    }
+
     /// Snapshot the current roster for read-only surfaces.
     pub(crate) fn snapshot(&self) -> Roster {
         self.roster.clone()

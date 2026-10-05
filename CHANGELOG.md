@@ -55,6 +55,40 @@ them.
 
 ### Added
 
+- `MobSessionService::load_retained_session_metadata` returns the latest
+  committed metadata of an exact retained session, including archived sessions,
+  through the persistent service's authoritative metadata owner. Unsupported
+  backends return a typed error. Ordinary visibility, resume and write rules
+  are unchanged; this read provides no revision or currentness guarantee.
+- `meerkat_mob::event::MemberSpawnedEvent` gains the public `creation` field.
+  Journals without that field remain readable as unknown provenance with no
+  creation token; replay never invents an ancestor or a proven root.
+- `meerkat-mob` records runtime-issued member creation identities and exact
+  spawn, fork and successor provenance in the existing member-created journal.
+  `MemberCreationId`, `MemberCreationRecord`, `MemberCreationProvenance`,
+  `MemberCreationSource`, `MemberCreationSnapshot`, `MemberCreationSourceWitness`
+  and `MemberCreationError` expose those facts.
+  `MobHandle::{member_creation_for_session, member_creation_journal_cursor}`
+  read retained creation facts and their journal position;
+  `MobHandle::capture_member_creation_source` captures a sealed source witness
+  for `SpawnMemberSpec::with_creation_source` before delegation. These
+  facts prove ancestry, not permission to execute tools or access a resource.
+  New unproven ancestry is distinct from missing legacy data, and a provenance
+  read failure does not prevent ordinary spawn, fork or delegation execution.
+- `SpawnMemberSpec::host_root` explicitly marks trusted host-origin creation.
+  `SpawnMemberSpec::new` defaults to unproven ancestry; agent-lane handles
+  downgrade host-root requests. Policy auto-spawn also remains unproven.
+- `MobBuilder::before_activation` accepts a `MobBeforeActivation` host hook
+  before fresh or restored members execute. Hosts can bind optional services
+  to the current roster and session authority before the first tool call.
+  Its `MobReadHandle`, also available through `MobHandle::read_handle`, exposes
+  direct reads and no actor commands.
+  A failed hook aborts startup; no hook runs unless explicitly configured.
+- `MobMcpState::{set_before_activation, set_additional_child_tool_bundles}`
+  propagate optional host service binding and tool factories to delegated
+  child mobs. Factories resolve each executing caller independently; child
+  registration does not reuse a parent's access decision.
+
 - Generic connector OAuth (#1631). A trusted host names a credential slot
   (`{realm_id, slot_id}`, a storage address, never account proof) and a
   connector descriptor (issuer, client, resource, scopes, strategy and

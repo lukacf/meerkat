@@ -430,8 +430,10 @@ pub struct MobMcpState {
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
+    before_activation: std::sync::OnceLock<meerkat_mob::MobBeforeActivation>,
     /// Host bundles; only the child-available ones reach child mob builders.
     child_tool_bundles: ChildToolBundles,
+    additional_child_tool_bundles: std::sync::OnceLock<ChildToolBundles>,
     /// Host consequence-policy registry, forwarded to every child builder.
     tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     /// The host's explicit application tool policy for child mob members.
@@ -571,7 +573,9 @@ impl MobMcpState {
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
+            before_activation: std::sync::OnceLock::new(),
             child_tool_bundles: ChildToolBundles::default(),
+            additional_child_tool_bundles: std::sync::OnceLock::new(),
             tool_consequence_policy_registry: None,
             child_application_tool_policy: None,
             persistent_storage_root: None,
@@ -1289,6 +1293,28 @@ impl MobMcpState {
         self
     }
 
+    /// Bind host services for every child handle before member execution.
+    /// Install once before any child create/restore operation is admitted.
+    pub fn set_before_activation(
+        &self,
+        callback: meerkat_mob::MobBeforeActivation,
+    ) -> Result<(), MobError> {
+        self.before_activation
+            .set(callback)
+            .map_err(|_| MobError::Internal("before-activation callback already bound".into()))
+    }
+
+    /// Add provider-opened host bundles before child create/restore is admitted.
+    /// This is a one-time bootstrap operation, not a tool-facing mutation.
+    pub fn set_additional_child_tool_bundles(
+        &self,
+        bundles: ChildToolBundles,
+    ) -> Result<(), MobError> {
+        self.additional_child_tool_bundles
+            .set(bundles)
+            .map_err(|_| MobError::Internal("additional child bundles already bound".into()))
+    }
+
     /// Install the host's tool consequence-policy registry. It is forwarded
     /// to every child mob builder, and installing it makes the host managed:
     /// child mob creation then requires
@@ -1445,6 +1471,12 @@ impl MobMcpState {
             .with_default_external_tools_provider(self.external_tools_provider.clone())
             .with_workgraph_service(self.workgraph_service.clone());
         builder = self.child_tool_bundles.configure(builder);
+        if let Some(bundles) = self.additional_child_tool_bundles.get() {
+            builder = bundles.configure(builder);
+        }
+        if let Some(callback) = self.before_activation.get() {
+            builder = builder.before_activation(Arc::clone(callback));
+        }
         if let Some(registry) = &self.tool_consequence_policy_registry {
             builder = builder.with_tool_consequence_policy_registry(Arc::clone(registry));
         }
@@ -1856,6 +1888,9 @@ impl MobMcpState {
         if child {
             // Host tool bundles reach a child mob only through the host.
             self.child_tool_bundles.supply(&mut definition);
+            if let Some(bundles) = self.additional_child_tool_bundles.get() {
+                bundles.supply(&mut definition);
+            }
         }
         let scope = child_tool_policy::ChildMobScope::new(child);
         let mut builder =
@@ -2246,7 +2281,7 @@ impl MobMcpState {
         backend: Option<MobBackendKind>,
         placement: Option<meerkat_mob::machines::mob_machine::HostId>,
     ) -> Result<meerkat_mob::SpawnResult, MobError> {
-        let mut spec = SpawnMemberSpec::new(profile, identity);
+        let mut spec = SpawnMemberSpec::host_root(profile, identity);
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
         spec.placement = placement;
@@ -6288,7 +6323,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
-                        let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity);
+                        let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity)
+                            .with_creation_source(
+                                meerkat_mob::MemberCreationSourceWitness::unavailable(),
+                            );
                         s.initial_message = spec
                             .initial_message
                             .map(agent_input::decode_agent_content_input)

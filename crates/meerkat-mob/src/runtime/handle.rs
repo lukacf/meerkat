@@ -5580,6 +5580,7 @@ pub struct SpawnMemberSpec {
     /// without holding manage scope over the whole mob. Never taken from
     /// caller-supplied arguments.
     pub(crate) spawned_by: Option<AgentIdentity>,
+    pub(crate) creation_origin: crate::member_creation::MemberCreationOrigin,
     pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed lineage of a fork-derived member, carried into its seating build
     /// as `SessionBuildOptions::fork_source`. Set only when the runtime applies
@@ -5648,6 +5649,24 @@ impl std::fmt::Debug for SpawnMemberSpec {
 }
 
 impl SpawnMemberSpec {
+    fn mark_agent_creation(&mut self) {
+        if matches!(
+            self.creation_origin,
+            crate::member_creation::MemberCreationOrigin::HostRoot
+        ) {
+            self.creation_origin = crate::member_creation::MemberCreationOrigin::Unproven;
+        }
+    }
+
+    /// Attach exact runtime-proven parent ancestry to a child launch.
+    pub fn with_creation_source(mut self, source: crate::MemberCreationSourceWitness) -> Self {
+        self.creation_origin = crate::member_creation::MemberCreationOrigin::Source(source);
+        self
+    }
+
+    /// Construct a launch without claiming an independent host origin.
+    /// Attach a sealed source witness for child ancestry, or use
+    /// [`Self::host_root`] at an explicitly trusted host creation boundary.
     pub fn new(profile: impl Into<ProfileName>, identity: impl Into<AgentIdentity>) -> Self {
         Self {
             role_name: profile.into(),
@@ -5679,11 +5698,21 @@ impl SpawnMemberSpec {
             placement: None,
             forked_participant_attachment: None,
             spawned_by: None,
+            creation_origin: crate::member_creation::MemberCreationOrigin::Unproven,
             fork_job: None,
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
             fork_build_inheritance: None,
         }
+    }
+
+    /// Attest an independent creation at a trusted host boundary.
+    /// Agent-lane and owner-context ingress still downgrade this claim unless
+    /// a sealed parent witness supplies the actual child ancestry.
+    pub fn host_root(profile: impl Into<ProfileName>, identity: impl Into<AgentIdentity>) -> Self {
+        let mut spec = Self::new(profile, identity);
+        spec.creation_origin = crate::member_creation::MemberCreationOrigin::HostRoot;
+        spec
     }
 
     /// Seat this capability-attached participant with its source member's
@@ -10358,7 +10387,7 @@ impl MobHandle {
         binding: crate::RuntimeBinding,
     ) -> Result<MemberRef, MobError> {
         let external_binding = matches!(binding, crate::RuntimeBinding::External { .. });
-        let mut spec = SpawnMemberSpec::new(profile_name, agent_identity);
+        let mut spec = SpawnMemberSpec::host_root(profile_name, agent_identity);
         spec.initial_message = initial_message;
         spec.binding = Some(binding);
         if external_binding {
@@ -10394,7 +10423,7 @@ impl MobHandle {
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
-        let mut spec = SpawnMemberSpec::new(profile_name, agent_identity);
+        let mut spec = SpawnMemberSpec::host_root(profile_name, agent_identity);
         spec.initial_message = initial_message;
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
@@ -10489,9 +10518,15 @@ impl MobHandle {
 
     pub(crate) async fn spawn_spec_internal_with_source(
         &self,
-        spec: SpawnMemberSpec,
+        mut spec: SpawnMemberSpec,
         spawn_source: SpawnSource,
     ) -> Result<MemberRef, MobError> {
+        if matches!(
+            self.command_authority_kind(),
+            crate::control_policy::CommandAuthorityKind::AgentLane
+        ) {
+            spec.mark_agent_creation();
+        }
         let spawn_source = SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode);
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
@@ -10616,10 +10651,11 @@ impl MobHandle {
 
     pub(super) async fn spawn_spec_receipt_with_owner_context_and_source(
         &self,
-        spec: SpawnMemberSpec,
+        mut spec: SpawnMemberSpec,
         owner_context: CanonicalOpsOwnerContext,
         spawn_source: SpawnSource,
     ) -> Result<MemberSpawnReceipt, MobError> {
+        spec.mark_agent_creation();
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
                 spawn_source: SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode),
@@ -14400,13 +14436,19 @@ impl MobHandle {
             },
             source_session_id.clone(),
         );
-        Ok(super::ForkBuildInheritance::new(
+        let creation_source = match self.capture_member_creation_source(source_session_id).await {
+            Ok(witness) => witness,
+            Err(_) => crate::MemberCreationSourceWitness::unavailable(),
+        };
+        let mut inheritance = super::ForkBuildInheritance::new(
             source,
             app_context,
             labels,
             external_tools,
             external_tools_origin,
-        ))
+        );
+        inheritance.creation_source = Some(creation_source);
+        Ok(inheritance)
     }
 
     /// Seat an already committed durable fork as a new mob member through the
@@ -15164,7 +15206,8 @@ impl MobHandle {
             objective_id: options.objective_id,
             ..MemberTurnOptions::default()
         };
-        let mut spec = SpawnMemberSpec::new(profile_name, identity);
+        let mut spec = SpawnMemberSpec::new(profile_name, identity)
+            .with_creation_source(crate::MemberCreationSourceWitness::unavailable());
         // The task is admitted explicitly through the exact internal work
         // carrier after provisioning, so no deferred initial turn may exist.
         spec.initial_message = None;

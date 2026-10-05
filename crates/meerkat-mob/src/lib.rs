@@ -76,6 +76,7 @@ pub mod ids;
 pub mod launch;
 #[doc(hidden)]
 pub mod machines;
+pub mod member_creation;
 mod mob_machine;
 mod portable_profile;
 pub mod profile;
@@ -91,6 +92,11 @@ pub mod temporary_council;
 pub mod validate;
 pub mod workgraph_attention;
 pub mod workgraph_flow;
+
+pub use member_creation::{
+    MemberCreationError, MemberCreationId, MemberCreationProvenance, MemberCreationRecord,
+    MemberCreationSnapshot, MemberCreationSource, MemberCreationSourceWitness,
+};
 
 // Re-exports for convenience
 pub use backend::{MobBackendKind, RuntimeBinding};
@@ -331,6 +337,7 @@ pub use runtime::{
     arm_identity_recovery_fail_stop_for_test, member_operator_tool_defs_for_test,
     member_status_deadline_after_snapshot_wait_for_test,
 };
+pub use runtime::{MobBeforeActivation, MobReadHandle};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
 pub use runtime_mode::MobRuntimeMode;

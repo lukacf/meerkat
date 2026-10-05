@@ -87,7 +87,7 @@ jobs:
     name: Workspace unit tests
     needs: machine-verify
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       RUSTC_WRAPPER: sccache
@@ -135,7 +135,7 @@ jobs:
     name: Workspace integration-fast tests
     needs: feature-matrix
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       RUSTC_WRAPPER: sccache
@@ -174,7 +174,7 @@ jobs:
     name: Deterministic e2e lane
     needs: minimal-and-modularity
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       RUSTC_WRAPPER: sccache
@@ -219,7 +219,7 @@ jobs:
     name: Bounded TLC machine verification
     needs: gcp-buildbuddy
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       RUSTC_WRAPPER: sccache
@@ -270,7 +270,7 @@ jobs:
     name: Deep TLC composition verification
     needs: audit
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       RUSTC_WRAPPER: sccache
@@ -321,7 +321,7 @@ jobs:
     name: Python + TypeScript SDK suites
     needs: e2e-fast
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       RUSTC_WRAPPER: sccache
@@ -375,7 +375,7 @@ jobs:
     name: Clippy (all targets, all features)
     needs: workspace-unit
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -407,7 +407,7 @@ jobs:
     name: Feature matrix (lint + test)
     needs: gcp-buildbuddy
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -447,7 +447,7 @@ jobs:
     name: Minimal features + surface modularity
     needs: release-stack-budget
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -487,7 +487,7 @@ jobs:
     name: Release worker-stack budget (rkat-rpc dispatch path)
     needs: gcp-buildbuddy
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -528,7 +528,7 @@ jobs:
     name: System e2e lane
     needs: gcp-buildbuddy
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -565,7 +565,7 @@ jobs:
     name: Web SDK build + tests
     needs: e2e-system
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -615,7 +615,7 @@ jobs:
     name: WASM browser contract
     needs: dense-topology
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
       # Link the 8 MiB wasm stack sdks/web/scripts/build-wasm.mjs asks for.
@@ -671,7 +671,7 @@ jobs:
     name: Release packaging dry-run
     needs: gcp-buildbuddy
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -703,7 +703,7 @@ jobs:
     name: Security audit
     needs: sdk-web
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -723,7 +723,7 @@ jobs:
     name: MobKit docs mirror lag
     needs: release-packaging
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6

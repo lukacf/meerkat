@@ -56,7 +56,7 @@ concurrency:
 jobs:
   publish:
     name: Mirror MobKit main
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       REQUESTED_SHA: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.event.inputs.source_sha || '' }}
       REQUESTED_REF: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.ref || 'main' }}

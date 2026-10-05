@@ -87,7 +87,7 @@ env:
 jobs:
   changes:
     name: Change classification
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       code_changed: ${{ steps.classify.outputs.code_changed }}
       sdk_changed: ${{ steps.classify.outputs.sdk_changed }}
@@ -155,7 +155,7 @@ jobs:
   fmt-governance:
     name: Format + governance gates
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -231,7 +231,7 @@ jobs:
     # [[package]] block textually and leaves a branch-only crate pointing at a
     # version the merged lock no longer contains. No conflict marker, no test
     # failure, and then `cargo publish` (which is --locked) dies seconds in.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Depth 2, not the default 1: a depth-1 clone grafts HEAD to have no
       # parents, which hides the very merge topology this job reports on.
@@ -264,7 +264,7 @@ jobs:
     name: Clippy (workspace, all features)
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -292,7 +292,7 @@ jobs:
     name: Build unit-test archive
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -329,7 +329,7 @@ jobs:
       - changes
       - unit-archive
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -350,7 +350,7 @@ jobs:
       - changes
       - unit-archive
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -375,7 +375,7 @@ jobs:
     name: Build integration archives + run integration-crate tests
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -431,7 +431,7 @@ jobs:
       - changes
       - int-archives
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -452,7 +452,7 @@ jobs:
       - changes
       - int-archives
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -473,7 +473,7 @@ jobs:
     name: Integration tests, ${{ matrix.group }} crates
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -535,7 +535,7 @@ jobs:
     name: Deterministic e2e lane
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -568,7 +568,7 @@ jobs:
     name: Generation ratchets
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -721,7 +721,7 @@ jobs:
     name: Bounded TLC machine verification
     needs: changes
     if: ${{ needs.changes.outputs.machine_authority_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
       # A dedicated runner has no Cargo lock contention, so keep xtask under
@@ -766,7 +766,7 @@ jobs:
     name: wasm32 check
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -794,7 +794,7 @@ jobs:
     name: WASM browser contract
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.wasm_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
       # Link the 8 MiB wasm stack sdks/web/scripts/build-wasm.mjs asks for.
@@ -846,7 +846,7 @@ jobs:
     name: Web SDK build + tests
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.sdk_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
       # Dev profile: skips wasm-opt (which dominates the release build — it
@@ -897,7 +897,7 @@ jobs:
     name: Python + TypeScript SDK suites
     needs: changes
     if: ${{ needs.changes.outputs.sdk_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -938,7 +938,7 @@ jobs:
     name: Security audit
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -977,7 +977,7 @@ jobs:
       - sdk-host
       - sdk-web
       - audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check lane results
         shell: bash

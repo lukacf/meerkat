@@ -229,6 +229,76 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
 }
 
 impl RuntimeOAuthFlowHandle {
+    fn start_browser_attempt(
+        &self,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        nonce: Option<String>,
+    ) -> Result<String, OAuthFlowError> {
+        provider.validate_redirect(&redirect_uri)?;
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.sync_persisted_payloads("admit_oauth_browser_flow")?;
+        let state = OAuthFlowRegistry::new_state()?;
+        let expires_at = expires_at_millis(provider.lifetime(self.registry.ttl()))?;
+        self.admit_browser(&target, &state, &provider, &redirect_uri, expires_at)?;
+        let (lifecycle_pruned, lifecycle_pruned_snapshot) =
+            self.retain_registry_payloads_with_lifecycle();
+        let inserted = self.registry.insert_browser_flow_with_pruned(
+            state.clone(),
+            target.clone(),
+            provider.clone(),
+            redirect_uri.clone(),
+            pkce_verifier,
+            nonce,
+        );
+        let pruned = match inserted {
+            Ok(pruned) => pruned,
+            Err(err) => {
+                if let Err(expire_err) = self.expire_browser(&target, &state) {
+                    tracing::debug!(
+                        target: "meerkat::auth::oauth",
+                        binding_target = ?target, action = ?OAuthBrowserActionRef::project(&state),
+                        "start: browser expiry compensation no-op after insert failure (legitimate interleaving): {expire_err}"
+                    );
+                }
+                return Err(err);
+            }
+        };
+        let (removed_browser, removed_device) =
+            Self::removed_snapshot_keys_from_pruned(&lifecycle_pruned_snapshot, &lifecycle_pruned);
+        self.expire_collected_flows(pruned);
+        let admitted_browser = [browser_snapshot_key(&target, &state)];
+        if let Err(err) = self.persist_registry_payloads_claiming_admission(
+            "admit_oauth_browser_flow",
+            &target,
+            &removed_browser,
+            &removed_device,
+            &admitted_browser,
+            &[],
+        ) {
+            let _ = self.registry.remove_retired_browser_payload(
+                &state,
+                &target,
+                provider,
+                &redirect_uri,
+            );
+            if let Err(expire_err) = self.expire_browser(&target, &state) {
+                tracing::debug!(
+                    target: "meerkat::auth::oauth",
+                    binding_target = ?target, action = ?OAuthBrowserActionRef::project(&state),
+                    "start: browser expiry compensation no-op after persist failure (legitimate interleaving): {expire_err}"
+                );
+            }
+            return Err(err);
+        }
+        Ok(state)
+    }
+
     pub fn start(
         &self,
         target: AuthCredentialIdentity,
@@ -676,14 +746,8 @@ impl RuntimeOAuthFlowHandle {
             &record.redirect_uri,
             expires_at_millis,
         )?;
-        self.registry.insert_restored_browser_flow(
-            state.to_string(),
-            record.target.clone(),
-            record.provider.clone(),
-            record.redirect_uri.clone(),
-            record.pkce_verifier.clone(),
-            record.created_at,
-        )
+        self.registry
+            .insert_restored_browser_flow(state.to_string(), record.clone())
     }
 
     fn rehydrate_persisted_payloads(&self) {
@@ -880,11 +944,14 @@ impl RuntimeOAuthFlowHandle {
             .registry
             .insert_restored_browser_flow(
                 persisted.state.clone(),
-                persisted.target.clone(),
-                provider,
-                persisted.redirect_uri.clone(),
-                persisted.pkce_verifier.clone(),
-                created_at,
+                OAuthFlowRecord {
+                    target: persisted.target.clone(),
+                    provider,
+                    redirect_uri: persisted.redirect_uri.clone(),
+                    pkce_verifier: persisted.pkce_verifier.clone(),
+                    nonce: persisted.nonce.clone(),
+                    created_at,
+                },
             )
             .is_err()
             && let Err(err) = self.expire_browser(&persisted.target, &persisted.state)
@@ -1592,65 +1659,18 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         redirect_uri: String,
         pkce_verifier: String,
     ) -> Result<String, OAuthFlowError> {
-        provider.validate_redirect(&redirect_uri)?;
-        let _payload_guard = self
-            .payload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.sync_persisted_payloads("admit_oauth_browser_flow")?;
-        let state = OAuthFlowRegistry::new_state()?;
-        let expires_at = expires_at_millis(provider.lifetime(self.registry.ttl()))?;
-        self.admit_browser(&target, &state, &provider, &redirect_uri, expires_at)?;
-        let (lifecycle_pruned, lifecycle_pruned_snapshot) =
-            self.retain_registry_payloads_with_lifecycle();
-        let inserted = self.registry.insert_browser_flow_with_pruned(
-            state.clone(),
-            target.clone(),
-            provider.clone(),
-            redirect_uri.clone(),
-            pkce_verifier,
-        );
-        let pruned = match inserted {
-            Ok(pruned) => pruned,
-            Err(err) => {
-                if let Err(expire_err) = self.expire_browser(&target, &state) {
-                    tracing::debug!(
-                        target: "meerkat::auth::oauth",
-                        binding_target = ?target, action = ?OAuthBrowserActionRef::project(&state),
-                        "start: browser expiry compensation no-op after insert failure (legitimate interleaving): {expire_err}"
-                    );
-                }
-                return Err(err);
-            }
-        };
-        let (removed_browser, removed_device) =
-            Self::removed_snapshot_keys_from_pruned(&lifecycle_pruned_snapshot, &lifecycle_pruned);
-        self.expire_collected_flows(pruned);
-        let admitted_browser = [browser_snapshot_key(&target, &state)];
-        if let Err(err) = self.persist_registry_payloads_claiming_admission(
-            "admit_oauth_browser_flow",
-            &target,
-            &removed_browser,
-            &removed_device,
-            &admitted_browser,
-            &[],
-        ) {
-            let _ = self.registry.remove_retired_browser_payload(
-                &state,
-                &target,
-                provider,
-                &redirect_uri,
-            );
-            if let Err(expire_err) = self.expire_browser(&target, &state) {
-                tracing::debug!(
-                    target: "meerkat::auth::oauth",
-                    binding_target = ?target, action = ?OAuthBrowserActionRef::project(&state),
-                    "start: browser expiry compensation no-op after persist failure (legitimate interleaving): {expire_err}"
-                );
-            }
-            return Err(err);
-        }
-        Ok(state)
+        self.start_browser_attempt(target, provider, redirect_uri, pkce_verifier, None)
+    }
+
+    fn start_with_nonce(
+        &self,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        nonce: String,
+    ) -> Result<String, OAuthFlowError> {
+        self.start_browser_attempt(target, provider, redirect_uri, pkce_verifier, Some(nonce))
     }
 
     fn verify(

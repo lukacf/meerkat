@@ -30,9 +30,9 @@ pub use refresh::InMemoryCoordinator;
 
 // Re-exports from meerkat-core (trait + types moved there in B2 split).
 pub use meerkat_core::auth::token_store::{
-    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedAuthMode,
-    PersistedTokens, ProviderAuthPersistence, RefreshCoordinator, RefreshError, RefreshFn,
-    TokenKey, TokenStore, TokenStoreError,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome,
+    CredentialSlotRefusal, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence,
+    RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore, TokenStoreError,
 };
 
 pub fn credential_source_uses_persisted_store(source: &CredentialSourceSpec) -> bool {

@@ -418,6 +418,49 @@ export interface WireMcpAuthTarget {
   server_url: string;
 }
 
+export interface WireConnectorSlot {
+  realm_id: string;
+  slot_id: string;
+}
+
+export interface WireConnectorAccountSelectionKnown {
+  account: string;
+  mode: "known";
+}
+
+export interface WireConnectorAccountSelectionDiscover {
+  mode: "discover";
+}
+
+export type WireConnectorAccountSelection = WireConnectorAccountSelectionKnown | WireConnectorAccountSelectionDiscover;
+
+export interface WireConnectorAuthTarget {
+  account_selection: WireConnectorAccountSelection;
+  client: string;
+  issuer: string;
+  resource: string;
+  scopes: string[];
+  slot: WireConnectorSlot;
+  strategy_id: string;
+}
+
+export interface WireConnectorVerifiedAccount {
+  issuer: string;
+  strategy_id: string;
+  subject: string;
+}
+
+export interface WireScopeEvidenceTokenEndpointResponse {
+  kind: "token_endpoint_response";
+}
+
+export interface WireScopeEvidenceRetainedOnRefresh {
+  granted_at: string;
+  kind: "retained_on_refresh";
+}
+
+export type WireScopeEvidence = WireScopeEvidenceTokenEndpointResponse | WireScopeEvidenceRetainedOnRefresh;
+
 export type InstructionActivationDisposition = unknown;
 
 export type InstructionActivationExpectation = unknown;
@@ -534,7 +577,23 @@ export interface AuthStatusParamsMcpLoginTarget {
   mcp: WireMcpAuthTarget;
 }
 
-export type AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget;
+export interface AuthStatusParamsConnectorSlotTarget {
+  connector: WireConnectorSlot;
+}
+
+export type AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTarget | AuthStatusParamsConnectorSlotTarget;
+
+export interface LoginCancelParamsMcpLoginCancelParams {
+  mcp: WireMcpAuthTarget;
+  state: string;
+}
+
+export interface LoginCancelParamsConnectorLoginCancelParams {
+  connector: WireConnectorSlot;
+  state: string;
+}
+
+export type LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCancelParamsConnectorLoginCancelParams;
 
 export interface LoginCompleteParamsProviderLoginTarget {
   code: string;
@@ -553,7 +612,14 @@ export interface LoginCompleteParamsMcpLoginTarget {
   mcp: WireMcpAuthTarget;
 }
 
-export type LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget;
+export interface LoginCompleteParamsConnectorLoginTarget {
+  code: string;
+  redirect_uri: string;
+  state: string;
+  connector: WireConnectorAuthTarget;
+}
+
+export type LoginCompleteParams = LoginCompleteParamsProviderLoginTarget | LoginCompleteParamsMcpLoginTarget | LoginCompleteParamsConnectorLoginTarget;
 
 export interface LoginStartParamsProviderLoginTarget {
   redirect_uri: string;
@@ -568,7 +634,12 @@ export interface LoginStartParamsMcpLoginTarget {
   mcp: WireMcpAuthTarget;
 }
 
-export type LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget;
+export interface LoginStartParamsConnectorLoginTarget {
+  redirect_uri: string;
+  connector: WireConnectorAuthTarget;
+}
+
+export type LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget | LoginStartParamsConnectorLoginTarget;
 
 export interface WireAuthStatusResultAuthStatusDetail {
   account_id?: string | null;
@@ -591,17 +662,29 @@ export interface WireAuthStatusResultMcpAuthStatus {
   phase: "authorized" | "reauth_required" | "authorization_required";
 }
 
-export type WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus;
-
-export interface LoginCancelParams {
-  mcp: WireMcpAuthTarget;
-  state: string;
+export interface WireAuthStatusResultConnectorAuthStatus {
+  connector: WireConnectorSlot;
+  expires_at?: string | null;
+  has_refresh_token: boolean;
+  phase: "authorized" | "reauth_required" | "authorization_required";
+  scope_evidence?: WireScopeEvidence | null;
+  scopes?: string[];
+  verified_account?: WireConnectorVerifiedAccount | null;
 }
 
-export interface WireLoginCancelled {
+export type WireAuthStatusResult = WireAuthStatusResultAuthStatusDetail | WireAuthStatusResultMcpAuthStatus | WireAuthStatusResultConnectorAuthStatus;
+
+export interface WireLoginCancelledMcpLoginTarget {
   cancelled: boolean;
   mcp: WireMcpAuthTarget;
 }
+
+export interface WireLoginCancelledConnectorSlotTarget {
+  cancelled: boolean;
+  connector: WireConnectorSlot;
+}
+
+export type WireLoginCancelled = WireLoginCancelledMcpLoginTarget | WireLoginCancelledConnectorSlotTarget;
 
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
@@ -5150,8 +5233,8 @@ export type SenderContentTaint = "clean" | "tainted";
 export type SendTaintOverride = { declare: SenderContentTaint } | "undeclared";
 
 export interface WireRenderMetadata {
-  class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
-  salience?: "background" | "normal" | "important" | "urgent" | null;
+  class: WireRenderClass;
+  salience?: WireRenderSalience | null;
 }
 
 export interface WireTrustedPeerIdentityEd25519PublicKey {
@@ -5327,7 +5410,7 @@ export type LiveAssistantPlaybackHint = "duck" | "restore";
 
 export interface LiveAssistantPlaybackHintParams {
   channel_id: string;
-  hint: "duck" | "restore";
+  hint: LiveAssistantPlaybackHint;
 }
 
 export interface LiveMediaHealthParams {
@@ -5391,43 +5474,43 @@ export interface LiveCommitInputParams {
 export type LiveRefreshStatus = "queued";
 
 export interface LiveRefreshResult {
-  status: "queued";
+  status: LiveRefreshStatus;
 }
 
 export type LiveCloseStatus = "closed";
 
 export interface LiveCloseResult {
-  status: "closed";
+  status: LiveCloseStatus;
 }
 
 export type LiveSendInputStatus = "sent";
 
 export interface LiveSendInputResult {
-  status: "sent";
+  status: LiveSendInputStatus;
 }
 
 export type LiveCommitInputStatus = "committed";
 
 export interface LiveCommitInputResult {
-  status: "committed";
+  status: LiveCommitInputStatus;
 }
 
 export type LiveInterruptStatus = "interrupted";
 
 export interface LiveInterruptResult {
-  status: "interrupted";
+  status: LiveInterruptStatus;
 }
 
 export type LiveTruncateStatus = "truncated";
 
 export interface LiveTruncateResult {
-  status: "truncated";
+  status: LiveTruncateStatus;
 }
 
 export type LivePlaybackCompleteStatus = "completed";
 
 export interface LivePlaybackCompleteResult {
-  status: "completed";
+  status: LivePlaybackCompleteStatus;
 }
 
 export interface LiveInputChunkWireAudio {
@@ -5879,23 +5962,23 @@ export type WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireL
 export interface RuntimeAcceptResult {
   existing_id?: string | null;
   input_id?: string | null;
-  outcome_type: "accepted" | "deduplicated" | "rejected";
+  outcome_type: RuntimeAcceptOutcomeType;
   policy?: "stage" | "queue" | "immediate" | null;
   reason?: string | null;
   state?: Record<string, unknown> | null;
 }
 
 export interface WireInputStateHistoryEntry {
-  from: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  from: WireInputLifecycleState;
   reason?: string | null;
   timestamp: string;
-  to: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  to: WireInputLifecycleState;
 }
 
 export interface WireInputState {
   attempt_count?: number;
   created_at: string;
-  current_state: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  current_state: WireInputLifecycleState;
   durability?: "durable" | "volatile" | "ephemeral" | null;
   history?: WireInputStateHistoryEntry[];
   idempotency_key?: string | null;
@@ -5969,7 +6052,7 @@ export interface CatalogModelEntry {
   profile?: Record<string, unknown> | null;
   release_stage?: "stable" | "experimental" | "operator_defined";
   server_id?: string | null;
-  tier: "recommended" | "supported";
+  tier: WireModelTier;
 }
 
 export interface ProviderCatalog {
@@ -6131,7 +6214,14 @@ export interface WireLoginStartMcpLoginStart {
   mcp: WireMcpAuthTarget;
 }
 
-export type WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart;
+export interface WireLoginStartConnectorSlotTarget {
+  authorize_url: string;
+  redirect_uri: string;
+  state: string;
+  connector: WireConnectorSlot;
+}
+
+export type WireLoginStart = WireLoginStartProviderLoginStart | WireLoginStartMcpLoginStart | WireLoginStartConnectorSlotTarget;
 
 export interface WireLoginReadyProviderLoginReady {
   expires_at?: string | null;
@@ -6154,7 +6244,17 @@ export interface WireLoginReadyMcpLoginReady {
   mcp: WireMcpAuthTarget;
 }
 
-export type WireLoginReady = WireLoginReadyProviderLoginReady | WireLoginReadyMcpLoginReady;
+export interface WireLoginReadyConnectorLoginReady {
+  expires_at?: string | null;
+  has_refresh_token: boolean;
+  scopes: string[];
+  state?: string | null;
+  connector: WireConnectorSlot;
+  scope_evidence: WireScopeEvidence;
+  verified_account: WireConnectorVerifiedAccount;
+}
+
+export type WireLoginReady = WireLoginReadyProviderLoginReady | WireLoginReadyMcpLoginReady | WireLoginReadyConnectorLoginReady;
 
 export interface WireDeviceStart {
   device_code: string;

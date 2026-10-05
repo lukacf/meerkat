@@ -33,6 +33,7 @@
 //! that attempt's authorize URL and state to the caller.
 
 use chrono::{DateTime, Utc};
+use meerkat_core::connection::{CredentialAccountId, CredentialAccountRef};
 use meerkat_core::connection::{WriteOwnerError, resolve_write_owner};
 use meerkat_core::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, LeaseKey};
 use meerkat_core::{
@@ -47,6 +48,12 @@ use meerkat_providers::auth_store::{
     CredentialMutationError, PersistedTokens, ProviderAuthPersistence, TokenStoreError,
     credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
 };
+use meerkat_providers::connector_login::{
+    ConnectorAccountStrategy, ConnectorAuthPhase, ConnectorAuthStatus, ConnectorLoginComplete,
+    ConnectorLoginError, ConnectorLoginStart, ConnectorOAuthAuthority, ConnectorOAuthCallback,
+    ConnectorOAuthTarget, ConnectorStrategies, ConnectorVerifiedAccount,
+};
+use meerkat_providers::connector_oauth::{AccountSelection, ScopeEvidence};
 use meerkat_providers::mcp_oauth::{
     McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback, McpOAuthError,
     McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin, McpServerIdentity,
@@ -301,6 +308,114 @@ pub fn mcp_auth_target_to_wire(target: &McpServerIdentity) -> meerkat_contracts:
     }
 }
 
+/// The connector slot named on the wire.
+pub fn connector_slot_from_wire(
+    slot: &meerkat_contracts::WireConnectorSlot,
+) -> Result<CredentialAccountRef, HostAuthError> {
+    Ok(CredentialAccountRef {
+        realm: RealmId::parse(&slot.realm_id)
+            .map_err(|error| HostAuthError::ConnectorTarget(error.to_string()))?,
+        account: CredentialAccountId::parse(&slot.slot_id)
+            .map_err(|error| HostAuthError::ConnectorTarget(error.to_string()))?,
+    })
+}
+
+pub fn connector_slot_to_wire(slot: &CredentialAccountRef) -> meerkat_contracts::WireConnectorSlot {
+    meerkat_contracts::WireConnectorSlot {
+        realm_id: slot.realm.to_string(),
+        slot_id: slot.account.to_string(),
+    }
+}
+
+/// The connector login target named on the wire.
+pub fn connector_target_from_wire(
+    target: &meerkat_contracts::WireConnectorAuthTarget,
+) -> Result<ConnectorOAuthTarget, HostAuthError> {
+    use meerkat_contracts::WireConnectorAccountSelection;
+    Ok(ConnectorOAuthTarget {
+        slot: connector_slot_from_wire(&target.slot)?,
+        issuer: target.issuer.clone(),
+        client: target.client.clone(),
+        resource: target.resource.clone(),
+        scopes: target.scopes.iter().cloned().collect(),
+        strategy_id: target.strategy_id.clone(),
+        account: match &target.account_selection {
+            WireConnectorAccountSelection::Known { account } => {
+                AccountSelection::Known(account.clone())
+            }
+            WireConnectorAccountSelection::Discover => AccountSelection::Discover,
+        },
+    })
+}
+
+fn verified_account_to_wire(
+    account: &ConnectorVerifiedAccount,
+) -> meerkat_contracts::WireConnectorVerifiedAccount {
+    meerkat_contracts::WireConnectorVerifiedAccount {
+        issuer: account.issuer.clone(),
+        strategy_id: account.strategy_id.clone(),
+        subject: account.subject.clone(),
+    }
+}
+
+fn scope_evidence_to_wire(evidence: ScopeEvidence) -> meerkat_contracts::WireScopeEvidence {
+    match evidence {
+        ScopeEvidence::TokenEndpointResponse => {
+            meerkat_contracts::WireScopeEvidence::TokenEndpointResponse
+        }
+        ScopeEvidence::RetainedOnRefresh { from } => {
+            meerkat_contracts::WireScopeEvidence::RetainedOnRefresh {
+                granted_at: DateTime::<Utc>::from_timestamp(from.granted_at_epoch_secs, 0)
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default(),
+            }
+        }
+    }
+}
+
+/// `auth/login/complete` result for a connector login.
+pub fn connector_ready_to_wire(done: &ConnectorLoginComplete) -> meerkat_contracts::WireLoginReady {
+    meerkat_contracts::WireLoginReady {
+        state: None,
+        target: meerkat_contracts::WireLoginReadyTarget::Connector(
+            meerkat_contracts::WireConnectorLoginReady {
+                connector: connector_slot_to_wire(&done.slot),
+                verified_account: verified_account_to_wire(&done.verified_account),
+                scope_evidence: scope_evidence_to_wire(done.scope_evidence),
+            },
+        ),
+        expires_at: done.expires_at.map(|at| at.to_rfc3339()),
+        has_refresh_token: done.has_refresh_token,
+        scopes: done.scopes.clone(),
+    }
+}
+
+/// `auth/status/get` result for a connector slot.
+pub fn connector_status_to_wire(
+    status: &ConnectorAuthStatus,
+) -> meerkat_contracts::WireConnectorAuthStatus {
+    meerkat_contracts::WireConnectorAuthStatus {
+        connector: connector_slot_to_wire(&status.slot),
+        phase: match status.phase {
+            ConnectorAuthPhase::Authorized => meerkat_contracts::WireMcpAuthPhase::Authorized,
+            ConnectorAuthPhase::ReauthRequired => {
+                meerkat_contracts::WireMcpAuthPhase::ReauthRequired
+            }
+            ConnectorAuthPhase::AuthorizationRequired => {
+                meerkat_contracts::WireMcpAuthPhase::AuthorizationRequired
+            }
+        },
+        verified_account: status
+            .verified_account
+            .as_ref()
+            .map(verified_account_to_wire),
+        scopes: status.scopes.clone(),
+        scope_evidence: status.scope_evidence.map(scope_evidence_to_wire),
+        expires_at: status.expires_at.map(|at| at.to_rfc3339()),
+        has_refresh_token: status.has_refresh_token,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HostAuthError {
     #[error(transparent)]
@@ -333,6 +448,10 @@ pub enum HostAuthError {
     McpOAuth(#[from] McpOAuthError),
     #[error(transparent)]
     McpTarget(#[from] HostMcpTargetRefusal),
+    #[error(transparent)]
+    Connector(#[from] ConnectorLoginError),
+    #[error("invalid connector target: {0}")]
+    ConnectorTarget(String),
 }
 
 /// Injectable native-host authentication facade.
@@ -342,6 +461,7 @@ pub struct HostAuthService {
     authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
     http: reqwest::Client,
     mcp_account_strategy: Arc<dyn McpOAuthAccountStrategy>,
+    connector_strategies: ConnectorStrategies,
 }
 
 impl HostAuthService {
@@ -354,7 +474,77 @@ impl HostAuthService {
             authority,
             http: reqwest::Client::new(),
             mcp_account_strategy: Arc::new(OidcUserInfoAccountStrategy::new()),
+            connector_strategies: ConnectorStrategies::with_defaults(),
         }
+    }
+
+    /// Install a connector account strategy (keyed by its strategy id) next
+    /// to the default OIDC UserInfo strategy.
+    pub fn with_connector_strategy(mut self, strategy: Arc<dyn ConnectorAccountStrategy>) -> Self {
+        self.connector_strategies = self.connector_strategies.with(strategy);
+        self
+    }
+
+    /// The native connector OAuth owner bound to this service's persistence,
+    /// AuthMachine lease and flow owner. Native hosts use it for bearer
+    /// tokens (with refresh); its HTTP client follows no redirects.
+    pub fn connector_oauth_authority(&self) -> Result<ConnectorOAuthAuthority, HostAuthError> {
+        Ok(ConnectorOAuthAuthority::new(
+            self.persistence.clone(),
+            self.authority.oauth_flow_authority(),
+            self.connector_strategies.clone(),
+        )?)
+    }
+
+    /// Admit one host-driven connector OAuth attempt into `target.slot`. The
+    /// returned projection is host-only (see the module docs).
+    pub async fn connector_login_start(
+        &self,
+        target: &ConnectorOAuthTarget,
+        redirect_uri: &str,
+    ) -> Result<ConnectorLoginStart, HostAuthError> {
+        Ok(self
+            .connector_oauth_authority()?
+            .login_start(target, redirect_uri)
+            .await?)
+    }
+
+    /// Complete an admitted connector attempt from the host's loopback
+    /// callback. The admitted descriptor must equal `target`'s facts.
+    pub async fn connector_login_complete(
+        &self,
+        target: &ConnectorOAuthTarget,
+        callback: ConnectorOAuthCallback,
+    ) -> Result<ConnectorLoginComplete, HostAuthError> {
+        Ok(self
+            .connector_oauth_authority()?
+            .login_complete_for_target(target, callback)
+            .await?)
+    }
+
+    /// Retire the connector attempt admitted under `state` for `slot`.
+    pub fn connector_login_cancel(
+        &self,
+        slot: &CredentialAccountRef,
+        state: &str,
+    ) -> Result<(), HostAuthError> {
+        Ok(self
+            .connector_oauth_authority()?
+            .login_cancel(slot, state)?)
+    }
+
+    /// Disconnect a connector slot: remove its credential and release its
+    /// lifecycle. A slot holding another owner's credential is refused.
+    pub async fn connector_logout(&self, slot: &CredentialAccountRef) -> Result<(), HostAuthError> {
+        Ok(self.connector_oauth_authority()?.logout(slot).await?)
+    }
+
+    /// Secret-free status of a connector slot. No refresh, no network I/O.
+    pub async fn connector_status(
+        &self,
+        slot: &CredentialAccountRef,
+    ) -> Result<ConnectorAuthStatus, HostAuthError> {
+        Ok(self.connector_oauth_authority()?.status(slot).await?)
     }
 
     pub fn with_http_client(mut self, http: reqwest::Client) -> Self {

@@ -171,7 +171,7 @@ impl McpOAuthAccountStrategy for AccountStrategy {
             resource: context.resource.to_owned(),
             redirect_uri: context.redirect_uri.to_owned(),
             scopes: self.profile.scopes.clone(),
-            expected_account: self.profile.expected_account.clone(),
+            expected_account: self.profile.expected_account.clone().into(),
             strategy_id: self.profile.strategy_id.clone(),
         }
         .try_into()

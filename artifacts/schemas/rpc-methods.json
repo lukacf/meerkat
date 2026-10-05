@@ -311,7 +311,7 @@
       "result_type": "WireAuthProfileCleared"
     },
     {
-      "description": "Begin an OAuth login for a provider binding or an MCP server; returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent",
+      "description": "Begin an OAuth login for a provider binding, an MCP server or a connector slot; returns authorize_url, state, redirect_uri and the target echo (PKCE verifier stays server-side). Host-channel data: never pass it to an agent",
       "name": "auth/login/start",
       "params_type": "LoginStartParams",
       "result_type": "WireLoginStart"
@@ -323,7 +323,7 @@
       "result_type": "WireLoginReady"
     },
     {
-      "description": "Retire a pending MCP OAuth attempt by its state",
+      "description": "Retire a pending MCP or connector OAuth attempt by its state",
       "name": "auth/login/cancel",
       "params_type": "LoginCancelParams",
       "result_type": "WireLoginCancelled"
@@ -347,7 +347,7 @@
       "result_type": "WireProvisionApiKeyResult"
     },
     {
-      "description": "Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target",
+      "description": "Get binding-resolved auth status with an optional profile override, or the authorization status of an MCP server target or a connector slot",
       "name": "auth/status/get",
       "params_type": "AuthStatusParams",
       "result_type": "WireAuthStatusResult"

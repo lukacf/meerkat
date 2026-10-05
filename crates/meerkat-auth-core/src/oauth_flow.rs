@@ -546,6 +546,10 @@ pub struct OAuthFlowRecord {
     pub provider: OAuthBrowserFlowIdentity,
     pub redirect_uri: String,
     pub pkce_verifier: String,
+    /// OIDC nonce minted for this attempt by its native owner, when the
+    /// attempt's account strategy verifies an ID token. Single-use: it lives
+    /// and dies with this record, like the PKCE verifier.
+    pub nonce: Option<String>,
     pub created_at: Instant,
 }
 
@@ -597,6 +601,8 @@ pub struct PersistedOAuthBrowserFlow {
     pub provider: OAuthBrowserFlowIdentity,
     pub redirect_uri: String,
     pub pkce_verifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
     pub created_at_millis: u64,
     pub expires_at_millis: u64,
 }
@@ -980,6 +986,24 @@ pub trait OAuthFlowAuthority: Send + Sync {
         pkce_verifier: String,
     ) -> Result<String, OAuthFlowError>;
 
+    /// [`start`](Self::start) for an attempt whose account strategy verifies
+    /// an OIDC ID token: the record also retains `nonce`, minted by the
+    /// native connector owner from the same CSPRNG as the state. Owners that
+    /// cannot retain a nonce refuse.
+    fn start_with_nonce(
+        &self,
+        _target: AuthCredentialIdentity,
+        _provider: OAuthBrowserFlowIdentity,
+        _redirect_uri: String,
+        _pkce_verifier: String,
+        _nonce: String,
+    ) -> Result<String, OAuthFlowError> {
+        Err(OAuthFlowError::LifecycleRejected {
+            operation: "admit_oauth_browser_flow",
+            detail: "this flow owner does not retain OIDC nonces".to_owned(),
+        })
+    }
+
     fn verify(
         &self,
         state: &str,
@@ -1282,6 +1306,7 @@ impl OAuthFlowRegistry {
                     provider: record.provider.clone(),
                     redirect_uri: record.redirect_uri.clone(),
                     pkce_verifier: record.pkce_verifier.clone(),
+                    nonce: record.nonce.clone(),
                     created_at_millis: now_millis.saturating_sub(elapsed_millis),
                     expires_at_millis: now_millis
                         .saturating_add(ttl_millis.saturating_sub(elapsed_millis)),
@@ -1311,27 +1336,15 @@ impl OAuthFlowRegistry {
         OAuthFlowRegistrySnapshot { browser, device }
     }
 
+    /// Re-insert a restored browser attempt under `state`, exactly as it
+    /// was admitted (including its original `created_at`).
     pub fn insert_restored_browser_flow(
         &self,
         state: String,
-        target: AuthCredentialIdentity,
-        provider: OAuthBrowserFlowIdentity,
-        redirect_uri: String,
-        pkce_verifier: String,
-        created_at: Instant,
+        record: OAuthFlowRecord,
     ) -> Result<(), OAuthFlowError> {
-        provider.validate_redirect(&redirect_uri)?;
-        let mut flows = self.flows.lock();
-        flows.insert(
-            state,
-            OAuthFlowRecord {
-                target,
-                provider,
-                redirect_uri,
-                pkce_verifier,
-                created_at,
-            },
-        );
+        record.provider.validate_redirect(&record.redirect_uri)?;
+        self.flows.lock().insert(state, record);
         Ok(())
     }
 
@@ -1371,6 +1384,17 @@ impl OAuthFlowRegistry {
         redirect_uri: String,
         pkce_verifier: String,
     ) -> Result<(String, OAuthPrunedFlows), OAuthFlowError> {
+        self.start_with_pruned_and_nonce(target, provider, redirect_uri, pkce_verifier, None)
+    }
+
+    pub fn start_with_pruned_and_nonce(
+        &self,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        nonce: Option<String>,
+    ) -> Result<(String, OAuthPrunedFlows), OAuthFlowError> {
         let state = new_state_token()?;
         provider.validate_redirect(&redirect_uri)?;
         let record = OAuthFlowRecord {
@@ -1378,6 +1402,7 @@ impl OAuthFlowRegistry {
             provider,
             redirect_uri,
             pkce_verifier,
+            nonce,
             created_at: Instant::now(),
         };
         let mut flows = self.flows.lock();
@@ -1398,6 +1423,7 @@ impl OAuthFlowRegistry {
         provider: OAuthBrowserFlowIdentity,
         redirect_uri: String,
         pkce_verifier: String,
+        nonce: Option<String>,
     ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
         provider.validate_redirect(&redirect_uri)?;
         let record = OAuthFlowRecord {
@@ -1405,6 +1431,7 @@ impl OAuthFlowRegistry {
             provider,
             redirect_uri,
             pkce_verifier,
+            nonce,
             created_at: Instant::now(),
         };
         let mut flows = self.flows.lock();
@@ -1491,6 +1518,18 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
         pkce_verifier: String,
     ) -> Result<String, OAuthFlowError> {
         self.start_with_pruned(target, provider, redirect_uri, pkce_verifier)
+            .map(|(state, _)| state)
+    }
+
+    fn start_with_nonce(
+        &self,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        nonce: String,
+    ) -> Result<String, OAuthFlowError> {
+        self.start_with_pruned_and_nonce(target, provider, redirect_uri, pkce_verifier, Some(nonce))
             .map(|(state, _)| state)
     }
 
@@ -1809,6 +1848,7 @@ mod tests {
             provider: OAuthProviderIdentity::AnthropicClaudeAi.into(),
             redirect_uri: "https://example/callback".to_string(),
             pkce_verifier: "verifier".to_string(),
+            nonce: None,
             created_at_millis: 1_000,
             expires_at_millis: 61_000,
         };
@@ -2090,6 +2130,7 @@ mod tests {
                 provider: OAuthProviderIdentity::OpenAiChatGpt.into(),
                 redirect_uri: "http://127.0.0.1/callback".to_string(),
                 pkce_verifier: "verifier".to_string(),
+                nonce: None,
                 created_at: Instant::now()
                     .checked_sub(Duration::from_secs(61))
                     .expect("test duration is representable"),

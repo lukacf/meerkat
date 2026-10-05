@@ -57,6 +57,14 @@ pub mod browser_login {
     };
 }
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+pub mod connector_login {
+    pub use meerkat_auth_core::connector_login::*;
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub mod connector_oauth {
+    pub use meerkat_auth_core::connector_oauth::*;
+}
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 pub mod mcp_oauth {
     pub use meerkat_auth_core::mcp_oauth::*;
 }

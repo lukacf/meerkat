@@ -333,13 +333,26 @@ impl McpOAuthAccountStrategy for OidcUserInfoAccountStrategy {
             resource: context.resource.to_owned(),
             redirect_uri: context.redirect_uri.to_owned(),
             scopes,
-            expected_account: expected_account.to_owned(),
+            expected_account: expected_account.into(),
             strategy_id: OIDC_USERINFO_STRATEGY_ID.to_owned(),
         }
         .try_into()
     }
 
     async fn observe_account(
+        &self,
+        descriptor: &ConnectorOAuthDescriptor,
+        tokens: &OAuthTokenResult,
+    ) -> Result<ConnectorAccountObservation, ConnectorOAuthRefusal> {
+        self.observe_userinfo(descriptor, tokens).await
+    }
+}
+
+impl OidcUserInfoAccountStrategy {
+    /// The issuer's UserInfo `sub` for `tokens`' access token, with the
+    /// granted scopes of the token response (the requested scopes when the
+    /// response omits `scope`).
+    pub async fn observe_userinfo(
         &self,
         descriptor: &ConnectorOAuthDescriptor,
         tokens: &OAuthTokenResult,
@@ -968,7 +981,7 @@ impl McpOAuthAuthority {
             },
         )?;
         let facts = descriptor.parameters();
-        if facts.expected_account != expected_account {
+        if facts.expected_account.known() != Some(expected_account) {
             return Err(ConnectorOAuthRefusal::AccountMismatch.into());
         }
         if facts.issuer != discovery.authorization_server
@@ -1020,7 +1033,9 @@ impl McpOAuthAuthority {
             return Ok(None);
         };
         let facts = connector.parameters();
-        if facts.expected_account != expected_account || facts.resource != target.server_url() {
+        if facts.expected_account.known() != Some(expected_account)
+            || facts.resource != target.server_url()
+        {
             if let Some((authority, _)) = self.interactive.as_ref() {
                 let _ = authority.expire(
                     state,
@@ -1145,7 +1160,9 @@ impl McpOAuthAuthority {
             return Err(McpOAuthError::Flow(OAuthFlowError::BrowserIdentityMismatch));
         };
         let facts = connector.parameters();
-        if target.expected_account() != Some(facts.expected_account.as_str()) {
+        if target.expected_account().is_none()
+            || target.expected_account() != facts.expected_account.known()
+        {
             return Err(ConnectorOAuthRefusal::AccountMismatch.into());
         }
         if facts.resource != target.server_url() {
@@ -2003,14 +2020,14 @@ async fn acquire_admission_lock(binding_slug: String) -> tokio::sync::OwnedMutex
 }
 
 /// HTTP client for MCP OAuth endpoints: follows no redirects.
-fn no_redirect_client() -> Client {
+pub(crate) fn no_redirect_client() -> Client {
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_default()
 }
 
-trait RefuseRedirect {
+pub(crate) trait RefuseRedirect {
     /// `error_for_status` that also refuses any 3xx answer explicitly.
     fn error_for_status_refusing_redirects(self) -> Result<reqwest::Response, String>;
 }
@@ -2137,6 +2154,10 @@ fn map_coordinated_login_error(
             server_name: target.server_name().to_string(),
             reason,
         },
+        CredentialMutationError::SlotRefused(refusal) => McpOAuthError::AuthLifecycle {
+            server_name: target.server_name().to_string(),
+            reason: refusal.to_string(),
+        },
         CredentialMutationError::Cancelled => McpOAuthError::AuthLifecycle {
             server_name: target.server_name().to_string(),
             reason: "credential mutation coordinator cancelled the login commit".to_string(),
@@ -2144,7 +2165,7 @@ fn map_coordinated_login_error(
     }
 }
 
-fn lifecycle_snapshot_is_absent(snapshot: &AuthLeaseSnapshot) -> bool {
+pub(crate) fn lifecycle_snapshot_is_absent(snapshot: &AuthLeaseSnapshot) -> bool {
     snapshot.phase.is_none()
         && !snapshot.credential_present
         && snapshot.generation == 0
@@ -2188,7 +2209,7 @@ fn map_coordinated_refresh_error(target: &McpServerIdentity, error: RefreshError
 
 /// Whole seconds since the Unix epoch, clamped to a non-negative `u64` for the
 /// `AuthMachine` lease lifecycle inputs.
-fn epoch_secs(time: DateTime<Utc>) -> u64 {
+pub(crate) fn epoch_secs(time: DateTime<Utc>) -> u64 {
     time.timestamp().max(0) as u64
 }
 
@@ -2233,7 +2254,7 @@ fn unquote_auth_value(raw: &str) -> Option<String> {
     }
 }
 
-fn absolutize_url(base: &str, value: &str) -> Result<String, String> {
+pub(crate) fn absolutize_url(base: &str, value: &str) -> Result<String, String> {
     let base = reqwest::Url::parse(base).map_err(|error| error.to_string())?;
     base.join(value)
         .map(|url| url.to_string())
@@ -2296,7 +2317,7 @@ fn require_https_or_loopback(
     })
 }
 
-fn is_loopback_url(url: &reqwest::Url) -> bool {
+pub(crate) fn is_loopback_url(url: &reqwest::Url) -> bool {
     matches!(
         url.host_str(),
         Some("localhost" | "127.0.0.1" | "::1" | "[::1]")

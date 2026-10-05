@@ -114,7 +114,7 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/auth/bindings/{binding_id}/test` | Test a binding resolve path |
 | `POST` | `/auth/login/start` | Start interactive auth login |
 | `POST` | `/auth/login/complete` | Complete interactive auth login |
-| `POST` | `/auth/login/cancel` | Retire a pending MCP OAuth attempt by its state |
+| `POST` | `/auth/login/cancel` | Retire a pending MCP or connector OAuth attempt by its state |
 | `POST` | `/auth/login/device/start` | Start device-code login |
 | `POST` | `/auth/login/device/complete` | Complete device-code login |
 | `GET` | `/auth/bindings/{binding_id}/status` | Read binding auth status |
@@ -1271,12 +1271,17 @@ binding-scoped `AuthBindingRef`.
 </ParamField>
 
 The same endpoints accept an MCP server target instead of a provider binding:
-`{"mcp": {"server_name", "server_url", "oauth_account"}, ...}`. See
-[Host-driven OAuth](/api/mcp#host-driven-oauth).
+`{"mcp": {"server_name", "server_url", "oauth_account"}, ...}`, or a connector
+target, `{"connector": {"slot", "issuer", "client", "resource", "scopes",
+"strategy_id", "account_selection"}, ...}`. See
+[Host-driven OAuth](/api/mcp#host-driven-oauth) and
+[Connector OAuth](/guides/auth#connector-oauth).
 
 ### POST /auth/login/cancel
 
-Retire a pending MCP OAuth attempt by its state. The server must be configured.
+Retire a pending MCP or connector OAuth attempt by its state. An MCP server
+must be configured; a connector attempt is named by its slot,
+`{"connector": {"realm_id", "slot_id"}, "state"}`.
 
 ```json Request
 {

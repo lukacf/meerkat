@@ -217,3 +217,141 @@ async fn retained_metadata_default_is_unsupported_for_nonpersistent_service() {
         assert!(matches!(error, SessionError::Unsupported(_)));
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source() {
+    fn open(
+        path: &std::path::Path,
+        head_canonical: bool,
+    ) -> (
+        meerkat_session::PersistentSessionService<PersistentMockBuilder>,
+        Arc<dyn meerkat_runtime::RuntimeStore>,
+    ) {
+        let sessions: Arc<dyn SessionStore> = Arc::new(
+            meerkat_store::SqliteSessionStore::open(path).expect("open session projection"),
+        );
+        let runtime: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+            if head_canonical {
+                meerkat_runtime::SqliteRuntimeStore::new_head_canonical(path)
+            } else {
+                meerkat_runtime::SqliteRuntimeStore::new_whole_blob(path)
+            }
+            .expect("open native runtime authority"),
+        );
+        (
+            meerkat_session::PersistentSessionService::new(
+                PersistentMockBuilder,
+                4,
+                sessions,
+                runtime.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            ),
+            runtime,
+        )
+    }
+
+    for head_canonical in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("retained.sqlite3");
+        let binding = meerkat_core::MobMemberBinding {
+            mob_id: "retained-reopen".into(),
+            role: "worker".into(),
+            member: "same-logical-member".into(),
+        };
+        let (source_id, successor_id) = {
+            let (service, runtime) = open(&path, head_canonical);
+            let machine = meerkat_runtime::MeerkatMachine::persistent(
+                runtime,
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            );
+            let mut created = Vec::new();
+            for policy in [Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly), None] {
+                let result = service
+                    .create_session(CreateSessionRequest {
+                        injected_context: Vec::new(),
+                        model: "retained-source".into(),
+                        prompt: ContentInput::Text("no provider turn needed".into()),
+                        system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                        max_tokens: None,
+                        event_tx: None,
+                        initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                        deferred_prompt_policy:
+                            meerkat_core::service::DeferredPromptPolicy::Discard,
+                        build: Some(meerkat_core::service::SessionBuildOptions {
+                            mob_member_binding: Some(binding.clone()),
+                            tool_access_policy: policy,
+                            ..Default::default()
+                        }),
+                        labels: None,
+                    })
+                    .await
+                    .expect("create source or later same-binding session");
+                created.push(result.session_id);
+            }
+            service
+                .archive_with_machine_protocol(
+                    &created[0],
+                    meerkat_session::MachineSessionArchiveProtocol::from_machine(&machine),
+                )
+                .await
+                .expect("retire source through native archive authority");
+            assert!(
+                service
+                    .load_persisted_session_metadata(&created[0])
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            MobSessionService::cancel_all_checkpointers(&service).await;
+            (created.remove(0), created.remove(0))
+        };
+
+        // The original service, machine and store handles have left scope.
+        let (reopened, _) = open(&path, head_canonical);
+        let retained = reopened
+            .load_retained_session_metadata(&source_id)
+            .await
+            .unwrap()
+            .expect("retired exact source survives reopening SQLite");
+        assert_eq!(retained.session_id, source_id);
+        assert_eq!(retained.mob_member_binding(), Some(&binding));
+        assert_eq!(
+            retained
+                .session_metadata
+                .unwrap()
+                .tooling
+                .tool_access_policy,
+            Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly),
+            "a later unrestricted session must not replace the retired source policy"
+        );
+        assert!(
+            reopened
+                .load_persisted_session_metadata(&source_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let successor = reopened
+            .load_retained_session_metadata(&successor_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(successor.session_id, successor_id);
+        assert_eq!(
+            successor
+                .session_metadata
+                .unwrap()
+                .tooling
+                .tool_access_policy,
+            None
+        );
+        assert!(
+            reopened
+                .load_retained_session_metadata(&SessionId::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}

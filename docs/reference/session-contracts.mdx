@@ -465,6 +465,9 @@ original token and birth cursor and records its exact predecessor binding.
 claim; authenticated source witnesses establish delegated ancestry instead.
 Policy auto-spawn remains `Unproven`, because a host-configured policy does not
 prove that the resulting creation was independent of member activity.
+RPC and REST spawn ingress also remains `Unproven` until it carries an
+authenticated originating principal. Transport choice alone is insufficient;
+that authority work is tracked in [#1646](https://github.com/lukacf/meerkat/issues/1646).
 
 Historical creation facts remain in the existing journal-backed roster
 projection after retirement. `MobHandle::member_creation_for_session` reads

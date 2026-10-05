@@ -4838,6 +4838,42 @@ fn talk_over_starts(
     Ok(starts)
 }
 
+/// Whether the barge-in fixture `fixture` landed on assistant speech: the
+/// assistant was audible while the user spoke (`overlap_ms` > 0), or an
+/// audible assistant burst was still current at the onset by the peer's own
+/// burst rule. That means it started at or before the onset and its last
+/// active window is within the peer's end hysteresis of the onset.
+///
+/// Since #1651 the barge-in duck mutes the assistant at the browser within
+/// its own latency (about 100-400 ms), so audible overlap is truncated by
+/// design. When the provider's next frame arrives after the duck (Turbo S
+/// S103 soak 65b7a5c3 R3: audible at 51279, onset 51285, duck at 51491), the
+/// overlap is 0 although the barge-in did interrupt speech. A burst that had
+/// already ended (R6: last active 48259, onset 48940, 681 ms > the 600 ms
+/// hysteresis) still fails: a barge-in on silence interrupts nothing.
+fn barge_in_landed_on_speech(timeline: &[TimelineEntry], fixture: u64, overlap_ms: u64) -> bool {
+    if overlap_ms > 0 {
+        return true;
+    }
+    let Some(onset_ms) = fixture_start_entry(timeline, fixture).map(|e| e.t_ms) else {
+        return false;
+    };
+    let Some(hysteresis_ms) = fixture_end_entry(timeline, fixture)
+        .and_then(|end| end.detail["facts"]["hysteresis_ms"].as_u64())
+    else {
+        return false;
+    };
+    timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::AssistantAudioEnd)
+        .any(|end| {
+            matches!(
+                (end.detail_u64("started_ms"), end.detail_u64("last_active_ms")),
+                (Some(started), Some(last)) if started <= onset_ms && last + hysteresis_ms >= onset_ms
+            )
+        })
+}
+
 /// The talk-over contract for one barge-in: measure its segments, record
 /// them as evidence (so a failure says which segment moved), and return the
 /// violations of the end-to-end, ingest and playout bounds and any talk-over
@@ -8337,7 +8373,7 @@ async fn run_s103_interrupt_and_recover(
                 ));
             }
         }
-        if barge_in_overlap_ms == 0 {
+        if !barge_in_landed_on_speech(&timeline, barge_in, barge_in_overlap_ms) {
             deterministic_failures.push(
                 "the barge-in did not land on assistant speech, so it interrupted nothing".to_owned(),
             );
@@ -13252,6 +13288,106 @@ mod config_tests {
     /// user's input final (soak d98607e1 R5). A "done" said before the
     /// barge-in (the previous readout's "Done!") does not count, and no
     /// "done" after it fails.
+    /// Local only: replay `barge_in_landed_on_speech` over recorded S103 run
+    /// journals (S103_REPLAY = colon-separated run directories), printing
+    /// the verdict and the overlap beside it.
+    #[test]
+    #[ignore = "local replay against recordings"]
+    fn s103_barge_in_landed_replay() {
+        use super::support::TimelineEntry;
+        let dirs = std::env::var("S103_REPLAY").unwrap_or_default();
+        for dir in dirs.split(':').filter(|d| !d.is_empty()) {
+            let journal =
+                std::fs::read_to_string(std::path::Path::new(dir).join("journal.jsonl")).unwrap();
+            let mut timeline: Vec<TimelineEntry> = Vec::new();
+            for line in journal.lines() {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                let record = &value["record"];
+                if record["kind"] == "timeline" && record["channel"] == 1 {
+                    // Entry kinds this oracle does not model are skipped.
+                    timeline = record["entries"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+                        .collect();
+                }
+            }
+            let barge_in = timeline
+                .iter()
+                .find(|e| e.detail["name"] == "interrupt_barge_in" && e.detail["id"].is_u64())
+                .and_then(|e| e.detail["id"].as_u64())
+                .unwrap();
+            let overlap = super::fixture_end_entry(&timeline, barge_in)
+                .and_then(|e| e.detail_u64("overlap_ms"))
+                .unwrap_or(0);
+            println!(
+                "REPLAY {dir} overlap={overlap} landed={}",
+                super::barge_in_landed_on_speech(&timeline, barge_in, overlap)
+            );
+        }
+    }
+
+    /// S103 soak 65b7a5c3 (the duck, #1651, truncates audible overlap): R3's
+    /// barge-in started 6 ms after the assistant became audible and the duck
+    /// muted the rest, so the overlap is 0 but the burst was current at the
+    /// onset: it landed. R6's barge-in started 681 ms after the last active
+    /// window, past the 600 ms hysteresis: a barge-in on silence, it fails.
+    #[test]
+    fn s103_barge_in_lands_on_a_burst_current_at_the_onset_even_when_ducked() {
+        use super::support::{TimelineEntry, TimelineKind};
+        let timeline = |onset: u64, started: u64, last_active: u64, ended_at: u64| {
+            vec![
+                TimelineEntry {
+                    t_ms: started,
+                    kind: TimelineKind::AssistantAudioStart,
+                    detail: serde_json::json!({"response": 0}),
+                },
+                TimelineEntry {
+                    t_ms: onset,
+                    kind: TimelineKind::FixtureStart,
+                    detail: serde_json::json!({"id": 2, "name": "interrupt_barge_in", "speech_ms": 2870}),
+                },
+                TimelineEntry {
+                    t_ms: ended_at,
+                    kind: TimelineKind::AssistantAudioEnd,
+                    detail: serde_json::json!({"started_ms": started, "last_active_ms": last_active, "response": 0}),
+                },
+                TimelineEntry {
+                    t_ms: onset + 4450,
+                    kind: TimelineKind::FixtureEnd,
+                    detail: serde_json::json!({"id": 2, "name": "interrupt_barge_in", "overlap_ms": 0,
+                        "facts": {"hysteresis_ms": 600}}),
+                },
+            ]
+        };
+        // R3: audible at 51279, onset 51285, last active 51279 (the duck at
+        // 51491 muted the rest).
+        assert!(super::barge_in_landed_on_speech(
+            &timeline(51285, 51279, 51279, 51974),
+            2,
+            0
+        ));
+        // R6: a burst from 44051 last active at 48259; onset 48940.
+        assert!(!super::barge_in_landed_on_speech(
+            &timeline(48940, 44051, 48259, 48952),
+            2,
+            0
+        ));
+        // Audible overlap is enough on its own.
+        assert!(super::barge_in_landed_on_speech(
+            &timeline(48940, 44051, 48259, 48952),
+            2,
+            200
+        ));
+        // No burst at all before the onset: nothing was interrupted.
+        assert!(!super::barge_in_landed_on_speech(
+            &timeline(48940, 50000, 51000, 51700),
+            2,
+            0
+        ));
+    }
+
     #[test]
     fn s100_barge_in_reply_is_judged_by_content_after_the_barge_in() {
         use super::support::{TimelineEntry, TimelineKind};

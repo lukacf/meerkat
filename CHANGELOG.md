@@ -1391,6 +1391,17 @@ them.
     delegation state change. It closed 0.5 s after the correction's result
     was released (S103 R6 on b187df1e0, provider
     `context_injection_incomplete`), so the result was never read.
+  - The barge-in lands on assistant speech when the assistant was audible
+    while the user spoke, or when an audible assistant burst was still
+    current at the onset (started by then, last active within the peer's
+    600 ms end hysteresis). Since #1651 the duck mutes the assistant within
+    its own latency, so the audible overlap can be 0 for a real barge-in
+    (soak 65b7a5c3 R3: audible at 51279, onset 51285, duck at 51491).
+  - The browser peer's `first_assistant_audio` anchor fires on an
+    already-speaking assistant only while it is voicing (an active window
+    within the last 100 ms). Otherwise it waits for the next burst start,
+    instead of barging in during the end hysteresis of a finished burst
+    (R6: armed 681 ms after the last active window).
 - Shell tool commands and background jobs no longer inherit the host's
   stdin. In a stdio JSON-RPC host (`rkat-rpc`) stdin is the protocol
   transport, so a command that read stdin (`cat`, `head`, a prompt) could

@@ -170,6 +170,12 @@ them.
 
 ### Testing
 
+- Every hosted Linux CI and release job now runs on `ubuntu-24.04` instead of
+  `ubuntu-latest`. GitHub moves `ubuntu-latest` to Ubuntu 26 from
+  2026-10-19 (actions/runner-images#14748). The release builds depend on the
+  image's packages (bundled Opus through cmake, libasound2-dev, the TLC JDK,
+  the wasm toolchain, Playwright's system dependencies). Moving to 26 becomes
+  a validated change instead of a silent one.
 - `meerkat-memory` `released_v2_store_with_empty_rows_is_purged_on_open` no
   longer treats approximate HNSW search recall as an exact oracle. Its final
   reopen check asserted three hits for one query and failed 5 of 200 serial

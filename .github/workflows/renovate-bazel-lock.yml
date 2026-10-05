@@ -22,7 +22,7 @@ jobs:
       github.actor == 'renovate[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'renovate/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}

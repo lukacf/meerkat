@@ -117,7 +117,7 @@ env:
 jobs:
   control-plane-up:
     name: Control plane up
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       grpc_url: ${{ steps.endpoint.outputs.grpc_url }}
@@ -188,7 +188,7 @@ jobs:
   executors-up:
     name: Executors up
     needs: [control-plane-up]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -239,7 +239,7 @@ jobs:
   prebuild-submit:
     name: Prebuild submitter
     needs: [control-plane-up, executors-up]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Cold `//...` (3,447 actions) needs ~12-13 min of Bazel time plus setup;
     # a 12-minute timeout cancelled it at 97% on 2026-09-22.
     timeout-minutes: 25
@@ -265,7 +265,7 @@ jobs:
   static-submit:
     name: Static submitter
     needs: [control-plane-up, executors-up]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -289,7 +289,7 @@ jobs:
   native-submit:
     name: Native submitter
     needs: [control-plane-up, executors-up, prebuild-submit]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -335,7 +335,7 @@ jobs:
     # started ~28 min into the 50-min SLO and still ran at the deadline on
     # the v0.8.43 and v0.8.44 tag runs (it needs ~22-25 min cold).
     needs: [control-plane-up, executors-up]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Above the SLO left when it starts, so the SLO watchdog, not a GitHub
     # timeout, stops an overrunning batch.
     timeout-minutes: 60
@@ -363,7 +363,7 @@ jobs:
   governance-submit:
     name: Governance submitter
     needs: [control-plane-up, executors-up]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -429,7 +429,7 @@ jobs:
   wasm-feature-changes:
     name: WASM, SDK, and feature change detection
     needs: [control-plane-up]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       changed: ${{ steps.edge-changes.outputs.changed }}
@@ -456,7 +456,7 @@ jobs:
     name: SDK suites submitter
     needs: [control-plane-up, executors-up, wasm-feature-changes]
     if: ${{ needs.wasm-feature-changes.outputs.sdk_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -482,7 +482,7 @@ jobs:
     name: WASM check submitter
     needs: [control-plane-up, executors-up, wasm-feature-changes]
     if: ${{ needs.wasm-feature-changes.outputs.wasm_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -507,7 +507,7 @@ jobs:
     name: Minimal feature submitter
     needs: [control-plane-up, executors-up, wasm-feature-changes]
     if: ${{ needs.wasm-feature-changes.outputs.minimal_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -532,7 +532,7 @@ jobs:
     name: Feature matrix submitter
     needs: [control-plane-up, executors-up, wasm-feature-changes]
     if: ${{ needs.wasm-feature-changes.outputs.feature_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -563,7 +563,7 @@ jobs:
     name: Security audit submitter
     needs: [control-plane-up, executors-up, wasm-feature-changes]
     if: ${{ needs.wasm-feature-changes.outputs.audit_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
@@ -600,7 +600,7 @@ jobs:
       - minimal-feature-submit
       - feature-submit
       - audit-submit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -661,7 +661,7 @@ jobs:
       - feature-submit
       - audit-submit
       - executors-down
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check results

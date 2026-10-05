@@ -33,7 +33,7 @@ permissions:
 jobs:
   semver:
     name: Measure and attest release semver
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Only crates that differ from the published baseline are rebuilt and the
     # baseline is one checkout of its tag, so a release measurement is a
     # minutes-scale job. Anything longer is a regression, not a slow day.

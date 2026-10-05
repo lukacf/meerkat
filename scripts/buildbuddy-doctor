@@ -534,7 +534,7 @@ if job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'name: GCP BuildBud
   job_has_line .github/workflows/buildbuddy.yml gate '- audit-submit' &&
   grep -Fq 'default_target="//..."' scripts/buildbuddy-bazel-poc &&
   grep -Fq -- '--build_tag_filters=-local,-manual,-e2e,-system,-live,-slow,-required-feature,-trybuild,-snapshot,-fixture,-cargo-equivalent,-requires-network' scripts/buildbuddy-bazel-poc &&
-  job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest'; then
+  job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-24.04'; then
   pass "Reusable GCP BuildBuddy workflow uses a broad Bazel-native prebuild plus path-aware edge lanes"
 else
   bad "Reusable GCP BuildBuddy workflow is not using the broad-prebuild/path-aware edge-lane shape"

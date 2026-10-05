@@ -87,7 +87,7 @@ jobs:
   require_ci_green:
     name: Require green CI
     timeout-minutes: 130
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     steps:
       - name: Checkout release ref
         uses: actions/checkout@v6
@@ -319,7 +319,7 @@ jobs:
       github.event.inputs.publish_release_assets_only != 'true' &&
       !(github.actor == 'lukacf' &&
         github.event.inputs.release_backend == 'buildbuddy')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -397,7 +397,7 @@ jobs:
       github.event.inputs.publish_release_assets_only != 'true' &&
       github.actor == 'lukacf' &&
       github.event.inputs.release_backend == 'buildbuddy'
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     env:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
       MEERKAT_BUILDBUDDY_CI_JOBS: ${{ vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || vars.MEERKAT_BUILDBUDDY_CI_JOBS || '64' }}
@@ -448,7 +448,7 @@ jobs:
        (github.event.inputs.publish_web_sdk_only != 'true' &&
         github.event.inputs.publish_release_assets_only != 'true'))
     needs: [require_ci_green, release_validate_cargo, release_validate_buildbuddy, release_validate_buildbuddy_full]
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     steps:
       - name: Check selected release validation backend
         shell: bash
@@ -497,7 +497,7 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_packages == 'true'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       # A recovery dispatch must run the fixed generic preflight from the
@@ -533,7 +533,7 @@ jobs:
     if: >-
       github.event.inputs.publish_web_sdk_only != 'true' &&
       github.event.inputs.publish_release_assets_only != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The measurement belongs before the tag. Tag-triggered releases consume
     # exact-tree evidence from Release semver readiness. Manual recovery may
     # still run or verify an explicit historical measurement; the measurement
@@ -736,7 +736,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - runs-on: ubuntu-latest
+          - runs-on: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
           - runs-on: ubuntu-24.04-arm
@@ -981,7 +981,7 @@ jobs:
     # the generated machine crates peak above 13 GB. The same build takes
     # about 20 minutes at four jobs on Linux; verify_windows_binaries then
     # proves the result on a real Windows runner.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -1131,7 +1131,7 @@ jobs:
          (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
           vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&
       (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     env:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     strategy:
@@ -1332,7 +1332,7 @@ jobs:
       github.actor == 'lukacf' &&
       (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
        vars.MEERKAT_RELEASE_BUILDBUDDY == '1')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -1446,7 +1446,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_packages == 'true' &&
         github.event.inputs.alpha_crates_only != 'true'))
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     timeout-minutes: 180
     steps:
       - name: Checkout
@@ -1513,7 +1513,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true'))
     needs: [build_binaries, build_binaries_buildbuddy, build_binaries_windows_cross, verify_windows_binaries]
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     steps:
       - name: Check selected release binary backend
         shell: bash
@@ -1584,7 +1584,7 @@ jobs:
         build_binaries_gate,
         publish_unix_release_and_homebrew,
       ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Recovery runs execute the current workflow against an older release
       # tag, so load helpers from the workflow ref rather than that old tag.
@@ -1748,7 +1748,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true'))
     needs: [publish_github_release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout workflow helpers
         uses: actions/checkout@v6
@@ -1776,7 +1776,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true'))
     needs: [publish_github_release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout release tag
@@ -1847,7 +1847,7 @@ jobs:
        github.event.inputs.publish_release_packages == 'true' &&
        github.event.inputs.publish_web_sdk_only != 'true'))
     needs: [require_ci_green, release_validate_gate, release_semver_gate, registry_credentials_preflight]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - name: Checkout
@@ -2019,7 +2019,7 @@ jobs:
         github.event.inputs.publish_release_packages == 'true' &&
         github.event.inputs.alpha_crates_only != 'true'))
     needs: [require_ci_green, build_web_sdk_package, registry_credentials_preflight]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout

@@ -110,7 +110,7 @@ How to translate that to your host:
 
 The current Windows release recipe is separate from these local measurements.
 In `.github/workflows/release.yml`, `build_binaries_windows_cross` runs on
-`ubuntu-latest` and invokes `.github/actions/build-windows-cross/action.yml`.
+`ubuntu-24.04` and invokes `.github/actions/build-windows-cross/action.yml`.
 That action uses cargo-xwin with clang-cl, lld-link, and the Windows SDK to
 cross-compile the four surface binaries and package their ZIP archives. It
 adds an 8 GiB swap file when total swap is below 8 GiB; it does not set

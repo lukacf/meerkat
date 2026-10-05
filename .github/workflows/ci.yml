@@ -219,7 +219,7 @@ env:
 jobs:
   changes:
     name: Change classification
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       rust_changed: ${{ steps.plan.outputs.rust_changed }}
@@ -285,7 +285,7 @@ jobs:
 
   fmt-governance:
     name: Format + governance
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       RUSTC_WRAPPER: sccache
@@ -395,7 +395,7 @@ jobs:
   ratchets:
     name: Generation ratchets
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
@@ -553,7 +553,7 @@ jobs:
     name: Bounded TLC audits (${{ matrix.part }})
     needs: changes
     if: ${{ needs.changes.outputs.machine_authority == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Past ~24 minutes a shard fails the PR execution budget anyway; 20 leaves
     # headroom over the expected 5-8 minutes.
     timeout-minutes: 20
@@ -585,7 +585,7 @@ jobs:
     name: Clippy (${{ matrix.name }})
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -650,7 +650,7 @@ jobs:
     name: Unit tests (${{ matrix.name }})
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.unit_shard_count != '0' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -744,7 +744,7 @@ jobs:
     # Selected by the suite count alone: a suite can be selected by changed
     # paths in a plan with no Rust change (xtask's workflow pins).
     if: ${{ needs.changes.result == 'success' && needs.changes.outputs.integration_count != '0' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -833,7 +833,7 @@ jobs:
     # exactly as on a pull request. A manual dispatch runs them too, so a
     # branch can measure the main lanes before it merges.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -914,7 +914,7 @@ jobs:
     # lib-test binary once here into a nextest archive; main-unit-archive-run
     # fans its execution out over partitions. Same trigger as main-unit.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_archive_build_count != '0' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -1026,7 +1026,7 @@ jobs:
     name: Main unit tests (${{ matrix.name }})
     needs: [changes, main-unit-archive-build]
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_archive_run_count != '0' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -1072,7 +1072,7 @@ jobs:
     name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
@@ -1139,7 +1139,7 @@ jobs:
     needs: changes
     # Post-merge only (12 min measured); pull requests defer it.
     if: ${{ github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       RUSTC_WRAPPER: sccache
@@ -1188,7 +1188,7 @@ jobs:
     # SDK suite) also run on pull requests that touch their inputs, without
     # the Rust build.
     if: ${{ (github.event_name == 'push' && (needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.sdk_host == 'true' || needs.changes.outputs.examples_browser == 'true')) || (github.event_name != 'push' && needs.changes.outputs.examples_browser == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
@@ -1279,7 +1279,7 @@ jobs:
     # when the runtime, the crates it builds from, or those examples change.
     # Independent of the Rust lanes, so it stays off the critical path.
     if: ${{ github.event_name == 'push' || needs.changes.outputs.example_web == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Sized from measurement (2026-09-29). Warm (sccache 100% hits, e.g. job
     # 109577859270): 4.5 min, 2 min of it the wasm build. Cold, a pull request
     # that changes meerkat-core, so all 27 workspace crates of the wasm graph
@@ -1396,7 +1396,7 @@ jobs:
     # Compile the Rust regression binaries independently of the example build
     # so both lanes retain the pull-request wall-clock budget.
     if: ${{ github.event_name == 'push' || needs.changes.outputs.example_web == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       RUSTC_WRAPPER: sccache
@@ -1464,7 +1464,7 @@ jobs:
     # any Cargo manifest, or a moved or deleted Rust file. Every main push
     # runs it.
     if: ${{ github.event_name == 'push' || needs.changes.outputs.bazel_graph == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -1512,7 +1512,7 @@ jobs:
       - example-web
       - wasm-timers
       - bazel-graph
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check lane results

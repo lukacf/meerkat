@@ -21,7 +21,7 @@ env:
 jobs:
   unit-archive:
     name: Build Mob unit-test archive
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A release commit bumps every workspace crate version, which invalidates
     # all compiled workspace artifacts in sccache and the cargo cache; the
     # archive then builds cold and needs well over 15 minutes.
@@ -62,7 +62,7 @@ jobs:
   dense-topology:
     name: 300 members x 150 peers
     needs: unit-archive
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout

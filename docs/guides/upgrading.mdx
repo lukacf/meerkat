@@ -1,0 +1,213 @@
+---
+title: "Upgrading"
+description: "What to do when moving a running system to a new Meerkat release: one-way migrations, data notes, breaking changes and their migration steps."
+icon: "arrow-up"
+---
+
+Each section below covers one release, newest first. Read every section
+between the version you run and the version you are moving to. The full list
+of changes for each release is in
+[CHANGELOG.md](https://github.com/lukacf/meerkat/blob/main/CHANGELOG.md).
+
+## Upgrading to 0.8.51
+
+This section is for systems running 0.8.50. The full list of changes is in
+the CHANGELOG under `## [0.8.51]`.
+
+### Before you upgrade
+
+- **The upgrade is one-way.** 0.8.51 migrates these stores forward the first
+  time it opens them, and 0.8.50 binaries refuse the migrated files:
+  - SQLite session store: schema v5 (transcript retirements);
+  - WorkGraph: schema v4 (keyed admissions);
+  - semantic memory: schema v3 (purges empty-text rows).
+- **Upgrade every process that shares a store at the same time.** A 0.8.50
+  process left running against a store a 0.8.51 process has migrated will be
+  refused on its next open.
+- **Take a backup first** if you might need to roll back, since there is no
+  downgrade path for migrated files.
+
+### SQLite sessions that 0.8.50 could no longer load
+
+SQLite sessions written by 0.8.50 or earlier that went through more than 32
+compaction rewrites could reach a state where every cold load fails with
+`Store(Corrupted(<session id>))`. Writes kept succeeding and no rows were
+lost.
+
+- **Do not delete or recreate such a session. Upgrade the host to 0.8.51.**
+- 0.8.51 loads these sessions again with no action needed. Cold load replays
+  them from the edge their rotated anchor sealed, but only after verifying
+  that the edge's result, extended by the anchor's own tail rows, reproduces
+  the anchor exactly. The session's next compaction rewrite then re-mints the
+  anchor.
+- New sessions are not affected.
+
+### Session envelope status
+
+- **No envelope migration.** The persisted session envelope stays at version
+  3 (`SESSION_VERSION`), stored input state at version 5, and session
+  metadata schema at version 2, the same as 0.8.50. Session documents
+  written by 0.8.50 load unchanged.
+- **Transcript history is now bounded.** After each compaction, a session
+  keeps the bodies of only the most recent
+  `[compaction] history_retained_rewrites` rewrites (default 4). Existing
+  documents re-anchor on their next compaction. The SQLite store deletes the
+  rewrite rows below the same cut.
+- **Old revisions can be retired.** Fork, rewind, restore and revision reads
+  of a revision older than the retention window fail with the typed
+  `TranscriptRevisionRetired`, naming the oldest retained revision. Raise
+  `history_retained_rewrites` if you need to reach further back. Code that
+  walks `commits()` and projects each commit's parent must skip commits
+  before the cut.
+
+### Breaking changes and what to do
+
+#### Hosts that serve application tool policies
+
+- Agent `mob_create`, agent `delegate` and spawns into existing child mobs
+  are refused (`policy_denied`, code `child_tool_policy_required`) until you
+  choose a child application tool policy.
+- **Do:** call `MobMcpState::with_child_application_tool_policy(binding)`
+  with the policy child members should run under, or pass
+  `ApplicationToolPolicyBinding::Unmanaged` to opt out explicitly.
+- `delegate` helpers now run as a child mob under that policy. Host-created
+  mobs, same-mob `mob_spawn_member` and `fork_off`, and temporary councils are
+  unaffected. Hosts without a tool-policy registry see no change.
+- Host tool bundles reach child mobs only if you mark them `ChildAvailable`
+  with `MobMcpState::with_child_tool_bundles`.
+
+#### Agent-facing mob tool inputs
+
+- Model-supplied mob definitions and profiles that name internal-only fields
+  (`mcp_servers`, `rust_bundles`, `is_implicit`, `session_cleanup_policy`,
+  ...) are refused with `InvalidArguments`. On the agent surface, host
+  filesystem skill paths, images by `blob_id` and videos by `uri` are refused
+  too.
+- **Do:** keep MCP servers and Rust bundles in host-defined profiles, and
+  have agents reference those profiles by name. Host-facing surfaces (RPC,
+  REST, SDK, CLI) are unchanged.
+
+#### MCP OAuth
+
+- Meerkat no longer opens a browser or binds a callback listener itself.
+- **Do:**
+  - drive login with `McpOAuthAuthority::login_start`, `login_complete` and
+    `login_cancel`, the `HostAuthService::mcp_login_*` methods, the
+    `auth/login/*` RPC and REST methods with an MCP target, or
+    `rkat mcp login` (see [Authentication](/guides/auth));
+  - give each server that needs interactive login an `oauth_account`;
+  - update `McpOAuthAuthority::new(persistence, auth_lease)` and
+    `with_http(persistence, http, auth_lease)` calls, which no longer take a
+    browser;
+  - set `AgentBuildConfig::mcp_auth_resolver` (use `None` to keep the old
+    behaviour);
+  - replace `BrowserOpener`, `SystemBrowserOpener` and
+    `McpOAuthAuthority::interactive_login`, which are removed.
+- RPC, REST and the MCP server now install interactive MCP auth by default.
+  A missing credential surfaces as the typed `AuthorizationRequired` host
+  status.
+
+#### Auth wire (`auth/login/*`, `auth/status/get`)
+
+- Login params take a `target` (a provider or an MCP server). The Rust
+  `LoginStartParams`, `LoginCompleteParams`, `WireLoginStart` and
+  `WireLoginReady` replace their provider fields with `target`.
+- Provider login params now refuse unknown fields.
+- **Do:** in Python, build requests through the client wrappers; the
+  generated types are unions and no longer constructible dataclasses.
+  Provider JSON payloads themselves are unchanged.
+
+#### Per-profile tool deny lists
+
+- `[profiles.<name>.tools] deny = [...]` is new. A name that is not a known
+  tool (or a tool of a declared MCP server's mapped list) fails the member's
+  build with `DeclaredToolUnknown`.
+- A profile's `read_only` now travels as `declared_tool_restriction` and no
+  longer appears in `AgentBuildConfig::tool_access_policy`. The effective
+  gate is unchanged.
+- **Do:** if you read `tool_access_policy` off a built config, read
+  `declared_tool_restriction` too. Members persisted before 0.8.51 keep their
+  old restriction until respawned.
+
+#### Mob Stop and Shutdown
+
+- `MobHandle::stop` returns `Result<MobStopReport, MobError>`.
+  `MobMcpState::mob_stop` returns the report, and `mob_lifecycle_action`
+  returns `MobLifecycleReports`.
+- **Shutdown cancels members' in-flight runs immediately.** Use Stop if runs
+  should finish first. `shutdown_with_report(ShutdownOptions)` reports
+  per-member outcomes, and `ShutdownOptions::with_deadline` bounds every wait
+  by your own deadline (for example below a Kubernetes termination grace
+  period).
+- While a Shutdown runs, commands other than a second Shutdown get
+  `ActorCommandChannelClosed`. Treat it as "mob shutting down".
+- A retirement that started and failed answers `MemberRetirementStuck`.
+  **Do:** call `MobHandle::redrive_retirement` or resume the mob.
+- A spawn that completes into a Stopped mob leaves it Stopped and holds the
+  new member. Call Resume to run it. `Reset` also releases a Stop's holds.
+- `MobBuilder::with_runtime_adapter` must be passed the session service's
+  own `MeerkatMachine` (a clone of it). A different machine over the same
+  store is refused with `MobError::RuntimeOwnerConflict`.
+
+#### Live (GPT Live and WebRTC clients)
+
+- `WireLiveAdapterStatus::Closed` is now a struct variant,
+  `Closed { reason, reopen_recommended }`. **Do:** match `Closed { .. }` (or
+  use `is_closed()`) and build it with `WireLiveAdapterStatus::closed()`. A
+  plain close still serializes as `{"status":"closed"}`.
+- `AgentEvent::LiveChannelClosed` is published on every committed close.
+  **Do:** handle it in event consumers that match exhaustively on event
+  types.
+- WebRTC clients should answer `live/media_health_requested` with
+  `live/media_health`, and may apply `live/assistant_playback_hint`
+  (`duck`/`restore`) to their playback. The TypeScript and Python SDKs now
+  deliver `live/*` notifications through `onLiveNotification` and
+  `on_live_notification`.
+- Hosts that forward observations receive playback hints only if they
+  override `ExperimentalLivePublicObservationPublisher::publish_playback_hint`.
+
+#### Other behaviour changes
+
+- **rkat-rpc over TCP:** a session's callback tools route only to the
+  connection that created it. `SessionRuntime::set_callback_channel` is
+  deprecated. **Do:** use `init_callback_channel` for the single-client
+  default route.
+- **MCP stdio servers** are killed as soon as their stdin closes. A server
+  that must flush state on EOF can no longer rely on a grace period.
+- **Shell tool commands** read EOF from stdin immediately (`/dev/null`).
+- **Mob kickoff status notices** (`mob.kickoff_*`) are one-way lifecycle
+  notices. Receivers no longer get a peer request to answer.
+- **SQLite database paths** that are hard links or not regular files are
+  refused (`UnsupportedDatabaseFile`). **Do:** point stores at a single
+  regular file.
+- **Semantic memory:** empty-text rows are purged on first open, and empty
+  queries return no hits.
+
+#### Rust API
+
+Struct literals and exhaustive matches need updating for the new fields and
+variants listed under `### Breaking` in the CHANGELOG. The most common are:
+
+- `LlmRequest.tool_choice`, `TurnToolOverlay.tool_choice_plan`, and
+  `CompactionConfig.history_retained_rewrites` (default 4);
+- `MemoryIndexExclusion::EmptyText`,
+  `TranscriptEditError::TranscriptRevisionRetired`,
+  `LlmError::ToolChoiceUnsupported` and `MobError::RuntimeOwnerConflict`;
+- `SessionRuntimeLlmReconfigureHost::service` is now a `Weak` (build it with
+  `Arc::downgrade`).
+
+### Upgrade checklist
+
+1. Back up stores you might need to roll back.
+2. Stop every 0.8.50 process that shares a store, then start 0.8.51 on all of
+   them together.
+3. If you serve application tool policies, set a child application tool
+   policy.
+4. Move host-only MCP servers and Rust bundles out of agent-created profiles.
+5. Update MCP OAuth hosts to the start/complete/cancel flow.
+6. Review Shutdown callers: use Stop to let runs finish, and set a
+   `ShutdownOptions` deadline that fits your termination grace period.
+7. Update live clients for `Closed { .. }`, `LiveChannelClosed`, and the
+   media-health and playback-hint notifications.
+8. Leave any SQLite session that 0.8.50 reported as `Corrupted` in place.
+   0.8.51 loads it.

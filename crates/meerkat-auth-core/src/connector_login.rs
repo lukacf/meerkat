@@ -265,34 +265,13 @@ impl ConnectorLoginError {
             | Self::Verification(_)
             | Self::Slot(_)
             | Self::ReauthRequired => true,
-            Self::Flow(error) => flow_error_is_refusal(error),
+            Self::Flow(error) => error.is_refusal(),
             Self::DiscoveryFailed(_)
             | Self::TokenExchangeFailed
             | Self::RefreshFailed(_)
             | Self::TokenStore(_)
             | Self::AuthLifecycle(_) => false,
         }
-    }
-}
-
-/// Whether a flow-owner error refuses the caller's attempt (unknown,
-/// mismatched or expired state) rather than reporting a flow-owner
-/// persistence or lifecycle failure.
-fn flow_error_is_refusal(error: &OAuthFlowError) -> bool {
-    match error {
-        OAuthFlowError::Missing
-        | OAuthFlowError::BrowserIdentityMismatch
-        | OAuthFlowError::Connector(_)
-        | OAuthFlowError::ProviderMismatch { .. }
-        | OAuthFlowError::RedirectUriMismatch
-        | OAuthFlowError::TargetMismatch { .. }
-        | OAuthFlowError::DevicePollInProgress
-        | OAuthFlowError::DeviceCodeAlreadyAdmitted
-        | OAuthFlowError::DeviceExpiryOutOfRange => true,
-        OAuthFlowError::RegistryProjectionMissing { .. }
-        | OAuthFlowError::StateGenerationFailed
-        | OAuthFlowError::LifecycleRejected { .. }
-        | OAuthFlowError::PersistenceFailed { .. } => false,
     }
 }
 

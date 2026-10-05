@@ -42,6 +42,7 @@ them.
   - `CredentialMutationError` gains `SlotRefused(CredentialSlotRefusal)`.
   - `RefreshError` gains `RequiredScopesNotGranted`.
   - Connector refresh failures are split: `ConnectorLoginError::RefreshFailed` is now only a failure the token endpoint reported. Lock, lifecycle and closure failures are `AuthLifecycle` (#1737).
+  - MCP OAuth gets the same split: `McpOAuthError::RefreshFailed` is only a token-endpoint report, and local refresh failures are `McpOAuthError::AuthLifecycle`. `McpOAuthError::Flow` flow-owner persistence and lifecycle failures are no longer refusals (`is_refusal() == false`). The new `OAuthFlowError::is_refusal` owns that split (#1737).
   - `ConnectorOAuthParameters::expected_account` is an `AccountSelection`
     (`Known(account)` or `Discover`). `From<String>`/`From<&str>` build
     `Known`, and the wire form of a Known account is unchanged.

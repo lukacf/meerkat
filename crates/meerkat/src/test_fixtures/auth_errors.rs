@@ -294,5 +294,33 @@ pub fn reason_examples() -> Vec<(HostAuthError, R)> {
             )),
             R::Infrastructure,
         ),
+        (
+            HostAuthError::McpOAuth(McpOAuthError::Flow(OAuthFlowError::PersistenceFailed {
+                operation: "admit_oauth_browser_flow",
+                detail: INTERNAL_DETAIL_CANARY.into(),
+            })),
+            R::Infrastructure,
+        ),
+        (
+            HostAuthError::McpOAuth(McpOAuthError::Flow(OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_browser_flow",
+                detail: INTERNAL_DETAIL_CANARY.into(),
+            })),
+            R::Infrastructure,
+        ),
+        (
+            HostAuthError::McpOAuth(McpOAuthError::AuthLifecycle {
+                server_name: "s".into(),
+                reason: INTERNAL_DETAIL_CANARY.into(),
+            }),
+            R::Infrastructure,
+        ),
+        (
+            HostAuthError::McpOAuth(McpOAuthError::RefreshFailed {
+                server_name: "s".into(),
+                reason: "token endpoint refused the refresh".into(),
+            }),
+            R::UpstreamFailure,
+        ),
     ]
 }

@@ -5035,6 +5035,9 @@ struct ResultDelivery {
     channel: u32,
     elapsed_ms: u64,
     text: String,
+    /// Sideband arrival of the delegation's `session.delegation.created` on
+    /// the same channel, when recorded.
+    created_ms: Option<u64>,
 }
 
 /// Every result delivery on the sideband, all channels, in send order.
@@ -5055,6 +5058,20 @@ fn announced_result_text(content: &str) -> Option<&str> {
 }
 
 fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> {
+    let created: std::collections::BTreeMap<(u32, &str), u64> = lines
+        .iter()
+        .filter_map(|line| match &line.entry {
+            provider_recording::Entry::ServerFrame { raw }
+                if raw["type"] == "session.delegation.created" =>
+            {
+                Some((
+                    (line.channel_ordinal, raw["delegation"]["id"].as_str()?),
+                    line.elapsed_ms,
+                ))
+            }
+            _ => None,
+        })
+        .collect();
     lines
         .iter()
         .filter_map(|line| match &line.entry {
@@ -5069,6 +5086,7 @@ fn result_deliveries(lines: &[provider_recording::Line]) -> Vec<ResultDelivery> 
                     channel: line.channel_ordinal,
                     elapsed_ms: line.elapsed_ms,
                     text: text.to_owned(),
+                    created_ms: created.get(&(line.channel_ordinal, delegation_id)).copied(),
                 })
             }
             _ => None,
@@ -5326,6 +5344,15 @@ fn readout_faults(
             )
         })
         .collect();
+    // Each channel delivery's send and its delegation's creation, peer clock.
+    let delivery_created_ms: std::collections::BTreeMap<i64, i64> = deliveries
+        .iter()
+        .filter(|d| d.channel == channel)
+        .filter_map(|d| Some((d.elapsed_ms as i64 - offset, d.created_ms? as i64 - offset)))
+        .collect();
+    let delivered_ms: Vec<i64> = delivered.iter().map(|(sent, _)| *sent).collect();
+    // A licensing delivery's one re-reading response, across sentences.
+    let mut licensed: std::collections::BTreeMap<i64, u64> = Default::default();
     let mut voicings: std::collections::BTreeMap<String, Vec<&support::ReadoutRecord>> =
         Default::default();
     for record in records {
@@ -5347,22 +5374,32 @@ fn readout_faults(
             .map(|(t, _)| *t)
             .collect();
         sends.sort_unstable();
-        let delivered_ms: Vec<i64> = delivered.iter().map(|(sent, _)| *sent).collect();
-        let mut licensed = std::collections::BTreeSet::new();
         let mut used = 0usize;
         let mut unaccounted = false;
         for (position, response) in responses.iter().enumerate() {
-            // A re-reading opened by a later result delivery that does not
-            // itself carry the sentence: the voice re-reads what that result
-            // updates (S103 #1705, 0375acca R3: diff-only corrections, "Updated
-            // the kickoff to Friday", and the brief read again with Friday).
-            // One re-reading per delivery; narration-, cue- and
-            // speech-opened re-reads stay unaccounted.
+            // A re-reading of what a later correction updates (S103 #1705,
+            // 0375acca R3: diff-only corrections, "Updated the kickoff to
+            // Friday", and the brief read again with Friday). Licensed only
+            // when the response was opened by that delivery's own
+            // commentary acknowledgement on this channel, the delivery does
+            // not carry the sentence, the sentence was delivered on this
+            // channel before it, and its delegation was created after that
+            // earlier delivery (a correction requested once the result
+            // existed, never a parallel job); one re-reading response per
+            // licensing delivery. Narration-, cue- and speech-opened
+            // re-reads stay unaccounted.
             if position > 0
                 && let Some(delivery) = opening_delivery(response, &prompt_lanes_ms, &delivered_ms)
                 && !sends.contains(&delivery)
-                && licensed.insert(delivery)
+                && let Some(original) = sends.iter().copied().filter(|sent| *sent < delivery).min()
+                && delivery_created_ms
+                    .get(&delivery)
+                    .is_some_and(|created| *created > original)
+                && licensed
+                    .get(&delivery)
+                    .is_none_or(|licensed_response| *licensed_response == response.index)
             {
+                licensed.insert(delivery, response.index);
                 continue;
             }
             if position > 0
@@ -12399,6 +12436,20 @@ mod config_tests {
             channel: 1,
             elapsed_ms,
             text: text.to_owned(),
+            created_ms: None,
+        }
+    }
+
+    /// A result whose delegation was created at `created_ms`.
+    fn created_delivery(
+        delegation_id: &str,
+        created_ms: u64,
+        elapsed_ms: u64,
+        text: &str,
+    ) -> super::ResultDelivery {
+        super::ResultDelivery {
+            created_ms: Some(created_ms),
+            ..result_delivery(delegation_id, elapsed_ms, text)
         }
     }
 
@@ -12569,11 +12620,13 @@ mod config_tests {
         ]
     }
 
+    /// The corrections were requested after the brief was delivered (their
+    /// delegations are created at 4000 and 6000, the brief sent at 1000).
     fn s103_correction_deliveries() -> Vec<super::ResultDelivery> {
         vec![
-            result_delivery("item_brief", 1000, BRIEF),
-            result_delivery("item_thursday", 7500, THURSDAY),
-            result_delivery("item_friday", 8800, FRIDAY),
+            created_delivery("item_brief", 500, 1000, BRIEF),
+            created_delivery("item_thursday", 4000, 7500, THURSDAY),
+            created_delivery("item_friday", 6000, 8800, FRIDAY),
         ]
     }
 
@@ -12633,28 +12686,120 @@ mod config_tests {
         );
     }
 
-    /// A re-reading opened by the user's speech or a cue (no delivery opens
-    /// it) is still a duplicate readout.
-    #[test]
-    fn a_re_reading_not_opened_by_a_delivery_still_fails() {
-        let prompts = [
+    /// The commentary sends of the R3 shape: the brief, Thursday, the Friday
+    /// request's "Started" narration (acknowledged at response 8's boundary)
+    /// and Friday.
+    fn s103_correction_prompts() -> Vec<super::BrokerPrompt> {
+        vec![
             commentary(1000),
             commentary(7500),
             commentary(7800),
             commentary(8800),
-            cue(8950),
-        ];
+        ]
+    }
+
+    fn duplicate_count(
+        deliveries: &[super::ResultDelivery],
+        records: &[super::support::ReadoutRecord],
+        prompts: &[super::BrokerPrompt],
+    ) -> usize {
+        super::readout_faults(deliveries, 1, records, prompts, 0, None)
+            .iter()
+            .filter(|fault| matches!(fault, super::ReadoutFault::DuplicateReadout { .. }))
+            .count()
+    }
+
+    /// A re-reading after a result cue (a thinking append, never a response
+    /// boundary): the response is opened by the user's speech, so no
+    /// delivery licenses it.
+    #[test]
+    fn a_cue_opened_re_reading_still_fails() {
+        let mut prompts = s103_correction_prompts();
+        prompts.push(cue(8950));
         assert_eq!(
-            super::readout_faults(
+            duplicate_count(
                 &s103_correction_deliveries(),
-                1,
                 &s103_correction_records(USER),
-                &prompts,
-                0,
-                None
-            )
-            .len(),
+                &prompts
+            ),
             2
+        );
+    }
+
+    /// A third reading with no new delivery since the licensed one (opened
+    /// by a new delegation's boundary, not cut off by the user, so no
+    /// resumption either) is still a duplicate readout.
+    #[test]
+    fn a_re_reading_with_no_new_delivery_still_fails() {
+        const DELEGATION: &str = "session.delegation.created";
+        let mut records = s103_correction_records(COMMENTARY);
+        records[2].closed_by = Some(DELEGATION.to_owned());
+        records[2].closed_ms = Some(9_900);
+        records.push(bounded_readout(
+            10,
+            DELEGATION,
+            None,
+            "Once more. The client is the Marigold account. The deck code name is Pelican.",
+        ));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &records,
+                &s103_correction_prompts()
+            ),
+            2
+        );
+    }
+
+    /// One delivery licenses one re-reading: a second response whose opening
+    /// boundary acknowledges the same delivery (no commentary sent between)
+    /// is still a duplicate readout.
+    #[test]
+    fn two_re_readings_licensed_by_one_delivery_still_fail() {
+        let mut records = s103_correction_records(COMMENTARY);
+        records[2].closed_by = Some(COMMENTARY.to_owned());
+        records[2].closed_ms = Some(9_900);
+        records.push(bounded_readout(
+            10,
+            COMMENTARY,
+            None,
+            "Again. The client is the Marigold account. The deck code name is Pelican.",
+        ));
+        assert_eq!(
+            duplicate_count(
+                &s103_correction_deliveries(),
+                &records,
+                &s103_correction_prompts()
+            ),
+            2
+        );
+    }
+
+    /// A delivery on another channel, or of a job created before the brief
+    /// existed (S101-style parallel jobs), licenses nothing.
+    #[test]
+    fn a_delivery_from_another_channel_or_a_parallel_job_licenses_nothing() {
+        let mut other_channel = s103_correction_deliveries();
+        other_channel[2].channel = 2;
+        assert_eq!(
+            duplicate_count(
+                &other_channel,
+                &s103_correction_records(COMMENTARY),
+                &s103_correction_prompts()
+            ),
+            2,
+            "another channel's delivery"
+        );
+        let mut parallel_job = s103_correction_deliveries();
+        parallel_job[2].created_ms = Some(800);
+        assert_eq!(
+            duplicate_count(
+                &parallel_job,
+                &s103_correction_records(COMMENTARY),
+                &s103_correction_prompts()
+            ),
+            2,
+            "a job created before the brief was delivered"
         );
     }
 

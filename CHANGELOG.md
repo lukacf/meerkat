@@ -113,6 +113,21 @@ them.
   5.5 already did. Anthropic documents that Sonnet 5.5 rejects forced tool use
   with a 400, so the request no longer spends a provider round trip that is
   documented to fail. `auto` and `none` are unchanged.
+
+### Fixed
+
+- A runtime with the in-memory runtime store (`RealmBackend::Memory`, and
+  the in-memory store the RPC server and runtime-backed surfaces use) could
+  wedge a runtime thread for good when an operation finished. A terminal ops
+  transition blocks its thread until the ops lifecycle persistence worker
+  answers, and that worker needed the store's shared lock. If a task on the
+  same thread held that lock across an await, it could never resume to
+  release it, so the worker never answered and the thread never woke. The
+  in-memory store now keeps ops lifecycle state behind its own short-held
+  lock that never waits on the shared one (#1654).
+  `RuntimeStore::persist_ops_lifecycle` now documents the contract custom
+  stores must meet: never wait on state a runtime task can hold across an
+  await. The SQLite store already met it.
 - `meerkat-tools` tests compile on macOS again. The custody foreign-namespace
   fixture (`a_host_in_another_pid_namespace_is_proven_ended_by_its_lock`, its
   host role and their constants) uses `unshare(1)` and tokio's read-write FIFO

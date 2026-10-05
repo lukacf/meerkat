@@ -3727,13 +3727,13 @@ mod tests {
     }
 
     /// Regression: one session whose delivery application fails must not
-    /// abort the realm-wide drain — every later session in the pass must
-    /// still be reached, with each failure reported in the summary instead
-    /// of an early drain error. Neither origin session is materialized here,
-    /// so BOTH deliveries fail at the sink; a drain that stops at the first
-    /// failing session reports only one of them (pre-fix it returned Err).
+    /// abort the delivery pass: every later session in the pass must still be
+    /// reached, with each failure reported in the pass instead of an early
+    /// error. Neither origin session is materialized here, so BOTH deliveries
+    /// fail at the sink; a pass that stops at the first failing session
+    /// reports only one of them.
     #[tokio::test]
-    async fn job_delivery_drain_reaches_every_session_past_a_failing_one() {
+    async fn job_delivery_pass_reaches_every_session_past_a_failing_one() {
         let temp = tempfile::tempdir().expect("test tempdir");
         let (runtime, _config_store) = build_test_runtime(&temp);
         let realm = meerkat_core::connection::RealmId::global();
@@ -3777,10 +3777,19 @@ mod tests {
             .expect("complete");
         }
 
-        let summary = runtime
-            .drain_job_deliveries()
-            .await
-            .expect("a failing session is a reported failure, not a drain error");
+        // Armed after both commits, so the owner's reconcile pass sees both.
+        runtime.arm_runtime_delivery_owner();
+        let mut passes = runtime
+            .subscribe_job_delivery_passes()
+            .expect("a runtime with a realm arms its delivery owner");
+        let summary = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            passes.wait_for(|pass| pass.generation >= 1),
+        )
+        .await
+        .expect("the reconcile pass completes")
+        .expect("owner pass channel open")
+        .clone();
         assert_eq!(summary.projected, 2);
         assert_eq!(summary.applied, 0);
         assert_eq!(
@@ -3795,10 +3804,11 @@ mod tests {
                     .failures
                     .iter()
                     .any(|failure| failure.contains(&session_id.to_string())),
-                "drain must reach session {session_id} even when another session's \
+                "the pass must reach session {session_id} even when another session's \
                  delivery fails first; failures: {:?}",
                 summary.failures
             );
+            assert!(summary.blocked_sessions.contains(session_id));
         }
     }
 

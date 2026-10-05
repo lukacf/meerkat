@@ -1,8 +1,8 @@
 //! Typed tool choice lowered to Anthropic's `tool_choice`. `Auto` keeps
 //! today's bytes. A forced choice is refused locally under explicit thinking
 //! and on models proven to reject it (Claude Opus 5.5: live 400 "not
-//! supported for this model"); elsewhere it is sent, and the provider's own
-//! rejection maps to the same typed error.
+//! supported for this model"; Claude Sonnet 5.5: documented 400); elsewhere
+//! it is sent, and the provider's own rejection maps to the same typed error.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
@@ -81,22 +81,23 @@ fn every_choice_lowers_to_its_native_value_on_a_forceable_model() {
 
 #[test]
 fn forced_choice_is_refused_only_on_models_proven_to_reject_it() {
-    for choice in forced() {
-        assert_eq!(
-            refusal(body(&request("claude-opus-5-5", choice.clone()))),
-            ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice,
-            "{choice:?}"
-        );
+    for model in ["claude-opus-5-5", "claude-sonnet-5-5"] {
+        for choice in forced() {
+            assert_eq!(
+                refusal(body(&request(model, choice.clone()))),
+                ToolChoiceRefusal::ModelDoesNotSupportForcedToolChoice,
+                "{model} {choice:?}"
+            );
+        }
+        // Forbidding tool calls stays available.
+        let none = body(&request(model, ToolChoice::None)).unwrap();
+        assert_eq!(none["tool_choice"], json!({"type": "none"}), "{model}");
     }
-    // Forbidding tool calls stays available.
-    let none = body(&request("claude-opus-5-5", ToolChoice::None)).unwrap();
-    assert_eq!(none["tool_choice"], json!({"type": "none"}));
     // Live-accepted (claude-sonnet-5, claude-haiku-4-5-20251001) and unproven
     // cataloged models send the forced choice.
     for model in [
         "claude-sonnet-5",
         "claude-haiku-4-5-20251001",
-        "claude-sonnet-5-5",
         "claude-opus-5",
         "claude-fable-5-1",
     ] {
@@ -113,6 +114,8 @@ fn catalog_facts_match_the_live_probes() {
             .map(|caps| caps.supports_forced_tool_choice)
     };
     assert_eq!(forced("claude-opus-5-5"), Some(false));
+    // Documented: forced tool use is not supported on Sonnet 5.5.
+    assert_eq!(forced("claude-sonnet-5-5"), Some(false));
     assert_eq!(forced("claude-haiku-4-5-20251001"), Some(true));
     // claude-sonnet-5 is now a catalog row; the live probe accepted forced
     // choices, and its model documentation agrees.

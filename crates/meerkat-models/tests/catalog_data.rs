@@ -297,6 +297,10 @@ fn claude_sonnet_5_5_capability_row_matches_the_official_model_page() {
     assert!(caps.supports_compaction);
     assert!(caps.supports_structured_output);
     assert!(caps.supports_web_search);
+    assert!(
+        !caps.supports_forced_tool_choice,
+        "forced tool_choice returns 400 on Sonnet 5.5"
+    );
     assert_eq!(
         caps.effort_levels,
         &[

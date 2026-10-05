@@ -83,6 +83,15 @@ them.
 
 ### Fixed
 
+- Model catalog: Claude Sonnet 5.5 (`claude-sonnet-5-5`) now refuses a forced
+  `tool_choice` (`required` or a named tool) locally with the typed
+  `ModelDoesNotSupportForcedToolChoice` before the provider call, as Claude Opus
+  5.5 already did. Anthropic documents that Sonnet 5.5 rejects forced tool use
+  with a 400, so the request no longer spends a provider round trip that is
+  documented to fail. `auto` and `none` are unchanged.
+
+### Fixed
+
 - `meerkat-tools` tests compile on macOS again. The custody foreign-namespace
   fixture (`a_host_in_another_pid_namespace_is_proven_ended_by_its_lock`, its
   host role and their constants) uses `unshare(1)` and tokio's read-write FIFO

@@ -8966,6 +8966,9 @@ pub struct MeerkatMachineShared {
     /// boundary indefinitely, so the recovered payload is logged on
     /// transition, never per iteration.
     boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate,
+    /// Generation that advances each time a runtime attachment becomes
+    /// serving. See [`MeerkatMachine::subscribe_attachment_commits`].
+    attachment_commits: crate::tokio::sync::watch::Sender<u64>,
     /// Stable process-local serialization slots for session registration and
     /// final unregister publication. The index retains only weak references:
     /// every new lookup prunes dead slots, so historical session ids cannot
@@ -10727,6 +10730,7 @@ impl MeerkatMachine {
                 sessions: RwLock::new(HashMap::new()),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
+                attachment_commits: crate::tokio::sync::watch::Sender::new(0),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 pending_runless_terminal_publications: StdMutex::new(HashMap::new()),
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
@@ -10845,6 +10849,7 @@ impl MeerkatMachine {
                 sessions: RwLock::new(HashMap::new()),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
+                attachment_commits: crate::tokio::sync::watch::Sender::new(0),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 pending_runless_terminal_publications: StdMutex::new(HashMap::new()),
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
@@ -10963,6 +10968,7 @@ impl MeerkatMachine {
                 sessions: RwLock::new(HashMap::new()),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
+                attachment_commits: crate::tokio::sync::watch::Sender::new(0),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
                 pending_runless_terminal_publications: StdMutex::new(HashMap::new()),
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),

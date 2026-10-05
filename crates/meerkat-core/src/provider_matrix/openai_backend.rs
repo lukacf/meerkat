@@ -60,6 +60,16 @@ impl OpenAiBackendKind {
         }
     }
 
+    /// Whether this backend has admitted Meerkat's OpenAI prompt-cache fields
+    /// (`prompt_cache_enabled`, `_key`, `_retention`, `_options` and the input
+    /// breakpoints they author). Only the public OpenAI API has; the ChatGPT
+    /// backend, Azure OpenAI and Copilot stay gated off until their contracts
+    /// admit them (#925). The one owner of that decision: the OpenAI client
+    /// applies it on the wire (#1669) and hosts read it from the same place.
+    pub fn admits_prompt_cache_fields(self) -> bool {
+        matches!(self, Self::OpenAiApi)
+    }
+
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::OpenAiApi => "https://api.openai.com",
@@ -74,6 +84,18 @@ impl OpenAiBackendKind {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_public_openai_api_admits_prompt_cache_fields() {
+        for kind in OpenAiBackendKind::ALL {
+            assert_eq!(
+                kind.admits_prompt_cache_fields(),
+                *kind == OpenAiBackendKind::OpenAiApi,
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
 
     #[test]
     fn parse_roundtrip() {

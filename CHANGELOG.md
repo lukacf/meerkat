@@ -59,8 +59,22 @@ them.
 
   The JSON of MCP cancel requests and results is unchanged.
 
+- `meerkat_contracts::WireBackendProfile` gains the pub field
+  `prompt_cache_applicable: Option<bool>` (#1781; see Added). Code that
+  builds a `WireBackendProfile` with a struct literal must set it; the wire
+  form is unchanged for existing fields and the new field is omitted when
+  `None`.
 
 ### Added
+
+- Hosts can see whether Meerkat's OpenAI prompt-cache fields apply on a
+  backend: `WireBackendProfile.prompt_cache_applicable` (in a realm's
+  connection set and binding listings) is `true` for the public OpenAI API,
+  `false` for the ChatGPT backend and Azure OpenAI, and omitted for other
+  providers (#1781). It comes from the same decision the OpenAI client
+  applies on the wire, `OpenAiBackendKind::admits_prompt_cache_fields`, so
+  hosts no longer infer it from the backend kind. The SDKs' generated types
+  carry it.
 
 - `MobSessionService::load_retained_session_metadata` returns the latest
   committed metadata of an exact retained session, including archived sessions,

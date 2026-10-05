@@ -90,14 +90,23 @@ enum OpenAiBackendWire {
 }
 
 impl OpenAiBackendWire {
-    /// Whether this backend has admitted Meerkat's prompt-cache fields
-    /// (`prompt_cache_enabled`, `_key`, `_retention`, `_options` and the
-    /// input breakpoints they author). Only the public OpenAI API has; the
-    /// ChatGPT backend and Azure OpenAI stay gated off until their contracts
-    /// admit them (#925). This is the one owner of that decision: every
-    /// request this client sends passes it, whoever set the fields (#1669).
+    /// The backend kind this wire speaks to.
+    fn backend_kind(&self) -> meerkat_core::provider_matrix::OpenAiBackendKind {
+        match self {
+            Self::PublicOpenAi => meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+            Self::ChatGptBackend => {
+                meerkat_core::provider_matrix::OpenAiBackendKind::ChatGptBackend
+            }
+            Self::AzureOpenAi(_) => meerkat_core::provider_matrix::OpenAiBackendKind::AzureOpenAi,
+        }
+    }
+
+    /// Whether this backend has admitted Meerkat's prompt-cache fields,
+    /// decided by [`meerkat_core::provider_matrix::OpenAiBackendKind::admits_prompt_cache_fields`].
+    /// Every request this client sends passes it, whoever set the fields
+    /// (#1669).
     fn admits_prompt_cache_fields(&self) -> bool {
-        matches!(self, Self::PublicOpenAi)
+        self.backend_kind().admits_prompt_cache_fields()
     }
 }
 

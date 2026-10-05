@@ -6132,6 +6132,7 @@ export interface WireBackendProfile {
   base_url?: string | null;
   id: string;
   options?: unknown;
+  prompt_cache_applicable?: boolean | null;
   provider: string;
 }
 

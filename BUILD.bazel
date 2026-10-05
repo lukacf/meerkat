@@ -591,6 +591,7 @@ test_suite(
         "//crates/meerkat-comms:router_ambiguous_name_typed_error_test",
         "//crates/meerkat-comms:trust_duplicate_name_ok_duplicate_id_rejected_test",
         "//crates/meerkat-contracts:auth_binding_wire_test",
+        "//crates/meerkat-contracts:backend_profile_prompt_cache_wire_test",
         "//crates/meerkat-contracts:image_generation_wire_test",
         "//crates/meerkat-contracts:jobs_wire_test",
         "//crates/meerkat-contracts:live_audio_format_test",

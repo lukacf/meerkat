@@ -1439,11 +1439,11 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
-            return;
+            panic!("CI PROBE: skip path taken (probe)");
         }
         Err(error) => {
             eprintln!("skipped: user+pid namespaces unavailable: unshare probe: {error}");
-            return;
+            panic!("CI PROBE: skip path taken (probe error)");
         }
     }
     let root = TempDir::new().unwrap();
@@ -1510,7 +1510,7 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
                     "skipped: user+pid namespaces unavailable: unshare failed before the host started ({status}): {}",
                     stderr.trim()
                 );
-                return;
+                panic!("CI PROBE: skip path taken (unshare setup)");
             }
             panic!("the foreign-namespace host exited before it became ready ({status}); stderr:\n{stderr}");
         }
@@ -1546,6 +1546,9 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
     assert_eq!(
         report.recovered[0].cessation,
         ToolProcessCessation::ForeignIncarnationEnded
+    );
+    panic!(
+        "CI PROBE: the real foreign-namespace path ran to the end; see the exercised line above"
     );
 }
 

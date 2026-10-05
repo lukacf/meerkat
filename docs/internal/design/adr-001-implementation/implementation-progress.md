@@ -1,6 +1,79 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-04 at 21:03 UTC
+## Current delivery status, 2026-10-05
+
+The 0.9 coordinator leads the cross-repository work. Native
+[PR1730](https://github.com/lukacf/meerkat/pull/1730) is the current publication
+checkpoint. At the 18:44 UTC remote check it remained a draft at
+`afb79ea29d8cdf30689345d884b43bc6c5baa428`. The local runtime/test candidate is
+`64349561d898d0a9e3ad279fa1a7d286ff7b302f`, tree
+`2041118ca2f545541a1a05cccccb908765307589`. It integrates main through
+`98e26901ba24c0b2154192e17590cdb3773eb3b5`, the custody fixture correction,
+the accepted model-review/consent ADR, and a test-only OAuth fixture migration.
+This documentation refresh does not change that runtime/test source. The local
+candidate's normal push and CI are still pending; earlier published results do
+not qualify the integrated candidate.
+
+The native integration regression was executed before its repair: acquisition
+incorrectly accepted a builder-seeded runtime owner from a different store.
+After the repair, all eight selected tests passed across four binaries. They
+cover persistent owner/store conflicts, the typed conflicting-owner outcome,
+ephemeral service ownership, and queued work surviving model-visible permission
+refusal. The green command took 688.77 seconds, including 11m26s compilation;
+the test bodies took 0.737 seconds. Its raw log is
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-owner-green.log`.
+
+The auth-core test library initially failed to compile because its refresh tests
+still used the removed `BrowserOpener` fixture. A test-only migration to the
+host-driven login API retained the refresh cases. The targeted
+`mcp_oauth::tests::ce_mcp_stale_error_roundtrip_remains_typed` then passed,
+including the assertion that stale preparation is not a permission refusal.
+The command took 36.61 seconds, including 34.94 seconds compilation and a
+0.017-second test body. Its raw log is
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-stale-preparation-classification-r2.log`.
+Normal commit hooks passed. These nine selected passes do not establish complete
+surface coverage or replace the pending normal publication gate.
+
+The next broad cohort belongs to PR1730 after the combined runtime-correctness
+checkpoint finishes and its owned processes drain. That separate candidate is
+`e27338d97be661c1eb4e7670809020b91cba37f7`, tree
+`c92a3ef7ceded9e1d475bfa7ba4916a537604383`. Its second normal push passed lint,
+machine, generated-header and Bazel freshness checks, finished workspace
+compilation, and started unit execution at 18:35:05 UTC. It has no terminal
+workspace result at this checkpoint. Its raw log is
+`/private/tmp/adr-001-envelope-v4-r1/runtime-checkpoint-normal-push-r2.log`.
+Root publication does not require merging that separate branch first. One broad
+test cohort remains active at a time because socket and timing tests share host
+resources; independent source review and documentation continue in parallel.
+
+The [model-review and consent amendment](../adr-001-model-review-and-consent.md)
+incorporates the inspected Codex implementation and the accepted host deltas.
+It keeps default authorization local, treats optional reviewer unavailability
+separately from denial, and requires operation-local feedback with continued
+sibling and queued work. A reviewer cannot grant missing native permission.
+This is accepted design direction, not implemented reviewer, consent-consumption
+or host-integration functionality. Approval-store atomicity remains tracked by
+[issue1741](https://github.com/lukacf/meerkat/issues/1741).
+
+Performance acceptance remains open. No measurement qualifies the current
+integrated candidate. The historical six-cell study below missed every
+conditional mean threshold; fresh-turn overhead was 137.01 and 145.20 percent
+at grant depths 1 and 3. The required added authorization p99 below 1 ms per
+operation and representative overhead at most 10 percent remain unchanged.
+The accepted W20/N32 representative study needs a confirmed quiet GCP window
+and must finish within 20 minutes. It measures conditional mean ratios, not
+individual-operation p99; the latter still needs separate valid evidence.
+
+Full implementation remains incomplete under the
+[acceptance plan](acceptance-plan.md). Required follow-ons include interrupted
+recovery, persistent authority administration, principal/peer/callback carry,
+all surface and operation-family activation, Elephant integration, supported
+OS confinement, model review and human consent, and measured overhead. Narrow
+native or Console checkpoints do not satisfy those remaining requirements.
+The dated sections below preserve historical evidence and do not supersede
+this current delivery status.
+
+## Historical delivery status, 2026-10-04 at 21:03 UTC
 
 Native PR1634 is published at `b12d81e71e57bfeb2c3bc677c21c782f57cc3df6`,
 tree `1f9553187e12d0a7f91ac0cdd0ff54e56e658c77`. All normal push hooks,

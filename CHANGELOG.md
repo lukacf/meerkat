@@ -78,6 +78,19 @@ them.
   installs under PEP 668, which failed `make test-sdk-suites` in the 0.8.51
   release gate.
   `make path-classifier-selftest` runs `scripts/tests/require_python_test.sh`.
+- Repository scripts now require Bash >= 4.4 up front and say so. On macOS,
+  where `/usr/bin/env bash` can resolve to the system Bash 3.2, the pre-push
+  lane-retention contract died on `BASHPID: unbound variable`, and other
+  scripts rely on `mapfile`, associative arrays and expanding empty arrays
+  under `set -u`. `scripts/lib/require-bash.sh`, written in Bash 3.2 syntax,
+  stops the pre-push dispatcher, `release-hook.sh`,
+  `pre-push-prune-lanes.sh`, `check-semver-breaks.sh` and
+  `semver-rustdoc-json.sh` with "needs Bash >= 4.4; found <version>".
+  `rust-lane-doctor` and `release-doctor` report the version of `env bash`,
+  and `release-doctor` selects its Python through `require-python`.
+  `pre-push-prune-lanes.sh` falls back to `$$` when `BASHPID` is unset, and
+  `mapfile` uses in the semver scripts became read loops.
+  `scripts/tests/require_bash_test.sh` runs in `make path-classifier-selftest`.
 
 ## [0.8.51] - 2026-10-05
 

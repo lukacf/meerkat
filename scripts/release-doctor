@@ -68,16 +68,21 @@ else
   bad "npm is not installed; SDK publish checks need npm"
 fi
 
-release_python="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3 2>/dev/null || true)}"
-if [[ -z "${release_python}" ]]; then
-  bad "release hook Python is missing; install Python >= 3.10"
-elif "${release_python}" -c \
-  'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+if release_python="$("${workspace_root}/scripts/require-python" 3.10 "release hook" 2>/dev/null)"; then
   release_python_version="$("${release_python}" -c 'import platform; print(platform.python_version())')"
-  pass "release hook Python ${release_python_version} satisfies >= 3.10"
+  pass "release hook Python ${release_python_version} (${release_python}) satisfies >= 3.10"
 else
-  release_python_version="$("${release_python}" --version 2>&1 || true)"
-  bad "release hook Python '${release_python}' is too old (${release_python_version:-unknown}); require >= 3.10"
+  bad "$("${workspace_root}/scripts/require-python" 3.10 "release hook" 2>&1 >/dev/null)"
+fi
+
+# Bash >= 4.4 for the repository scripts (`#!/usr/bin/env bash`); see
+# scripts/lib/require-bash.sh. Check what `env bash` resolves to.
+env_bash_versinfo="$(env bash -c 'printf "%s %s %s" "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}" "${BASH_VERSION:-unknown}"' 2>/dev/null || true)"
+read -r env_bash_major env_bash_minor env_bash_version <<<"${env_bash_versinfo:-0 0 missing}"
+if [[ "${env_bash_major}" -gt 4 || ( "${env_bash_major}" -eq 4 && "${env_bash_minor}" -ge 4 ) ]]; then
+  pass "env bash ${env_bash_version} satisfies >= 4.4"
+else
+  bad "env bash is ${env_bash_version}; repository scripts need Bash >= 4.4 (macOS: brew install bash, ahead of /bin in PATH)"
 fi
 
 if command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com >/dev/null 2>&1; then

@@ -272,6 +272,7 @@ path-classifier-selftest:
 	@bash scripts/tests/ci_pr_classification_base_test.sh
 	@bash scripts/tests/buildbuddy_launcher_env_test.sh
 	@bash scripts/tests/require_python_test.sh
+	@bash scripts/tests/require_bash_test.sh
 	@bash scripts/tests/live_gate_selftest.sh
 
 cargo-agent-gate: rust-lane-doctor

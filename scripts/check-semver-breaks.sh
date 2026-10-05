@@ -34,6 +34,8 @@
 #                                        instead of downloading the release asset
 #   MEERKAT_SEMVER_REPORT_OUT            copy the tool report to this path
 set -euo pipefail
+# Bash >= 4.4 (see scripts/lib/require-bash.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/require-bash.sh"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -98,8 +100,9 @@ if ! git rev-parse -q --verify "refs/tags/${baseline_tag}^{commit}" >/dev/null 2
     git fetch --no-tags --depth=1 origin "+refs/tags/${baseline_tag}:refs/tags/${baseline_tag}"
 fi
 
-mapfile -t release_crates < <("$ROOT/scripts/release-rust-crates.sh")
+release_crates=()
 
+while IFS= read -r line; do release_crates+=("$line"); done < <("$ROOT/scripts/release-rust-crates.sh")
 classify_args=()
 for crate in "${release_crates[@]}"; do
     [[ -n "$crate" ]] || continue
@@ -112,10 +115,12 @@ done
 classified() {
     "$PYTHON" -c 'import json,sys; [print(c) for c in json.load(open(sys.argv[1]))[sys.argv[2]]]' "$classification_file" "$1"
 }
-mapfile -t changed_crates < <(classified changed)
-mapfile -t unchanged_crates < <(classified unchanged)
-mapfile -t first_publish_crates < <(classified first_publish)
-
+changed_crates=()
+while IFS= read -r line; do changed_crates+=("$line"); done < <(classified changed)
+unchanged_crates=()
+while IFS= read -r line; do unchanged_crates+=("$line"); done < <(classified unchanged)
+first_publish_crates=()
+while IFS= read -r line; do first_publish_crates+=("$line"); done < <(classified first_publish)
 echo "semver-breaks: ${#changed_crates[@]} crate(s) differ from ${baseline_tag}, ${#unchanged_crates[@]} identical, ${#first_publish_crates[@]} first publication"
 {
     echo "# semver-breaks classification against ${baseline_tag}"

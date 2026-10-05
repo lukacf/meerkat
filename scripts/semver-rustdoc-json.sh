@@ -33,6 +33,8 @@
 # Usage:
 #   scripts/semver-rustdoc-json.sh --source-root DIR --out DIR [--crate NAME]...
 set -euo pipefail
+# Bash >= 4.4 (see scripts/lib/require-bash.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/require-bash.sh"
 
 source_root=""
 out_dir=""
@@ -62,7 +64,8 @@ if [[ -x "$source_root/scripts/repo-cargo" ]]; then
 fi
 
 if [[ ${#crates[@]} -eq 0 ]]; then
-    mapfile -t crates < <("$source_root/scripts/release-rust-crates.sh")
+    crates=()
+    while IFS= read -r line; do crates+=("$line"); done < <("$source_root/scripts/release-rust-crates.sh")
 fi
 
 cd "$source_root"

@@ -7,6 +7,8 @@
 # "failed to push some refs", so an unattributed exit leaves the operator with
 # no way to tell a failing hook from a failing dispatcher.
 set -euo pipefail
+# Bash >= 4.4 (see scripts/lib/require-bash.sh).
+. "$(dirname "${BASH_SOURCE[0]}")/lib/require-bash.sh"
 
 dispatch_step="parsing hook arguments"
 

@@ -503,9 +503,35 @@ pub(super) fn recovered_peer_only_overlay_allows_trust_reconcile(
 // MobBuilder
 // ---------------------------------------------------------------------------
 
+/// Host binding hook called once during create or cold resume, before members
+/// can execute. The read-only handle exposes no actor commands. Use the hook
+/// to bind host services; an error aborts startup.
+///
+/// Hosts must discard bindings if a later bootstrap step fails. No hook runs
+/// unless one was explicitly installed with [`MobBuilder::before_activation`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type MobBeforeActivation = Arc<
+    dyn Fn(
+            super::MobReadHandle,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MobError>> + Send>>
+        + Send
+        + Sync,
+>;
+/// Host binding hook called before member execution on create or cold resume.
+#[cfg(target_arch = "wasm32")]
+pub type MobBeforeActivation = Arc<
+    dyn Fn(
+            super::MobReadHandle,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MobError>>>>
+        + Send
+        + Sync,
+>;
+
 /// Builder for creating or resuming a mob.
 pub struct MobBuilder {
     mode: BuilderMode,
+    before_activation: Option<MobBeforeActivation>,
     storage: MobStorage,
     session_service: Option<Arc<dyn MobSessionService>>,
     #[cfg(feature = "runtime-adapter")]
@@ -6666,6 +6692,9 @@ struct RuntimeWiring {
     dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
     machine_state_watch_tx:
         tokio::sync::watch::Sender<crate::machines::mob_machine::MobMachineState>,
+    /// Shared by preview handles and the final actor so restored dispatchers
+    /// observe subsequent lifecycle transitions through the same watch.
+    phase_watch_tx: tokio::sync::watch::Sender<MobState>,
     reachability_observations: Arc<super::handle::ReachabilityObservations>,
     restore_diagnostics:
         Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
@@ -6756,6 +6785,7 @@ impl MobBuilder {
     pub fn new(definition: MobDefinition, storage: MobStorage) -> Self {
         Self {
             mode: BuilderMode::Create(Arc::new(definition)),
+            before_activation: None,
             storage,
             session_service: None,
             #[cfg(feature = "runtime-adapter")]
@@ -6834,6 +6864,7 @@ impl MobBuilder {
             mode: BuilderMode::Resume {
                 expected_definition,
             },
+            before_activation: None,
             storage,
             session_service: None,
             #[cfg(feature = "runtime-adapter")]
@@ -6913,6 +6944,15 @@ impl MobBuilder {
     /// Default is `false`, which enforces the persistent-session contract.
     pub fn allow_ephemeral_sessions(mut self, allow: bool) -> Self {
         self.allow_ephemeral_sessions = allow;
+        self
+    }
+
+    /// Bind host services before any newly created or restored member can run.
+    /// The callback receives the same roster and session authority used by the
+    /// eventual public handle. It exposes only direct read operations because
+    /// the actor starts after bootstrap succeeds. A failure aborts bootstrap.
+    pub fn before_activation(mut self, hook: MobBeforeActivation) -> Self {
+        self.before_activation = Some(hook);
         self
     }
 
@@ -7062,6 +7102,7 @@ impl MobBuilder {
         Box::pin(async move {
             let MobBuilder {
                 mode,
+                before_activation,
                 storage,
                 session_service,
                 #[cfg(feature = "runtime-adapter")]
@@ -7267,6 +7308,7 @@ impl MobBuilder {
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
+                before_activation,
             )
             .await;
             #[cfg(not(target_arch = "wasm32"))]
@@ -7299,6 +7341,7 @@ impl MobBuilder {
     pub async fn resume(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
             mode,
+            before_activation,
             storage,
             session_service,
             #[cfg(feature = "runtime-adapter")]
@@ -7712,16 +7755,19 @@ impl MobBuilder {
             let seeded_restore_diagnostics = HashMap::new();
             // Prepare shared runtime components early so resume reconciliation can
             // wire tool dispatchers for recreated sessions to the final actor channel.
-            let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
+            // Restored dispatchers may read identity and historical creation
+            // facts during member materialization. Seed from the committed
+            // replay before binding host services; reconciliation replaces the
+            // projection below after applying any recovered binding events.
+            let roster_state = Arc::new(RwLock::new(RosterAuthority::from_roster(roster.clone())));
             let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
             let (machine_state_watch_tx, machine_state_watch_rx) =
                 tokio::sync::watch::channel(initial_dsl_authority.state().clone());
             let reachability_observations =
                 Arc::new(super::handle::ReachabilityObservations::default());
-            // Preview phase watch so the preview handle can answer status()
-            // before the actor spawns. The real actor-side sender replaces
-            // this once start_runtime_with_components owns the final pair.
-            let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
+            // Preview and final handles share one live phase watch. Host
+            // bindings and restored tools retain the preview handle.
+            let (phase_watch_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
             // One late-bound barrier per mob. Resume-time tool dispatchers,
             // the returned owner handle, and actor-created member tool handles
             // must all observe installations made after construction.
@@ -7738,6 +7784,7 @@ impl MobBuilder {
                 roster: roster_state.clone(),
                 dsl_authority: initial_dsl_authority,
                 machine_state_watch_tx,
+                phase_watch_tx,
                 reachability_observations: Arc::clone(&reachability_observations),
                 restore_diagnostics: restore_diagnostics.clone(),
                 runtime_metadata: storage.runtime_metadata.clone(),
@@ -7783,6 +7830,9 @@ impl MobBuilder {
                 per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
+            if let Some(hook) = before_activation {
+                hook(preview_handle.read_handle()).await?;
+            }
 
             let seeded_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
                 wiring.dsl_authority.state().topology_epoch,
@@ -8036,6 +8086,9 @@ impl MobBuilder {
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
+                // Cold resume already bound the preview handle before any
+                // member registration or reconciliation could execute work.
+                None,
             )
             .await
         }
@@ -8899,7 +8952,7 @@ impl MobBuilder {
                                 None
                             };
                             let recovered_endpoint_missing = recovered_endpoint.is_none();
-                            append_recovered_session_binding(
+                            let recovered_event = append_recovered_session_binding(
                                 dsl_authority,
                                 &tool_handle.events,
                                 &definition.id,
@@ -8909,15 +8962,17 @@ impl MobBuilder {
                                 "resume_repoint_missing_member_session_binding",
                             )
                             .await?;
+                            roster.apply(&recovered_event);
+                            tool_handle
+                                .roster
+                                .write()
+                                .await
+                                .apply_event(&recovered_event);
                             if recovered_endpoint_missing {
                                 new_recovered_session_bindings_without_endpoint
                                     .insert(entry.agent_identity.clone());
                             }
                             bridge_session_id = replacement_session_id;
-                            let _ = roster.set_bridge_session_id(
-                                &entry.agent_identity,
-                                bridge_session_id.clone(),
-                            );
                             if reuse_active_replacement {
                                 continue;
                             }
@@ -9483,7 +9538,7 @@ impl MobBuilder {
                                 entry.agent_identity
                             ))
                         })?;
-                    append_recovered_session_binding(
+                    let recovered_event = append_recovered_session_binding(
                         dsl_authority,
                         &tool_handle.events,
                         &definition.id,
@@ -9493,6 +9548,12 @@ impl MobBuilder {
                         "resume_upgrade_recovered_member_peer_endpoint",
                     )
                     .await?;
+                    roster.apply(&recovered_event);
+                    tool_handle
+                        .roster
+                        .write()
+                        .await
+                        .apply_event(&recovered_event);
                 } else {
                     register_seeded_member_peer(
                         dsl_authority,
@@ -9617,6 +9678,7 @@ impl MobBuilder {
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
         controlling_acceptor: Option<ControllingAcceptorConfig>,
         member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
+        before_activation: Option<MobBeforeActivation>,
     ) -> RuntimeStartFuture {
         Box::pin(async move {
             // Row #320 seed: the orphan budget is machine state, seeded once from the
@@ -9636,6 +9698,8 @@ impl MobBuilder {
             )?;
             let (machine_state_watch_tx, _machine_state_watch_rx) =
                 tokio::sync::watch::channel(dsl_authority.state().clone());
+            let (phase_watch_tx, _) =
+                tokio::sync::watch::channel(seeded_mob_public_phase(dsl_authority.state()));
             let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
             let (composition_binding, composition_signal_dispatcher) =
                 super::composition::binding_for_actor(&runtime_adapter, command_tx.clone());
@@ -9658,6 +9722,7 @@ impl MobBuilder {
                 roster,
                 dsl_authority,
                 machine_state_watch_tx,
+                phase_watch_tx,
                 reachability_observations: Arc::new(
                     super::handle::ReachabilityObservations::default(),
                 ),
@@ -9716,6 +9781,7 @@ impl MobBuilder {
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
+                before_activation,
             )
             .await
         })
@@ -9764,6 +9830,7 @@ impl MobBuilder {
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
         controlling_acceptor: Option<ControllingAcceptorConfig>,
         member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
+        before_activation: Option<MobBeforeActivation>,
     ) -> RuntimeStartFuture {
         Box::pin(async move {
             // Recover the actor-local idempotency index from durable public events
@@ -9785,6 +9852,7 @@ impl MobBuilder {
                 roster,
                 dsl_authority,
                 machine_state_watch_tx,
+                phase_watch_tx: phase_watch_tx_actor,
                 reachability_observations,
                 restore_diagnostics,
                 runtime_metadata,
@@ -9802,8 +9870,8 @@ impl MobBuilder {
             let wiring_public_phase = seeded_mob_public_phase(dsl_authority.state());
             // Terminal-phase watch: seed with the initial phase so a status()
             // call before any DSL transition returns the right answer.
-            let (phase_watch_tx_actor, phase_watch_rx) =
-                tokio::sync::watch::channel(wiring_public_phase);
+            phase_watch_tx_actor.send_replace(wiring_public_phase);
+            let phase_watch_rx = phase_watch_tx_actor.subscribe();
             let handle = MobHandle {
                 // Explicit launch-site mint (A16): the launching process IS the
                 // owning operator — not ambient inference (gotcha #19).
@@ -9831,6 +9899,9 @@ impl MobBuilder {
                 lifecycle_observations: Arc::clone(&lifecycle_observations),
                 per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
+            if let Some(hook) = before_activation {
+                hook(handle.read_handle()).await?;
+            }
             // Row #320: the orphan budget is MobMachine state (seeded once in
             // `start_runtime` from `definition.limits.max_orphaned_turns`); the
             // executor no longer holds a shell-side budget.

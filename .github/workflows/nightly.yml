@@ -258,18 +258,10 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      - name: Install pinned TLC
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
-            --output "$HOME/.local/lib/tla2tools.jar"
-          printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' \
-            "$HOME/.local/lib" > "$HOME/.local/bin/tlc"
-          chmod +x "$HOME/.local/bin/tlc"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Setup TLC
+        uses: ./.github/actions/setup-tlc-ci
+        with:
+          setup-java: "false"
 
       - name: Canonical bounded machine verification
         run: make machine-verify
@@ -317,18 +309,10 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      - name: Install pinned TLC
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
-            --output "$HOME/.local/lib/tla2tools.jar"
-          printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' \
-            "$HOME/.local/lib" > "$HOME/.local/bin/tlc"
-          chmod +x "$HOME/.local/bin/tlc"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Setup TLC
+        uses: ./.github/actions/setup-tlc-ci
+        with:
+          setup-java: "false"
 
       - name: Deep composition verification (900 s per-run cap)
         run: make machine-verify-deep-compositions

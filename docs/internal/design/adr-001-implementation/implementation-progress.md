@@ -1,10 +1,10 @@
 # ADR-001 implementation checkpoint
 
-## Current delivery status, 2026-10-05
+## Current delivery status, 2026-10-06
 
 The 0.9 coordinator leads the cross-repository work. Native
 [PR1730](https://github.com/lukacf/meerkat/pull/1730) is the current publication
-checkpoint. At the 19:24 UTC remote check it remained a draft at
+checkpoint. At the latest remote check it remained a draft at
 `afb79ea29d8cdf30689345d884b43bc6c5baa428`. The previous integrated baseline is
 `64349561d898d0a9e3ad279fa1a7d286ff7b302f`, tree
 `2041118ca2f545541a1a05cccccb908765307589`. It integrates main through
@@ -24,6 +24,30 @@ in the 0.9 coordinator chat temporarily removes GitHub CI as a blocker during
 the Actions outage. CI is recorded as skipped, never passed. Existing local
 checks, source identity, consumer acceptance and publication ownership remain;
 normal CI resumes when the service is healthy.
+
+MobKit's approval display checkpoint [PR594](https://github.com/lukacf/meerkat-mobkit/pull/594)
+merged as `e09a3c33e25c96a29cff30ec2923eaccc7a9c7ba` at 22:15:37 UTC.
+Its final source passed 726 console tests and all 14 existing static, build,
+freshness and inventory commands. Inventory checks are not E2E executions.
+The operator guide [PR603](https://github.com/lukacf/meerkat-mobkit/pull/603)
+merged as `62bef663cdbae8d59340d5d85d09650b698bf318` at 22:20:43 UTC after
+normal applicable documentation hooks. Hosted CI for both merges was skipped
+under the explicit outage exception. These changes display existing decisions
+and document their limits; they do not implement the native model reviewer or
+establish release/deployment acceptance.
+
+The current Mac integration cut is main `851fd7de9`, including PR1749's retained
+member lineage and PR1760's in-memory ops lifecycle deadlock repair. The store
+merge preserves native custody and epoch retirement while placing ops snapshots
+and retirement fences behind the incoming separate short-lived mutex. CI keeps
+both governed JSONL and upstream TLC requirements; changelog entries from both
+parents remain. A source review also migrated the newly added CLI and retained
+metadata fixtures to the fallible native constructors. These are source-level
+integration findings, not executed test passes. Existing GCP `c7f42abb` results
+remain baseline evidence; the final normal Mac gate must qualify this integrated
+source. Routine unrelated main changes do not require repeating this integration.
+
+Clock times in the qualification history below are UTC on 2026-10-05.
 
 The GCP run lasted from 20:39:20 to 21:05:56 UTC on the exact `f3ebf2a02`
 source. Workspace library, integration and E2E inventories stopped during

@@ -449,6 +449,45 @@ else
   bad "TLC lane parts drop, duplicate, or misplace a hand audit, or the machine-verify part runs one"
 fi
 
+# The audit shards never execute xtask, so the PR lane runs them without an
+# xtask argument; every other part still requires one.
+if noxtask_a="$(PATH="$tlc_env_tmp:$PATH" \
+      TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+      TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+      bash crates/xtask/tests/machine_verify_all_tlc_test.sh --part audits-a 2>&1)" \
+  && [ "$(printf '%s\n' "$noxtask_a" | audit_lines)" = "$(printf '%s\n' "$a_out" | audit_lines)" ] \
+  && ! PATH="$tlc_env_tmp:$PATH" bash crates/xtask/tests/machine_verify_all_tlc_test.sh --part machine-verify >/dev/null 2>&1; then
+  ok "TLC lane: audit shards run without an xtask argument; machine-verify still requires one"
+else
+  bad "TLC lane: an audit shard needs an xtask argument, or machine-verify runs without one"
+fi
+
+# setup-tlc-ci is the one TLC install: the repository's immutable mirror of
+# the tlaplus v1.8.0 build (tlaplus rebuilds that pre-release in place),
+# pinned by sha256, with no fallback. Every workflow and action installs TLC
+# through it, so PR, nightly and BuildBuddy lanes run one build.
+tlc_action=.github/actions/setup-tlc-ci/action.yml
+tlc_mirror='https://github.com/lukacf/meerkat/releases/download/tlc-tla2tools-v1.8.0-20261004/tla2tools.jar'
+tlc_sha256='c2fe4e56e43bde19f213b4a7e441d037297fda733e503579623e859b79348239'
+if [ -f "$tlc_action" ] \
+  && grep -Fq "default: ${tlc_mirror}" "$tlc_action" \
+  && grep -Fq "default: ${tlc_sha256}" "$tlc_action" \
+  && grep -Fq 'distribution: temurin' "$tlc_action" \
+  && grep -Fq 'sha256sum' "$tlc_action" \
+  && grep -Fq 'needs a sha256 pin' "$tlc_action" \
+  && grep -Fq 'does not match the pinned' "$tlc_action" \
+  && grep -Fq 'GITHUB_PATH' "$tlc_action"; then
+  ok "setup-tlc-ci installs the mirrored TLC jar pinned by sha256 and reports its digest"
+else
+  bad "setup-tlc-ci is missing, unpinned, off the mirror, or no longer reports the jar digest"
+fi
+if [ -z "$(grep -rlF 'tlaplus/tlaplus/releases' .github)" ] \
+  && [ "$(grep -rlF 'uses: ./.github/actions/setup-tlc-ci' .github | sort | tr '\n' ' ')" = ".github/actions/setup-buildbuddy-ci/action.yml .github/workflows/cargo.yml .github/workflows/ci.yml .github/workflows/nightly.yml " ]; then
+  ok "every TLC install goes through setup-tlc-ci; no workflow downloads the rolling tlaplus jar"
+else
+  bad "a workflow or action installs TLC outside setup-tlc-ci, or downloads the rolling tlaplus jar"
+fi
+
 echo ""
 echo "gate summary: ${pass} passed, ${fail} failed"
 if [ "$fail" -ne 0 ]; then

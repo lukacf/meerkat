@@ -108,15 +108,10 @@ struct Inner {
     /// malformed and unsupported rows remain observable instead of being
     /// normalized by an eager typed decode.
     runtime_lifecycle: HashMap<String, Vec<u8>>,
-    /// Persisted ops lifecycle snapshots.
-    ops_lifecycle_snapshots: HashMap<String, PersistedOpsSnapshot>,
     /// Durable semantic high-water for peer-only member sessions. Runtime
     /// bearer tokens are deliberately never persisted here.
     direct_member_incarnation_high_waters:
         HashMap<String, meerkat_contracts::wire::supervisor_bridge::BridgeDirectMemberIncarnation>,
-    /// Exact ops epochs retired by atomic unregister finalization. Tombstones
-    /// outlive row deletion so detached callbacks cannot resurrect them.
-    retired_ops_epochs: HashSet<(String, meerkat_core::RuntimeEpochId)>,
     /// Runtime id -> transcript-rewrite-keyed compaction projection outbox.
     compaction_projection_outbox:
         HashMap<String, HashMap<meerkat_core::CompactionProjectionId, CompactionOutboxEntry>>,
@@ -469,13 +464,34 @@ fn apply_prepared_memory_input_state_mutations(
     }
 }
 
-/// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`.
+/// Ops lifecycle state, kept apart from [`Inner`] (#1654).
+///
+/// The ops lifecycle persistence worker writes here while a terminal
+/// transition holds its runtime thread for the worker's reply. Any task can
+/// hold `inner` across an await; if the worker needed `inner`, a task holding
+/// it on the blocked thread could never resume to release it, and the thread
+/// would never wake. So this lock is a std mutex, held only for short sections
+/// that never await, and it never waits on `inner`. Lock order where both are
+/// needed (`commit_unregister_finalization`): `inner`, then this.
+#[derive(Debug, Default)]
+struct OpsLifecycleState {
+    /// Persisted ops lifecycle snapshots.
+    snapshots: HashMap<String, PersistedOpsSnapshot>,
+    /// Exact ops epochs retired by atomic unregister finalization. Tombstones
+    /// outlive row deletion so detached callbacks cannot resurrect them.
+    retired_epochs: HashSet<(String, meerkat_core::RuntimeEpochId)>,
+}
+
+/// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`, except the
+/// ops lifecycle state, which is behind its own std mutex (see
+/// [`OpsLifecycleState`]).
 #[derive(Debug, Clone)]
 pub struct InMemoryRuntimeStore {
     // Created once with the actual shared memory backend. Derived Clone keeps
     // this same mechanical owner along with the same row-state Inner.
     execution_custody: super::RuntimeStoreExecutionCustody,
     inner: Arc<Mutex<Inner>>,
+    ops_lifecycle: Arc<StdMutex<OpsLifecycleState>>,
     auth_oauth_flow_snapshot: Arc<StdMutex<Option<Vec<u8>>>>,
     #[cfg(test)]
     auth_oauth_flow_store_calls: Arc<AtomicUsize>,
@@ -537,7 +553,10 @@ impl InMemoryRuntimeStore {
         entered: Arc<crate::tokio::sync::Notify>,
         release: Arc<crate::tokio::sync::Notify>,
     ) {
-        *self.ops_lifecycle_persist_before.lock().unwrap() = Some((entered, release));
+        *self
+            .ops_lifecycle_persist_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
     }
 
     #[cfg(test)]
@@ -546,13 +565,23 @@ impl InMemoryRuntimeStore {
         entered: Arc<crate::tokio::sync::Notify>,
         release: Arc<crate::tokio::sync::Notify>,
     ) {
-        *self.atomic_input_persist_before.lock().unwrap() = Some((entered, release));
+        *self
+            .atomic_input_persist_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
     }
 
     #[cfg(test)]
     pub(crate) fn lose_next_atomic_input_persist_acknowledgement(&self) {
         self.atomic_input_persist_ack_loss
             .store(true, Ordering::Release);
+    }
+
+    /// Hold the store's shared state lock, as any store operation does while
+    /// it runs. Test support for the persistence-wait deadlock shape (#1654).
+    #[cfg(test)]
+    pub(crate) async fn hold_state_lock_for_test(&self) -> impl Drop + '_ {
+        self.inner.lock().await
     }
 
     /// Install committed WholeBlob body bytes verbatim, bypassing every
@@ -585,6 +614,7 @@ impl InMemoryRuntimeStore {
         Self {
             execution_custody: super::RuntimeStoreExecutionCustody::new(),
             inner: Arc::new(Mutex::new(Inner::default())),
+            ops_lifecycle: Arc::new(StdMutex::new(OpsLifecycleState::default())),
             auth_oauth_flow_snapshot: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             auth_oauth_flow_store_calls: Arc::new(AtomicUsize::new(0)),
@@ -2987,7 +3017,11 @@ impl RuntimeStore for InMemoryRuntimeStore {
     ) -> Result<(), RuntimeStoreError> {
         #[cfg(test)]
         {
-            let gate = self.atomic_input_persist_before.lock().unwrap().take();
+            let gate = self
+                .atomic_input_persist_before
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             if let Some((entered, release)) = gate {
                 entered.notify_one();
                 release.notified().await;
@@ -3665,14 +3699,22 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .insert(rid.clone(), lifecycle_record);
         sync_runtime_session_catalog_lifecycle(&mut inner, &rid, runtime_state);
         apply_prepared_memory_input_state_mutations(&mut inner, &rid, prepared_input_mutations);
-        if inner
-            .ops_lifecycle_snapshots
+        // Lock order: `inner` (held above), then the ops lifecycle state. The
+        // ops lock never waits on `inner`, so the persistence worker, which
+        // takes only the ops lock, can always finish (#1654). Taking it while
+        // `inner` is still held keeps this finalization one transaction.
+        let mut ops = self
+            .ops_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ops
+            .snapshots
             .get(&rid)
             .is_some_and(|snapshot| snapshot.epoch_id == retired_ops_epoch)
         {
-            inner.ops_lifecycle_snapshots.remove(&rid);
+            ops.snapshots.remove(&rid);
         }
-        inner.retired_ops_epochs.insert((rid, retired_ops_epoch));
+        ops.retired_epochs.insert((rid, retired_ops_epoch));
         Ok(())
     }
 
@@ -3683,15 +3725,22 @@ impl RuntimeStore for InMemoryRuntimeStore {
     ) -> Result<(), RuntimeStoreError> {
         #[cfg(test)]
         {
-            let gate = self.ops_lifecycle_persist_before.lock().unwrap().take();
+            let gate = self
+                .ops_lifecycle_persist_before
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             if let Some((entered, release)) = gate {
                 entered.notify_one();
                 release.notified().await;
             }
         }
-        let mut inner = self.inner.lock().await;
-        if inner
-            .retired_ops_epochs
+        let mut ops = self
+            .ops_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ops
+            .retired_epochs
             .contains(&(runtime_id.0.clone(), snapshot.epoch_id.clone()))
         {
             return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
@@ -3699,9 +3748,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 epoch_id: snapshot.epoch_id.clone(),
             });
         }
-        inner
-            .ops_lifecycle_snapshots
-            .insert(runtime_id.0.clone(), snapshot.clone());
+        ops.snapshots.insert(runtime_id.0.clone(), snapshot.clone());
         Ok(())
     }
 
@@ -3710,10 +3757,13 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         candidate: &PersistedOpsSnapshot,
     ) -> Result<PersistedOpsSnapshot, RuntimeStoreError> {
-        let mut inner = self.inner.lock().await;
+        let mut ops = self
+            .ops_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = runtime_id.0.clone();
-        if inner
-            .retired_ops_epochs
+        if ops
+            .retired_epochs
             .contains(&(key.clone(), candidate.epoch_id.clone()))
         {
             return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
@@ -3721,13 +3771,13 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 epoch_id: candidate.epoch_id.clone(),
             });
         }
-        let canonical = inner
-            .ops_lifecycle_snapshots
+        let canonical = ops
+            .snapshots
             .entry(key)
             .or_insert_with(|| candidate.clone())
             .clone();
-        if inner
-            .retired_ops_epochs
+        if ops
+            .retired_epochs
             .contains(&(runtime_id.0.clone(), canonical.epoch_id.clone()))
         {
             return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
@@ -3742,16 +3792,22 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<PersistedOpsSnapshot>, RuntimeStoreError> {
-        let inner = self.inner.lock().await;
-        Ok(inner.ops_lifecycle_snapshots.get(&runtime_id.0).cloned())
+        let ops = self
+            .ops_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(ops.snapshots.get(&runtime_id.0).cloned())
     }
 
     async fn delete_ops_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<(), RuntimeStoreError> {
-        let mut inner = self.inner.lock().await;
-        inner.ops_lifecycle_snapshots.remove(&runtime_id.0);
+        self.ops_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshots
+            .remove(&runtime_id.0);
         Ok(())
     }
 

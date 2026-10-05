@@ -422,8 +422,10 @@ document.getElementById("agentPicker")!.addEventListener("click", (e) => {
 
 async function loadRuntime(): Promise<RuntimeModule> {
   if (runtime) return runtime;
+  // Page-relative, like the sprites and background: the app may be served
+  // from a sub-path rather than a site root.
   const urls = [
-    new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString(),
+    new URL("./meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString(),
     new URL("./runtime.js", window.location.href).toString(),
   ];
   let mod: RuntimeModule | null = null;

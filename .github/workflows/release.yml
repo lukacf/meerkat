@@ -371,6 +371,10 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release_assets_only != 'true' }}
         run: make check-rust-release-config
 
+      - name: Verify release crates package their license files
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release_assets_only != 'true' }}
+        run: make check-crate-license-files
+
       # 0.8.22 lost a release evening here: the tag's Cargo.lock referenced a
       # thiserror version the merged lock no longer contained (only --locked
       # refuses it, and cargo publish is --locked), and healing that lock

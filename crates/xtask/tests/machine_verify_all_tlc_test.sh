@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-xtask_bin="${1:?xtask binary path is required}"
+# usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
+#        machine_verify_all_tlc_test.sh --part audits-a|audits-b
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -12,9 +13,16 @@ xtask_bin="${1:?xtask binary path is required}"
 # machine_verify_audits_a_tlc_test, machine_verify_audits_b_tlc_test) so the
 # BuildBuddy machine-authority lane runs them in parallel; together they are
 # exactly `all`.
+# The audit shards never execute xtask, so they alone may omit its path.
 lane_part="all"
-if [[ "${2:-}" == "--part" ]]; then
-  lane_part="${3:?--part needs machine-verify, audits-a, audits-b or all}"
+if [[ "${1:-}" == "--part" && ( "${2:-}" == "audits-a" || "${2:-}" == "audits-b" ) ]]; then
+  xtask_bin=""
+  lane_part="$2"
+else
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a|audits-b may omit it)}"
+  if [[ "${2:-}" == "--part" ]]; then
+    lane_part="${3:?--part needs machine-verify, audits-a, audits-b or all}"
+  fi
 fi
 case "${lane_part}" in
   machine-verify|audits-a|audits-b|all) ;;
@@ -27,7 +35,7 @@ esac
 run_part() {
   [[ "${lane_part}" == "all" || "${lane_part}" == "$1" ]]
 }
-if [[ "${xtask_bin}" != /* ]]; then
+if [[ -n "${xtask_bin}" && "${xtask_bin}" != /* ]]; then
   if [[ -x "${PWD}/${xtask_bin}" ]]; then
     xtask_bin="${PWD}/${xtask_bin}"
   else
@@ -56,6 +64,10 @@ fi
 if ! command -v tlc >/dev/null 2>&1; then
   if [[ "${MACHINE_VERIFY_TLC_DRIFT_ONLY:-0}" == "1" ]]; then
     echo "MACHINE_VERIFY_TLC_DRIFT_ONLY=1: tlc absent, running drift-only machine-check-drift (NOT TLC verification)"
+    if [[ -z "${xtask_bin}" ]]; then
+      echo "error: tlc is absent and drift-only needs the xtask binary; pass it before --part" >&2
+      exit 1
+    fi
     exec "${xtask_bin}" machine-check-drift --all
   fi
   echo "error: tlc not on PATH but this lane advertises TLC-backed verification." >&2

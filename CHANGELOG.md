@@ -57,6 +57,40 @@ them.
 
 ### Added
 
+- `MobSessionService::load_retained_session_metadata` returns the latest
+  committed metadata of an exact retained session, including archived sessions,
+  through the persistent service's authoritative metadata owner. Unsupported
+  backends return a typed error. Ordinary visibility, resume and write rules
+  are unchanged; this read provides no revision or currentness guarantee.
+- `meerkat_mob::event::MemberSpawnedEvent` gains the public `creation` field.
+  Journals without that field remain readable as unknown provenance with no
+  creation token; replay never invents an ancestor or a proven root.
+- `meerkat-mob` records runtime-issued member creation identities and exact
+  spawn, fork and successor provenance in the existing member-created journal.
+  `MemberCreationId`, `MemberCreationRecord`, `MemberCreationProvenance`,
+  `MemberCreationSource`, `MemberCreationSnapshot`, `MemberCreationSourceWitness`
+  and `MemberCreationError` expose those facts.
+  `MobHandle::{member_creation_for_session, member_creation_journal_cursor}`
+  read retained creation facts and their journal position;
+  `MobHandle::capture_member_creation_source` captures a sealed source witness
+  for `SpawnMemberSpec::with_creation_source` before delegation. These
+  facts prove ancestry, not permission to execute tools or access a resource.
+  New unproven ancestry is distinct from missing legacy data, and a provenance
+  read failure does not prevent ordinary spawn, fork or delegation execution.
+- `SpawnMemberSpec::host_root` explicitly marks trusted host-origin creation.
+  `SpawnMemberSpec::new` defaults to unproven ancestry; agent-lane handles
+  downgrade host-root requests. Policy auto-spawn also remains unproven.
+- `MobBuilder::before_activation` accepts a `MobBeforeActivation` host hook
+  before fresh or restored members execute. Hosts can bind optional services
+  to the current roster and session authority before the first tool call.
+  Its `MobReadHandle`, also available through `MobHandle::read_handle`, exposes
+  direct reads and no actor commands.
+  A failed hook aborts startup; no hook runs unless explicitly configured.
+- `MobMcpState::{set_before_activation, set_additional_child_tool_bundles}`
+  propagate optional host service binding and tool factories to delegated
+  child mobs. Factories resolve each executing caller independently; child
+  registration does not reuse a parent's access decision.
+
 - Generic connector OAuth (#1631). A trusted host names a credential slot
   (`{realm_id, slot_id}`, a storage address, never account proof) and a
   connector descriptor (issuer, client, resource, scopes, strategy and
@@ -90,15 +124,49 @@ them.
   Cold reads no longer wait on their own guard. Connector logout uses the
   coordinated credential mutation path with an atomic mode check, preserving
   foreign-mode credentials and the existing rollback behavior.
+
+- BuildBuddy runs no longer sit idle for 600 s after every build (#1744).
+  Since the Bazel client started running under an environment allowlist,
+  `scripts/buildbuddy-bazel-poc` put its stderr `tee` redirect on a call of a
+  shell function. Bash keeps a process substitution's pipe open while a
+  function runs, so the client inherited it, and the Bazel server it
+  daemonizes held it for `--max_idle_secs` (600 s). The script's `wait` for
+  `tee` then blocked that long after Bazel had already finished. That cost
+  about 10 minutes per invocation on the GCP graph and on the hosted release
+  builds, and pushed submitters over their timeouts. The redirect now sits on
+  the client command itself.
+  - A run that outlasts Bazel's reported build time by more than
+    `BUILDBUDDY_MAX_EXIT_LAG_SECS` (default 120 s) now fails loudly, without a
+    retry, so a stall like this shows up as itself.
+  - `scripts/tests/buildbuddy_poc_exit_lag_test.sh` covers this with a fake
+    client that leaves a daemon behind. It runs in
+    `make path-classifier-selftest`.
+
+- Examples: the Office demo (`examples/033-the-office-demo-sh`) works when
+  served from a sub-path, not only from a site root. Its built page loaded
+  `/assets/...` and the WASM runtime from `/meerkat-pkg/...` at the root;
+  Vite now builds with relative asset URLs (`base: "./"`) and the runtime
+  loads page-relative, like the demo's sprites and background. The offline
+  regression suite imports the runtime the same way.
+
 - Model catalog: Claude Sonnet 5.5 (`claude-sonnet-5-5`) now refuses a forced
   `tool_choice` (`required` or a named tool) locally with the typed
   `ModelDoesNotSupportForcedToolChoice` before the provider call, as Claude Opus
   5.5 already did. Anthropic documents that Sonnet 5.5 rejects forced tool use
   with a 400, so the request no longer spends a provider round trip that is
   documented to fail. `auto` and `none` are unchanged.
-
-### Fixed
-
+- A runtime with the in-memory runtime store (`RealmBackend::Memory`, and
+  the in-memory store the RPC server and runtime-backed surfaces use) could
+  wedge a runtime thread for good when an operation finished. A terminal ops
+  transition blocks its thread until the ops lifecycle persistence worker
+  answers, and that worker needed the store's shared lock. If a task on the
+  same thread held that lock across an await, it could never resume to
+  release it, so the worker never answered and the thread never woke. The
+  in-memory store now keeps ops lifecycle state behind its own short-held
+  lock that never waits on the shared one (#1654).
+  `RuntimeStore::persist_ops_lifecycle` now documents the contract custom
+  stores must meet: never wait on state a runtime task can hold across an
+  await. The SQLite store already met it.
 - `meerkat-tools` tests compile on macOS again. The custody foreign-namespace
   fixture (`a_host_in_another_pid_namespace_is_proven_ended_by_its_lock`, its
   host role and their constants) uses `unshare(1)` and tokio's read-write FIFO
@@ -162,6 +230,14 @@ them.
   5.5 it accepts forced `tool_choice` and does not support mid-conversation
   system messages. Provider inference stays an exact catalog match: other
   uncatalogued `claude-*` IDs still fail loudly.
+- Published crates now include their license files. Every crate declares
+  `license = "MIT OR Apache-2.0"`, but cargo packages only files under the
+  crate directory, so 0.8.51 and earlier published every crate without
+  `LICENSE-MIT` or `LICENSE-APACHE`. Each release crate now carries symlinks
+  to the workspace-root files, which `cargo package` follows, and
+  `make check-crate-license-files` fails CI and release validation when a
+  release crate's `cargo package --list` lacks either file. The release
+  packaging check also verifies both files in every built `.crate` archive.
 
 ### Testing
 
@@ -183,6 +259,34 @@ them.
   must leave the audit's goal unreachable. Dropping the bootstrap-summary
   conjunct must fail `AuditResultFollowsSummary`. Both seeded defects were
   previously checked only by hand (#1607).
+- PR CI runs the bounded TLC audits. When a pull request or push touches
+  machine authority, a `Bounded TLC audits` job runs both hand-written audit
+  shards of the canonical TLC lane in parallel, and the `CI gate` requires
+  it (#1720). The audit shards take no xtask argument.
+- One pinned TLC build for every lane. The new `setup-tlc-ci` action
+  installs the repository's immutable mirror of the tlaplus v1.8.0 jar
+  (release `tlc-tla2tools-v1.8.0-20261004`), pinned by sha256 with no
+  fallback, and prints the jar's source, digest and TLC version. tlaplus
+  rebuilds its v1.8.0 pre-release in place, so PR, nightly and BuildBuddy
+  lanes could run different TLC builds. The PR, nightly and `cargo.yml`
+  TLC lanes and `setup-buildbuddy-ci` now all install through the action.
+
+- Turbo S S101's premature-outcome oracle no longer reads a duration as the
+  second job (#1713). "The 25 second one just finished." names job 1, the
+  25-second job, but matched job 2's ordinal reference "second one" and was
+  flagged as a premature job 2 claim. An ordinal "second" right after a count
+  is now a duration's unit, and each job is also named by its own sleep
+  duration (job 1 25 s, job 2 20 s). The only post-#1635 sighting was this
+  false positive, so the genuine rate is 0 in 46.
+
+- Turbo S S99 records two diagnostic metrics. `recall_delegated` is recorded
+  for every client delegation in an S99 exchange, before the native-voice
+  check, so every soak counts the delegated-recall rate (#1719).
+  `provider_truncated_answer` is recorded when an exchange's transcript
+  matches but the browser decoded no speech for it: gpt-live cut its own
+  audio over the user's last word while its transcript kept the whole answer
+  (#1717). The browser peer counts decoded speech before its playback gate,
+  so no duck causes it.
 
 ## [0.8.51] - 2026-10-05
 

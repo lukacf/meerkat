@@ -9401,6 +9401,14 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// Persist a snapshot of the ops lifecycle registry state.
+    ///
+    /// Contract: this must complete without waiting on any state that a
+    /// runtime task can hold across an `.await` (an async mutex or semaphore,
+    /// a transaction or connection kept open across an await). The ops
+    /// lifecycle persistence worker calls it while a terminal transition holds
+    /// its runtime thread for the reply, so such a wait could wedge that
+    /// thread behind a task it blocks (#1654). Short, await-free critical
+    /// sections and blocking-pool work are fine.
     async fn persist_ops_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,

@@ -5356,6 +5356,7 @@ pub(super) struct PendingSpawn {
     pub(super) effective_model_override: Option<String>,
     /// Durable spawner provenance for the roster entry and spawn event.
     pub(super) spawned_by: Option<AgentIdentity>,
+    pub(super) creation_origin: crate::member_creation::MemberCreationOrigin,
     pub(super) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed fork lineage for the roster entry and spawn event.
     pub(super) fork_source: Option<meerkat_core::ForkBuildSource>,
@@ -6031,6 +6032,7 @@ struct RespawnSnapshot {
     effective_model_override: Option<String>,
     /// Spawner provenance carried to the replacement incarnation.
     spawned_by: Option<AgentIdentity>,
+    creation_origin: crate::member_creation::MemberCreationOrigin,
     fork_job: Option<crate::runtime::ForkJobRecord>,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
@@ -6080,6 +6082,7 @@ struct SpawnFinalizeCtx {
     effective_profile_override: Option<crate::profile::Profile>,
     effective_model_override: Option<String>,
     spawned_by: Option<AgentIdentity>,
+    creation_origin: crate::member_creation::MemberCreationOrigin,
     fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed fork lineage, persisted with the member's spawn event and roster
     /// entry so every rebuild carries it (see `ForkBuildInheritance`).
@@ -6142,6 +6145,7 @@ struct SpawnActivateState {
     effective_profile_override: Option<crate::profile::Profile>,
     effective_model_override: Option<String>,
     spawned_by: Option<AgentIdentity>,
+    creation_origin: crate::member_creation::MemberCreationOrigin,
     fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed fork lineage, persisted with the member's spawn event and roster
     /// entry so every rebuild carries it (see `ForkBuildInheritance`).
@@ -6191,6 +6195,7 @@ impl SpawnActivateState {
             effective_profile_override,
             effective_model_override,
             spawned_by,
+            creation_origin,
             fork_job,
             fork_source,
             fork_overlay,
@@ -6242,6 +6247,7 @@ impl SpawnActivateState {
             effective_profile_override,
             effective_model_override,
             spawned_by,
+            creation_origin,
             fork_job,
             fork_source,
             fork_overlay,
@@ -29459,6 +29465,7 @@ impl MobActor {
             effective_profile_override: entry.effective_profile_override,
             effective_model_override: entry.effective_model_override,
             spawned_by: entry.spawned_by,
+            creation_origin: crate::member_creation::MemberCreationOrigin::Unproven,
             fork_job: entry.fork_job,
             fork_source: entry.fork_source,
             fork_overlay: entry.fork_overlay,
@@ -29789,6 +29796,7 @@ impl MobActor {
             // the placed lane above.
             forked_participant_attachment: _,
             spawned_by,
+            creation_origin,
             fork_job,
             fork_source,
             fork_overlay,
@@ -29810,6 +29818,15 @@ impl MobActor {
                 fork_context,
             } => Some((source_member_id, fork_context)),
             _ => None,
+        };
+        // A transcript/context fork or an imported resume without retained
+        // canonical creation facts is not proof of an independent root.
+        let creation_origin = if matches!(creation_origin, crate::member_creation::MemberCreationOrigin::HostRoot)
+            && (fork_spec.is_some() || resume_bridge_session_id.is_some())
+        {
+            crate::member_creation::MemberCreationOrigin::Unproven
+        } else {
+            creation_origin
         };
         let inline_preparation = async {
             if agent_identity.is_system_reserved() && !allow_reserved_flow_identity {
@@ -29973,6 +29990,7 @@ impl MobActor {
             reply_tx,
             suppress_autonomous_initial_prompt,
             spawned_by,
+            creation_origin,
             fork_job,
             fork_source: fork_source.clone(),
             fork_overlay,
@@ -30462,6 +30480,7 @@ impl MobActor {
             reply_tx,
             suppress_autonomous_initial_prompt,
             spawned_by,
+            creation_origin,
             fork_job,
             fork_source,
             fork_overlay,
@@ -30653,6 +30672,7 @@ impl MobActor {
                 effective_profile_override,
                 effective_model_override,
                 spawned_by: spawned_by.clone(),
+                creation_origin: creation_origin.clone(),
                 fork_job: fork_job.clone(),
                 fork_source: fork_source.clone(),
                 fork_overlay,
@@ -30852,6 +30872,7 @@ impl MobActor {
             effective_profile_override,
             effective_model_override,
             spawned_by,
+            creation_origin,
             fork_job,
             fork_source,
             fork_overlay,
@@ -31369,7 +31390,10 @@ impl MobActor {
                 })
                 .await
             {
-                Ok(_) => return Ok(()),
+                Ok(event) => {
+                    self.roster.write().await.record_creation_event(&event);
+                    return Ok(());
+                }
                 Err(error) => {
                     last_append_error = Some(error);
                     match reconcile_exact_mob_event_after_cursor(
@@ -31380,7 +31404,10 @@ impl MobActor {
                     )
                     .await
                     {
-                        Ok(Some(_)) => return Ok(()),
+                        Ok(Some(event)) => {
+                            self.roster.write().await.record_creation_event(&event);
+                            return Ok(());
+                        }
                         Ok(None) if attempt < 2 => tokio::task::yield_now().await,
                         Ok(None) => {
                             self.durable_uncertainty_fail_stop = true;
@@ -31800,6 +31827,7 @@ impl MobActor {
             // Spawner provenance is only set by the caller-turn fork, which
             // refuses placement; a placed spawn never carries one.
             spawned_by: _,
+            creation_origin: _,
             fork_job: _,
             // Fork lineage is in-process build input the local seating paths
             // own; ordinary spawn ingress refuses it before the placed lane,
@@ -32575,6 +32603,9 @@ impl MobActor {
             effective_profile_override,
             effective_model_override,
             spawned_by: None,
+            // The remote Pending carrier does not persist a source witness.
+            // Its recovery path must therefore remain explicit unknown.
+            creation_origin: crate::member_creation::MemberCreationOrigin::Unproven,
             fork_job: None,
             // A placed spawn is never a fork seating: ingress refuses a fork
             // source on it.
@@ -32868,6 +32899,7 @@ impl MobActor {
                 effective_profile_override,
                 effective_model_override,
                 spawned_by,
+                creation_origin,
                 fork_job,
                 fork_source,
                 fork_overlay,
@@ -33053,6 +33085,7 @@ impl MobActor {
                                 effective_profile_override,
                                 effective_model_override,
                                 spawned_by: spawned_by.clone(),
+                                creation_origin: creation_origin.clone(),
                                 fork_job: fork_job.clone(),
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
@@ -33127,6 +33160,7 @@ impl MobActor {
                                 effective_profile_override,
                                 effective_model_override,
                                 spawned_by: spawned_by.clone(),
+                                creation_origin: creation_origin.clone(),
                                 fork_job: fork_job.clone(),
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
@@ -33256,6 +33290,7 @@ impl MobActor {
             placement: _,
             forked_participant_attachment: _,
             spawned_by: _,
+            creation_origin: _,
             fork_job: _,
             // A policy auto-spawn is fresh: `SpawnMemberSpec::new` sets neither.
             fork_source: _,
@@ -33454,6 +33489,7 @@ impl MobActor {
             effective_profile_override: override_profile.clone(),
             effective_model_override: model_override.clone(),
             spawned_by: None,
+            creation_origin: crate::member_creation::MemberCreationOrigin::Unproven,
             fork_job: None,
             // A policy auto-spawn is fresh, never a fork seating.
             fork_source: None,
@@ -33610,15 +33646,16 @@ impl MobActor {
         use crate::store::IdentityMemberEventCommitOutcome;
 
         let Some(original_permit) = original_permit else {
-            self.events
+            let committed = self
+                .events
                 .append(NewMobEvent {
                     mob_id: self.definition.id.clone(),
                     timestamp: None,
                     kind: MobEventKind::MemberSpawned(spawned),
                 })
                 .await
-                .map(|_| ())
                 .map_err(MobError::from)?;
+            self.roster.write().await.record_creation_event(&committed);
             return Ok(());
         };
         let Some(store) = self.identity_member.as_ref() else {
@@ -33647,14 +33684,18 @@ impl MobActor {
             .commit_identity_member_spawned(&permit, &event)
             .await?
         {
-            IdentityMemberEventCommitOutcome::Applied { .. } => {
+            IdentityMemberEventCommitOutcome::Applied { event } => {
+                self.roster.write().await.record_creation_event(&event);
                 #[cfg(any(test, feature = "test-support"))]
                 super::trigger_identity_recovery_fail_stop(
                     super::IdentityRecoveryFailStopPoint::MemberEventApplied,
                 );
                 Ok(())
             }
-            IdentityMemberEventCommitOutcome::AlreadyExact { .. } => Ok(()),
+            IdentityMemberEventCommitOutcome::AlreadyExact { event } => {
+                self.roster.write().await.record_creation_event(&event);
+                Ok(())
+            }
             IdentityMemberEventCommitOutcome::Conflict { detail, .. } => {
                 Err(crate::store::MobStoreError::CasConflict(format!(
                     "identity member target or authority changed before finalization: {detail}"
@@ -33778,8 +33819,85 @@ impl MobActor {
         let _ = (operation_id, reason);
     }
 
-    /// Spawn ladder, pre-commit phase: `BeginSpawnExec` → trust / overlay /
-    /// event append → `CommitSpawnMembership` → `provision.commit()`. On any
+    /// Derive creation facts from retained journal authority or a sealed
+    /// runtime source witness before publishing the new member.
+    async fn prepare_member_creation(
+        &self,
+        ctx: &SpawnFinalizeCtx,
+        session_id: Option<&SessionId>,
+    ) -> crate::MemberCreationRecord {
+        use crate::MemberCreationProvenance as Provenance;
+        use crate::member_creation::MemberCreationOrigin as Origin;
+        let unproven = || crate::MemberCreationRecord {
+            creation_id: Some(crate::MemberCreationId::new()),
+            provenance: Provenance::Unproven,
+        };
+        if let Some(session_id) = session_id {
+            match self
+                .roster
+                .read()
+                .await
+                .member_creation_for_session(session_id)
+            {
+                Ok(Some(previous))
+                    if previous.member_binding.member == ctx.agent_identity.as_str() =>
+                {
+                    return previous.creation;
+                }
+                Ok(None) => {}
+                Ok(Some(_)) | Err(_) => return unproven(),
+            }
+        }
+        let provenance = match (&ctx.creation_origin, ctx.fork_source.as_ref()) {
+            (Origin::Source(witness), fork_source) => match witness.source.as_ref() {
+                Some(source) if witness.successor => {
+                    if source.member_binding.mob_id != self.definition.id.as_str()
+                        || source.member_binding.member != ctx.agent_identity.as_str()
+                        || Some(&source.session_id) == session_id
+                        || fork_source.is_some()
+                    {
+                        return unproven();
+                    }
+                    Provenance::Successor {
+                        predecessor_session_id: source.session_id.clone(),
+                        predecessor_member_binding: source.member_binding.clone(),
+                        predecessor_creation_id: source.creation_id,
+                    }
+                }
+                Some(source) => match fork_source {
+                    Some(fork)
+                        if fork.source_session_id == source.session_id
+                            && fork.source_member == source.member_binding =>
+                    {
+                        Provenance::Fork {
+                            source_creation_id: source.creation_id,
+                        }
+                    }
+                    Some(_) => Provenance::Unproven,
+                    None => Provenance::Spawn {
+                        source: source.clone(),
+                    },
+                },
+                None => Provenance::Unproven,
+            },
+            (Origin::HostRoot, None) => Provenance::Root,
+            (Origin::HostRoot, Some(_)) | (Origin::Unproven, _) => Provenance::Unproven,
+        };
+        let creation_id = match &provenance {
+            Provenance::Successor {
+                predecessor_creation_id,
+                ..
+            } => *predecessor_creation_id,
+            _ => crate::MemberCreationId::new(),
+        };
+        crate::MemberCreationRecord {
+            creation_id: Some(creation_id),
+            provenance,
+        }
+    }
+
+    /// Spawn ladder, pre-commit phase: `BeginSpawnExec` -> trust / overlay /
+    /// event append -> `CommitSpawnMembership` -> `provision.commit()`. On any
     /// pre-membership failure the opened spawn-exec phase is reset via
     /// `AbortSpawnExec` and the pending provision is archived, leaving the
     /// identity respawnable.
@@ -33812,6 +33930,12 @@ impl MobActor {
         let identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
         let pending_member_ref = provision.member_ref()?.clone();
+        let creation_session_id = ctx
+            .remote
+            .as_ref()
+            .map(|remote| &remote.ack.session_id)
+            .or_else(|| pending_member_ref.bridge_session_id());
+        let creation = self.prepare_member_creation(ctx, creation_session_id).await;
         // DEC-R1: `HostMaterialized` members never persist an external
         // binding overlay — their re-acquire path is machine
         // re-materialization, not peer-only rebind material.
@@ -34226,6 +34350,7 @@ impl MobActor {
             .with_placed_spawn_id(Some(remote.placed_spawn_id.clone()))
             .with_member_peer_endpoint(Some(member_peer_endpoint.clone()))
             .with_direct_member_fence(ctx.direct_member_fence.clone());
+            spawned.creation = creation.clone();
             spawned.runtime_mode = runtime_mode;
             spawned.labels = labels.clone();
             spawned.continuity_intent = continuity_intent.clone();
@@ -34374,6 +34499,7 @@ impl MobActor {
         .with_bridge_member_ref(Some(Self::sanitized_member_ref(&pending_member_ref)))
         .with_member_peer_endpoint(member_peer_endpoint.clone())
         .with_direct_member_fence(ctx.direct_member_fence.clone());
+        spawned_event.creation = creation;
         spawned_event.runtime_mode = runtime_mode;
         spawned_event.labels = labels.clone();
         spawned_event.continuity_intent = continuity_intent.clone();
@@ -43513,6 +43639,24 @@ impl MobActor {
                 effective_profile_override: entry.effective_profile_override,
                 effective_model_override: entry.effective_model_override,
                 spawned_by: entry.spawned_by,
+                creation_origin: crate::member_creation::MemberCreationOrigin::Source(match entry.member_ref.bridge_session_id() {
+                    Some(session_id) => match roster.member_creation_for_session(session_id).ok().flatten() {
+                        Some(crate::MemberCreationSnapshot {
+                            creation: crate::MemberCreationRecord { creation_id: Some(creation_id), .. },
+                            member_binding,
+                            ..
+                        }) => crate::MemberCreationSourceWitness {
+                            successor: true,
+                            source: Some(crate::MemberCreationSource {
+                                session_id: session_id.clone(),
+                                member_binding,
+                                creation_id,
+                            }),
+                        },
+                        _ => crate::MemberCreationSourceWitness::unavailable(),
+                    },
+                    None => crate::MemberCreationSourceWitness::unavailable(),
+                }),
                 fork_job: entry.fork_job,
                 cleanup_retry,
             }
@@ -43548,6 +43692,7 @@ impl MobActor {
                         spec
                     }
                 };
+                replacement_spec.creation_origin = snapshot.creation_origin.clone();
                 // Ownership belongs to the identity, not the incarnation: a
                 // successor spec (which callers cannot author) keeps the
                 // spawner of the incarnation it replaces.

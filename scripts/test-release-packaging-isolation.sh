@@ -120,7 +120,17 @@ if [[ "$unique_lanes" -ne "$EXPECTED_PACKAGES" ]]; then
   exit 92
 fi
 
-printf 'fixture archive\n' > "$CARGO_TARGET_DIR/package/$crate-0.0.0.crate"
+# A real gzip tarball with the layout cargo produces, so the packaging check's
+# license-file inspection reads it like a published archive.
+archive_root="$call_tmp.archive/$crate-0.0.0"
+mkdir -p "$archive_root"
+printf 'fixture archive\n' > "$archive_root/Cargo.toml"
+printf 'MIT\n' > "$archive_root/LICENSE-MIT"
+if [[ "${OMIT_LICENSE_CRATE:-}" != "$crate" ]]; then
+  printf 'Apache-2.0\n' > "$archive_root/LICENSE-APACHE"
+fi
+tar -czf "$CARGO_TARGET_DIR/package/$crate-0.0.0.crate" -C "$call_tmp.archive" "$crate-0.0.0"
+rm -rf "$call_tmp.archive"
 if [[ "${FAIL_CRATE:-}" == "$crate" ]]; then
   echo "error: intentional package failure for $crate" >&2
   exit 42
@@ -248,5 +258,16 @@ grep -Fq "error: intentional package failure for beta" "$failure_log" ||
 if [[ "$(grep -c '^beta$' "$failure_state/invocations")" -ne 1 ]]; then
   fail "the failing package was retried instead of reported"
 fi
+
+license_state="$TEST_ROOT/license"
+license_log="$TEST_ROOT/license.log"
+status="$(run_checker "$CHECKER" "$license_state" "$license_log" OMIT_LICENSE_CRATE=gamma)"
+if [[ "$status" -eq 0 ]]; then
+  fail "a package archive without LICENSE-APACHE was accepted"
+fi
+grep -Fq "package archive lacks LICENSE-APACHE" "$license_log" ||
+  fail "the archive missing its license file was not named" "$(cat "$license_log")"
+grep -Fq "gamma-0.0.0.crate" "$license_log" ||
+  fail "the license failure did not name the archive" "$(cat "$license_log")"
 
 echo "release packaging isolation contract holds"

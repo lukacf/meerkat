@@ -106,6 +106,12 @@ for crate in "${RELEASE_CRATES[@]}"; do
         exit 1
     fi
     cp "$archive" "$package_target/package/"
+    for license_file in LICENSE-MIT LICENSE-APACHE; do
+        if ! tar -tzf "$archive" | grep -qx "$crate-$version/$license_file"; then
+            echo "package archive lacks $license_file: $archive" >&2
+            exit 1
+        fi
+    done
 done
 
 echo "Running published-style facade link smoke..."

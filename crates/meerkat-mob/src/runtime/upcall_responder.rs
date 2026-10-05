@@ -679,7 +679,9 @@ impl MobUpcallSeams {
         self.ensure_spawn_tool_scope(context, tool_name).await?;
         self.ensure_spawn_member_scope(context, tool_name, &spec)
             .await?;
-        let domain_spec = self.domain_spawn_spec(tool_name, requester, spec)?;
+        let domain_spec = self
+            .domain_spawn_spec(tool_name, requester, spec)?
+            .with_creation_source(self.capture_creation_source(requester).await);
         let result = self
             .handle
             .spawn_spec(domain_spec)
@@ -701,9 +703,13 @@ impl MobUpcallSeams {
             self.ensure_spawn_member_scope(context, tool_name, spec)
                 .await?;
         }
+        let creation_source = self.capture_creation_source(requester).await;
         let domain_specs = specs
             .into_iter()
-            .map(|spec| self.domain_spawn_spec(tool_name, requester, spec))
+            .map(|spec| {
+                self.domain_spawn_spec(tool_name, requester, spec)
+                    .map(|spec| spec.with_creation_source(creation_source.clone()))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let results = self
             .handle
@@ -726,7 +732,25 @@ impl MobUpcallSeams {
         Ok(json!({ "results": results }))
     }
 
-    /// Wire spawn spec → domain spec. Placement defaults to the REQUESTER's
+    async fn capture_creation_source(
+        &self,
+        requester: &AgentIdentity,
+    ) -> crate::MemberCreationSourceWitness {
+        // The requester was validated by the exact generated upcall fence.
+        // Its current session still has to agree with persisted source facts.
+        let result = async {
+            let entry = self.handle.get_member(requester).await.ok().flatten()?;
+            let session_id = entry.bridge_session_id()?;
+            self.handle
+                .capture_member_creation_source(session_id)
+                .await
+                .ok()
+        }
+        .await;
+        result.unwrap_or_else(crate::MemberCreationSourceWitness::unavailable)
+    }
+
+    /// Wire spawn spec -> domain spec. Placement defaults to the REQUESTER's
     /// machine-recorded placement (§7.3: an upcall spawn without explicit
     /// placement lands on the requesting member's host).
     fn domain_spawn_spec(
@@ -744,7 +768,8 @@ impl MobUpcallSeams {
                 ))
             })?,
         };
-        let mut out = SpawnMemberSpec::new(spec.profile.clone(), spec.member_id.as_str());
+        let mut out = SpawnMemberSpec::new(spec.profile.clone(), spec.member_id.as_str())
+            .with_creation_source(crate::MemberCreationSourceWitness::unavailable());
         out.initial_message = spec.initial_message;
         out.runtime_mode = spec.runtime_mode.map(domain_runtime_mode);
         if let Some(launch) = spec.launch_mode {

@@ -1472,7 +1472,8 @@ fn build_spawn_spec(
     auth_binding: Option<WireAuthBindingRef>,
     placement: Option<String>,
 ) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
-    let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), agent_identity.as_str());
+    let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), agent_identity.as_str())
+        .with_creation_source(meerkat_mob::MemberCreationSourceWitness::unavailable());
     spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;
     spec.runtime_mode = runtime_mode.map(runtime_mode_from_wire);
     // Resolve binding: explicit binding takes precedence over legacy backend tag.

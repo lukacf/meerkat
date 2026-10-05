@@ -4,7 +4,7 @@
 #   require-python MIN [WHO]
 #
 # An explicit $PYTHON is the caller's choice and is the only candidate.
-# Otherwise python3.13, python3.12, python3.11 and python3 are tried in that
+# Otherwise python3.14 down to python3.11, then python3, are tried in that
 # order, because PATH can put an older python3 first (Apple's 3.9 on macOS).
 # Fails with "WHO needs Python >= MIN; found ..." instead of letting a script
 # hit an AttributeError or ImportError partway through.
@@ -23,7 +23,7 @@ candidates=()
 if [[ -n "${PYTHON:-}" ]]; then
   candidates=("${PYTHON}")
 else
-  for name in python3.13 python3.12 python3.11 python3; do
+  for name in python3.14 python3.13 python3.12 python3.11 python3; do
     path="$(command -v "${name}" 2>/dev/null || true)"
     [[ -n "${path}" ]] && candidates+=("${path}")
   done

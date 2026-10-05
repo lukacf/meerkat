@@ -57,14 +57,18 @@ them.
   it explicitly and refuse an older interpreter up front. They used whatever
   `python3` came first in `PATH`, so on macOS, where Apple's Python 3.9 can
   come first, the pre-push nextest archive contract failed mid-hook with an
-  `AttributeError` on `hashlib.file_digest`. The new `scripts/require-python
+  `AttributeError` on `hashlib.file_digest`. That helper,
+  `scripts/restore-ci-unit-mob-archive.py`, now hashes in chunks with
+  `hashlib.sha256()` (still verifying the digest before extracting), so it
+  runs on the release scripts' Python >= 3.10 floor, and refuses anything
+  older up front. The new `scripts/require-python
   MIN WHO` honours an explicit `PYTHON`, otherwise prefers python3.13 through
   python3.11 over `python3`, and fails with "WHO needs Python >= MIN; found
   <version> (<path>)". It replaces the per-script copies of that selection,
   which had no version check, in 15 scripts plus `release-hook.sh` (still
   >= 3.10), `buildbuddy-doctor`, `gcp-buildbuddy-ci-image` (`tomllib`) and
-  the archive contract test. `scripts/restore-ci-unit-mob-archive.py` also
-  refuses Python < 3.11 itself when run directly. When no interpreter
+  the archive contract test, which selects >= 3.10 and also runs the restore
+  test on `python3.10` when one is installed. When no interpreter
   qualifies, `PYTHON` in the Makefile becomes a lazy error, so only targets
   that use Python stop, with that reason.
 - `make test-sdk-python`, `publish-dry-run-python` and

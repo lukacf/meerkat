@@ -1937,6 +1937,71 @@ async function liveChannelCloseShape(ch: LiveChannel) {
 }
 void liveChannelCloseShape;
 
+// Connector account selection must keep its named discriminated union when
+// nested in the target. Widening to Record<string, unknown> accepts malformed
+// selections and prevents consumers from narrowing on mode.
+import type {
+  InstructionActivationIdentity,
+  InstructionActivationReceipt,
+  WireConnectorAccountSelection,
+  WireConnectorAccountSelectionKnown,
+  WireConnectorAccountSelectionDiscover,
+  WireConnectorAuthTarget,
+} from "../src/generated/types.js";
+
+// Aliases emitted from a different schema root must not replace narrower
+// schema-local fields with unknown.
+declare const instructionIdentity: InstructionActivationIdentity;
+declare const instructionReceipt: InstructionActivationReceipt;
+const instructionActivationId: string = instructionIdentity.activation_id;
+const instructionDisposition: "applied" | "duplicate" = instructionReceipt.disposition;
+void [instructionActivationId, instructionDisposition];
+
+const connectorKnown: WireConnectorAccountSelection = {
+  mode: "known",
+  account: "verified-subject",
+};
+const connectorDiscover: WireConnectorAccountSelection = { mode: "discover" };
+declare const connectorTarget: WireConnectorAuthTarget;
+const connectorKnownTarget: WireConnectorAuthTarget = {
+  ...connectorTarget,
+  account_selection: connectorKnown,
+};
+const connectorDiscoverTarget: WireConnectorAuthTarget = {
+  ...connectorTarget,
+  account_selection: connectorDiscover,
+};
+const connectorMissingAccount: WireConnectorAuthTarget = {
+  ...connectorTarget,
+  // @ts-expect-error Known selection requires the expected verified account.
+  account_selection: { mode: "known" },
+};
+const connectorInvalidMode: WireConnectorAuthTarget = {
+  ...connectorTarget,
+  // @ts-expect-error Account selection has only Known and Discover modes.
+  account_selection: { mode: "other" },
+};
+
+function connectorSelectedAccount(target: WireConnectorAuthTarget): string | null {
+  const selection: WireConnectorAccountSelection = target.account_selection;
+  if (target.account_selection.mode === "known") {
+    const known: WireConnectorAccountSelectionKnown = target.account_selection;
+    const account: string = known.account;
+    return account;
+  }
+  const discover: WireConnectorAccountSelectionDiscover = target.account_selection;
+  void [selection, discover];
+  return null;
+}
+
+void [
+  connectorKnownTarget,
+  connectorDiscoverTarget,
+  connectorMissingAccount,
+  connectorInvalidMode,
+  connectorSelectedAccount,
+];
+
 // refresh() returns Promise<LiveRefreshResult>.
 async function liveChannelRefreshShape(ch: LiveChannel) {
   const result = await ch.refresh();

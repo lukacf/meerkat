@@ -960,13 +960,13 @@ export interface InstructionActivationRecord {
 export interface InstructionActivationRequest {
   activation_id: string;
   body: string;
-  expectation: InstructionActivationExpectation;
+  expectation: Record<string, unknown>;
   revision: Record<string, unknown>;
   supersedes?: string | null;
 }
 
 export interface InstructionActivationReceipt {
-  disposition: InstructionActivationDisposition;
+  disposition: "applied" | "duplicate";
   record: InstructionActivationRecord;
 }
 
@@ -5233,8 +5233,8 @@ export type SenderContentTaint = "clean" | "tainted";
 export type SendTaintOverride = { declare: SenderContentTaint } | "undeclared";
 
 export interface WireRenderMetadata {
-  class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
-  salience?: "background" | "normal" | "important" | "urgent" | null;
+  class: WireRenderClass;
+  salience?: WireRenderSalience | null;
 }
 
 export interface WireTrustedPeerIdentityEd25519PublicKey {
@@ -5510,7 +5510,7 @@ export interface LiveTruncateResult {
 export type LivePlaybackCompleteStatus = "completed";
 
 export interface LivePlaybackCompleteResult {
-  status: "completed";
+  status: LivePlaybackCompleteStatus;
 }
 
 export interface LiveInputChunkWireAudio {
@@ -5962,23 +5962,23 @@ export type WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireL
 export interface RuntimeAcceptResult {
   existing_id?: string | null;
   input_id?: string | null;
-  outcome_type: "accepted" | "deduplicated" | "rejected";
+  outcome_type: RuntimeAcceptOutcomeType;
   policy?: "stage" | "queue" | "immediate" | null;
   reason?: string | null;
   state?: Record<string, unknown> | null;
 }
 
 export interface WireInputStateHistoryEntry {
-  from: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  from: WireInputLifecycleState;
   reason?: string | null;
   timestamp: string;
-  to: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  to: WireInputLifecycleState;
 }
 
 export interface WireInputState {
   attempt_count?: number;
   created_at: string;
-  current_state: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  current_state: WireInputLifecycleState;
   durability?: "durable" | "volatile" | "ephemeral" | null;
   history?: WireInputStateHistoryEntry[];
   idempotency_key?: string | null;

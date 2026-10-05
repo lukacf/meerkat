@@ -781,19 +781,6 @@ def _pascal_case(name: str) -> str:
     return "".join(part.capitalize() for part in re.split(r"[^0-9A-Za-z]+", name) if part)
 
 
-def _emitted_union_aliases(schema: dict[str, Any], emitted: set[str]) -> set[str]:
-    """Local defs of `schema` that are already-emitted `oneOf`/`anyOf` aliases."""
-    defs = schema.get("$defs", {})
-    if not isinstance(defs, dict):
-        return set()
-    return {
-        name
-        for name in emitted
-        if isinstance(defs.get(name), dict)
-        and ("oneOf" in defs[name] or "anyOf" in defs[name])
-    }
-
-
 def _schema_root_with_local_defs(root_schema: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     schema_root = dict(root_schema)
     schema_root["$defs"] = {
@@ -3418,6 +3405,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_python_dataclasses: set[str] = {"WireToolResult"}
     emitted_python_named_types: set[str] = {"WireToolResult"}
+    emitted_python_alias_schemas: dict[str, str] = {}
     emitted_from_wire_parsers: set[str] = set()
 
     def append_python_dataclass(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
@@ -3428,12 +3416,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
         doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
-        # An already-emitted union alias is referenced by name: inlining a
-        # tagged union widens its arms into anonymous dicts.
         local_defs = (
-            set(schema.get("$defs", {}).keys())
-            - emitted_python_dataclasses
-            - _emitted_union_aliases(schema, emitted_python_named_types)
+            set(schema.get("$defs", {}).keys()) - emitted_python_dataclasses
             if isinstance(schema, dict)
             else set()
         )
@@ -3441,6 +3425,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         schema_root["$defs"] = {
             **root_schema.get("$defs", {}),
             **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
+        # A same-named alias may have been emitted from another schema root.
+        # Reuse it only when it represents this local definition's structure.
+        local_defs -= {
+            local_name for local_name in local_defs
+            if emitted_python_alias_schemas.get(local_name)
+            == _canonical_schema_key(schema_root, schema_root["$defs"][local_name])
         }
         types_content += f"\n@dataclass\nclass {name}:\n"
         types_content += f'    """{doc}"""\n'
@@ -3490,6 +3481,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         if name in emitted_python_named_types:
             return
         schema = _lookup_named_schema(root_schema, name)
+        emitted_python_alias_schemas[name] = _canonical_schema_key(
+            _schema_root_with_local_defs(root_schema, schema), schema
+        )
         root_ref_name = (
             _resolve_schema_ref_name(str(schema["$ref"]))
             if isinstance(schema, dict) and "$ref" in schema
@@ -4370,6 +4364,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_typescript_interfaces: set[str] = {"WireToolResult"}
     emitted_typescript_named_types: set[str] = {"WireToolResult"}
+    emitted_typescript_alias_schemas: dict[str, str] = {}
 
     def append_typescript_interface(name: str, root_schema: dict[str, Any]) -> None:
         nonlocal types_content
@@ -4378,12 +4373,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         schema = _lookup_named_schema(root_schema, name)
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
-        # An already-emitted union alias is referenced by name: inlining a
-        # tagged union widens its arms into anonymous dicts.
         local_defs = (
-            set(schema.get("$defs", {}).keys())
-            - emitted_typescript_interfaces
-            - _emitted_union_aliases(schema, emitted_typescript_named_types)
+            set(schema.get("$defs", {}).keys()) - emitted_typescript_interfaces
             if isinstance(schema, dict)
             else set()
         )
@@ -4391,6 +4382,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         schema_root["$defs"] = {
             **root_schema.get("$defs", {}),
             **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
+        # Preserve aliases only across structurally matching schema roots,
+        # as in the Python emitter above.
+        local_defs -= {
+            local_name for local_name in local_defs
+            if emitted_typescript_alias_schemas.get(local_name)
+            == _canonical_schema_key(schema_root, schema_root["$defs"][local_name])
         }
         types_content += f"\nexport interface {name} {{\n"
         for field_name, field_schema in properties.items():
@@ -4419,6 +4417,9 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         if name in emitted_typescript_named_types:
             return
         schema = _lookup_named_schema(root_schema, name)
+        emitted_typescript_alias_schemas[name] = _canonical_schema_key(
+            _schema_root_with_local_defs(root_schema, schema), schema
+        )
         root_ref_name = (
             _resolve_schema_ref_name(str(schema["$ref"]))
             if isinstance(schema, dict) and "$ref" in schema

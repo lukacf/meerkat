@@ -1215,7 +1215,7 @@ class InstructionActivationRequest:
     """Explicit request to append one immutable instruction revision transition."""
     activation_id: str
     body: str
-    expectation: InstructionActivationExpectation
+    expectation: dict[str, Any]
     revision: dict[str, Any]
     supersedes: Optional[str] = None
 
@@ -1223,7 +1223,7 @@ class InstructionActivationRequest:
 @dataclass
 class InstructionActivationReceipt:
     """Reproducible receipt returned by the safe-boundary activation facade."""
-    disposition: InstructionActivationDisposition
+    disposition: Literal['applied', 'duplicate']
     record: InstructionActivationRecord
 
 
@@ -5341,7 +5341,7 @@ LivePlaybackCompleteStatus = Literal['completed']
 @dataclass
 class LivePlaybackCompleteResult:
     """Response payload for live/playback_complete: typed `status` discriminator."""
-    status: Literal['completed']
+    status: LivePlaybackCompleteStatus
 
 
 # Public-wire mirror of [`RealtimeTranscriptEvent`].

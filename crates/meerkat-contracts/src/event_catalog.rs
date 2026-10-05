@@ -51,4 +51,8 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "provider_cache_breakpoints_discarded",
     "boundary_append_applied",
     "boundary_appends_discarded",
+    // One of the session's live channels closed: published after every
+    // committed close with the channel, a typed `LiveChannelCloseReason` and
+    // `reopen_recommended` (docs/api/rpc.mdx event table).
+    "live_channel_closed",
 ];

@@ -91,6 +91,12 @@ them.
   `pre-push-prune-lanes.sh` falls back to `$$` when `BASHPID` is unset, and
   `mapfile` uses in the semver scripts became read loops.
   `scripts/tests/require_bash_test.sh` runs in `make path-classifier-selftest`.
+### Testing
+
+- The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
+  - Four workers spawn at once while a member's turn runs.
+  - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
+  - The mob then shuts down mid-turn under a 30 s deadline. Shutdown must return within that deadline and report an explicit outcome for every member.
 
 ## [0.8.51] - 2026-10-05
 

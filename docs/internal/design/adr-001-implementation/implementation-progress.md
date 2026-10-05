@@ -18,8 +18,8 @@ The current successor also integrates actual main merge
 `74b6c7473797cb904f554c8c2cc1bb7386ec3c66`, containing the upstream memory-test
 correction described below. That correction changes no production behavior.
 Qualification of that integrated source, `f3ebf2a02e19330aa926b61a205fcd62466ca2fc`,
-failed as described below. Its fixture successor is in GCP qualification;
-earlier published results do not qualify it. Luka's explicit 2026-10-05 instruction
+failed as described below. Its fixture successor completed GCP qualification
+with two test failures; earlier published results do not qualify it. Luka's explicit 2026-10-05 instruction
 in the 0.9 coordinator chat temporarily removes GitHub CI as a blocker during
 the Actions outage. CI is recorded as skipped, never passed. Existing local
 checks, source identity, consumer acceptance and publication ownership remain;
@@ -36,16 +36,18 @@ under the explicit outage exception. These changes display existing decisions
 and document their limits; they do not implement the native model reviewer or
 establish release/deployment acceptance.
 
-The current Mac integration cut is main `851fd7de9`, including PR1749's retained
+The Mac integration commit `eff3fcddf2dd3e86816d3cd02b2a986276958a8a`, tree
+`91f03eca38fc1c3c732d297998330af9915ebe9a`, integrates main `851fd7de9`, including PR1749's retained
 member lineage and PR1760's in-memory ops lifecycle deadlock repair. The store
 merge preserves native custody and epoch retirement while placing ops snapshots
 and retirement fences behind the incoming separate short-lived mutex. CI keeps
 both governed JSONL and upstream TLC requirements; changelog entries from both
 parents remain. A source review also migrated the newly added CLI and retained
 metadata fixtures to the fallible native constructors. These are source-level
-integration findings, not executed test passes. Existing GCP `c7f42abb` results
-remain baseline evidence; the final normal Mac gate must qualify this integrated
-source. Routine unrelated main changes do not require repeating this integration.
+integration findings, not executed test passes. Normal merge commit hooks passed
+in 11.55 seconds. Existing GCP `c7f42abb` results remain baseline evidence;
+the final normal Mac gate must qualify the integrated successor. Routine
+unrelated main changes do not require repeating this integration.
 
 Clock times in the qualification history below are UTC on 2026-10-05.
 
@@ -78,11 +80,45 @@ unwrap as `c7f42abbd2fb9bb3df0b724a83f6df8ce3659681`, tree
 and the one-line difference against local `970fa7a01`. The GCP owner reports
 format checking and the default-feature workspace all-targets check passed;
 the latter ran from 21:59:47 to 22:10:37 UTC. That command did not include the
-replay feature. The workspace library command started at 22:10:38, followed by
-the existing integration, cold-restart and E2E commands. Their results remain
-pending. The GCP transport commit skipped commit hooks; its explicit format
-check and the final normal Mac hooks are separate evidence. The fixture changes
-preserve all production behavior, existing assertions and negative tests.
+replay feature. The four test commands completed at 22:42:16 UTC:
+
+- Workspace library: 13,021 passed, one failed and 19 skipped. Command wall time
+  was 1,114.63 seconds; test execution took 380.644 seconds. The live-close test
+  failed its independently started clocks' 150 ms lower bound at 149.894422 ms
+  after its `Ok(None)` assertion passed. This unchanged upstream timing oracle
+  is tracked by [issue1779](https://github.com/lukacf/meerkat/issues/1779), with
+  its correction owned separately. There was no retry.
+- Workspace integration: 3,098 passed, one failed and 83 skipped. Command wall
+  time was 454.53 seconds; test execution took 452.847 seconds. The transcript
+  retention fixture expected version 3 after an explicit write, conflicting
+  with this checkpoint's version 4 writer. This is an integration regression
+  in the test expectation, not a passing inventory.
+- Cold restart: all nine passed, zero skipped. Command wall time was 325.06
+  seconds; test execution took 2.845 seconds.
+- E2E fast lane: all 30 passed, zero skipped. Command wall time was 3.66 seconds;
+  test execution took 2.576 seconds.
+
+All command results and source identity are retained under
+`/private/tmp/adr-001-envelope-v4-r1/adr1730-c7f42abb/`, copied and hash-verified
+against the GCP owner's raw receipts. The GCP transport commit skipped commit
+hooks; its explicit format check and normal Mac hooks are separate evidence.
+These results do not qualify the later main integration or establish performance.
+
+The normal Mac push of `eff3fcdd` started at 22:28:59 UTC and was stopped at
+22:44:25 UTC after the deterministic version mismatch was reported. It exited
+143 after 925.78 seconds; its owned process group subsequently drained and no
+push occurred. Preliminary checks and formatting passed. The lint hook was
+still building prerequisites, so lint and later gates did not pass. Raw output
+is `envelope-main-851-normal-push.log` in the local evidence directory above.
+The narrow successor corrects the retention test to assert a version 3 input,
+a version 4 write, and exact equality of every other JSON field. It changes
+neither the historical fixture nor production behavior; its focused execution
+passed the affected test, with five unrelated tests unselected. The command
+took 112.52 seconds, including 1m51s compilation and 0.040 seconds of test
+execution. Independent source review confirmed that all history, message,
+metadata and subsequent retention assertions remain intact. The focused pass
+does not qualify the broad candidate. Raw output is
+`envelope-retention-v4-fixture-green.log` in the same local evidence directory.
 
 The Mac candidate adds one test-build correction to that GCP source:
 `StdioChildCustody::spawned_pid` is compiled only for Linux tests, matching its
@@ -90,7 +126,7 @@ only caller. The Mac compile check emitted an unused-method warning for its
 former all-platform test configuration, which conflicts with the normal strict
 lint policy. Both predicates are true for Linux tests, so their helper and
 caller behavior are unchanged. This is a source-level conclusion; the final
-normal Mac gate still must execute. The current GCP run remains unchanged.
+normal Mac gate still must execute. The recorded GCP source remains unchanged.
 
 The connector merge needed four integration repairs: preserve typed stale
 preparation, use coordinated mode-constrained logout, adapt the generated

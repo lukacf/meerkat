@@ -538,6 +538,67 @@ jobs:
         if: ${{ needs.changes.outputs.machine_authority == 'true' || needs.changes.outputs.machine_posters == 'true' }}
         run: make verify-machine-poster-coverage
 
+  # Bounded TLC on machine-authority changes. The hand-written audits model
+  # check the generated machines against their invariants and goals (drift
+  # in `ratchets` only proves the artifacts match the DSL). Each shard of
+  # the canonical TLC lane needs only a JDK and the pinned TLC jar (the
+  # audit parts never run xtask), runs in parallel, and fits the PR budget.
+  # The `machine-verify --all` sweep stays on nightly, the release gate and
+  # the release-tag graph.
+  tlc-audits:
+    name: Bounded TLC audits (${{ matrix.part }})
+    needs: changes
+    if: ${{ needs.changes.outputs.machine_authority == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [audits-a, audits-b]
+    env:
+      # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
+      # the runner.
+      TLC_WORKERS: "4"
+      JAVA_TOOL_OPTIONS: -Xmx8g
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install pinned TLC
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
+            --output "$HOME/.local/lib/tla2tools.jar"
+          printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' \
+            "$HOME/.local/lib" > "$HOME/.local/bin/tlc"
+          chmod +x "$HOME/.local/bin/tlc"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run the audit shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          lane=crates/xtask/tests/machine_verify_all_tlc_test.sh
+          # Fail closed: a lane script without parts would ignore --part and
+          # run the whole lane, including machine-verify against a stand-in
+          # xtask binary.
+          if ! grep -q 'run_part ${{ matrix.part }}' "${lane}"; then
+            echo "::error::${lane} has no --part ${{ matrix.part }}; this lane cannot run it."
+            exit 1
+          fi
+          # The audit parts never execute xtask; any absolute executable
+          # satisfies the lane's argument.
+          bash "${lane}" "$(command -v true)" --part "${{ matrix.part }}"
+
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: changes
@@ -1456,6 +1517,7 @@ jobs:
       - changes
       - fmt-governance
       - ratchets
+      - tlc-audits
       - clippy
       - unit
       - integration
@@ -1477,6 +1539,8 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
+          TLC_AUDITS_RESULT: ${{ needs.tlc-audits.result }}
+          MACHINE_AUTHORITY: ${{ needs.changes.outputs.machine_authority }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
@@ -1524,7 +1588,7 @@ jobs:
           if [[ -n "${UNIT_DEFERRED}" ]]; then
             echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
           fi
-          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT}"
+          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT} tlc-audits=${TLC_AUDITS_RESULT}"
           echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
@@ -1556,6 +1620,11 @@ jobs:
           require_success "Change classification" "${CHANGES_RESULT}"
           require_success "Format + governance" "${FMT_GOVERNANCE_RESULT}"
           require_success "Generation ratchets" "${RATCHETS_RESULT}"
+          if [[ "${MACHINE_AUTHORITY}" == "true" ]]; then
+            require_ran "Bounded TLC audits" "${TLC_AUDITS_RESULT}"
+          else
+            forbid_failure "Bounded TLC audits" "${TLC_AUDITS_RESULT}"
+          fi
           if [[ "${RUST_CHANGED}" == "true" ]]; then
             if ! [[ "${SHARD_COUNT}" =~ ^[0-9]+$ ]] || (( SHARD_COUNT < 1 )); then
               echo "::error::a build-relevant change produced no lanes (shard_count='${SHARD_COUNT}')."

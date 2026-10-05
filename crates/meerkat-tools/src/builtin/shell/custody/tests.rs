@@ -1468,7 +1468,9 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(UNSHARE_ROOT_ENV, root.path())
+        // MUTANT (CI probe): an unusable custody root, so the host role
+        // panics before it reports ready.
+        .env(UNSHARE_ROOT_ENV, "/proc/meerkat-ci-probe-unusable-root")
         .env(UNSHARE_SCOPE_ENV, scope.as_str())
         .stdin(Stdio::null())
         .stdout(Stdio::null())

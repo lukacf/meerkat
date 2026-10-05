@@ -35,6 +35,52 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Connector OAuth (#1631; see Added) changes these Rust types:
+  - `PersistedAuthMode` gains `ConnectorOauth`.
+  - `CredentialMutationError` gains `SlotRefused(CredentialSlotRefusal)`.
+  - `RefreshError` gains `RequiredScopesNotGranted`.
+  - `ConnectorOAuthParameters::expected_account` is an `AccountSelection`
+    (`Known(account)` or `Discover`). `From<String>`/`From<&str>` build
+    `Known`, and the wire form of a Known account is unchanged.
+  - `OAuthFlowRecord` and `PersistedOAuthBrowserFlow` gain `nonce`.
+  - `OAuthFlowRegistry::insert_browser_flow_with_pruned` takes the nonce,
+    and `insert_restored_browser_flow` takes the whole `OAuthFlowRecord`.
+  - `LoginCancelParams` and `WireLoginCancelled` become target unions
+    (`Mcp` or `Connector`).
+
+  The JSON of MCP cancel requests and results is unchanged.
+
+
+### Added
+
+- Generic connector OAuth (#1631). A trusted host names a credential slot
+  (`{realm_id, slot_id}`, a storage address, never account proof) and a
+  connector descriptor (issuer, client, resource, scopes, strategy and
+  account selection).
+  - The owner discovers the issuer's endpoints, admits PKCE (plus an OIDC
+    nonce for ID-token strategies), exchanges the code and has the strategy
+    verify the provider account.
+  - It stores the credential as `ConnectorOauth` under the slot, with the
+    verified account bound to it.
+  - `discover` logins publish only into an empty slot, so racing logins never
+    swap grants, even for the same account. `known` reconnects replace a
+    slot's credential only for the same account, issuer, client, resource and
+    strategy; the loopback port and requested scopes may change.
+  - Granted scopes are owner-parsed from the token response
+    (`scope_evidence`). Refresh keeps the original grant when the response
+    omits `scope`, rotates refresh tokens atomically, and refuses narrowing
+    or a different subject without changing the credential.
+  - Native hosts use `HostAuthService::connector_*` and
+    `ConnectorOAuthAuthority`; `connector_logout` disconnects a slot so it
+    can take another account. RPC and REST hosts use a `connector` target on
+    `auth/login/start`, `complete` and `cancel`, and (RPC) `auth/status/get`;
+    the result and status report the slot and the verified account as
+    separate fields.
+  - New Python `auth_connector_*` methods and TypeScript
+    `authConnectorStatus`.
+
 ### Fixed
 
 - `meerkat-tools` tests compile on macOS again. The custody foreign-namespace

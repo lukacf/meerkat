@@ -326,7 +326,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.50",
+        "CARGO_PKG_VERSION": "0.8.51",
         "CARGO_BIN_NAME": "connector_login_owner",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },

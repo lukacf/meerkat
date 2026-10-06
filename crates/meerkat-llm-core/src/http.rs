@@ -4,11 +4,19 @@ use crate::error::LlmError;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::IpAddr;
 
+/// Build a provider HTTP client for `base_url`.
+///
+/// Native clients never follow redirects, same-origin included: a request
+/// goes only to the endpoint it was built for, and a 3xx answer comes back
+/// to the provider as the configured endpoint's response. On wasm32 the
+/// browser owns redirect handling.
 #[allow(dead_code)]
 pub fn build_http_client_for_base_url(
     builder: reqwest::ClientBuilder,
     base_url: &str,
 ) -> Result<reqwest::Client, LlmError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let builder = builder.redirect(reqwest::redirect::Policy::none());
     // no_proxy is not available on wasm32 (browser handles proxies)
     #[cfg(not(target_arch = "wasm32"))]
     let builder = {
@@ -45,6 +53,7 @@ fn is_loopback_base_url(base_url: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::is_loopback_base_url;
 
@@ -70,6 +79,7 @@ mod tests {
 
     /// Accept one connection on `listener`, read the request head, and answer
     /// with `response`.
+    #[cfg(not(target_arch = "wasm32"))]
     async fn answer_once(listener: tokio::net::TcpListener, response: String) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let Ok((mut socket, _)) = listener.accept().await else {
@@ -90,6 +100,7 @@ mod tests {
     /// Every provider client builds its HTTP client here, so a redirect from
     /// the configured endpoint to another host is never followed: the 3xx
     /// comes back to the provider instead of a request to the other host.
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn provider_http_client_does_not_follow_a_cross_host_redirect() {
         let target = tokio::net::TcpListener::bind("127.0.0.1:0")

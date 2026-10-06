@@ -4624,9 +4624,15 @@ mod tests {
             let mut stream = client.stream(&request);
             let mut error = None;
             while let Some(event) = stream.next().await {
-                if let Err(e) = event {
-                    error = Some(e);
-                    break;
+                match event {
+                    Err(e)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error: e },
+                    }) => {
+                        error = Some(e);
+                        break;
+                    }
+                    Ok(_) => {}
                 }
             }
             let reached = hits.lock().expect("redirect target lock").clone();

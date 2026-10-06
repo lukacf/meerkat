@@ -4365,6 +4365,37 @@ fn render_approval_init_expr(expr: &Expr, machine: &MachineSchema) -> Result<Str
     }
 }
 
+/// Delimit one rendered operand of a Rust binary operator.
+///
+/// The owner renderers print `&&`/`||` joins, comparisons and arithmetic
+/// without outer parentheses. Spliced bare into a larger operator, a compound
+/// operand is regrouped by Rust precedence: `Eq(And[a, b], false)` would print
+/// `(a) && (b) == false`, which Rust parses as `a && (b == false)`, while the
+/// TLA model keeps the AST grouping. Only self-delimiting atoms stay bare; an
+/// `if .. { .. } else { .. }` is one, because its braces close both branches.
+fn rust_operand(expr: &Expr, rendered: String) -> String {
+    match expr {
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::U64Max
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::None
+        | Expr::Some(_)
+        | Expr::Not(_)
+        | Expr::Call { .. }
+        | Expr::Contains { .. }
+        | Expr::MapContainsKey { .. }
+        | Expr::MapGet { .. }
+        | Expr::IfElse { .. } => rendered,
+        _ => format!("({rendered})"),
+    }
+}
+
 fn render_approval_expr(
     expr: &Expr,
     binding_types: &std::collections::BTreeMap<String, TypeRef>,
@@ -4395,13 +4426,13 @@ fn render_approval_expr(
         Expr::Or(items) => render_approval_expr_joined(items, " || ", binding_types, machine),
         Expr::Eq(left, right) => Ok(format!(
             "{} == {}",
-            render_approval_expr(left, binding_types, machine)?,
-            render_approval_expr(right, binding_types, machine)?
+            rust_operand(left, render_approval_expr(left, binding_types, machine)?),
+            rust_operand(right, render_approval_expr(right, binding_types, machine)?)
         )),
         Expr::Neq(left, right) => Ok(format!(
             "{} != {}",
-            render_approval_expr(left, binding_types, machine)?,
-            render_approval_expr(right, binding_types, machine)?
+            rust_operand(left, render_approval_expr(left, binding_types, machine)?),
+            rust_operand(right, render_approval_expr(right, binding_types, machine)?)
         )),
         Expr::Contains { collection, value } => Ok(format!(
             "{}.contains({})",
@@ -5445,43 +5476,91 @@ fn render_session_document_expr(
         )),
         Expr::Eq(left, right) => Ok(format!(
             "{} == {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::Neq(left, right) => Ok(format!(
             "{} != {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::Add(left, right) => Ok(format!(
             "{} + {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::Sub(left, right) => Ok(format!(
             "{} - {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::Gt(left, right) => Ok(format!(
             "{} > {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::Gte(left, right) => Ok(format!(
             "{} >= {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::Lt(left, right) => Ok(format!(
             "{} < {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::Lte(left, right) => Ok(format!(
             "{} <= {}",
-            render_session_document_expr(left, binding_types, machine)?,
-            render_session_document_expr(right, binding_types, machine)?
+            rust_operand(
+                left,
+                render_session_document_expr(left, binding_types, machine)?
+            ),
+            rust_operand(
+                right,
+                render_session_document_expr(right, binding_types, machine)?
+            )
         )),
         Expr::MapContainsKey { map, key } => Ok(format!(
             "{}.contains_key({})",
@@ -6511,18 +6590,18 @@ fn render_sta_expr(
         Expr::Or(items) => render_sta_expr_joined(items, " || ", binding_types, machine),
         Expr::Eq(left, right) => Ok(format!(
             "{} == {}",
-            render_sta_expr(left, binding_types, machine)?,
-            render_sta_expr(right, binding_types, machine)?
+            rust_operand(left, render_sta_expr(left, binding_types, machine)?),
+            rust_operand(right, render_sta_expr(right, binding_types, machine)?)
         )),
         Expr::Neq(left, right) => Ok(format!(
             "{} != {}",
-            render_sta_expr(left, binding_types, machine)?,
-            render_sta_expr(right, binding_types, machine)?
+            rust_operand(left, render_sta_expr(left, binding_types, machine)?),
+            rust_operand(right, render_sta_expr(right, binding_types, machine)?)
         )),
         Expr::Gt(left, right) => Ok(format!(
             "{} > {}",
-            render_sta_expr(left, binding_types, machine)?,
-            render_sta_expr(right, binding_types, machine)?
+            rust_operand(left, render_sta_expr(left, binding_types, machine)?),
+            rust_operand(right, render_sta_expr(right, binding_types, machine)?)
         )),
         Expr::Call { helper, args } => {
             let rendered_args = args
@@ -8530,5 +8609,322 @@ mod write_tests {
                 "an unchanged sibling of a changed artifact was rewritten"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod expr_grouping_tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::{
+        render_approval_expr, render_session_document_expr, render_sta_expr, rust_operand,
+    };
+    use meerkat_machine_schema::{Expr, MachineSchema, TypeRef, catalog::dsl};
+    use quote::ToTokens;
+    use std::collections::BTreeMap;
+
+    type Renderer = fn(&Expr, &BTreeMap<String, TypeRef>, &MachineSchema) -> anyhow::Result<String>;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Value {
+        Bool(bool),
+        Int(i128),
+    }
+
+    fn b(name: &str) -> Expr {
+        Expr::Binding(name.to_owned())
+    }
+
+    fn and(items: Vec<Expr>) -> Expr {
+        Expr::And(items)
+    }
+
+    fn or(items: Vec<Expr>) -> Expr {
+        Expr::Or(items)
+    }
+
+    fn eq(left: Expr, right: Expr) -> Expr {
+        Expr::Eq(Box::new(left), Box::new(right))
+    }
+
+    fn neq(left: Expr, right: Expr) -> Expr {
+        Expr::Neq(Box::new(left), Box::new(right))
+    }
+
+    /// Boolean shapes every owner renderer supports: comparisons and
+    /// negations applied to compound sub-expressions, on either side.
+    fn boolean_cases() -> Vec<Expr> {
+        vec![
+            // (a && b) == false
+            eq(and(vec![b("a"), b("b")]), Expr::Bool(false)),
+            // !(a || b)
+            Expr::Not(Box::new(or(vec![b("a"), b("b")]))),
+            // (a || b) == true
+            eq(or(vec![b("a"), b("b")]), Expr::Bool(true)),
+            // false == (a && b)
+            eq(Expr::Bool(false), and(vec![b("a"), b("b")])),
+            // (a && b) != c
+            neq(and(vec![b("a"), b("b")]), b("c")),
+            // ((a && b) || c) == ((b || c) != a), nested inside a join
+            and(vec![
+                b("c"),
+                eq(
+                    or(vec![and(vec![b("a"), b("b")]), b("c")]),
+                    neq(or(vec![b("b"), b("c")]), b("a")),
+                ),
+            ]),
+            // (a == b) == c
+            eq(eq(b("a"), b("b")), b("c")),
+        ]
+    }
+
+    /// Conditional operands, which only the session document owner renders.
+    fn if_else_cases() -> Vec<Expr> {
+        vec![
+            // (if a { b } else { c }) == false, and as a right operand
+            eq(
+                Expr::IfElse {
+                    condition: Box::new(b("a")),
+                    then_expr: Box::new(b("b")),
+                    else_expr: Box::new(b("c")),
+                },
+                Expr::Bool(false),
+            ),
+            neq(
+                b("c"),
+                Expr::IfElse {
+                    condition: Box::new(or(vec![b("a"), b("b")])),
+                    then_expr: Box::new(and(vec![b("a"), b("b")])),
+                    else_expr: Box::new(b("c")),
+                },
+            ),
+        ]
+    }
+
+    fn eval_ast(expr: &Expr, env: &BTreeMap<&str, Value>) -> Value {
+        let int = |e: &Expr| match eval_ast(e, env) {
+            Value::Int(v) => v,
+            other => panic!("expected integer, got {other:?}"),
+        };
+        let boolean = |e: &Expr| match eval_ast(e, env) {
+            Value::Bool(v) => v,
+            other => panic!("expected bool, got {other:?}"),
+        };
+        match expr {
+            Expr::Bool(v) => Value::Bool(*v),
+            Expr::U64(v) => Value::Int(i128::from(*v)),
+            Expr::Binding(name) => env[name.as_str()],
+            Expr::Not(inner) => Value::Bool(!boolean(inner)),
+            Expr::And(items) => Value::Bool(items.iter().all(boolean)),
+            Expr::Or(items) => Value::Bool(items.iter().any(boolean)),
+            Expr::Eq(l, r) => Value::Bool(eval_ast(l, env) == eval_ast(r, env)),
+            Expr::Neq(l, r) => Value::Bool(eval_ast(l, env) != eval_ast(r, env)),
+            Expr::Gt(l, r) => Value::Bool(int(l) > int(r)),
+            Expr::Gte(l, r) => Value::Bool(int(l) >= int(r)),
+            Expr::Lt(l, r) => Value::Bool(int(l) < int(r)),
+            Expr::Lte(l, r) => Value::Bool(int(l) <= int(r)),
+            Expr::Add(l, r) => Value::Int(int(l) + int(r)),
+            Expr::Sub(l, r) => Value::Int(int(l) - int(r)),
+            Expr::IfElse {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                if boolean(condition) {
+                    eval_ast(then_expr, env)
+                } else {
+                    eval_ast(else_expr, env)
+                }
+            }
+            other => panic!("unsupported test expression {other:?}"),
+        }
+    }
+
+    /// Evaluate rendered Rust with Rust's own grammar: `syn` decides the
+    /// grouping, exactly as rustc would for the generated owner.
+    fn eval_rust(expr: &syn::Expr, env: &BTreeMap<&str, Value>) -> Value {
+        let int = |e: &syn::Expr| match eval_rust(e, env) {
+            Value::Int(v) => v,
+            other => panic!("expected integer, got {other:?}"),
+        };
+        let boolean = |e: &syn::Expr| match eval_rust(e, env) {
+            Value::Bool(v) => v,
+            other => panic!("expected bool, got {other:?}"),
+        };
+        match expr {
+            syn::Expr::Paren(inner) => eval_rust(&inner.expr, env),
+            syn::Expr::Lit(lit) => match &lit.lit {
+                syn::Lit::Bool(v) => Value::Bool(v.value),
+                syn::Lit::Int(v) => Value::Int(v.base10_parse().expect("integer literal")),
+                other => panic!("unsupported literal {}", other.to_token_stream()),
+            },
+            syn::Expr::Path(path) => {
+                let ident = path.path.get_ident().expect("binding identifier");
+                env[ident.to_string().as_str()]
+            }
+            syn::Expr::Unary(unary) => match unary.op {
+                syn::UnOp::Not(_) => Value::Bool(!boolean(&unary.expr)),
+                ref other => panic!("unsupported unary operator {}", other.to_token_stream()),
+            },
+            syn::Expr::Binary(bin) => match bin.op {
+                syn::BinOp::And(_) => Value::Bool(boolean(&bin.left) && boolean(&bin.right)),
+                syn::BinOp::Or(_) => Value::Bool(boolean(&bin.left) || boolean(&bin.right)),
+                syn::BinOp::Eq(_) => {
+                    Value::Bool(eval_rust(&bin.left, env) == eval_rust(&bin.right, env))
+                }
+                syn::BinOp::Ne(_) => {
+                    Value::Bool(eval_rust(&bin.left, env) != eval_rust(&bin.right, env))
+                }
+                syn::BinOp::Gt(_) => Value::Bool(int(&bin.left) > int(&bin.right)),
+                syn::BinOp::Ge(_) => Value::Bool(int(&bin.left) >= int(&bin.right)),
+                syn::BinOp::Lt(_) => Value::Bool(int(&bin.left) < int(&bin.right)),
+                syn::BinOp::Le(_) => Value::Bool(int(&bin.left) <= int(&bin.right)),
+                syn::BinOp::Add(_) => Value::Int(int(&bin.left) + int(&bin.right)),
+                syn::BinOp::Sub(_) => Value::Int(int(&bin.left) - int(&bin.right)),
+                ref other => panic!("unsupported binary operator {}", other.to_token_stream()),
+            },
+            syn::Expr::If(branch) => {
+                let block_value = |block: &syn::Block| match block.stmts.as_slice() {
+                    [syn::Stmt::Expr(tail, None)] => eval_rust(tail, env),
+                    _ => panic!("unsupported branch {}", block.to_token_stream()),
+                };
+                let Some((_, else_expr)) = &branch.else_branch else {
+                    panic!("rendered `if` without `else`");
+                };
+                let syn::Expr::Block(else_block) = else_expr.as_ref() else {
+                    panic!("unsupported else branch {}", else_expr.to_token_stream());
+                };
+                if boolean(&branch.cond) {
+                    block_value(&branch.then_branch)
+                } else {
+                    block_value(&else_block.block)
+                }
+            }
+            other => panic!(
+                "unsupported rendered expression {}",
+                other.to_token_stream()
+            ),
+        }
+    }
+
+    fn assert_rendering_preserves_grouping(
+        owner: &str,
+        render: Renderer,
+        machine: &MachineSchema,
+        cases: &[Expr],
+        envs: &[BTreeMap<&str, Value>],
+    ) {
+        for case in cases {
+            let rendered =
+                render(case, &BTreeMap::new(), machine).expect("renderable test expression");
+            // Owners splice every guard into `(..)`, so parse it delimited.
+            let parsed: syn::Expr = syn::parse_str(&format!("({rendered})"))
+                .unwrap_or_else(|err| panic!("{owner} rendered invalid Rust `{rendered}`: {err}"));
+            for env in envs {
+                assert_eq!(
+                    eval_rust(&parsed, env),
+                    eval_ast(case, env),
+                    "{owner} rendered `{rendered}`, which Rust groups differently from the AST \
+                     {case:?} under {env:?}"
+                );
+            }
+        }
+    }
+
+    fn boolean_envs() -> Vec<BTreeMap<&'static str, Value>> {
+        (0u8..8)
+            .map(|bits| {
+                BTreeMap::from([
+                    ("a", Value::Bool(bits & 1 != 0)),
+                    ("b", Value::Bool(bits & 2 != 0)),
+                    ("c", Value::Bool(bits & 4 != 0)),
+                ])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn approval_owner_rendering_keeps_compound_operand_grouping() {
+        assert_rendering_preserves_grouping(
+            "ApprovalLifecycleMachine",
+            render_approval_expr,
+            &dsl::dsl_approval_lifecycle_machine_production_schema(),
+            &boolean_cases(),
+            &boolean_envs(),
+        );
+    }
+
+    #[test]
+    fn session_turn_admission_owner_rendering_keeps_compound_operand_grouping() {
+        assert_rendering_preserves_grouping(
+            "SessionTurnAdmissionMachine",
+            render_sta_expr,
+            &dsl::dsl_session_turn_admission_machine_production_schema(),
+            &boolean_cases(),
+            &boolean_envs(),
+        );
+    }
+
+    #[test]
+    fn session_document_owner_rendering_keeps_compound_operand_grouping() {
+        let machine = dsl::dsl_session_document_machine_production_schema();
+        assert_rendering_preserves_grouping(
+            "SessionDocumentMachine",
+            render_session_document_expr,
+            &machine,
+            &boolean_cases(),
+            &boolean_envs(),
+        );
+        assert_rendering_preserves_grouping(
+            "SessionDocumentMachine",
+            render_session_document_expr,
+            &machine,
+            &if_else_cases(),
+            &boolean_envs(),
+        );
+
+        let sub = |l: Expr, r: Expr| Expr::Sub(Box::new(l), Box::new(r));
+        let add = |l: Expr, r: Expr| Expr::Add(Box::new(l), Box::new(r));
+        let arithmetic = vec![
+            // x - (y - z) == 3
+            eq(sub(b("x"), sub(b("y"), b("z"))), Expr::U64(3)),
+            // x >= y + (z - x)
+            Expr::Gte(Box::new(b("x")), Box::new(add(b("y"), sub(b("z"), b("x"))))),
+            // (x < y) == (y <= z)
+            eq(
+                Expr::Lt(Box::new(b("x")), Box::new(b("y"))),
+                Expr::Lte(Box::new(b("y")), Box::new(b("z"))),
+            ),
+            // (x > y) != (z > x)
+            neq(
+                Expr::Gt(Box::new(b("x")), Box::new(b("y"))),
+                Expr::Gt(Box::new(b("z")), Box::new(b("x"))),
+            ),
+        ];
+        let envs: Vec<_> = (0i128..27)
+            .map(|n| {
+                BTreeMap::from([
+                    ("x", Value::Int(n % 3 + 2)),
+                    ("y", Value::Int(n / 3 % 3)),
+                    ("z", Value::Int(n / 9)),
+                ])
+            })
+            .collect();
+        assert_rendering_preserves_grouping(
+            "SessionDocumentMachine",
+            render_session_document_expr,
+            &machine,
+            &arithmetic,
+            &envs,
+        );
+    }
+
+    #[test]
+    fn rust_operand_delimits_only_compound_operands() {
+        assert_eq!(rust_operand(&b("a"), "a".to_owned()), "a");
+        assert_eq!(
+            rust_operand(&and(vec![b("a"), b("b")]), "(a) && (b)".to_owned()),
+            "((a) && (b))"
+        );
     }
 }

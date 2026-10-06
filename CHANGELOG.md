@@ -252,6 +252,15 @@ them.
 
 ### Fixed
 
+- The protocol codegen owners for `ApprovalLifecycleMachine`,
+  `SessionDocumentMachine` and `SessionTurnAdmissionMachine` now keep a
+  compound operand of a comparison or arithmetic operator grouped. Before,
+  a DSL guard such as `(a && b) == false` rendered into the generated Rust
+  authority as `(a) && (b) == false`, which Rust parses as
+  `a && (b == false)`, while the generated TLA model kept the grouping, so
+  TLC checked a guard the runtime did not evaluate. Every operand that is not
+  self-delimiting is now parenthesized. No machine on `main` used such a
+  form, so no generated authority changes.
 - Members spawned through the mob operator tools (`spawn_member`,
   `spawn_many_members`) now record the member that spawned them as their
   creator. Before, every such child was recorded as unproven, so

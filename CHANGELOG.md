@@ -153,6 +153,17 @@ them.
 
 ### Fixed
 
+- A public Live close requested before the provider's `session.started`
+  is now held and sent once the session starts (#1794). gpt-live never
+  confirmed a `session.close` that reached it before its own
+  `session.started`, so the close stalled until the host retired the channel
+  locally (Turbo S S99's obsolete reopen, closed about 65 ms after open: 4 of
+  6 close stalls). The held close is accepted at once, sent exactly once when
+  the started frame is applied, dropped if `session.closed` arrives first,
+  and settled by the sideband's end if the session never starts; a provider
+  that stays silent with the sideband open still settles through the host's
+  bounded local retirement. A close after `session.started` is unchanged.
+
 - A host's console observation path no longer overflows a 2 MiB debug worker
   stack. `MobMcpState::mob_handles_snapshot` and every mob verb that calls
   `ensure_restored` built the persistent-restore future inline, and the

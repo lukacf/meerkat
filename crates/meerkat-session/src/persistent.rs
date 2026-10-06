@@ -15973,12 +15973,18 @@ mod tests {
         .expect("close must not wait for a pending turn's durable boundary");
         assert!(matches!(result, Err(SessionError::Busy { .. })));
         // The bounded variant waits for the running turn's boundary instead
-        // of refusing, and settles as soon as the turn releases it.
+        // of refusing, and settles as soon as the turn releases it. The
+        // ordering is proven by a flag set just before the release and read
+        // the moment the waiter settles, not by wall-clock: the waiter starts
+        // late here (a forced stall, as on a loaded machine), which a
+        // measured lower bound could not tolerate.
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let bounded_service = Arc::clone(&service);
         let bounded_session = session_id.clone();
         let bounded_channel = channel.clone();
+        let bounded_released = Arc::clone(&released);
         let bounded = tokio::spawn(async move {
-            let started = std::time::Instant::now();
+            std::thread::sleep(std::time::Duration::from_millis(20));
             let result = bounded_service
                 .resolve_live_assistant_playback_on_channel_close_within(
                     &bounded_session,
@@ -15986,24 +15992,30 @@ mod tests {
                     std::time::Duration::from_secs(5),
                 )
                 .await;
-            (result, started.elapsed())
+            let settled_after_release = bounded_released.load(std::sync::atomic::Ordering::SeqCst);
+            (result, settled_after_release)
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(
             !bounded.is_finished(),
             "the bounded close waits for the turn"
         );
+        released.store(true, std::sync::atomic::Ordering::SeqCst);
         drop(boundary);
-        let (bounded_result, waited) = bounded.await.expect("bounded close task");
+        // Hang guard only; the bound under test is the close's own 5 s.
+        let (bounded_result, settled_after_release) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), bounded)
+                .await
+                .expect("the bounded close settles once the turn releases the boundary")
+                .expect("bounded close task");
         assert!(
             bounded_result
                 .expect("bounded close settles once the turn ends")
                 .is_none()
         );
         assert!(
-            waited >= std::time::Duration::from_millis(150)
-                && waited < std::time::Duration::from_secs(5),
-            "settled when the turn released the boundary: {waited:?}"
+            settled_after_release,
+            "the bounded close settled before the turn released its boundary"
         );
         // Held past the bound, the bounded variant is Busy like the unbounded one.
         let held = service

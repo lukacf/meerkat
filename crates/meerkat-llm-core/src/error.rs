@@ -610,6 +610,20 @@ impl LlmError {
         }
     }
 
+    /// The configured provider endpoint answered with a redirect, which
+    /// provider HTTP clients do not follow. The message is public diagnostic
+    /// data, so it carries only the status: never the `Location` (which can
+    /// hold sensitive URL material) or the unbounded response body.
+    fn redirect_refused(status: u16) -> Self {
+        Self::InvalidConfig {
+            message: format!(
+                "the configured endpoint answered HTTP {status} redirect; the request reached \
+                 that endpoint, and the redirect was not followed. Configure the final endpoint \
+                 as the base URL"
+            ),
+        }
+    }
+
     /// Create from HTTP status code and message
     pub fn from_http_status(status: u16, message: String, retry_after_ms: Option<u64>) -> Self {
         // Structured conversation stops take precedence over generic status
@@ -622,6 +636,11 @@ impl LlmError {
             return stop;
         }
         match status {
+            // Provider HTTP clients never follow redirects, so a 3xx is the
+            // configured endpoint's own answer: the request reached it (and
+            // may have had effect there); only the follow-up was not sent.
+            // Retrying would get the same answer, so it is terminal.
+            300..=399 => Self::redirect_refused(status),
             401 => Self::AuthenticationFailed { message },
             // 402 is a billing failure (Anthropic `billing_error`): the key is
             // valid, the account cannot pay, and no retry clears it.
@@ -661,6 +680,11 @@ impl LlmError {
         message: String,
         headers: &reqwest::header::HeaderMap,
     ) -> Self {
+        // A redirect is terminal, so it needs nothing from the headers: its
+        // refusal is decided before any header (such as Retry-After) is read.
+        if (300..=399).contains(&status) {
+            return Self::redirect_refused(status);
+        }
         let retry_after_ms = headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
@@ -1094,6 +1118,41 @@ mod tests {
 
         let err = LlmError::ServerOverloaded;
         assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn a_redirect_answer_is_a_terminal_typed_error() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LOCATION,
+            reqwest::header::HeaderValue::from_static(
+                "https://elsewhere.example/v1?token=location-secret",
+            ),
+        );
+        // An out-of-range Retry-After is never read for a redirect.
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("18446744073709551615"),
+        );
+        for status in [301, 302, 303, 307, 308] {
+            let error = LlmError::from_http_response(status, "body-secret".to_string(), &headers);
+            let LlmError::InvalidConfig { message } = &error else {
+                panic!("HTTP {status}: a typed redirect refusal, got {error:?}");
+            };
+            assert!(message.contains(&format!("HTTP {status} redirect")));
+            // Neither the Location nor the response body reaches the
+            // diagnostic.
+            for raw in ["elsewhere.example", "location-secret", "body-secret"] {
+                assert!(!message.contains(raw), "HTTP {status}: {raw} in {message}");
+            }
+            // The first request did reach the configured endpoint.
+            assert!(message.contains("the request reached that endpoint"));
+            assert!(!error.is_retryable(), "HTTP {status} is terminal");
+            assert!(matches!(
+                LlmError::from_http_status(status, "body-secret".to_string(), None),
+                LlmError::InvalidConfig { message } if !message.contains("body-secret")
+            ));
+        }
     }
 
     #[test]

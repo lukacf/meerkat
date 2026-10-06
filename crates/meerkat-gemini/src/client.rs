@@ -46,7 +46,10 @@ fn gemini_tag(request: &LlmRequest) -> Option<&GeminiProviderTag> {
 pub struct GeminiClient {
     api_key: String,
     base_url: String,
-    http: reqwest::Client,
+    /// The provider HTTP client, or why it could not be built. A failed
+    /// build fails each request with that error instead of substituting a
+    /// default client, whose redirect policy would follow redirects.
+    http: Result<reqwest::Client, LlmError>,
     #[cfg(not(target_arch = "wasm32"))]
     checked_http: std::sync::OnceLock<Result<reqwest::Client, LlmError>>,
     wire_mode: GeminiWireMode,
@@ -300,6 +303,11 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
 }
 
 impl GeminiClient {
+    /// The provider HTTP client; a failed build fails the request.
+    fn http(&self) -> Result<&reqwest::Client, LlmError> {
+        self.http.as_ref().map_err(Clone::clone)
+    }
+
     /// Create a new Gemini client with the given API key
     pub fn new(api_key: String) -> Self {
         Self::new_with_base_url(
@@ -310,8 +318,7 @@ impl GeminiClient {
 
     /// Create a new Gemini client with an explicit base URL
     pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
-        let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url);
         Self {
             api_key,
             base_url,
@@ -327,9 +334,7 @@ impl GeminiClient {
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
-        if let Ok(http) = http::build_http_client_for_base_url(reqwest::Client::builder(), &url) {
-            self.http = http;
-        }
+        self.http = http::build_http_client_for_base_url(reqwest::Client::builder(), &url);
         self.base_url = url;
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -862,7 +867,7 @@ impl GeminiClient {
         body: &Value,
     ) -> Result<reqwest::Response, LlmError> {
         let mut req = self
-            .http
+            .http()?
             .post(endpoint)
             .header("Content-Type", "application/json");
         if let Some(authorizer) = &self.authorizer {
@@ -911,7 +916,7 @@ impl GeminiClient {
             });
         };
         let mut req = self
-            .http
+            .http()?
             .post(endpoint)
             .header("Content-Type", "application/json");
         let mut extra: Vec<(String, String)> = Vec::new();
@@ -944,7 +949,7 @@ impl GeminiClient {
                 message: "Gemini API gs:// video references require Google bearer auth for Files API registration; use the vertex_ai backend for direct gs:// references or pass a pre-registered file URI".to_string(),
             });
         };
-        let mut req = self.http.get(endpoint);
+        let mut req = self.http()?.get(endpoint);
         let mut extra: Vec<(String, String)> = Vec::new();
         let mut auth_req = meerkat_core::HttpAuthorizationRequest {
             method: "GET",
@@ -2166,9 +2171,9 @@ impl GeminiClient {
                 self.checked_http.get_or_init(|| http::build_checked_http_client_for_base_url(
                     reqwest::Client::builder(), &self.base_url,
                 )).as_ref().map_err(Clone::clone)?
-            } else { &self.http };
+            } else { self.http()? };
             #[cfg(target_arch = "wasm32")]
-            let http = &self.http;
+            let http = self.http()?;
 
             // Auth path: if an authorizer is attached (Code Assist /
             // Vertex ADC Bearer flow), collect its headers via the

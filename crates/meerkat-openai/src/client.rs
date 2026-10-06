@@ -95,7 +95,10 @@ pub struct OpenAiClient {
     base_url: String,
     responses_path: String,
     backend_wire: OpenAiBackendWire,
-    http: reqwest::Client,
+    /// The provider HTTP client, or why it could not be built. A failed
+    /// build fails each request with that error instead of substituting a
+    /// default client, whose redirect policy would follow redirects.
+    http: Result<reqwest::Client, LlmError>,
     #[cfg(not(target_arch = "wasm32"))]
     checked_http: std::sync::OnceLock<Result<reqwest::Client, LlmError>>,
     /// Extra headers emitted on every request (e.g. `ChatGPT-Account-ID`,
@@ -678,6 +681,11 @@ pub(crate) fn project_openai_replay_messages_for_target(
 }
 
 impl OpenAiClient {
+    /// The provider HTTP client; a failed build fails the request.
+    fn http(&self) -> Result<&reqwest::Client, LlmError> {
+        self.http.as_ref().map_err(Clone::clone)
+    }
+
     fn model_supports_temperature(model: &str) -> bool {
         crate::request_support::supports_temperature(model)
     }
@@ -716,8 +724,7 @@ impl OpenAiClient {
         api_key: Option<String>,
         base_url: String,
     ) -> Self {
-        let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url);
         Self {
             api_key,
             base_url,
@@ -888,9 +895,7 @@ impl OpenAiClient {
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
-        if let Ok(http) = http::build_http_client_for_base_url(reqwest::Client::builder(), &url) {
-            self.http = http;
-        }
+        self.http = http::build_http_client_for_base_url(reqwest::Client::builder(), &url);
         self.base_url = url;
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1316,10 +1321,10 @@ impl OpenAiClient {
                 .as_ref()
                 .map_err(Clone::clone)?
         } else {
-            &self.http
+            self.http()?
         };
         #[cfg(target_arch = "wasm32")]
-        let http = &self.http;
+        let http = self.http()?;
         let mut request_builder = http
             .post(endpoint)
             .header("Content-Type", "application/json");
@@ -1970,7 +1975,7 @@ impl OpenAiClient {
         request_extra_headers: &[(String, String)],
     ) -> Result<reqwest::Response, LlmError> {
         let mut request_builder = self
-            .http
+            .http()?
             .post(endpoint)
             .header("Content-Type", "application/json");
         request_builder = self

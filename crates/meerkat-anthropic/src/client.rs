@@ -4671,6 +4671,110 @@ mod tests {
         server.abort();
     }
 
+    /// What a redirect target saw: one `(method, x-api-key)` per request.
+    type RedirectTargetHits = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    async fn record_redirect_target_hit(
+        State(hits): State<RedirectTargetHits>,
+        method: axum::http::Method,
+        headers: axum::http::HeaderMap,
+    ) -> impl IntoResponse {
+        let api_key = headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        hits.lock()
+            .expect("redirect target lock")
+            .push((method.to_string(), api_key));
+        StatusCode::OK
+    }
+
+    /// A configured endpoint that answers every request with `status` and a
+    /// `Location` on another host (another port of the loopback address, which
+    /// reqwest treats as cross-host), plus that other host, which records
+    /// whatever reaches it.
+    async fn spawn_redirecting_endpoint(
+        status: StatusCode,
+    ) -> (String, RedirectTargetHits, Vec<tokio::task::JoinHandle<()>>) {
+        let hits = RedirectTargetHits::default();
+        let target = Router::new()
+            .fallback(record_redirect_target_hit)
+            .with_state(Arc::clone(&hits));
+        let target_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let target_addr = target_listener.local_addr().expect("target addr");
+        let location = format!("http://{target_addr}/v1/messages");
+        let origin = Router::new().fallback(move || {
+            let location = location.clone();
+            async move { (status, [("location", location)]) }
+        });
+        let origin_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirecting endpoint");
+        let origin_addr = origin_listener.local_addr().expect("origin addr");
+        let servers = vec![
+            tokio::spawn(async move {
+                axum::serve(target_listener, target)
+                    .await
+                    .expect("serve target");
+            }),
+            tokio::spawn(async move {
+                axum::serve(origin_listener, origin)
+                    .await
+                    .expect("serve origin");
+            }),
+        ];
+        (format!("http://{origin_addr}"), hits, servers)
+    }
+
+    /// A model request goes only to the configured endpoint: a redirect is
+    /// not followed (so neither the API key header, which reqwest does not
+    /// strip on a cross-host redirect, nor the request reaches another host)
+    /// and the request fails with a typed error.
+    #[tokio::test]
+    async fn messages_do_not_follow_a_redirect_off_the_configured_endpoint() {
+        for status in [StatusCode::FOUND, StatusCode::TEMPORARY_REDIRECT] {
+            let (base_url, hits, servers) = spawn_redirecting_endpoint(status).await;
+            let client = AnthropicClient::builder("sk-redirect-probe".to_string())
+                .base_url(base_url)
+                .build()
+                .expect("client");
+            let request = LlmRequest::new(
+                "claude-sonnet-4-5",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let mut stream = client.stream(&request);
+            let mut error = None;
+            while let Some(event) = stream.next().await {
+                match event {
+                    Err(e)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error: e },
+                    }) => {
+                        error = Some(e);
+                        break;
+                    }
+                    Ok(_) => {}
+                }
+            }
+            let reached = hits.lock().expect("redirect target lock").clone();
+            assert!(
+                reached.is_empty(),
+                "HTTP {status}: the redirect was followed to another host, which received \
+                 (method, x-api-key) {reached:?}"
+            );
+            let error = error.unwrap_or_else(|| panic!("HTTP {status}: the request fails"));
+            assert!(
+                matches!(&error, LlmError::InvalidConfig { message } if message.contains("redirect")),
+                "HTTP {status}: a typed redirect refusal, got {error:?}"
+            );
+            for server in servers {
+                server.abort();
+            }
+        }
+    }
+
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so
     /// tests can pin per-chunk wire behavior (keepalive-only chunks etc.).
     async fn paced_sse(State(chunks): State<Vec<String>>) -> impl IntoResponse {

@@ -124,6 +124,21 @@ them.
   error on process-restart restore now fails only that member's restore,
   with the error as its restore failure reason; the rest of the mob comes
   up. It used to fail the whole mob resume (#1701).
+- Behaviour-only (not measured by the gate): native provider HTTP clients
+  (`meerkat_llm_core::http::build_http_client_for_base_url`, used by the
+  Anthropic, OpenAI, OpenAI-compatible and Gemini clients) no longer follow
+  redirects, same-origin included. A model request goes only to the endpoint
+  the client was built for. A 3xx answer from it is now the terminal
+  `LlmError::InvalidConfig` (it used to be followed, or mapped to the
+  retryable `LlmError::Unknown`). The error carries only the status and
+  says the request reached the configured endpoint; it never includes the
+  `Location` or the response body. Before, a cross-host
+  redirect re-sent the request elsewhere with provider key headers such as
+  `x-api-key` and `x-goog-api-key`, which reqwest does not strip. The
+  OpenAI, OpenAI-compatible and Gemini constructors no longer fall back to
+  `reqwest::Client::new()` (which follows redirects) when the configured
+  client fails to build: each request fails with that build error instead.
+  Browser (wasm32) redirect handling is unchanged.
 
 
 ### Added

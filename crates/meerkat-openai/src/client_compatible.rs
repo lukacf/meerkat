@@ -87,7 +87,10 @@ pub struct OpenAiCompatibleClient {
     authorizer: Option<Arc<dyn HttpAuthorizer>>,
     provider: Provider,
     base_url: String,
-    http: reqwest::Client,
+    /// The provider HTTP client, or why it could not be built. A failed
+    /// build fails each request with that error instead of substituting a
+    /// default client, whose redirect policy would follow redirects.
+    http: Result<reqwest::Client, LlmError>,
     #[cfg(not(target_arch = "wasm32"))]
     checked_http: std::sync::OnceLock<Result<reqwest::Client, LlmError>>,
     responses_delegate: Option<crate::OpenAiClient>,
@@ -100,6 +103,11 @@ pub struct OpenAiCompatibleClient {
 }
 
 impl OpenAiCompatibleClient {
+    /// The provider HTTP client; a failed build fails the request.
+    fn http(&self) -> Result<&reqwest::Client, LlmError> {
+        self.http.as_ref().map_err(Clone::clone)
+    }
+
     pub fn new(
         mode: OpenAiCompatibleMode,
         remote_model: String,
@@ -130,8 +138,7 @@ impl OpenAiCompatibleClient {
         bearer_token: Option<String>,
         options: OpenAiCompatibleClientOptions,
     ) -> Self {
-        let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url);
         let responses_delegate = matches!(mode, OpenAiCompatibleMode::Responses).then(|| {
             crate::OpenAiClient::new_with_optional_api_key_and_base_url(
                 bearer_token.clone(),
@@ -735,10 +742,10 @@ impl OpenAiCompatibleClient {
                 .as_ref()
                 .map_err(Clone::clone)?
         } else {
-            &self.http
+            self.http()?
         };
         #[cfg(target_arch = "wasm32")]
-        let http = &self.http;
+        let http = self.http()?;
         let (request_builder, receipt) = self
             .apply_dynamic_auth_with_receipt(
                 http.post(url),
@@ -1321,7 +1328,7 @@ impl LlmClient for OpenAiCompatibleClient {
     async fn health_check(&self) -> Result<(), LlmError> {
         let url = format!("{}/models", self.base_url);
         let response = self
-            .apply_dynamic_auth(self.http.get(&url), "GET", &url, "application/json")
+            .apply_dynamic_auth(self.http()?.get(&url), "GET", &url, "application/json")
             .await?
             .send()
             .await

@@ -601,6 +601,36 @@ pub(crate) enum RetainedSeedAdmission {
     Refused,
 }
 
+/// How a retained summary can seed an open (#1784).
+pub(crate) enum RetainedOpening {
+    /// The retained summary and every row committed since it ride the
+    /// startup `session.input`.
+    Seed(LiveContextSummary, RealtimeSessionOpenConfig),
+    /// No retained summary can seed this open (none retained, the session
+    /// archived or gone, the prefix or identity changed, the source
+    /// unreadable): the open takes the fresh-summary path with the
+    /// pre-open bound, and a summary that misses it is delivered late, as on
+    /// a first open.
+    Unavailable,
+    /// A retained summary still matches the session, but the rows committed
+    /// since it exceed the startup bounds. A reopen then seeds a fresh
+    /// summary at creation and waits for it: a summary is never appended
+    /// into an open reopened channel (appended at the onset of the user's
+    /// first question it was answered inside the utterance; appended into
+    /// silence it was spoken unprompted).
+    TailExceedsStartupBounds(RetainedTailOverflow),
+}
+
+/// Which startup bound the rows after a retained summary exceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedTailOverflow {
+    /// More conversation turns than the recent-turns window
+    /// (`LIVE_STARTUP_RECENT_TURNS`).
+    RecentTurnsWindow { following_turns: usize },
+    /// More than the provider's startup input holds verbatim.
+    StartupInputFit { following_rows: usize },
+}
+
 /// Outcome of the bounded pre-open summary wait for one concurrent boundary.
 pub(crate) enum LivePreOpenSummary {
     /// The summary was ready and exactly current: it rides the startup

@@ -265,6 +265,8 @@ export interface WireBackendProfile {
   backend_kind: WireBackendKind;
   base_url?: string | null;
   options?: unknown;
+  /** OpenAI backends: whether Meerkat's OpenAI prompt-cache fields apply here. Omitted for other providers. */
+  prompt_cache_applicable?: boolean | null;
 }
 
 export interface WireAuthProfile {
@@ -597,6 +599,7 @@ export function parseWireBackendProfile(value: unknown, path = 'backend_profile'
   const backendKind = parseWireBackendKind(record.backend_kind, `${path}.backend_kind`);
   validateProviderBackendKind(provider, backendKind, `${path}.backend_kind`);
   optionalString(record, 'base_url', `${path}.base_url`);
+  optionalBoolean(record, 'prompt_cache_applicable', `${path}.prompt_cache_applicable`);
   return value as WireBackendProfile;
 }
 

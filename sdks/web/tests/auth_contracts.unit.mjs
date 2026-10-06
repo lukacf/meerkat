@@ -362,3 +362,21 @@ function identityPayload() {
     profile_id: 'prod_env_key',
   };
 }
+
+test('backend profiles carry an optional typed prompt_cache_applicable', () => {
+  // A server that predates the field omits it.
+  assert.equal(parseWireBackendProfile(backendProfile).prompt_cache_applicable, undefined);
+  assert.equal(
+    parseWireBackendProfile({ ...backendProfile, prompt_cache_applicable: true }).prompt_cache_applicable,
+    true,
+  );
+  assert.equal(
+    parseWireBackendProfile({ ...backendProfile, backend_kind: 'chatgpt_backend', prompt_cache_applicable: false })
+      .prompt_cache_applicable,
+    false,
+  );
+  assert.throws(
+    () => parseWireBackendProfile({ ...backendProfile, prompt_cache_applicable: 'yes' }),
+    /prompt_cache_applicable/,
+  );
+});

@@ -247,6 +247,12 @@ def _symbols_module_level_const_missing(text: str) -> tuple[str, ...] | None:
     return tuple(segments[-1:])
 
 
+def _symbols_struct_with_pub_fields_changed_type(text: str) -> tuple[str, ...] | None:
+    # struct meerkat_contracts::wire::LoginCancelParams became enum
+    match = re.fullmatch(r"struct\s+([A-Za-z0-9_:]+)\s+became\s+(?:an\s+)?(?:enum|union)", text)
+    return _path_symbols(match.group(1)) if match else None
+
+
 def _symbols_struct_missing(text: str) -> tuple[str, ...] | None:
     # struct meerkat_live::host::LiveChannelId
     match = re.fullmatch(r"struct\s+([A-Za-z0-9_:]+)", text)
@@ -316,6 +322,9 @@ STRUCTURAL_EXTRACTORS = {
     "pub_module_level_const_missing": _symbols_module_level_const_missing,
     "struct_missing": _symbols_struct_missing,
     "struct_pub_field_missing": _symbols_struct_pub_field_missing,
+    # "struct <path> became enum in file <file>:<line>" (v0.50.0 template;
+    # first seen on the 0.8.52 report for LoginCancelParams).
+    "struct_with_pub_fields_changed_type": _symbols_struct_with_pub_fields_changed_type,
     # "trait <path>, previously in file <file>:<line>" (v0.50.0 template).
     "trait_missing": _symbols_trait_missing,
     "trait_method_added": _symbols_trait_method_added,

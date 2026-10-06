@@ -1,3 +1,4 @@
+pub(crate) mod protected;
 pub(crate) mod sse;
 pub(crate) mod streamable_http;
 

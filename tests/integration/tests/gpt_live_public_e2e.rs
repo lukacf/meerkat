@@ -1738,7 +1738,7 @@ async fn run_s97_client_context_vertical(
     evidence.stage(EvidenceStage::Connected)?;
     // The lag rule's input is recorded whether the phases pass or fail: a
     // failing run must be classifiable as provider-degraded or valid.
-    let phases: Result<_, Box<dyn std::error::Error>> = async {
+    let phases = AssertUnwindSafe(async {
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -2006,18 +2006,28 @@ async fn run_s97_client_context_vertical(
         "durable delegated executor spawn did not materialize in canonical mob events"
     );
 
-        Ok((
+        Ok::<_, Box<dyn std::error::Error>>((
             provider_delegation_ref_digest,
             delegation_index,
             delegation_outputs,
             commentary_acks,
             worker_identity,
         ))
-    }
+    })
+    .catch_unwind()
     .await;
-    if let Err(error) = peer.record_timeline().await {
-        eprintln!("S97: the browser timeline could not be recorded: {error}");
-    }
+    // The lag-rule input, recorded whether the phases passed, failed or
+    // panicked; a panic resumes only after it (#1765).
+    let phases = evidence::record_before_resuming(phases, async {
+        if let Err(error) = peer.record_timeline().await {
+            eprintln!("S97: the browser timeline could not be recorded: {error}");
+        }
+    })
+    .await;
+    let phases = match phases {
+        Ok(phases) => phases,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
     let (
         provider_delegation_ref_digest,
         delegation_index,
@@ -3681,13 +3691,17 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     })
     .catch_unwind()
     .await;
+    // The current channel's lag-rule input, recorded whether the body passed,
+    // failed or panicked: a failing run must be classifiable as
+    // provider-degraded or valid. Before `settle_scenario_body`, which
+    // resumes a panic and never returns for it (#1765).
+    let result = evidence::record_before_resuming(result, async {
+        if let Err(error) = live.peer.record_timeline().await {
+            eprintln!("S99: the browser timeline could not be recorded: {error}");
+        }
+    })
+    .await;
     let result = settle_scenario_body(&mut live, result).await;
-    // The current channel's lag-rule input, recorded whether the body passed
-    // or failed: a failing run must be classifiable as provider-degraded or
-    // valid.
-    if let Err(error) = live.peer.record_timeline().await {
-        eprintln!("S99: the browser timeline could not be recorded: {error}");
-    }
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;

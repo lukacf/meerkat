@@ -4,8 +4,42 @@
 
 The 0.9 coordinator leads the cross-repository work. Native
 [PR1730](https://github.com/lukacf/meerkat/pull/1730) is the current publication
-checkpoint. At the latest remote check it remained a draft at
-`afb79ea29d8cdf30689345d884b43bc6c5baa428`. The previous integrated baseline is
+checkpoint. Commit `24efa210844e640c6907babb485cc745118c8801`, tree
+`c10c045bca384e0b64bb7460bbaf8dfe3b2454cb`, completed the normal hooked
+fast-forward push on GCP at 05:35:01.899 UTC on 2026-10-06. The command exited
+zero after 2h05m53s, with no skipped hooks, bypass or force push. The owner
+verified the remote branch at the same commit and the source checkout clean.
+
+All normal hook stages passed, including strict workspace/all-target/all-feature
+Clippy, machine verification, generated/Bazel freshness, and the deterministic
+unit, integration, HeadCanonical cold-restart and E2E-fast gate. The successful
+runner does not retain per-lane counts, so this checkpoint claims no new test
+totals. The raw push log is retained locally at
+`/private/tmp/adr-001-envelope-v4-r1/adr-push-24efa210/push-raw.log` and on GCP
+at `/tmp/rb/toolkit-work/receipts/adr-push-24efa210/push-raw.log`, with SHA256
+`db5499442ed2689acc64df4eb65f72ecf1557a9a8708367fc014d376d9247ec2`.
+
+This successor integrates main `17853e0e48fa7a865274ed8d8a28bd1604ed0f18`,
+including the debug-stack and write-only-when-changed code-generation fixes.
+The Mac owns source resolution and focused regression preparation; GCP owns
+the successor's compilation, normal push hooks, hosted CI and merge. The
+exact-24 qualification above does not qualify this merged successor. Normal
+hosted CI is required again; the temporary Actions-outage exception has ended.
+No accepted overhead benchmark or full-surface completion is claimed.
+
+The merge applies the read-only restriction before authorization entry
+observation and preserves it when currentness refreshes the dispatch context.
+Prepared OpenAI dispatch retains the shared replay projection and backend-owned
+cache-field filtering. Three new regression tests cover refreshed direct and
+resolved tool contexts, nested policy gates, and prepared request bodies across
+public OpenAI, ChatGPT and Azure backends. They were authored before the source
+resolution and remain uncompiled and unexecuted pending GCP validation. The
+Bazel module lock and two automatically merged BUILD files were regenerated;
+the repository's strict Bazel freshness command passed on this source.
+
+## Earlier qualification history
+
+The previous integrated baseline is
 `64349561d898d0a9e3ad279fa1a7d286ff7b302f`, tree
 `2041118ca2f545541a1a05cccccb908765307589`. It integrates main through
 `98e26901ba24c0b2154192e17590cdb3773eb3b5`, the custody fixture correction,
@@ -19,11 +53,10 @@ The current successor also integrates actual main merge
 correction described below. That correction changes no production behavior.
 Qualification of that integrated source, `f3ebf2a02e19330aa926b61a205fcd62466ca2fc`,
 failed as described below. Its fixture successor completed GCP qualification
-with two test failures; earlier published results do not qualify it. Luka's explicit 2026-10-05 instruction
-in the 0.9 coordinator chat temporarily removes GitHub CI as a blocker during
-the Actions outage. CI is recorded as skipped, never passed. Existing local
-checks, source identity, consumer acceptance and publication ownership remain;
-normal CI resumes when the service is healthy.
+with two test failures; earlier published results did not qualify it. Luka's
+explicit 2026-10-05 instruction in the 0.9 coordinator chat temporarily removed
+GitHub CI as a blocker during the Actions outage. Those historical CI omissions
+remain recorded as skipped, never passed.
 
 MobKit's approval display checkpoint [PR594](https://github.com/lukacf/meerkat-mobkit/pull/594)
 merged as `e09a3c33e25c96a29cff30ec2923eaccc7a9c7ba` at 22:15:37 UTC.

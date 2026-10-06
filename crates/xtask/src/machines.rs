@@ -5170,12 +5170,11 @@ fn merged_java_tool_options() -> String {
 }
 
 fn write_generated(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create output dir {}", parent.display()))?;
-    }
+    // Skips the write when the bytes already match, so an unchanged artifact
+    // keeps its mtime and does not rebuild its crate (crate::generated_files).
     let contents = normalize_generated_contents(path, contents)?;
-    fs::write(path, contents).with_context(|| format!("write {}", path.display()))
+    crate::generated_files::write_if_changed(path, contents.as_bytes())?;
+    Ok(())
 }
 
 fn compare_generated(path: &Path, expected: &str, mismatches: &mut Vec<String>) -> Result<()> {

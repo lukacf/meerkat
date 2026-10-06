@@ -2,6 +2,9 @@
 
 use crate::McpError;
 use crate::client_service::{ClientServiceSelection, ConnectedClient, McpClientServiceFactory};
+use crate::transport::protected::{
+    ProtectedMetadata, ProtectedMetadataState, ProtectedStdioTransport,
+};
 use crate::transport::sse::{SseClientConfig, SseClientTransport};
 use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
@@ -12,7 +15,7 @@ use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::types::ContentBlock;
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequest, CallToolRequestParams, CallToolResult, ServerResult};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::Value;
@@ -23,6 +26,8 @@ use tokio::process::Command;
 /// Connection to an MCP server
 pub struct McpConnection {
     config: McpServerConfig,
+    connection_id: crate::McpConnectionId,
+    protected_metadata: ProtectedMetadataState,
     service: ConnectedClient,
     /// The stdio server's process, owned until `close` observes its exit.
     stdio_child: Option<StdioChildCustody>,
@@ -279,6 +284,8 @@ impl McpConnection {
                 ));
             }
         }
+        let connection_id = crate::McpConnectionId::allocate()?;
+        let protected_metadata = ProtectedMetadataState::default();
         // Refusal precedes process spawn, SSE startup and HTTP transport effects.
         let client = ClientServiceSelection::select(config, client_factory.as_deref())?;
         let mut stdio_child = None;
@@ -287,7 +294,14 @@ impl McpConnection {
                 // We own the process; rmcp only gets its stdout/stdin.
                 let custody = stdio_custody.unwrap_or_default();
                 let (stdout, stdin) = custody.spawn(stdio)?;
-                match client.serve((stdout, stdin)).await {
+                match client
+                    .serve(ProtectedStdioTransport::new(
+                        stdout,
+                        stdin,
+                        protected_metadata.clone(),
+                    ))
+                    .await
+                {
                     Ok(service) => {
                         stdio_child = Some(custody);
                         service
@@ -317,7 +331,8 @@ impl McpConnection {
                         .await;
                     }
                     McpHttpTransport::Sse => {
-                        let http_client = ReqwestSseClient::new(headers);
+                        let http_client = ReqwestSseClient::new(headers)
+                            .with_protected_metadata(protected_metadata.clone());
                         let transport = SseClientTransport::start_with_client(
                             http_client,
                             SseClientConfig {
@@ -342,6 +357,8 @@ impl McpConnection {
 
         Ok(Self {
             config: config.clone(),
+            connection_id,
+            protected_metadata,
             service,
             stdio_child,
         })
@@ -482,9 +499,16 @@ impl McpConnection {
         recorder: Option<crate::transport::streamable_http::AuthChallengeRecorder>,
         client: ClientServiceSelection,
     ) -> Result<Self, StreamableConnectError> {
+        let connection_id =
+            crate::McpConnectionId::allocate().map_err(|_| StreamableConnectError {
+                reason: "MCP connection generation unavailable".into(),
+                auth: Default::default(),
+            })?;
+        let protected_metadata = ProtectedMetadataState::default();
         let recorder = recorder.unwrap_or_default();
         let http_client =
-            ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone());
+            ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone())
+                .with_protected_metadata(protected_metadata.clone());
         let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
         if let Some(token) = bearer_token {
             transport_config = transport_config.auth_header(token);
@@ -499,6 +523,8 @@ impl McpConnection {
             })?;
         Ok(Self {
             config: config.clone(),
+            connection_id,
+            protected_metadata,
             service,
             stdio_child: None,
         })
@@ -621,6 +647,11 @@ impl McpConnection {
         &self.config
     }
 
+    /// Physical generation of this exact connection.
+    pub fn connection_id(&self) -> crate::McpConnectionId {
+        self.connection_id
+    }
+
     /// Get server info
     pub fn server_info(&self) -> Option<Arc<rmcp::model::ServerInfo>> {
         self.service.peer_info()
@@ -642,23 +673,41 @@ impl McpConnection {
     /// whose content parses to the same JSON value is its serialization and
     /// is not repeated.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let request = match args.as_object().cloned() {
+        let result = self.call_tool_result(name, args, None).await?;
+        crate::protocol::convert_tool_result(result, name)
+    }
+
+    pub(crate) async fn call_tool_result(
+        &self,
+        name: &str,
+        args: &Value,
+        metadata: Option<serde_json::Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = match args.as_object().cloned() {
             Some(arguments) => {
                 CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
             }
             None => CallToolRequestParams::new(name.to_string()),
         };
-
-        let result =
-            self.service
-                .call_tool(request)
-                .await
-                .map_err(|e| McpError::ToolCallFailed {
-                    tool: name.to_string(),
-                    reason: format!("{e}"),
-                })?;
-
-        crate::protocol::convert_tool_result(result, name)
+        let mut request = CallToolRequest::new(params);
+        if let Some(metadata) = metadata {
+            self.protected_metadata.register(&metadata)?;
+            request.extensions.insert(ProtectedMetadata(metadata));
+        }
+        let result = self
+            .service
+            .send_request(request.into())
+            .await
+            .map_err(|error| McpError::ToolCallFailed {
+                tool: name.to_string(),
+                reason: error.to_string(),
+            })?;
+        match result {
+            ServerResult::CallToolResult(result) => Ok(result),
+            _ => Err(McpError::ProtocolError {
+                message: "unexpected MCP tools/call response".into(),
+            }),
+        }
     }
 
     /// Call a tool, returning only the text content as a concatenated string.

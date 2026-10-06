@@ -6125,6 +6125,7 @@ class WireBackendProfile:
     provider: str
     base_url: Optional[str] = None
     options: Optional[Any] = None
+    prompt_cache_applicable: Optional[bool] = None
 
 
 @dataclass

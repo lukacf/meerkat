@@ -38,6 +38,8 @@ pub mod auth;
 pub mod authorization;
 pub mod blob;
 pub mod budget;
+pub mod call_origin;
+pub use call_origin::{CALL_ORIGIN_META_KEY, WireCallOrigin};
 pub mod comms;
 pub mod compact;
 pub mod completion_feed;

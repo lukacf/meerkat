@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { embeddedInputs, moduleReferences, packageForFile } from "./rust-test-selector.mjs";
+import { embeddedInputs, gitLines, moduleReferences, packageForFile } from "./rust-test-selector.mjs";
 
 const refs = moduleReferences(`
 //! A doc example with #[path = "support/not_a_module.rs"] must not affect
@@ -50,5 +50,16 @@ const embedded = embeddedInputs(dirs);
 assert.ok(embedded.length > 0, "expected tracked embedded-input symlinks under crate directories");
 assert.ok(embedded.every((input) => input.pkg.name === "meerkat"));
 assert.ok(embedded.some((input) => input.path === ".claude/skills/meerkat-platform/SKILL.md"));
+
+// Per-crate license links (#1766) point at the repo-root license files. They
+// are packaging metadata, not compile inputs: a license edit selects no
+// package, and no embedded input is a license file.
+assert.ok(
+  gitLines(["ls-files", "-s", "--", "crates"]).some((entry) => /^120000 .*\/LICENSE-MIT$/.test(entry)),
+  "expected the per-crate LICENSE-MIT symlinks this exemption covers",
+);
+assert.equal(packageForFile("LICENSE-MIT", dirs), null);
+assert.equal(packageForFile("LICENSE-APACHE", dirs), null);
+assert.ok(embedded.every((input) => !/^LICENSE/.test(input.path)));
 
 console.log("rust selector selftest ok");

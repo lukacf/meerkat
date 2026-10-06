@@ -4207,6 +4207,16 @@ fn primitive_admitted_content_shape(primitive: &RunPrimitive) -> TurnContentShap
     }
 }
 
+/// Whether a staged primitive was admitted as a `ResumePending` continuation,
+/// from the runtime-stamped execution kind it carries.
+fn staged_primitive_resumes_pending(staged: &StagedRunInput) -> bool {
+    staged
+        .turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.execution_kind)
+        == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+}
+
 fn primitive_turn_start_input(
     run_id: &RunId,
     primitive: &RunPrimitive,
@@ -4217,7 +4227,20 @@ fn primitive_turn_start_input(
                 run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
             },
         ),
-        RunPrimitive::StagedInput(staged) if staged.appends.is_empty() => None,
+        // An appends-empty staged primitive (the transient-turn-context /
+        // live-steer class) applies no conversation content and starts no
+        // turn of its own. A `ResumePending` continuation is also appends-empty
+        // but runs a real turn from the session's pending boundary (for
+        // example staged callback results), so it starts this exact run like
+        // any other turn. Without that start the agent finds the previous
+        // run's terminal turn state, starts a run under an identity of its
+        // own, and the runtime's `RunCompleted` for this run no longer matches
+        // the machine's `current_run_id` (#1772).
+        RunPrimitive::StagedInput(staged)
+            if staged.appends.is_empty() && !staged_primitive_resumes_pending(staged) =>
+        {
+            None
+        }
         RunPrimitive::StagedInput(_) => {
             let admitted_content_shape = crate::meerkat_machine::dsl::ContentShape::from(
                 primitive_admitted_content_shape(primitive),
@@ -9377,6 +9400,61 @@ mod tests {
             }
             other => Err(format!("expected StartConversationRun, got {other:?}")),
         }
+    }
+
+    /// #1772: an ordinary continuation carries no appends but resumes a real
+    /// turn from the pending boundary, so it starts this exact run. Any other
+    /// appends-empty staged primitive still starts no turn.
+    #[test]
+    fn resume_pending_continuation_starts_its_own_conversation_turn() -> Result<(), String> {
+        let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
+        let input_id = input.id().clone();
+        let primitive =
+            input_to_primitive(&input, input_id).expect("single input metadata cannot conflict");
+        let RunPrimitive::StagedInput(staged) = &primitive else {
+            return Err(format!("expected a staged primitive, got {primitive:?}"));
+        };
+        assert!(
+            staged.appends.is_empty(),
+            "an ordinary continuation without a turn append carries no appends"
+        );
+        let run_id = RunId::new();
+
+        match primitive_turn_start_input(&run_id, &primitive) {
+            Some(crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: got_run_id,
+                primitive_kind,
+                admitted_content_shape,
+                ..
+            }) => {
+                assert_eq!(
+                    got_run_id,
+                    crate::meerkat_machine::dsl::RunId::from_domain(&run_id)
+                );
+                assert_eq!(
+                    primitive_kind,
+                    crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn
+                );
+                assert_eq!(
+                    admitted_content_shape,
+                    crate::meerkat_machine::dsl::ContentShape::Empty
+                );
+            }
+            other => return Err(format!("expected StartConversationRun, got {other:?}")),
+        }
+
+        let mut content_turn_metadata = staged.turn_metadata.clone().unwrap_or_default();
+        content_turn_metadata.execution_kind =
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn);
+        let appends_empty_content = RunPrimitive::StagedInput(StagedRunInput {
+            turn_metadata: Some(content_turn_metadata),
+            ..staged.clone()
+        });
+        assert!(
+            primitive_turn_start_input(&run_id, &appends_empty_content).is_none(),
+            "an appends-empty staged primitive that is not a resume starts no turn"
+        );
+        Ok(())
     }
 
     #[test]

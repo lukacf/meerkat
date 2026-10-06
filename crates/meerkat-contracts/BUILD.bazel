@@ -294,6 +294,66 @@ rust_test(
 )
 
 rust_test(
+    name = "backend_profile_prompt_cache_wire_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-contracts",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "backend_profile_prompt_cache_wire",
+    crate_root = "tests/backend_profile_prompt_cache_wire.rs",
+    crate_features = [
+        "schema",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/auth_principals_v0_8_49.json",
+    ] + [
+        "//crates/meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//crates/meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//crates/meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
+    ],
+    srcs = [
+        "tests/backend_profile_prompt_cache_wire.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_BIN_NAME": "backend_profile_prompt_cache_wire",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-contracts",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-contracts",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-schedule:meerkat_schedule",
+        "//crates/meerkat-workgraph:meerkat_workgraph",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-contracts",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "image_generation_wire_test",
     aliases = aliases(
         package_name = "crates/meerkat-contracts",
@@ -959,6 +1019,7 @@ test_suite(
     name = "fast_tests",
     tests = [
         ":auth_binding_wire_test",
+        ":backend_profile_prompt_cache_wire_test",
         ":image_generation_wire_test",
         ":jobs_wire_test",
         ":live_audio_format_test",

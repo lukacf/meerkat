@@ -498,6 +498,25 @@ expect_gate_reused "dispatcher ignored full-coverage evidence for a SKIP push"
 : > "$INVOCATION_LOG"
 run_skip_dispatch "" >/dev/null
 expect_gate_reused "dispatcher ignored its own full-coverage evidence"
+
+# machine-codegen-drift is the only local machine/protocol drift check: the
+# dispatcher refuses any SKIP that names it, even with full evidence on file,
+# and runs no hook.
+: > "$INVOCATION_LOG"
+set +e
+refuse_output="$(run_skip_dispatch "cargo-test, machine-codegen-drift")"
+refuse_status=$?
+set -e
+if [[ "$refuse_status" -eq 0 ]]; then
+  echo "dispatcher accepted SKIP=machine-codegen-drift" >&2
+  exit 1
+fi
+if ! grep -Fq "machine-codegen-drift, which cannot be skipped" <<<"$refuse_output"; then
+  echo "dispatcher refused SKIP=machine-codegen-drift without naming the hook" >&2
+  echo "$refuse_output" >&2
+  exit 1
+fi
+expect_gate_reused "dispatcher ran hooks for a refused SKIP"
 rm -rf "$SKIP_REPO"
 
 # Concurrent pushes share one stable worktree. The later process waits for the

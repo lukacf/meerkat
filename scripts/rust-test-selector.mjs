@@ -10,7 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 
 export const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
@@ -150,6 +150,9 @@ const embeddedInputCache = new WeakMap();
 // it as docs-only. Resolve every tracked symlink inside a crate directory and
 // treat its target as an input of that crate. The mapping is derived from the
 // symlinks themselves so new embedded documents need no selector change.
+// A license file name: LICENSE, LICENSE-MIT, LICENSE-APACHE, LICENSE.md, ...
+const LICENSE_LINK_RE = /^LICENSE(?:[-.][A-Za-z0-9.-]+)?$/;
+
 export function embeddedInputs(dirs) {
   let inputs = embeddedInputCache.get(dirs);
   if (inputs) return inputs;
@@ -170,6 +173,11 @@ export function embeddedInputs(dirs) {
     }
     const path = normalizePath(relative(root, resolve(root, dirname(link), target)));
     if (!path || path === ".." || path.startsWith("../") || path.startsWith("/")) continue;
+    // Per-crate license links (crates/*/LICENSE-MIT -> ../../LICENSE-MIT,
+    // #1766) are package metadata that `cargo package` copies; no crate
+    // compiles them, so they are not embedded inputs of any one package (the
+    // first crate in path order used to claim the repo-root license files).
+    if (LICENSE_LINK_RE.test(basename(link)) && !path.includes("/") && LICENSE_LINK_RE.test(path)) continue;
     if (crateDirPackageForPath(path, dirs)) continue;
     let isDirectory = false;
     try {

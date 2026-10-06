@@ -7,6 +7,7 @@
 
 mod agent_input;
 mod agent_tools;
+mod child_mcp_servers;
 mod child_tool_bundles;
 mod child_tool_policy;
 pub mod council_relink;
@@ -25,6 +26,7 @@ mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
 };
+pub use child_mcp_servers::{ChildMcpServerRegistrationError, ChildMcpServers};
 pub use child_tool_bundles::{ChildToolBundleAvailability, ChildToolBundles};
 pub use child_tool_policy::ChildToolPolicyRefused;
 pub use detached_delivery::{
@@ -434,6 +436,8 @@ pub struct MobMcpState {
     /// Host bundles; only the child-available ones reach child mob builders.
     child_tool_bundles: ChildToolBundles,
     additional_child_tool_bundles: std::sync::OnceLock<ChildToolBundles>,
+    /// Public descriptors supplied at child creation, never protected configs.
+    child_mcp_servers: std::sync::RwLock<ChildMcpServers>,
     /// Host consequence-policy registry, forwarded to every child builder.
     tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     /// The host's explicit application tool policy for child mob members.
@@ -588,6 +592,7 @@ impl MobMcpState {
             before_activation: std::sync::OnceLock::new(),
             child_tool_bundles: ChildToolBundles::default(),
             additional_child_tool_bundles: std::sync::OnceLock::new(),
+            child_mcp_servers: std::sync::RwLock::new(ChildMcpServers::default()),
             tool_consequence_policy_registry: None,
             child_application_tool_policy: None,
             persistent_storage_root: None,
@@ -997,7 +1002,11 @@ impl MobMcpState {
                 .store(false, Ordering::SeqCst);
             return;
         };
-        tokio::spawn(crate::council_relink::restore_sweep(weak));
+        // Built in its own frame: `tokio::spawn` takes the future by value,
+        // so an inline sweep future would transit every caller's debug frame.
+        tokio::spawn(meerkat_runtime::stack_relief::box_in_own_frame(move || {
+            crate::council_relink::restore_sweep(weak)
+        }));
     }
 
     /// Override the local capability sweep cadence for deterministic tests.
@@ -1023,21 +1032,23 @@ impl MobMcpState {
                 .store(false, Ordering::SeqCst);
             return;
         };
-        tokio::spawn(async move {
-            loop {
-                let Some(state) = weak.upgrade() else {
-                    return;
-                };
-                state.sweep_local_forked_participants().await;
-                let interval = Duration::from_millis(
-                    state
-                        .local_forked_participant_sweep_interval_ms
-                        .load(Ordering::SeqCst),
-                );
-                drop(state);
-                tokio::time::sleep(interval).await;
-            }
-        });
+        tokio::spawn(meerkat_runtime::stack_relief::box_in_own_frame(
+            move || async move {
+                loop {
+                    let Some(state) = weak.upgrade() else {
+                        return;
+                    };
+                    state.sweep_local_forked_participants().await;
+                    let interval = Duration::from_millis(
+                        state
+                            .local_forked_participant_sweep_interval_ms
+                            .load(Ordering::SeqCst),
+                    );
+                    drop(state);
+                    tokio::time::sleep(interval).await;
+                }
+            },
+        ));
     }
 
     async fn sweep_local_forked_participants(&self) {
@@ -1325,6 +1336,22 @@ impl MobMcpState {
         self.additional_child_tool_bundles
             .set(bundles)
             .map_err(|_| MobError::Internal("additional child bundles already bound".into()))
+    }
+
+    /// Host-attested public MCP descriptors for inline child profiles,
+    /// including implicit delegate mobs. The default supplies none.
+    pub fn with_child_mcp_servers(self, servers: ChildMcpServers) -> Self {
+        self.set_child_mcp_servers(servers);
+        self
+    }
+
+    /// Replace the host supply for future child creation. Existing persisted
+    /// profiles retain their descriptors and are revalidated by the host resolver.
+    pub fn set_child_mcp_servers(&self, servers: ChildMcpServers) {
+        *self
+            .child_mcp_servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = servers;
     }
 
     /// Install the host's tool consequence-policy registry. It is forwarded
@@ -1735,7 +1762,13 @@ impl MobMcpState {
         {
             let mut restored = self.restore_lock.lock().await;
             if !*restored {
-                self.restore_from_persistent_storage().await?;
+                // Built in its own frame: every caller of `ensure_restored`
+                // (each mob verb) would otherwise reserve the restore
+                // future's debug frame even on the already-restored path.
+                meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    self.restore_from_persistent_storage()
+                })
+                .await?;
                 *restored = true;
             }
         }
@@ -1761,20 +1794,25 @@ impl MobMcpState {
             return;
         };
         let restored_before_ms = self.created_at_ms;
-        tokio::spawn(async move {
-            let Some(state) = weak.upgrade() else {
-                return;
-            };
-            let reports =
-                crate::fork_relink::relink_restored_fork_children(&state, restored_before_ms, true)
-                    .await;
-            if !reports.is_empty() {
-                tracing::info!(
-                    children = reports.len(),
-                    "fork_off re-link pass handled children from a previous process"
-                );
-            }
-        });
+        tokio::spawn(meerkat_runtime::stack_relief::box_in_own_frame(
+            move || async move {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                let reports = crate::fork_relink::relink_restored_fork_children(
+                    &state,
+                    restored_before_ms,
+                    true,
+                )
+                .await;
+                if !reports.is_empty() {
+                    tracing::info!(
+                        children = reports.len(),
+                        "fork_off re-link pass handled children from a previous process"
+                    );
+                }
+            },
+        ));
     }
 
     async fn ensure_restored_best_effort(&self, action: &str) -> bool {
@@ -1903,6 +1941,10 @@ impl MobMcpState {
             if let Some(bundles) = self.additional_child_tool_bundles.get() {
                 bundles.supply(&mut definition);
             }
+            self.child_mcp_servers
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .supply(&mut definition)?;
         }
         let scope = child_tool_policy::ChildMobScope::new(child);
         let mut builder =
@@ -6957,6 +6999,46 @@ pub async fn handle_tools_call(
 mod tests {
     use super::*;
     use crate::workgraph_flow::{WorkGraphFlowBridge, WorkGraphFlowHost};
+
+    /// Debug-stack budget for the console observation path.
+    ///
+    /// Hosts call `mob_handles_snapshot` deep inside request handlers on a
+    /// 2 MiB worker stack. At opt-level=0 a poll frame reserves a slot for
+    /// every future a function builds inline, even on paths that never run
+    /// it. The restore future built in `ensure_restored` and the sweep
+    /// futures handed by value to `tokio::spawn` gave this path about 420 KiB
+    /// of frames (`mob_handles_snapshot` 167, `ensure_restored` 167,
+    /// `schedule_temporary_council_recovery` 86) and overflowed a host's
+    /// first console send. With those futures built in their own frames the
+    /// path runs in under 32 KiB; 128 KiB leaves room without hiding a
+    /// regression of that size.
+    #[cfg(not(target_arch = "wasm32"))]
+    const MOB_SNAPSHOT_DEBUG_STACK_BUDGET: usize = 128 * 1024;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mob_handles_snapshot_fits_its_debug_stack_budget() {
+        std::thread::Builder::new()
+            .name("mob-snapshot-small-stack".into())
+            .stack_size(MOB_SNAPSHOT_DEBUG_STACK_BUDGET)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("small-stack runtime");
+                runtime.block_on(async {
+                    let state = MobMcpState::new_in_memory();
+                    state
+                        .mob_handles_snapshot()
+                        .await
+                        .expect("owner snapshot of an empty state");
+                });
+            })
+            .expect("spawn small-stack thread")
+            .join()
+            .expect("mob_handles_snapshot must fit its debug stack budget");
+    }
+
     use async_trait::async_trait;
     use meerkat_core::InteractionId;
     use meerkat_core::PlainEventSource;

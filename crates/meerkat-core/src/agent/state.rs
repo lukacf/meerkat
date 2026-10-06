@@ -2334,16 +2334,19 @@ where
             // Await the call under both deadlines. Each observed stream event
             // re-arms the stall window; the hard deadline is fixed at call
             // start. Timers route through the crate tokio alias, so this works
-            // identically on wasm32 (tokio_with_wasm) and native.
+            // identically on wasm32 (tokio_with_wasm) and native. Deadlines are
+            // measured on `DeadlineInstant`, the clock those timers run on, so
+            // a timer that fires always finds its deadline reached (a paused
+            // test clock cannot leave the loop re-arming forever).
             let model_call_started = crate::time_compat::Instant::now();
             let wait_outcome = {
                 let call_fut = request_attempt.stream_response(assistant_message_id);
                 let mut call_fut = std::pin::pin!(call_fut);
-                let call_started = crate::time_compat::Instant::now();
+                let call_started = crate::time_compat::DeadlineInstant::now();
                 let mut last_activity = call_started;
                 let mut last_count = stream_activity_count();
                 loop {
-                    let now = crate::time_compat::Instant::now();
+                    let now = crate::time_compat::DeadlineInstant::now();
                     let hard_remaining = match hard_timeout {
                         Some((limit, source)) => {
                             let elapsed = now.duration_since(call_started);
@@ -2376,7 +2379,7 @@ where
                             let count = stream_activity_count();
                             if count != last_count {
                                 last_count = count;
-                                last_activity = crate::time_compat::Instant::now();
+                                last_activity = crate::time_compat::DeadlineInstant::now();
                             }
                         }
                     }
@@ -20442,6 +20445,77 @@ mod tests {
                 false,
             )))
         }
+    }
+
+    /// LLM client whose call never answers.
+    struct NeverAnsweringLlmClient {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for NeverAnsweringLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending().await
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// Under a paused clock the LLM call wait wakes exactly at the turn
+    /// deadline and terminalizes the turn after one call: the deadline is
+    /// measured on the clock its timer runs on, so the loop cannot re-arm
+    /// forever while real time stands still.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn call_wait_wakes_exactly_at_the_turn_deadline_under_a_paused_clock() {
+        const TURN_BUDGET: Duration = Duration::from_secs(30);
+        let client = Arc::new(NeverAnsweringLlmClient {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(Arc::clone(&client), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.budget = Budget::new(BudgetLimits {
+            max_tokens: None,
+            max_duration: None,
+            max_turn_duration: Some(TURN_BUDGET),
+            max_tool_calls: None,
+        });
+
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(TURN_BUDGET * 10, agent.run("hello".to_string().into()))
+            .await
+            .expect("the turn deadline must stop the call, not the test's hang guard")
+            .expect_err("an exhausted time horizon is a hard failure");
+
+        assert!(
+            matches!(
+                error,
+                AgentError::TerminalFailure {
+                    outcome: crate::TurnTerminalOutcome::TimeBudgetExceeded,
+                    cause_kind: crate::TurnTerminalCauseKind::TimeBudgetExceeded,
+                    ..
+                }
+            ),
+            "got: {error:?}"
+        );
+        assert_eq!(started.elapsed(), TURN_BUDGET);
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// The item this test exists for: every segment of a turn is bounded and

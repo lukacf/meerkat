@@ -33,11 +33,10 @@
 //!   use run by the provider) never traverse [`AgentToolDispatcher`], so this
 //!   gate cannot see them. A read-only launch is only truthful when the host
 //!   also disables native tool capabilities.
-//! - **MCP tools** are `Unknown` and denied. The MCP `readOnlyHint`
-//!   annotation is a hint supplied by the server being gated, not a proof, so
-//!   it is deliberately not honored here. An operator who has audited a
-//!   specific MCP tool should use an explicit `AllowList` instead of asking
-//!   read-only intent to guess.
+//! - **MCP tools** default to `Unknown` and are denied. A trusted process-local
+//!   MCP context provider may explicitly declare the exact configured destination
+//!   and raw operation read-only. The server's `readOnlyHint` annotation remains
+//!   untrusted and is never used to establish that authority.
 //! - **`shell`** is mutating: nothing in-tree classifies a command line, so
 //!   there is no read-only shell. Read-only intent denies it outright, which
 //!   also means the in-tree read surface is narrow (file reads go through
@@ -603,7 +602,13 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 )
                 .await;
         }
-        let result = self.inner.dispatch(call).await;
+        let result = if self.policy.requires_mutation_declaration() {
+            let mut context = ToolDispatchContext::default();
+            context.require_read_only_execution();
+            self.inner.dispatch_with_context(call, &context).await
+        } else {
+            self.inner.dispatch(call).await
+        };
         let outcome = if result.is_ok() {
             crate::LiveBridgeEffectOutcome::Committed
         } else {
@@ -635,7 +640,15 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 )
                 .await;
         }
-        let current_context = match context.observe_tool_entry(call, None) {
+        let mut narrowed;
+        let base = if self.policy.requires_mutation_declaration() {
+            narrowed = context.clone();
+            narrowed.require_read_only_execution();
+            &narrowed
+        } else {
+            context
+        };
+        let current_context = match base.observe_tool_entry(call, None) {
             Ok(current) => current,
             Err(error) => {
                 return custody
@@ -648,14 +661,12 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                     .await;
             }
         };
+        let dispatch_context = current_context.as_ref().unwrap_or(base);
         let result = self
             .inner
-            .dispatch_with_context(call, current_context.as_ref().unwrap_or(context))
+            .dispatch_with_context(call, dispatch_context)
             .await;
-        let result = current_context
-            .as_ref()
-            .unwrap_or(context)
-            .observe_tool_outcome(custody.effect_kind, result);
+        let result = dispatch_context.observe_tool_outcome(custody.effect_kind, result);
         let outcome = if result.is_ok() {
             crate::LiveBridgeEffectOutcome::Committed
         } else {
@@ -690,7 +701,15 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 )
                 .await;
         }
-        let current_context = match context.observe_tool_entry(call, Some(plan)) {
+        let mut narrowed;
+        let base = if self.policy.requires_mutation_declaration() {
+            narrowed = context.clone();
+            narrowed.require_read_only_execution();
+            &narrowed
+        } else {
+            context
+        };
+        let current_context = match base.observe_tool_entry(call, Some(plan)) {
             Ok(current) => current,
             Err(error) => {
                 return custody
@@ -703,14 +722,12 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                     .await;
             }
         };
+        let dispatch_context = current_context.as_ref().unwrap_or(base);
         let result = self
             .inner
-            .dispatch_resolved_with_context(call, current_context.as_ref().unwrap_or(context), plan)
+            .dispatch_resolved_with_context(call, dispatch_context, plan)
             .await;
-        let result = current_context
-            .as_ref()
-            .unwrap_or(context)
-            .observe_tool_outcome(custody.effect_kind, result);
+        let result = dispatch_context.observe_tool_outcome(custody.effect_kind, result);
         let outcome = if result.is_ok() {
             crate::LiveBridgeEffectOutcome::Committed
         } else {
@@ -1500,6 +1517,203 @@ mod tests {
     }
 
     // ── Read-only intent ─────────────────────────────────────────────────
+
+    async fn assert_read_only_context_survives_entry_reprepare(resolved: bool) {
+        use crate::authorization::{
+            AuthorizationOperation, OperationAuthorizationError, OperationAuthorizationFacts,
+            OperationObservation, OperationObservationError, OperationRefusalKind,
+            OperationRefused, PreparedAuthorizationBinding, PreparedOperationAuthorization,
+            PreparedOperationCheck, ToolAuthorizationFacts, ToolAuthorizationTarget,
+            WorkAuthorization, WorkAuthorizationContext,
+        };
+        use std::sync::atomic::AtomicUsize;
+
+        struct Probe {
+            refresh_on_entry: bool,
+            refreshed: AtomicBool,
+            preparations: AtomicUsize,
+            observations: Mutex<Vec<(bool, OperationObservation)>>,
+        }
+        struct Work(Arc<Probe>);
+        struct Prepared {
+            probe: Arc<Probe>,
+            binding: PreparedAuthorizationBinding,
+            refreshed: bool,
+        }
+        impl WorkAuthorization for Work {
+            fn prepare(
+                &self,
+                binding: &PreparedAuthorizationBinding,
+            ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError>
+            {
+                self.0.preparations.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(Prepared {
+                    probe: Arc::clone(&self.0),
+                    binding: binding.clone(),
+                    refreshed: self.0.refreshed.load(Ordering::SeqCst),
+                }))
+            }
+        }
+        impl PreparedOperationAuthorization for Prepared {
+            fn check_current(
+                &self,
+                binding: &PreparedAuthorizationBinding,
+            ) -> Result<(), OperationAuthorizationError> {
+                assert!(self.binding.same_operation(binding));
+                if self.refreshed != self.probe.refreshed.load(Ordering::SeqCst) {
+                    return Err(
+                        OperationRefused::new(OperationRefusalKind::ReprepareRequired).into(),
+                    );
+                }
+                Ok(())
+            }
+
+            fn observe(
+                &self,
+                binding: &PreparedAuthorizationBinding,
+                event: OperationObservation,
+            ) -> Result<(), OperationObservationError> {
+                assert!(self.binding.same_operation(binding));
+                if matches!(&event, OperationObservation::Entry) && self.probe.refresh_on_entry {
+                    self.probe.refreshed.store(true, Ordering::SeqCst);
+                }
+                self.probe
+                    .observations
+                    .lock()
+                    .unwrap()
+                    .push((self.refreshed, event));
+                Ok(())
+            }
+        }
+        struct ContextProbe(Mutex<Vec<ToolDispatchContext>>);
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for ContextProbe {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([tool_def("alpha")])
+            }
+
+            fn tool_mutation_class(&self, _tool_name: &str) -> ToolMutationClass {
+                ToolMutationClass::ReadOnly
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                panic!("governed dispatch must retain its context")
+            }
+
+            async fn dispatch_with_context(
+                &self,
+                call: ToolCallView<'_>,
+                context: &ToolDispatchContext,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.0.lock().unwrap().push(context.clone());
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.into(),
+                    "read-completed".into(),
+                    false,
+                )))
+            }
+        }
+
+        for nested in [false, true] {
+            for refresh_on_entry in [false, true] {
+                let probe = Arc::new(Probe {
+                    refresh_on_entry,
+                    refreshed: AtomicBool::new(false),
+                    preparations: AtomicUsize::new(0),
+                    observations: Mutex::new(Vec::new()),
+                });
+                let work = WorkAuthorizationContext::new(
+                    Arc::new(Work(Arc::clone(&probe))),
+                    crate::OperationExecutionScope::Domain,
+                );
+                let deadline =
+                    crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
+                        crate::ToolDeadlineOwner::CoreToolDispatch,
+                        std::time::Duration::from_secs(1),
+                    )])
+                    .unwrap();
+                let plan = crate::ToolExecutionContract::default()
+                    .resolve_default(deadline)
+                    .unwrap();
+                let binding = PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+                    operation_id: crate::OperationId::new(),
+                    execution_scope: crate::OperationExecutionScope::Domain,
+                    run_id: None,
+                    context_revision: None,
+                    operation: AuthorizationOperation::Tool(ToolAuthorizationFacts {
+                        call_id: Arc::from("read-call"),
+                        name: "alpha".into(),
+                        arguments: Arc::from(empty_args()),
+                        target: ToolAuthorizationTarget::Dispatcher(Arc::new(plan)),
+                    }),
+                });
+                let prepared = PreparedOperationCheck::prepare(work.clone(), binding).unwrap();
+                let context = ToolDispatchContext::default()
+                    .with_work_authorization(Some(work.clone()))
+                    .with_prepared_authorization(prepared.clone());
+                let leaf = Arc::new(ContextProbe(Mutex::new(Vec::new())));
+                let inner: Arc<dyn AgentToolDispatcher> = if nested {
+                    Arc::new(ExecutionPolicyGatedDispatcher::new(
+                        Arc::clone(&leaf),
+                        ToolExecutionPolicy::unrestricted(),
+                    ))
+                } else {
+                    leaf.clone()
+                };
+                let gated = ExecutionPolicyGatedDispatcher::new(inner, read_only());
+                let (call, plan) = prepared.tool_dispatch_parts().unwrap();
+                let outcome = if resolved {
+                    gated
+                        .dispatch_resolved_with_context(call, &context, plan)
+                        .await
+                } else {
+                    gated.dispatch_with_context(call, &context).await
+                }
+                .unwrap();
+                assert_eq!(outcome.result.tool_use_id, "read-call");
+                assert!(outcome.settlement_failures().is_empty());
+                let contexts = leaf.0.lock().unwrap();
+                assert_eq!(contexts.len(), 1);
+                let dispatched = &contexts[0];
+                assert!(dispatched.read_only_execution_required());
+                assert!(!context.read_only_execution_required());
+                assert!(dispatched.work_authorization().unwrap().same_context(&work));
+                let current = dispatched.prepared_authorization().unwrap();
+                assert!(current.binding().same_operation(prepared.binding()));
+                assert_eq!(current.same_check(&prepared), !refresh_on_entry);
+                assert_eq!(
+                    probe.preparations.load(Ordering::SeqCst),
+                    if refresh_on_entry { 2 } else { 1 }
+                );
+                let observations = probe.observations.lock().unwrap();
+                let layers = if nested { 2 } else { 1 };
+                assert_eq!(observations.len(), layers * 2);
+                assert!(
+                    observations[..layers]
+                        .iter()
+                        .all(|(_, event)| { matches!(event, OperationObservation::Entry) })
+                );
+                assert!(observations[layers..].iter().all(|(refreshed, event)| {
+                    *refreshed == refresh_on_entry
+                        && matches!(event, OperationObservation::Outcome(_))
+                }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_context_survives_entry_reprepare() {
+        assert_read_only_context_survives_entry_reprepare(false).await;
+    }
+
+    #[tokio::test]
+    async fn read_only_resolved_context_survives_entry_reprepare() {
+        assert_read_only_context_survives_entry_reprepare(true).await;
+    }
 
     #[tokio::test]
     async fn read_only_admits_declared_reads_and_refuses_everything_else() {

@@ -20268,6 +20268,13 @@
             "type": "string"
           },
           "options": true,
+          "prompt_cache_applicable": {
+            "description": "For an OpenAI backend: whether Meerkat's OpenAI prompt-cache fields\n(`prompt_cache_enabled`, `prompt_cache_key`, `prompt_cache_retention`,\n`prompt_cache_options`) and its model cache defaults apply on requests\nthrough this backend. A backend that has not admitted them receives\nnone, whoever set them. Omitted for other providers, and for an OpenAI\nbackend kind this version does not know.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "provider": {
             "description": "Provider as a normalized string: `\"openai\"` / `\"anthropic\"` /\n`\"gemini\"` / `\"self_hosted\"`. Wire types don't carry the strict\n`Provider` enum so consumers aren't forced to update their\nschema when we add new providers.",
             "type": "string"

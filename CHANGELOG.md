@@ -252,6 +252,30 @@ them.
 
 ### Fixed
 
+- Members spawned through the mob operator tools (`spawn_member`,
+  `spawn_many_members`) now record the member that spawned them as their
+  creator. Before, every such child was recorded as unproven, so
+  creation-history checks refused it. This was not specific to members
+  with MCP or other external tools: session creation copied the request's
+  external tools into the agent build, so the member's tool surface was
+  always shared, and the late binding that told the operator tools their
+  owner session was always skipped without a trace. The operator tools now
+  take the calling session from the tool call itself, as set by the agent
+  runtime and never from a tool argument. A call from a session that is not
+  a current member of the mob is refused on member status, retirement,
+  force-cancel and the restricted member list, instead of being treated as
+  ownerless.
+- Session creation now moves the request's external tools into the agent
+  instead of copying them, so ops-capable external tools are actually bound
+  to the session. `SessionAgentBuilder` gains `build_agent_taking_tools`; its
+  default calls `build_agent`, so existing builders keep working.
+- A shared ops-capable tool dispatcher that cannot be bound to its session
+  now fails the agent build with a named shared-ownership error, instead of
+  running silently unbound.
+- A failed read of a spawning member's creation facts is now reported as a
+  capture fault in an error-level trace with its cause, separate from a
+  source that legitimately has no facts (`MemberCreationError::Absent`).
+  Spawning still succeeds and the child is recorded as unproven, as before.
 - Durable job deliveries now reach sessions on every surface (#1497). Only
   RPC applied runtime inbox rows, on a 1 s timer backing off to 60 s, so on
   the CLI, REST and MCP server subscription notifications, events and

@@ -11,7 +11,7 @@ use meerkat_core::{
     ExternalToolDelta, ExternalToolSurfaceBaseState, ExternalToolSurfaceFailureCause,
     ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp,
     ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry, ToolDef,
-    ToolResult, agent::AgentToolDispatcher,
+    agent::AgentToolDispatcher,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1068,24 +1068,34 @@ impl AgentToolDispatcher for McpRouterAdapter {
         }
     }
 
+    fn tool_mutation_class(&self, tool_name: &str) -> meerkat_core::ToolMutationClass {
+        self.router
+            .try_read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|router| AgentToolDispatcher::tool_mutation_class(router, tool_name))
+            })
+            .unwrap_or(meerkat_core::ToolMutationClass::Unknown)
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         let guard = self.router.read().await;
         match &*guard {
-            Some(router) => {
-                // K1: external dispatch goes through the typed tool-argument
-                // contract — malformed / non-object args fail closed instead
-                // of being wrapped into a `Value::String` and forwarded.
-                let args = meerkat_core::ToolCallArguments::from_raw_json(call.args)
-                    .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
-                let blocks = router
-                    .call_tool(call.name, args.as_value())
-                    .await
-                    .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-                Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
-            }
+            Some(router) => router.dispatch_with_context(call, context).await,
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
         }
     }

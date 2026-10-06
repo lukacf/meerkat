@@ -2416,6 +2416,9 @@ pub struct AgentFactory {
     /// a build sets no `AgentBuildConfig::mcp_auth_resolver`.
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mcp_auth_resolver: Option<Arc<dyn meerkat_mcp::McpAuthResolver>>,
+    /// Process-local per-call MCP context preparation, shared by factory clones.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    mcp_call_context_provider: Option<Arc<dyn meerkat_mcp::McpCallContextProvider>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -3526,6 +3529,8 @@ impl AgentFactory {
             image_generation_machine: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_auth_resolver: None,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_call_context_provider: None,
         }
     }
 
@@ -3665,6 +3670,8 @@ impl AgentFactory {
             image_generation_machine: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_auth_resolver: None,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp_call_context_provider: None,
         }
     }
 
@@ -3688,6 +3695,17 @@ impl AgentFactory {
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     pub fn mcp_auth_resolver(mut self, resolver: Arc<dyn meerkat_mcp::McpAuthResolver>) -> Self {
         self.mcp_auth_resolver = Some(resolver);
+        self
+    }
+
+    /// Attach trusted context preparation to every declarative MCP router this
+    /// factory builds. This hook is process-local and never serialized.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    pub fn mcp_call_context_provider(
+        mut self,
+        provider: Arc<dyn meerkat_mcp::McpCallContextProvider>,
+    ) -> Self {
+        self.mcp_call_context_provider = Some(provider);
         self
     }
 
@@ -6555,6 +6573,9 @@ impl AgentFactory {
                         .clone()
                         .or_else(|| self.mcp_auth_resolver.clone()),
                 );
+            if let Some(provider) = &self.mcp_call_context_provider {
+                router = router.with_call_context_provider(Arc::clone(provider));
+            }
             for server in &build_config.mcp_servers {
                 router.stage_add(server.clone()).map_err(|error| {
                     BuildAgentError::McpSetup(format!(

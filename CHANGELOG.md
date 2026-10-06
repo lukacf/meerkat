@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- `McpError` gains `CallContext(McpCallContextError)` for fixed host context
+  refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
+  (behavior-only break). Typed MCP dispatch preserves `isError` as a failed
+  `ToolResult` with its content instead of flattening it into a transport error;
+  content-only convenience calls retain their existing error projection.
+
 - Connector OAuth (#1631; see Added) changes these Rust types:
   - `PersistedAuthMode` gains `ConnectorOauth` before `ExternalTokens`, so
     the implicit discriminants of `PersistedAuthMode::*` after it shift
@@ -75,6 +81,15 @@ them.
   applies on the wire, `OpenAiBackendKind::admits_prompt_cache_fields`, so
   hosts no longer infer it from the backend kind. The SDKs' generated types
   carry it.
+- Process-local `McpCallContextProvider` and `AgentFactory::mcp_call_context_provider`
+  prepare per-call metadata for an exact MCP destination and physical connection.
+  Metadata remains opaque until final serialization, cleanup follows cancellation,
+  and unavailable origin uses the strict shared `WireCallOrigin` codec. A trusted
+  provider can declare read-only operations; execution policy rechecks the actual
+  destination after asynchronous decisions and reloads.
+- `ChildMcpServers` supplies host-attested public descriptors to inline child and
+  delegate profiles. Protected connection credentials stay in host composition;
+  conflicting persisted descriptors refuse without replacement.
 
 - `MobSessionService::load_retained_session_metadata` returns the latest
   committed metadata of an exact retained session, including archived sessions,
@@ -175,6 +190,10 @@ them.
   appends-empty primitives still start no turn. A new runtime-backed test
   covers the whole path: callback-pending, then `stage_tool_results`, then an
   ordinary continuation, then completion.
+- Read-only agents can search and load deferred tools through the catalog
+  control plane. Loading affects session visibility only; a loaded mutating
+  operation still fails the execution policy gate.
+
 - BuildBuddy runs no longer sit idle for 600 s after every build (#1744).
   Since the Bazel client started running under an environment allowlist,
   `scripts/buildbuddy-bazel-poc` put its stderr `tee` redirect on a call of a

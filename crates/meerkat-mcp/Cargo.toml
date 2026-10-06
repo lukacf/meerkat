@@ -27,6 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
@@ -53,6 +54,8 @@ required-features = ["test-support"]
 nix = { workspace = true }
 
 [dev-dependencies]
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "registry"] }
 mcp-test-server = { path = "../../tests/fixtures/mcp-test-server" } # test-only shared rmcp handler; never a published runtime dependency
 tokio = { workspace = true, features = ["test-util", "macros"] }
 meerkat-runtime = { path = "../meerkat-runtime", default-features = false } # path-only (no version): breaks packaging dev-dep cycle; flags mirror the workspace dep

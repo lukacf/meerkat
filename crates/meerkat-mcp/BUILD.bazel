@@ -55,6 +55,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -91,6 +92,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -133,6 +135,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -171,6 +174,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -215,6 +219,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -275,6 +280,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = [
         "tests/account_selection.rs",
@@ -337,6 +343,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = [
         "tests/external_tool_integration.rs",
@@ -398,6 +405,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = [
         "tests/form_elicitation.rs",
@@ -461,6 +469,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = [
         "tests/lifecycle_contract.rs",
@@ -522,6 +531,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = [
         "tests/m6_composition.rs",
@@ -586,6 +596,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mcp-server-setup/SKILL.md",
+        "src/transport/protected.rs",
     ],
     srcs = [
         "tests/m6_staged_boundary.rs",

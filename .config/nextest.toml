@@ -47,6 +47,17 @@ success-output = "immediate-final"
 filter = 'test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
+[[profile.default.overrides]]
+# The same workflow test hit its eight-period bound (480 s) when the lane
+# co-scheduled it beside other CPU-heavy cases (run 37500828668, attempt 1):
+# the bound measured runner load, not the workflow. Reserve the lane instead
+# of raising the bound. A one-member test group with `max-threads = 1` would
+# not do this - a group only serializes its own members - so take every
+# thread, as the other load-sensitive cases in this file do. The default
+# profile's overrides apply to every profile (ci-unit, ci-pr, fast).
+filter = 'test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'
+threads-required = "num-cpus"
+
 # Pull-request and main CI unit lanes (ci.yml). `fast` plus a hang bound:
 # nothing is excluded from the lanes. The profile exists so the lane has its own name
 # for a PR-lane-only adjustment, and so that any such adjustment is a

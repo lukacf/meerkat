@@ -463,6 +463,12 @@ them.
 
 ### Testing
 
+- The xtask machine workflow test
+  (`machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts`)
+  now reserves its whole nextest lane in every profile, so no other test runs
+  beside it. It had hit its 480 s bound when scheduled beside other
+  CPU-heavy cases; the bound is unchanged, and
+  `scripts/test-ci-nextest-archive.sh` now requires the reservation.
 - The fork_off build-parity e2e test selects the forker's tool-round request
   by the position of `call_fork`'s output instead of the last user text
   (#1798). The child's background completion notice can be that request's

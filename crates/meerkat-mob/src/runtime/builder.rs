@@ -8773,11 +8773,31 @@ impl MobBuilder {
             // The host's spawn customizer makes an ordinary member's restore
             // request; a fork-derived member's is its own durable records,
             // like its first build (see `fork_build`).
-            let restore_spec = super::fork_build::rebuild_resume_spec(
+            // What the bound session holds, read once, for the customizer's
+            // resume view (an ordinary member only; a fork-derived member's
+            // rebuild is not customized). A failed read fails this member's
+            // restore, like any other per-member restore failure.
+            let restore_view = if entry.fork_source.is_none() && spawn_member_customizer.is_some() {
+                match super::fork_build::load_resumed_member_view(
+                    session_service.as_ref(),
+                    &bridge_session_id,
+                )
+                .await
+                {
+                    Ok(view) => view,
+                    Err(error) => {
+                        record_restore_failure(bridge_session_id.clone(), error.to_string()).await;
+                        continue;
+                    }
+                }
+            } else {
+                super::handle::ResumedMemberView::new(bridge_session_id.clone(), None)
+            };
+            let mut restore_spec = super::fork_build::rebuild_resume_spec(
                 &definition.id,
                 spawn_member_customizer.as_ref(),
                 entry,
-                &bridge_session_id,
+                &restore_view,
             )?;
             if restore_spec.identity != entry.agent_identity {
                 return Err(MobError::Internal(format!(
@@ -8990,6 +9010,34 @@ impl MobBuilder {
                             if reuse_active_replacement {
                                 continue;
                             }
+                            // The rebuild now runs on the successor: ask the
+                            // customizer again with what it holds.
+                            if entry.fork_source.is_none() && spawn_member_customizer.is_some() {
+                                let successor_view =
+                                    match super::fork_build::load_resumed_member_view(
+                                        session_service.as_ref(),
+                                        &bridge_session_id,
+                                    )
+                                    .await
+                                    {
+                                        Ok(view) => view,
+                                        Err(error) => {
+                                            record_restore_failure(
+                                                bridge_session_id.clone(),
+                                                error.to_string(),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                    };
+                                restore_spec.resume_provider_params =
+                                    super::fork_build::successor_resume_provider_params(
+                                        &definition.id,
+                                        spawn_member_customizer.as_ref(),
+                                        entry,
+                                        &successor_view,
+                                    )?;
+                            }
                             replacement_authorized
                         } else {
                             // Typed-observation contract: this arm is only
@@ -9020,6 +9068,10 @@ impl MobBuilder {
                 if let Some(model) = restore_model_override.as_ref() {
                     profile.model.clone_from(model);
                 }
+                super::fork_build::apply_resume_provider_params(
+                    &mut profile,
+                    restore_spec.resume_provider_params.as_ref(),
+                );
                 if restore_spec.inherited_tool_filter.is_some()
                     && restore_profile_override.is_none()
                 {
@@ -9265,6 +9317,10 @@ impl MobBuilder {
             if let Some(model) = restore_model_override.as_ref() {
                 profile.model.clone_from(model);
             }
+            super::fork_build::apply_resume_provider_params(
+                &mut profile,
+                restore_spec.resume_provider_params.as_ref(),
+            );
             if restore_spec.inherited_tool_filter.is_some() && restore_profile_override.is_none() {
                 build::open_profile_tool_categories_for_inherited_filter(&mut profile);
             }

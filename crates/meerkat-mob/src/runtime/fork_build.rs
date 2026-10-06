@@ -843,20 +843,95 @@ fn resume_customization_context(
 /// rebuilds, which repeat its first build (see the module docs). Its
 /// per-spawn overlay is the overlay rule's ([`rebuild_own_overlay`] when the
 /// rule asks for its own).
+///
+/// The customizer is asked through
+/// [`SpawnMemberCustomizer::customize_resume`](super::handle::SpawnMemberCustomizer::customize_resume)
+/// with `durable`, what the member's session (`durable.session_id`) holds.
 pub(crate) fn rebuild_resume_spec(
     mob_id: &MobId,
     customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
     entry: &RosterEntry,
-    session_id: &SessionId,
+    durable: &super::handle::ResumedMemberView,
 ) -> Result<super::handle::SpawnMemberSpec, MobError> {
-    let mut spec = member_resume_spec(entry, session_id);
+    let mut spec = member_resume_spec(entry, &durable.session_id);
     if entry.fork_source.is_some() {
         return Ok(spec);
     }
     if let Some(customizer) = customizer {
-        customizer.customize_spawn(&resume_customization_context(mob_id, &spec), &mut spec)?;
+        customizer.customize_resume(
+            &resume_customization_context(mob_id, &spec),
+            durable,
+            &mut spec,
+        )?;
     }
     Ok(spec)
+}
+
+/// What `session_id` holds for a resume rebuild: one read of its persisted
+/// metadata. A failed read is a typed error, never an absent identity.
+///
+/// Built in its own frame: the restore and explicit-resume loops that await
+/// it are among the largest debug poll frames in the crate, and the inline
+/// metadata view would add to every one of them.
+pub(crate) fn load_resumed_member_view<'a>(
+    session_service: &'a dyn super::session_service::MobSessionService,
+    session_id: &'a SessionId,
+) -> meerkat_runtime::stack_relief::OwnFrameFuture<
+    'a,
+    Result<super::handle::ResumedMemberView, MobError>,
+> {
+    meerkat_runtime::stack_relief::box_in_own_frame(move || {
+        read_resumed_member_view(session_service, session_id)
+    })
+}
+
+async fn read_resumed_member_view(
+    session_service: &dyn super::session_service::MobSessionService,
+    session_id: &SessionId,
+) -> Result<super::handle::ResumedMemberView, MobError> {
+    let metadata = session_service
+        .load_persisted_session_metadata(session_id)
+        .await
+        .map_err(MobError::SessionError)?;
+    Ok(super::handle::ResumedMemberView::new(
+        session_id.clone(),
+        metadata
+            .and_then(|view| view.session_metadata)
+            .map(|metadata| metadata.llm_identity()),
+    ))
+}
+
+/// The provider-params override the customizer gives `entry`'s rebuild on a
+/// successor session, asked again with the successor's `durable` view after a
+/// restore or explicit resume moved the member off its absent bound session.
+pub(crate) fn successor_resume_provider_params(
+    mob_id: &MobId,
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    entry: &RosterEntry,
+    durable: &super::handle::ResumedMemberView,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, MobError> {
+    Ok(rebuild_resume_spec(mob_id, customizer, entry, durable)?.resume_provider_params)
+}
+
+/// Apply a resume rebuild's field-scoped provider-params override to the
+/// profile it builds with: the value becomes the resumed identity's provider
+/// params (`ResumeOverrideField::ProviderParams`), persisted with it.
+pub(crate) fn apply_resume_provider_params(
+    profile: &mut crate::profile::Profile,
+    params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+) {
+    let Some(params) = params else {
+        return;
+    };
+    profile.provider_params = Some(params.clone());
+    if !profile
+        .resume_overrides
+        .contains(&crate::profile::ResumeOverrideField::ProviderParams)
+    {
+        profile
+            .resume_overrides
+            .push(crate::profile::ResumeOverrideField::ProviderParams);
+    }
 }
 
 /// The host spawn customizer's per-spawn overlay for `entry`'s own identity,
@@ -1235,7 +1310,13 @@ mod tests {
         let session = SessionId::new();
 
         let ordinary = roster_entry("domain-gmail", None);
-        let spec = rebuild_resume_spec(&mob_id, Some(&customizer), &ordinary, &session).unwrap();
+        let spec = rebuild_resume_spec(
+            &mob_id,
+            Some(&customizer),
+            &ordinary,
+            &super::super::handle::ResumedMemberView::new(session.clone(), None),
+        )
+        .unwrap();
         assert_eq!(
             spec.context,
             Some(serde_json::json!({"rewritten_for": "domain-gmail"}))
@@ -1262,7 +1343,13 @@ mod tests {
             ("council-participant", council_source),
         ] {
             let entry = roster_entry(member, Some(fork_source));
-            let spec = rebuild_resume_spec(&mob_id, Some(&customizer), &entry, &session).unwrap();
+            let spec = rebuild_resume_spec(
+                &mob_id,
+                Some(&customizer),
+                &entry,
+                &super::super::handle::ResumedMemberView::new(session.clone(), None),
+            )
+            .unwrap();
             let own_records = member_resume_spec(&entry, &session);
             assert_eq!(spec.labels, own_records.labels, "'{member}' labels");
             assert_eq!(spec.labels, Some(entry.labels.clone()));

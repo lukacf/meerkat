@@ -1670,6 +1670,10 @@ struct CreateSessionRecord {
     /// The session the build is seated on, and what the build does with it.
     resume_session_id: Option<SessionId>,
     session_build_intent: meerkat_core::SessionBuildIntent,
+    /// The build's provider params, and whether a resume build carries them
+    /// over the durable identity's (`ResumeOverrideMask::provider_params`).
+    provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    provider_params_masked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3797,6 +3801,14 @@ impl MockSessionService {
                     meerkat_core::SessionBuildIntent::Mint,
                     meerkat_core::service::SessionBuildOptions::session_build_intent,
                 ),
+                provider_params: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.provider_params.clone()),
+                provider_params_masked: req
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.resume_override_mask.provider_params),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -28794,6 +28806,487 @@ async fn fork_child_restored_after_a_crash_is_not_recustomized() {
 #[tokio::test]
 async fn fork_child_restored_by_explicit_resume_is_not_recustomized() {
     assert_fork_child_rebuild_is_not_recustomized(true).await;
+}
+
+/// The provider params a member is first seated with: the one knob a
+/// migration flips (`prompt_cache_enabled`) and others it must preserve.
+fn seated_provider_params() -> meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+    meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+        temperature: Some(0.25),
+        provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+            meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                prompt_cache_enabled: Some(false),
+                store: Some(true),
+                seed: Some(7),
+                ..Default::default()
+            },
+        )),
+        ..Default::default()
+    }
+}
+
+/// `params` with prompt caching turned on and every other knob kept.
+fn prompt_cache_enabled(
+    mut params: meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+) -> meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+    if let Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(tag)) =
+        params.provider_tag.as_mut()
+    {
+        tag.prompt_cache_enabled = Some(true);
+    }
+    params
+}
+
+/// A host's one-knob provider-params migration: on every resume rebuild it
+/// reads the member's persisted params and returns them with prompt caching
+/// on. Records every resume view it is given.
+#[derive(Default)]
+struct PromptCacheMigration {
+    views: std::sync::Mutex<Vec<(AgentIdentity, ResumedMemberView)>>,
+}
+
+impl PromptCacheMigration {
+    fn views(&self) -> Vec<(AgentIdentity, ResumedMemberView)> {
+        self.views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl SpawnMemberCustomizer for PromptCacheMigration {
+    fn customize_spawn(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        _spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
+
+    fn customize_resume(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        durable: &ResumedMemberView,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        self.views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((spec.identity.clone(), durable.clone()));
+        spec.resume_provider_params = durable
+            .llm_identity
+            .as_ref()
+            .and_then(|identity| identity.provider_params.clone())
+            .map(prompt_cache_enabled);
+        Ok(())
+    }
+}
+
+/// Records every resume rebuild it customizes, through the default
+/// `customize_resume` (a customizer written before resume views existed).
+#[derive(Default)]
+struct SpawnOnlyRecorder {
+    resumes: std::sync::Mutex<Vec<AgentIdentity>>,
+}
+
+impl SpawnMemberCustomizer for SpawnOnlyRecorder {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if ctx.spawn_source == SpawnSource::Resume {
+            self.resumes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(spec.identity.clone());
+        }
+        Ok(())
+    }
+}
+
+/// A mob whose worker members are seated with [`seated_provider_params`].
+fn provider_params_definition() -> MobDefinition {
+    let mut definition = sample_definition();
+    let Some(ProfileBinding::Inline(profile)) =
+        definition.profiles.get_mut(&ProfileName::from("worker"))
+    else {
+        panic!("the sample definition has an inline worker profile");
+    };
+    profile.provider_params = Some(seated_provider_params());
+    definition
+}
+
+/// Seat one worker with [`seated_provider_params`], then drop its live
+/// session and the mob actor (a process restart). With `stop_first` the mob
+/// is stopped before the restart, so the restore leaves the member for an
+/// explicit resume. Returns the service, the restart storage, the member and
+/// its session.
+async fn seat_member_with_provider_params_then_crash(
+    stop_first: bool,
+) -> (
+    Arc<MockSessionService>,
+    MobStorage,
+    AgentIdentity,
+    SessionId,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let restart_storage = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let handle = MobBuilder::new(provider_params_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let member = AgentIdentity::from("migrated-worker");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn the member");
+    let session = handle
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("the member's session");
+    let first = last_member_build(&service, &member).await;
+    assert_eq!(
+        first.provider_params,
+        Some(seated_provider_params()),
+        "the member is first seated with its profile's provider params"
+    );
+    if stop_first {
+        handle.stop().await.expect("stop");
+    }
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard live session");
+    crash_stop_and_release_routes(handle).await;
+    (service, restart_storage, member, session)
+}
+
+/// #1701: a resume customizer reads the member's persisted identity from its
+/// resume view and migrates one provider-params knob; the rebuild carries the
+/// migrated params over the durable ones, every other knob preserved.
+async fn assert_resume_migrates_one_provider_knob(explicit_resume: bool) {
+    let (service, storage, member, session) =
+        seat_member_with_provider_params_then_crash(explicit_resume).await;
+    let builds_before = member_build_count(&service, &member).await;
+    let migration = Arc::new(PromptCacheMigration::default());
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(migration.clone())
+        .resume()
+        .await
+        .expect("resume");
+    if explicit_resume {
+        resumed
+            .resume()
+            .await
+            .expect("explicit resume rebuilds the stopped member");
+    }
+    assert_eq!(
+        member_build_count(&service, &member).await,
+        builds_before + 1,
+        "the member is rebuilt once"
+    );
+
+    let views = migration.views();
+    let view = views
+        .iter()
+        .rev()
+        .find_map(|(identity, view)| (identity == &member).then_some(view))
+        .expect("the customizer is asked for the member's resume");
+    assert_eq!(view.session_id, session, "the view is the bound session's");
+    assert_eq!(
+        view.llm_identity
+            .as_ref()
+            .and_then(|identity| identity.provider_params.clone()),
+        Some(seated_provider_params()),
+        "the view holds the persisted provider params"
+    );
+
+    let rebuilt = last_member_build(&service, &member).await;
+    assert_eq!(rebuilt.resume_session_id, Some(session));
+    assert_eq!(
+        rebuilt.provider_params,
+        Some(prompt_cache_enabled(seated_provider_params())),
+        "the rebuild carries the migrated params, other knobs preserved"
+    );
+    assert!(
+        rebuilt.provider_params_masked,
+        "the migrated params override the durable identity's"
+    );
+}
+
+#[tokio::test]
+async fn resume_customizer_migrates_one_provider_knob_on_restart_restore() {
+    assert_resume_migrates_one_provider_knob(false).await;
+}
+
+#[tokio::test]
+async fn resume_customizer_migrates_one_provider_knob_on_explicit_resume() {
+    assert_resume_migrates_one_provider_knob(true).await;
+}
+
+/// The params a successor session holds, distinct from the bound session's.
+fn successor_provider_params() -> meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+    let mut params = seated_provider_params();
+    params.temperature = Some(0.75);
+    params
+}
+
+/// #1701: when an explicit resume moves a member off its lost session to a
+/// persisted successor, the customizer is asked again with the successor's
+/// view, and the rebuild carries the migration of the successor's params.
+#[tokio::test]
+async fn resume_customizer_is_asked_again_for_a_successor_session() {
+    let (service, storage, member, session) =
+        seat_member_with_provider_params_then_crash(true).await;
+    let migration = Arc::new(PromptCacheMigration::default());
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(migration.clone())
+        .resume()
+        .await
+        .expect("resume the stopped mob");
+    service.delete_persisted_session(&session).await;
+    let successor = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "successor".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(
+                    super::actor::render_member_comms_name(
+                        sample_definition().id.as_str(),
+                        "worker",
+                        member.as_str(),
+                    )
+                    .expect("comms name"),
+                ),
+                provider_params: Some(successor_provider_params()),
+                mob_member_binding: None,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("persist a successor session")
+        .session_id;
+    service.session_comms_names.write().await.remove(&successor);
+
+    resumed
+        .resume()
+        .await
+        .expect("explicit resume repoints the member to its successor");
+
+    let views = migration.views();
+    assert!(
+        views.iter().any(|(identity, view)| identity == &member
+            && view.session_id == successor
+            && view
+                .llm_identity
+                .as_ref()
+                .and_then(|identity| identity.provider_params.clone())
+                == Some(successor_provider_params())),
+        "the customizer is asked with the successor's view: {views:?}"
+    );
+    let rebuilt = last_member_build(&service, &member).await;
+    assert_eq!(rebuilt.resume_session_id, Some(successor));
+    assert_eq!(
+        rebuilt.provider_params,
+        Some(prompt_cache_enabled(successor_provider_params())),
+        "the rebuild migrates the successor's params, not the lost session's"
+    );
+    assert!(rebuilt.provider_params_masked);
+}
+
+/// A customizer that only implements `customize_spawn` is still asked at
+/// `SpawnSource::Resume` (the default `customize_resume`), and the rebuild
+/// keeps the durable provider params: nothing overrides them.
+#[tokio::test]
+async fn spawn_only_customizer_resume_keeps_the_durable_provider_params() {
+    let (service, storage, member, _session) =
+        seat_member_with_provider_params_then_crash(false).await;
+    let recorder = Arc::new(SpawnOnlyRecorder::default());
+    let _resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(recorder.clone())
+        .resume()
+        .await
+        .expect("resume");
+    assert!(
+        recorder
+            .resumes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&member),
+        "the default customize_resume asks customize_spawn"
+    );
+    let rebuilt = last_member_build(&service, &member).await;
+    assert!(
+        !rebuilt.provider_params_masked,
+        "no override: the rebuild keeps the durable provider params"
+    );
+}
+
+/// The view is read once per rebuild; a failed read fails that member's
+/// restore with the typed session error as its diagnostic (the mob still
+/// resumes), and fails an explicit resume with a typed `SessionError`.
+#[tokio::test]
+async fn unreadable_resume_view_fails_the_member_restore_not_the_mob() {
+    let (service, storage, member, session) =
+        seat_member_with_provider_params_then_crash(false).await;
+    service.fail_persisted_session_metadata_reads_for(session.clone());
+    let reads_before = service.persisted_session_metadata_reads_for(&session);
+    let migration = Arc::new(PromptCacheMigration::default());
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(migration.clone())
+        .resume()
+        .await
+        .expect("the mob resumes");
+    assert_eq!(
+        service.persisted_session_metadata_reads_for(&session),
+        reads_before + 1,
+        "the view is read once"
+    );
+    assert!(
+        migration.views().is_empty(),
+        "the customizer is not asked without a view"
+    );
+    let diagnostic = resumed
+        .restore_diagnostics
+        .read()
+        .await
+        .get(&member)
+        .cloned()
+        .expect("the member's restore failed");
+    assert_eq!(diagnostic.bridge_session_id, Some(session));
+    assert!(
+        diagnostic.reason.contains("mock metadata read failure"),
+        "the diagnostic carries the read failure: {}",
+        diagnostic.reason
+    );
+}
+
+#[tokio::test]
+async fn unreadable_resume_view_fails_an_explicit_resume_typed() {
+    let (service, storage, _member, session) =
+        seat_member_with_provider_params_then_crash(true).await;
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(PromptCacheMigration::default()))
+        .resume()
+        .await
+        .expect("resume the stopped mob");
+    service.fail_persisted_session_metadata_reads_for(session);
+    let error = resumed
+        .resume()
+        .await
+        .expect_err("the explicit resume cannot read the member's view");
+    // The explicit resume is a shared lifecycle operation: its failure
+    // reaches every caller inside the shared envelope.
+    let cause = match &error {
+        MobError::SharedLifecycleFailure(inner) => inner.as_ref(),
+        other => other,
+    };
+    assert!(
+        matches!(cause, MobError::SessionError(SessionError::Store(_))),
+        "a typed session error, got {error:?}"
+    );
+}
+
+/// `resume_provider_params` belongs to resume rebuilds: a fresh spawn that
+/// carries it is refused before any session is built.
+#[tokio::test]
+async fn fresh_spawn_refuses_resume_provider_params() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("fresh-with-resume-params");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.resume_provider_params = Some(seated_provider_params());
+    let error = handle
+        .spawn_spec(spec)
+        .await
+        .expect_err("a fresh spawn refuses resume provider params");
+    assert!(
+        matches!(
+            &error,
+            MobError::ResumeProviderParamsRequireResume { identity } if identity == &member
+        ),
+        "{error:?}"
+    );
+    assert_eq!(member_build_count(&service, &member).await, 0);
+    assert!(handle.get_member(&member).await.expect("read").is_none());
+}
+
+/// Appends its tag to the spec's labels, or fails when it has none.
+struct ChainStep(Option<&'static str>);
+
+impl SpawnMemberCustomizer for ChainStep {
+    fn customize_spawn(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        let Some(tag) = self.0 else {
+            return Err(MobError::WiringError("chain step refused".to_string()));
+        };
+        let labels = spec.labels.get_or_insert_with(BTreeMap::new);
+        let order = labels.entry("order".to_string()).or_default();
+        order.push_str(tag);
+        Ok(())
+    }
+}
+
+/// A chain runs its customizers in order on both spawn and resume, and stops
+/// at the first error.
+#[test]
+fn customizer_chain_runs_in_order_and_stops_at_the_first_error() {
+    let ctx = SpawnCustomizationContext {
+        mob_id: test_mob_id(),
+        spawn_source: SpawnSource::Resume,
+        spawner_identity: None,
+        spawner_runtime_id: None,
+        requested_profile: ProfileName::from("worker"),
+    };
+    let view = ResumedMemberView::new(SessionId::new(), None);
+    let chain = SpawnMemberCustomizerChain::new()
+        .then(Arc::new(ChainStep(Some("a"))))
+        .then(Arc::new(ChainStep(Some("b"))));
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from("m"));
+    chain.customize_spawn(&ctx, &mut spec).expect("spawn");
+    chain
+        .customize_resume(&ctx, &view, &mut spec)
+        .expect("resume");
+    assert_eq!(
+        spec.labels.as_ref().and_then(|labels| labels.get("order")),
+        Some(&"abab".to_string())
+    );
+
+    let failing = SpawnMemberCustomizerChain::new()
+        .then(Arc::new(ChainStep(Some("a"))))
+        .then(Arc::new(ChainStep(None)))
+        .then(Arc::new(ChainStep(Some("c"))));
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from("m"));
+    let error = failing
+        .customize_resume(&ctx, &view, &mut spec)
+        .expect_err("the second step fails");
+    assert!(matches!(error, MobError::WiringError(_)), "{error:?}");
+    assert_eq!(
+        spec.labels.as_ref().and_then(|labels| labels.get("order")),
+        Some(&"a".to_string()),
+        "the step after the failure never runs"
+    );
+    assert!(SpawnMemberCustomizerChain::new().is_empty());
 }
 
 /// Same deadline hazard for `delegate`: a helper whose caller stops waiting
@@ -79104,6 +79597,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
+        MobError::ResumeProviderParamsRequireResume { .. } => {
+            "resume_provider_params_require_resume".to_string()
+        }
         MobError::MemberRoleMigrationRequired { .. } => {
             "member_role_migration_required".to_string()
         }

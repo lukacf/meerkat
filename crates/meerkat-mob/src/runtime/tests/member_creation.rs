@@ -94,17 +94,10 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
                 true,
                 generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
             ));
+        // The owner is the dispatch context's origin session, as an agent
+        // turn of the parent session dispatches it.
         let dispatcher = if bind_owner {
-            match dispatcher
-                .bind_ops_lifecycle(
-                    Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                    parent_session.clone(),
-                )
-                .unwrap()
-            {
-                meerkat_core::agent::BindOutcome::Bound(bound)
-                | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
-            }
+            super::dispatched_from_session(dispatcher, parent_session.clone())
         } else {
             dispatcher
         };
@@ -156,6 +149,309 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
         service.metadata_read_failures_for.lock().unwrap().clear();
         handle.shutdown().await.unwrap();
     }
+}
+
+/// A failed read of the caller's creation facts is a classified capture
+/// fault, traced at error level with its cause, never passed off as an
+/// absence. Admission is unchanged: the child is spawned and recorded as
+/// unproven (creation facts are optional and confer no permission).
+#[tokio::test]
+async fn member_creation_operator_capture_fault_is_classified_traced_and_admits_unproven() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let parent = AgentIdentity::from("fault-operator-parent");
+    handle
+        .spawn(ProfileName::from("worker"), parent.clone(), None)
+        .await
+        .unwrap();
+    let parent_session = handle.resolve_bridge_session_id(&parent).await.unwrap();
+    service.fail_persisted_session_metadata_reads_for(parent_session.clone());
+
+    assert!(matches!(
+        crate::CreationSourceCapture::classify(
+            handle.capture_member_creation_source(&parent_session).await
+        ),
+        crate::CreationSourceCapture::CaptureFailed(crate::MemberCreationError::Session(_))
+    ));
+
+    let (captured, guard) = super::capture_warnings();
+    let dispatcher = super::dispatched_from_session(
+        Arc::new(super::super::tools::MobOperatorToolDispatcher::new(
+            handle.clone(),
+            true,
+            generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
+        )),
+        parent_session.clone(),
+    );
+    let args = serde_json::value::RawValue::from_string(
+        serde_json::json!({"profile":"worker", "member_id":"fault-child"}).to_string(),
+    )
+    .unwrap();
+    dispatcher
+        .dispatch(ToolCallView {
+            id: "capture-fault",
+            name: "spawn_member",
+            args: &args,
+        })
+        .await
+        .expect("a capture fault does not change spawn admission");
+    drop(guard);
+
+    let traced = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|fields| super::field(fields, "capture") == Some("failed"))
+        .cloned()
+        .expect("the capture fault is traced");
+    assert_eq!(super::field(&traced, "tracing.level"), Some("ERROR"));
+    assert_eq!(super::field(&traced, "operation"), Some("spawn_member"));
+    assert!(
+        super::field(&traced, "error").is_some_and(|cause| cause.contains("session read failed")),
+        "the trace carries the cause: {traced:?}"
+    );
+
+    let child_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("fault-child"))
+        .await
+        .expect("the child is admitted");
+    assert_eq!(
+        handle
+            .member_creation_for_session(&child_session)
+            .await
+            .unwrap()
+            .unwrap()
+            .creation
+            .provenance,
+        MemberCreationProvenance::Unproven,
+    );
+    service.metadata_read_failures_for.lock().unwrap().clear();
+    handle.shutdown().await.unwrap();
+}
+
+/// A supplied dispatch origin that is not a current member of the mob is
+/// refused on owned-target checks, even with manage scope, never downgraded
+/// to an ownerless call. A context-free call stays ownerless.
+#[tokio::test]
+async fn member_creation_stale_origin_is_refused_on_owned_target_checks() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let target = AgentIdentity::from("owned-target");
+    handle
+        .spawn(ProfileName::from("worker"), target.clone(), None)
+        .await
+        .unwrap();
+    let operator = || -> Arc<dyn AgentToolDispatcher> {
+        Arc::new(super::super::tools::MobOperatorToolDispatcher::new(
+            handle.clone(),
+            true,
+            generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
+        ))
+    };
+    let stale = super::dispatched_from_session(operator(), SessionId::new());
+    for (tool, args) in [
+        (
+            "member_status",
+            serde_json::json!({"member_id": "owned-target"}),
+        ),
+        ("list_members", serde_json::json!({})),
+    ] {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "stale-origin",
+            name: tool,
+            args: &raw,
+        };
+        assert!(
+            matches!(
+                stale.dispatch(call).await,
+                Err(ToolError::AccessDenied { .. })
+            ),
+            "{tool}: a stale origin is refused"
+        );
+        let call = ToolCallView {
+            id: "ownerless",
+            name: tool,
+            args: &raw,
+        };
+        operator().dispatch(call).await.unwrap_or_else(|error| {
+            panic!("{tool}: a context-free manage call is allowed: {error:?}")
+        });
+    }
+    handle.shutdown().await.unwrap();
+}
+
+/// The Some-origin authority matrix for the operator tools, with manage
+/// scope. A supplied origin is checked against the live roster before
+/// anything else:
+/// (a) the session of a current member is admitted;
+/// (b) a retired member's session, a member's session from before it was
+///     respawned (rebound away), and another mob's member session are all
+///     denied, on every owned-target tool;
+/// (c) a denied retire or force-cancel leaves the target exactly as it was;
+/// (d) list and status answer the same way for the same origins.
+#[tokio::test]
+async fn member_creation_some_origin_authority_matrix() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    // The test mob id is thread-local, so the second mob needs its own
+    // explicit id to be a genuinely different mob (and to hold its own
+    // supervisor route).
+    let mut other_definition = sample_definition_with_mob_tools();
+    other_definition.id = MobId::from(format!("other-mob-{}", uuid::Uuid::new_v4().simple()));
+    let (other_mob, _other_service) = create_test_mob(other_definition).await;
+    assert_ne!(
+        handle.mob_id(),
+        other_mob.mob_id(),
+        "the wrong-mob origin comes from a different mob"
+    );
+    let spawn = |identity: &'static str| {
+        let handle = handle.clone();
+        async move {
+            let identity = AgentIdentity::from(identity);
+            handle
+                .spawn(ProfileName::from("worker"), identity.clone(), None)
+                .await
+                .unwrap();
+            let session = handle.resolve_bridge_session_id(&identity).await.unwrap();
+            (identity, session)
+        }
+    };
+    let (target, _) = spawn("matrix-target").await;
+    let (_manager, manager_session) = spawn("matrix-manager").await;
+    let (victim, _) = spawn("matrix-victim").await;
+
+    let (retired, retired_session) = spawn("matrix-retired").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        super::retire_to_terminal(&handle, &retired),
+    )
+    .await
+    .expect("retirement settles within the failure bound")
+    .expect("retire the caller");
+
+    let (rebound, rebound_away_session) = spawn("matrix-rebound").await;
+    handle
+        .respawn(rebound.clone(), None)
+        .await
+        .expect("respawn the caller");
+    let rebound_session = handle.resolve_bridge_session_id(&rebound).await.unwrap();
+    assert_ne!(
+        rebound_session, rebound_away_session,
+        "a respawn binds a new session"
+    );
+
+    let foreign = AgentIdentity::from("matrix-foreign");
+    other_mob
+        .spawn(ProfileName::from("worker"), foreign.clone(), None)
+        .await
+        .unwrap();
+    let foreign_session = other_mob.resolve_bridge_session_id(&foreign).await.unwrap();
+
+    let operator_from = |session: SessionId| -> Arc<dyn AgentToolDispatcher> {
+        super::dispatched_from_session(
+            Arc::new(super::super::tools::MobOperatorToolDispatcher::new(
+                handle.clone(),
+                true,
+                generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
+            )),
+            session,
+        )
+    };
+    async fn call(
+        operator: &Arc<dyn AgentToolDispatcher>,
+        tool: &'static str,
+        member: Option<&AgentIdentity>,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let args = match member {
+            Some(member) => serde_json::json!({ "member_id": member.as_str() }),
+            None => serde_json::json!({}),
+        };
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        operator
+            .dispatch(ToolCallView {
+                id: "origin-matrix",
+                name: tool,
+                args: &raw,
+            })
+            .await
+    }
+    let target_status = || {
+        let handle = handle.clone();
+        let target = target.clone();
+        async move {
+            handle
+                .member_status(&target)
+                .await
+                .expect("target status")
+                .status
+        }
+    };
+    let status_before = target_status().await;
+
+    // (b), (c), (d): every invalid origin is denied on every tool, and a
+    // denied mutation leaves the target as it was.
+    for (label, session) in [
+        ("retired", retired_session),
+        ("rebound away", rebound_away_session),
+        ("wrong mob", foreign_session),
+    ] {
+        let operator = operator_from(session);
+        for (tool, member) in [
+            ("member_status", Some(&target)),
+            ("list_members", None),
+            ("retire_member", Some(&target)),
+            ("force_cancel_member", Some(&target)),
+        ] {
+            assert!(
+                matches!(
+                    call(&operator, tool, member).await,
+                    Err(ToolError::AccessDenied { .. })
+                ),
+                "{label} origin: {tool} is denied"
+            );
+        }
+        assert_eq!(
+            target_status().await,
+            status_before,
+            "{label} origin: a denied retire or force-cancel leaves the target unchanged"
+        );
+        assert!(
+            handle.get_member(&target).await.unwrap().is_some(),
+            "{label} origin: the target is still a member"
+        );
+    }
+
+    // (a): a current member's session (the manager, and the rebound member's
+    // new session) is admitted on every tool.
+    for (label, session) in [
+        ("manager", manager_session),
+        ("rebound current", rebound_session),
+    ] {
+        let operator = operator_from(session);
+        for (tool, member) in [
+            ("member_status", Some(&target)),
+            ("list_members", None),
+            ("force_cancel_member", Some(&target)),
+        ] {
+            call(&operator, tool, member)
+                .await
+                .unwrap_or_else(|error| panic!("{label} origin: {tool} is admitted: {error:?}"));
+        }
+    }
+    call(
+        &operator_from(
+            handle
+                .resolve_bridge_session_id(&AgentIdentity::from("matrix-manager"))
+                .await
+                .unwrap(),
+        ),
+        "retire_member",
+        Some(&victim),
+    )
+    .await
+    .expect("a current member with manage scope retires a member");
+    assert!(handle.get_member(&victim).await.unwrap().is_none());
+
+    other_mob.shutdown().await.unwrap();
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test]

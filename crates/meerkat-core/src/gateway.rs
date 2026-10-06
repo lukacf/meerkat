@@ -594,9 +594,13 @@ impl AgentToolDispatcher for ToolGateway {
         let mut builder = ToolGatewayBuilder::new();
         let mut any_bound = false;
         for entry in owned.entries {
-            if entry.dispatcher.capabilities().ops_lifecycle
-                && Arc::strong_count(&entry.dispatcher) == 1
-            {
+            if entry.dispatcher.capabilities().ops_lifecycle {
+                // A child that needs the binding but is still shared cannot
+                // be rebound. Leaving it unbound would silently drop its
+                // owner session and registry, so the bind is rejected.
+                if Arc::strong_count(&entry.dispatcher) != 1 {
+                    return Err(crate::agent::OpsLifecycleBindError::SharedOwnership);
+                }
                 let outcome = entry
                     .dispatcher
                     .bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?;
@@ -1058,7 +1062,13 @@ impl AgentToolDispatcher for DynamicToolComposite {
         let mut rebound = Vec::with_capacity(owned.dispatchers.len());
         let mut any_bound = false;
         for d in owned.dispatchers {
-            if d.capabilities().ops_lifecycle && Arc::strong_count(&d) == 1 {
+            if d.capabilities().ops_lifecycle {
+                // A child that needs the binding but is still shared cannot
+                // be rebound. Leaving it unbound would silently drop its
+                // owner session and registry, so the bind is rejected.
+                if Arc::strong_count(&d) != 1 {
+                    return Err(crate::agent::OpsLifecycleBindError::SharedOwnership);
+                }
                 let outcome =
                     d.bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?;
                 if outcome.was_bound() {

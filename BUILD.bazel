@@ -719,6 +719,7 @@ test_suite(
         "//crates/meerkat-mob-mcp:fork_off_surface_test",
         "//crates/meerkat-mob-mcp:fork_relink_test",
         "//crates/meerkat-mob-mcp:meerkat_mob_mcp_unit_test",
+        "//crates/meerkat-mob-mcp:operator_spawn_creation_source_test",
         "//crates/meerkat-mob-mcp:profile_tool_deny_test",
         "//crates/meerkat-mob-mcp:stop_after_turn_reaches_model_test",
         "//crates/meerkat-mob-mcp:stop_cancels_a_staged_run_test",

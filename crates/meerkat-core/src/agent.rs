@@ -1451,14 +1451,16 @@ pub struct DispatcherCapabilities {
 ///
 /// **Semantics (decision 11 — supported/best-effort/rejected):**
 /// - `Ok(Bound(d))` = **supported** — binding succeeded, side effects should be wired
-/// - `Ok(Skipped(d))` = **best-effort** — inner shared or incompatible, dispatcher unchanged
+/// - `Ok(Skipped(d))` = **best-effort** - no inner dispatcher needed the binding, dispatcher unchanged
+/// - `Err(SharedOwnership)` from a wrapper = **rejected** - an inner dispatcher that needs the
+///   binding is shared, so it cannot be rebound; it is never left silently unbound
 /// - `Err(SharedOwnership)` = **rejected** — outer wrapper is shared, caught by factory pre-check
 /// - `Err(Unsupported)` = **rejected** — type doesn't support this binding, caught by `capabilities()`
 pub enum BindOutcome {
     /// Binding was applied. The dispatcher was rebound.
     Bound(Arc<dyn AgentToolDispatcher>),
-    /// Binding was skipped — inner dispatcher was shared or unsupported.
-    /// The returned dispatcher is unchanged but safe to use.
+    /// Binding was skipped: no inner dispatcher needed it. The returned
+    /// dispatcher is unchanged but safe to use.
     Skipped(Arc<dyn AgentToolDispatcher>),
 }
 
@@ -2150,6 +2152,12 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         owner_bridge_session_id: crate::types::SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        // An inner dispatcher that needs the binding but is still shared
+        // cannot be rebound. Leaving it unbound would silently drop its owner
+        // session and registry, so the bind is rejected.
+        if owned.inner.capabilities().ops_lifecycle && Arc::strong_count(&owned.inner) != 1 {
+            return Err(OpsLifecycleBindError::SharedOwnership);
+        }
         if Arc::strong_count(&owned.inner) == 1 {
             let outcome = owned
                 .inner

@@ -2769,6 +2769,22 @@ pub trait SessionAgentBuilder: Send + Sync {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError>;
 
+    /// Build an agent for a new session from a request the caller owns.
+    ///
+    /// A builder may move tool dispatchers out of `req` (for example
+    /// `build.external_tools`) so the agent's composed tool surface owns them
+    /// exclusively. Session-time binding (owner session, ops registry) can
+    /// only rebind an exclusively owned dispatcher; one still shared with the
+    /// request would be refused. Everything else in `req` stays readable
+    /// after the call. The default builds from the borrowed request.
+    async fn build_agent_taking_tools(
+        &self,
+        req: &mut CreateSessionRequest,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        self.build_agent(req, event_tx).await
+    }
+
     /// Reconcile durable compaction stages for an exact session before its
     /// live [`SessionAgent`] has been materialized.
     ///
@@ -7107,9 +7123,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
 
         // Build the agent
+        // The agent takes exclusive ownership of the request's tool
+        // dispatchers so session-time binding reaches them.
+        let mut req = req;
         let agent = self
             .builder
-            .build_agent(&req, agent_event_tx.clone())
+            .build_agent_taking_tools(&mut req, agent_event_tx.clone())
             .await?;
         let llm_identity = agent
             .durable_llm_identity()

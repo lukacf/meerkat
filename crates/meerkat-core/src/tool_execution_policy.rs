@@ -756,6 +756,12 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         owner_bridge_session_id: crate::types::SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        // An inner dispatcher that needs the binding but is still shared
+        // cannot be rebound. Leaving it unbound would silently drop its owner
+        // session and registry, so the bind is rejected.
+        if owned.inner.capabilities().ops_lifecycle && Arc::strong_count(&owned.inner) != 1 {
+            return Err(OpsLifecycleBindError::SharedOwnership);
+        }
         if Arc::strong_count(&owned.inner) == 1 {
             let outcome = owned
                 .inner
@@ -1921,6 +1927,129 @@ mod tests {
         };
         assert_eq!(err, OpsLifecycleBindError::SharedOwnership);
         drop(extra_handle);
+    }
+
+    /// A wrapper or composite whose ops-capable child is still shared cannot
+    /// rebind that child. It rejects the bind with `SharedOwnership` and never
+    /// returns a dispatcher with the child silently left unbound.
+    #[test]
+    fn shared_ops_capable_child_rejects_the_bind_in_every_wrapper() {
+        fn bind(dispatcher: Arc<dyn AgentToolDispatcher>) -> Result<(), OpsLifecycleBindError> {
+            dispatcher
+                .bind_ops_lifecycle(
+                    Arc::new(UnsupportedOpsRegistry),
+                    crate::types::SessionId::new(),
+                )
+                .map(|_| ())
+        }
+
+        let shared: Arc<dyn AgentToolDispatcher> = Arc::new(SpyDispatcher::new(&["alpha"]));
+        let wrappers: Vec<(&str, Arc<dyn AgentToolDispatcher>)> = vec![
+            (
+                "execution policy gate",
+                Arc::new(ExecutionPolicyGatedDispatcher::new(
+                    Arc::clone(&shared),
+                    allow_list(&["alpha"]),
+                )),
+            ),
+            (
+                "filtered dispatcher",
+                Arc::new(crate::agent::FilteredToolDispatcher::new(
+                    Arc::clone(&shared),
+                    vec!["alpha".to_string()],
+                )),
+            ),
+            (
+                "dynamic composite",
+                Arc::new(crate::gateway::DynamicToolComposite::new(vec![Arc::clone(
+                    &shared,
+                )])),
+            ),
+            (
+                "tool gateway",
+                Arc::new(
+                    crate::gateway::ToolGatewayBuilder::new()
+                        .add_dispatcher(Arc::clone(&shared))
+                        .build()
+                        .expect("gateway builds"),
+                ),
+            ),
+        ];
+        for (label, wrapper) in wrappers {
+            assert_eq!(
+                bind(wrapper),
+                Err(OpsLifecycleBindError::SharedOwnership),
+                "{label} must reject a shared ops-capable child"
+            );
+        }
+
+        // The same composites bind an exclusively owned child.
+        let owned: Arc<dyn AgentToolDispatcher> = Arc::new(SpyDispatcher::new(&["alpha"]));
+        bind(Arc::new(crate::gateway::DynamicToolComposite::new(vec![
+            owned,
+        ])))
+        .expect("an exclusively owned child binds");
+    }
+
+    /// A shared child that does not need the binding passes through the bind
+    /// unchanged, next to an exclusively owned ops-capable child that binds.
+    #[tokio::test]
+    async fn shared_non_ops_child_passes_through_while_the_owned_ops_child_binds() {
+        struct PlainDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for PlainDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "plain".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        let plain: Arc<dyn AgentToolDispatcher> = Arc::new(PlainDispatcher {
+            tools: Arc::from([tool_def("plain")]),
+        });
+        let held = Arc::clone(&plain);
+        let spy = Arc::new(SpyDispatcher::new(&["alpha"]));
+        let spy_probe = Arc::downgrade(&spy);
+        let owned: Arc<dyn AgentToolDispatcher> = spy;
+        let composite: Arc<dyn AgentToolDispatcher> =
+            Arc::new(crate::gateway::DynamicToolComposite::new(vec![
+                plain, owned,
+            ]));
+        let outcome = composite
+            .bind_ops_lifecycle(
+                Arc::new(UnsupportedOpsRegistry),
+                crate::types::SessionId::new(),
+            )
+            .expect("a shared non-ops child does not block the bind");
+        assert!(outcome.was_bound());
+        let rebound = outcome.into_dispatcher();
+        assert!(
+            *spy_probe
+                .upgrade()
+                .expect("the owned child survives the rebind")
+                .ops_bound
+                .lock()
+                .unwrap(),
+            "the owned ops-capable child is bound"
+        );
+        dispatch_named_with_context(rebound.as_ref(), "plain")
+            .await
+            .expect("the shared plain child is still dispatchable");
+        drop(held);
     }
 
     #[test]

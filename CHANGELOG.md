@@ -201,6 +201,17 @@ them.
 
 ### Fixed
 
+- A host's console observation path no longer overflows a 2 MiB debug worker
+  stack. `MobMcpState::mob_handles_snapshot` and every mob verb that calls
+  `ensure_restored` built the persistent-restore future inline, and the
+  council-recovery, fork re-link and forked-participant sweeps handed their
+  futures by value to `tokio::spawn`. At opt-level 0 each of those reserved
+  its full size in the caller's frame, even on paths that never ran it; the
+  restore future grew with the child-mob builder options added since 0.8.51,
+  and the frames reached about 420 KiB on that path. They are now built in
+  their own frames (`stack_relief::box_in_own_frame`), the path runs in
+  under 32 KiB, and a 128 KiB debug-stack regression test guards it.
+
 - OpenAI: prompt-cache fields reach only a backend that has admitted them
   (#1669). The public OpenAI API admits them; the ChatGPT backend and Azure
   OpenAI do not, but two paths sent them there anyway:
@@ -358,6 +369,14 @@ them.
 
 ### Testing
 
+- `cargo xtask protocol-codegen` and `machine-codegen` write a generated
+  artifact only when its bytes change. Before, both rewrote every artifact on
+  every run, and the pre-push machine hook runs both. A byte-identical
+  rewrite of `crates/meerkat-core/src/generated/session_document.rs` bumped
+  its mtime, which Cargo tracks, so a retry that only touched TLA or docs
+  rebuilt meerkat-core and everything downstream. Generation and drift
+  checks are unchanged. A rerun on an unchanged tree now writes nothing (51
+  protocol artifacts reported `unchanged`).
 - The Rust changed-path selector no longer treats the per-crate license
   symlinks (`crates/*/LICENSE-MIT`, `LICENSE-APACHE`) as embedded compile
   inputs. Since those links landed, the repo-root license files mapped to
@@ -443,6 +462,26 @@ them.
   re-raised, so a run that fails by panic stays classifiable. Previously the
   unwind finished the journal first and the timeline write was refused
   (#1774, for #1765).
+- `meerkat-session`'s `live_close_refuses_busy_turn_boundary_and_can_retry`
+  no longer measures how long the bounded close waited. Its 150 ms lower
+  bound was timed from inside the spawned waiter, which can start after the
+  test's own 150 ms sleep began, so a loaded run measured 149.9 ms and failed.
+  A flag set just before the turn boundary is released, and read the moment
+  the waiter settles, now proves the ordering; the waiter starts late on
+  purpose, and the 5 s timeout is only a hang guard (#1779).
+- Turn-budget and LLM call deadlines are measured on Tokio's clock on
+  native (`time_compat::DeadlineInstant`, crate-private). In production, and
+  outside any runtime, it reads the same monotonic time as before; under a
+  paused Tokio clock it reads the paused clock, so budget and deadline tests
+  control time exactly. The LLM call wait measures its deadline on the clock
+  its timer runs on, so a timer that fires always finds the deadline reached.
+  wasm32 keeps `web_time`. No public signature changes.
+- `standalone_turn_budget_failure_allows_a_new_turn_with_a_fresh_budget` is
+  deterministic (#1776). It asserted one LLM call inside a 200 ms wall-clock
+  budget, which a loaded machine could spend before the first call. It now
+  uses a 30 s budget, a forced 300 ms stall before the first call, and a
+  call that pauses Tokio's clock once in flight, so the budget fires
+  exactly after one call; the second turn still answers with a fresh budget.
 
 ## [0.8.51] - 2026-10-05
 

@@ -86,8 +86,9 @@ them.
   `child_application_tool_policy` init parameter, or an explicit
   `ApplicationToolPolicyBinding::Unmanaged`). Calls into such a member
   return that refusal, and spawns into the child mob are refused as before.
-  The failure is not durable: once the host is started with a child policy,
-  the restore brings the members back on their own sessions. Host-created
+  To recover, set the child policy and restart the host: the next start
+  with the policy restores the refused members on their own sessions (a
+  restore failure is re-derived on each start, never persisted). Host-created
   mobs are unaffected.
 - Behaviour-only (not measured by the gate): a `SpawnMemberCustomizer`
   error on process-restart restore now fails only that member's restore,

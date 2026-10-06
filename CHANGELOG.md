@@ -447,6 +447,12 @@ them.
 
 ### Testing
 
+- The fork_off build-parity e2e test selects the forker's tool-round request
+  by the position of `call_fork`'s output instead of the last user text
+  (#1798). The child's background completion notice can be that request's
+  last user item; the test failed about 1 run in 4 (6 of 24) and now passes
+  24 of 24. The byte-for-byte parity assertions are unchanged.
+
 - `cargo xtask protocol-codegen` and `machine-codegen` write a generated
   artifact only when its bytes change. Before, both rewrote every artifact on
   every run, and the pre-push machine hook runs both. A byte-identical

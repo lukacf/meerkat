@@ -116,6 +116,27 @@ fn has_tool_output(body: &str) -> bool {
         .any(|item| item["type"] == "function_call_output")
 }
 
+/// The forker's tool round: the request that returns `call_fork`'s output to
+/// the model, with no assistant item after that output.
+///
+/// `fork_off` completes in the background, so the child's completion notice
+/// can land before this request (as its last user item) or after it (as a
+/// new turn whose history repeats the output, followed by the forker's
+/// reply). Neither the last user text nor a bare "carries a tool output" test
+/// identifies the round; the output's position does.
+fn is_fork_tool_round(body: &str) -> bool {
+    let items = input_items(body);
+    let Some(output_at) = items
+        .iter()
+        .position(|item| item["type"] == "function_call_output" && item["call_id"] == "call_fork")
+    else {
+        return false;
+    };
+    !items[output_at + 1..]
+        .iter()
+        .any(|item| item["role"] == "assistant" || item["type"] == "function_call")
+}
+
 fn tool_names(body: &str) -> Vec<String> {
     let value: Value = serde_json::from_str(body).unwrap();
     value["tools"]
@@ -600,9 +621,7 @@ async fn e2e_fast_mob_fork_off_child_request_matches_the_forker_byte_for_byte() 
     // explicit marker implicit mode adds on GPT-6), with identical bytes, so
     // the forker's first request writes that entry even on a cold cache and
     // the child reads it.
-    let forker_round = stack.only_body("forker tool round", |body| {
-        last_user_text(body).contains(FORK_PROMPT) && has_tool_output(body)
-    });
+    let forker_round = stack.only_body("forker tool round", is_fork_tool_round);
     let anchor_at = inherited
         .iter()
         .rposition(|item| item.get().contains(SOURCE_TURN))

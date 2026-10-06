@@ -12110,37 +12110,111 @@ mod tests {
         );
     }
 
-    /// #1701 restore ordering: a restored mob is classified as a child mob
-    /// before any member is restored, so its members' rebuilds run under the
-    /// child policy. On a managed host without a child policy that policy
-    /// refuses, and the child mob is not restored.
+    /// #1701 restore ordering, under the joint child-policy decision: a
+    /// restored mob is classified as a child mob before any member is
+    /// restored, so its members' rebuilds run under the child policy. A
+    /// managed host without a child policy still restores everything: the
+    /// child mob comes up, and its members are not brought back unconstrained.
+    /// Each carries a typed restore failure saying why and naming the fixes,
+    /// and calls into it return that refusal. (Recovery once the refusal
+    /// lifts is proved in meerkat-mob:
+    /// `refused_restore_is_per_member_and_recovers_once_admitted`.)
     #[tokio::test]
-    async fn child_mob_restore_runs_its_members_under_the_child_policy() {
+    async fn unconfigured_child_policy_refuses_restored_child_members_not_the_restore() {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
-        let (svc, mob_id, _session) =
-            seat_worker_then_exit(&svc, root.path(), true, "restored-policy-child").await;
-        let restored = Arc::new(
+        let worker = AgentIdentity::from("worker-1");
+        let seating = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+        let owner = SessionId::new();
+        svc.insert_persisted_session(Session::with_id(owner.clone()))
+            .await;
+        let child = seating
+            .mob_create_definition_with_owner_bridge_session(
+                explicit_definition("restored-policy-child"),
+                owner,
+                true,
+                false,
+            )
+            .await
+            .expect("create child mob");
+        let host_mob = seating
+            .mob_create_definition(explicit_definition("restored-policy-host"))
+            .await
+            .expect("create host mob");
+        for mob_id in [&child, &host_mob] {
+            seating
+                .mob_spawn(
+                    mob_id,
+                    ProfileName::from("worker"),
+                    worker.clone(),
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("spawn worker");
+            seating
+                .handle_for(mob_id)
+                .await
+                .expect("predecessor mob handle")
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+        }
+        let svc = Arc::new(svc.cold_restart().await);
+
+        let unconfigured = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
                 .with_persistent_storage_root(Some(root.path().to_path_buf()))
                 .with_tool_consequence_policy_registry(managed_policy_registry()),
         );
-        let error = restored
-            .mob_member_status(&mob_id, &AgentIdentity::from("worker-1"))
+        let mobs = unconfigured
+            .mob_list()
             .await
-            .expect_err("the child policy refuses the restored member");
-        assert!(
-            error
-                .to_string()
-                .contains("no child application tool policy is configured"),
-            "{error}"
+            .expect("the restore completes");
+        for mob_id in [&child, &host_mob] {
+            assert!(
+                mobs.iter().any(|(id, _)| id == mob_id),
+                "{mob_id} is restored: {mobs:?}"
+            );
+        }
+        assert_eq!(
+            unconfigured
+                .mob_member_status(&host_mob, &worker)
+                .await
+                .expect("host mob member status")
+                .status,
+            meerkat_mob::MobMemberStatus::Active,
+            "the host mob's member restores"
         );
+        let refusal = unconfigured
+            .handle_for(&child)
+            .await
+            .expect("the child mob is restored")
+            .member(&worker)
+            .await
+            .err()
+            .expect("the child member is refused");
+        let MobError::MemberRestoreFailed { reason, .. } = &refusal else {
+            panic!("a typed restore failure, got {refusal:?}");
+        };
+        for needle in [
+            "no child application tool policy is configured",
+            "MobMcpState::with_child_application_tool_policy(binding)",
+            "child_application_tool_policy",
+            "ApplicationToolPolicyBinding::Unmanaged",
+        ] {
+            assert!(reason.contains(needle), "{needle} missing from: {reason}");
+        }
     }
 
-    /// #1701 control: the managed host without a child policy that refuses to
-    /// restore a child mob (above) restores a host-created mob as before: it
-    /// is never classified as a child mob, so the child policy does not
-    /// govern its members' rebuilds.
+    /// #1701 control: the managed host without a child policy that refuses a
+    /// restored child mob's members (above) restores a host-created mob's
+    /// members as before: it is never classified as a child mob, so the child
+    /// policy does not govern its members' rebuilds.
     #[tokio::test]
     async fn host_mob_restore_is_untouched_by_the_child_policy() {
         let svc = Arc::new(MockSessionSvc::new());

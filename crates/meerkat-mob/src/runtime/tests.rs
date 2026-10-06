@@ -29108,6 +29108,97 @@ async fn resume_customizer_is_asked_again_for_a_successor_session() {
     assert!(rebuilt.provider_params_masked);
 }
 
+/// Refuses every resume rebuild until admitted, as a host policy that is not
+/// configured yet does.
+#[derive(Default)]
+struct RefusingUntilAdmitted {
+    admitted: std::sync::atomic::AtomicBool,
+}
+
+const NOT_ADMITTED: &str = "host policy is not configured; configure it to restore this member";
+
+impl SpawnMemberCustomizer for RefusingUntilAdmitted {
+    fn customize_spawn(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        _spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if self.admitted.load(std::sync::atomic::Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(MobError::WiringError(NOT_ADMITTED.to_string()))
+        }
+    }
+}
+
+/// #1701: a customizer refusal on restore fails that member's restore, not
+/// the mob: the mob comes up, the member carries the refusal as its typed
+/// restore failure, and the failure is not durable, so once the host admits
+/// the member (a host policy is configured when the host starts) the next
+/// restore brings it back on its own session.
+#[tokio::test]
+async fn refused_restore_is_per_member_and_recovers_once_admitted() {
+    let (service, storage, member, session) =
+        seat_member_with_provider_params_then_crash(false).await;
+    let next_start_storage = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(RefusingUntilAdmitted::default()))
+        .resume()
+        .await
+        .expect("the mob resumes");
+    let refusal = resumed
+        .member(&member)
+        .await
+        .err()
+        .expect("the refused member is not restored");
+    let MobError::MemberRestoreFailed {
+        member_id,
+        session_id,
+        reason,
+        ..
+    } = &refusal
+    else {
+        panic!("a typed restore failure, got {refusal:?}");
+    };
+    assert_eq!(member_id, &member);
+    assert_eq!(session_id.as_ref(), Some(&session));
+    assert!(reason.contains(NOT_ADMITTED), "{reason}");
+    crash_stop_and_release_routes(resumed).await;
+
+    let admitted = RefusingUntilAdmitted::default();
+    admitted
+        .admitted
+        .store(true, std::sync::atomic::Ordering::Release);
+    let restarted = MobBuilder::for_resume(next_start_storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(admitted))
+        .resume()
+        .await
+        .expect("the next start resumes");
+    restarted
+        .member(&member)
+        .await
+        .expect("the admitted member is restored");
+    assert_eq!(
+        restarted
+            .member_status(&member)
+            .await
+            .expect("member status")
+            .status,
+        MobMemberStatus::Active
+    );
+    let rebuilt = last_member_build(&service, &member).await;
+    assert_eq!(
+        rebuilt.resume_session_id,
+        Some(session),
+        "on its own session"
+    );
+}
+
 /// A customizer that only implements `customize_spawn` is still asked at
 /// `SpawnSource::Resume` (the default `customize_resume`), and the rebuild
 /// keeps the durable provider params: nothing overrides them.

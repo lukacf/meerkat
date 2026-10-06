@@ -8793,12 +8793,22 @@ impl MobBuilder {
             } else {
                 super::handle::ResumedMemberView::new(bridge_session_id.clone(), None)
             };
-            let mut restore_spec = super::fork_build::rebuild_resume_spec(
+            // A customizer refusal (a host policy that is not configured,
+            // say) fails this member's restore with the refusal as its
+            // diagnostic; the rest of the mob still comes up, and the member
+            // is restored once the customizer admits it.
+            let mut restore_spec = match super::fork_build::rebuild_resume_spec(
                 &definition.id,
                 spawn_member_customizer.as_ref(),
                 entry,
                 &restore_view,
-            )?;
+            ) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    record_restore_failure(bridge_session_id.clone(), error.to_string()).await;
+                    continue;
+                }
+            };
             if restore_spec.identity != entry.agent_identity {
                 return Err(MobError::Internal(format!(
                     "spawn customizer cannot change resume restore identity from '{}' to '{}'",
@@ -9031,12 +9041,22 @@ impl MobBuilder {
                                         }
                                     };
                                 restore_spec.resume_provider_params =
-                                    super::fork_build::successor_resume_provider_params(
+                                    match super::fork_build::successor_resume_provider_params(
                                         &definition.id,
                                         spawn_member_customizer.as_ref(),
                                         entry,
                                         &successor_view,
-                                    )?;
+                                    ) {
+                                        Ok(params) => params,
+                                        Err(error) => {
+                                            record_restore_failure(
+                                                bridge_session_id.clone(),
+                                                error.to_string(),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                    };
                             }
                             replacement_authorized
                         } else {

@@ -75,10 +75,24 @@ them.
   `resume_provider_params`.
 - Behaviour-only (not measured by the gate): `MobMcpState` classifies a
   restored mob as a child mob before its members are restored, not after
-  (#1701). A restored child mob's member rebuilds now run under the child
-  application tool policy customizer, so a managed host with no child policy
-  refuses to restore a child mob with members, as it already refuses spawns
-  into one. Host-created mobs are unaffected.
+  (#1701), so a restored child mob's members are no longer brought back
+  outside the child application tool policy. On a managed host (a tool
+  consequence policy registry is installed) with no child policy, the mob
+  still restores, but each member of a child mob is left unrestored with a
+  typed restore failure (`MobError::MemberRestoreFailed`) whose reason says
+  why (the host runs a tool-policy registry and no child application tool
+  policy is configured) and names the fixes
+  (`MobMcpState::with_child_application_tool_policy`, the MobKit
+  `child_application_tool_policy` init parameter, or an explicit
+  `ApplicationToolPolicyBinding::Unmanaged`). Calls into such a member
+  return that refusal, and spawns into the child mob are refused as before.
+  The failure is not durable: once the host is started with a child policy,
+  the restore brings the members back on their own sessions. Host-created
+  mobs are unaffected.
+- Behaviour-only (not measured by the gate): a `SpawnMemberCustomizer`
+  error on process-restart restore now fails only that member's restore,
+  with the error as its restore failure reason; the rest of the mob comes
+  up. It used to fail the whole mob resume (#1701).
 
 
 ### Added

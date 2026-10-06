@@ -438,7 +438,7 @@ async fn cancellation_drops_lease_finishes_native_call_and_wakes_progress() {
         tokio::select! {
             _ = &mut call => panic!("blocked call returned before cancellation"),
             permit = fixture.server.entered.acquire() => permit.unwrap().forget(),
-            _ = tokio::time::sleep(LIMIT) => panic!("server never entered"),
+            () = tokio::time::sleep(LIMIT) => panic!("server never entered"),
         }
         assert_eq!(
             router.external_tool_surface_snapshot().entries[0].inflight_call_count,

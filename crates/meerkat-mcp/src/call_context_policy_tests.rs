@@ -128,7 +128,7 @@ async fn read_only_plain_and_context_dispatch_refuse_reloaded_mutating_or_unknow
                 tokio::select! {
                     _ = &mut dispatch => panic!("dispatch skipped the consequence barrier"),
                     permit = barrier.entered.acquire() => permit.unwrap().forget(),
-                    _ = tokio::time::sleep(LIMIT) => panic!("consequence policy never entered"),
+                    () = tokio::time::sleep(LIMIT) => panic!("consequence policy never entered"),
                 }
                 if let McpTransportConfig::Http(http) = &mut config.transport {
                     http.headers

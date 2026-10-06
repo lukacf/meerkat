@@ -168,6 +168,35 @@ live/replay fixtures, examples and the core result alias, found no other
 incomplete literals. Production code is unchanged. Normal publication
 qualification remains pending.
 
+That fixture correction committed as `fcd5115487897a252cadb408d2ee989fc935ceb6`,
+tree `765df7331470c1dfb29edc15c8846f5075045586`, after normal applicable commit
+hooks passed in 10.08 seconds. GCP's locked workspace all-target/all-feature
+strict Clippy passed on that exact clean source in 1,065.83 seconds, from
+00:58:14 to 01:16:00 UTC on 2026-10-06. Its raw log, timing and pre/post source
+identity are retained under `adr-precheck-fcd51154/` in the local evidence
+directory. This is compile/lint evidence, not runtime test execution.
+
+The normal Mac push started at 00:57:44 UTC on 2026-10-06 and exited 1 after
+1,254.81 seconds. Its terminal state and full process group drain were observed
+at 01:18:43 UTC. Preliminary checks, formatting and broad strict Clippy passed.
+Machine verification then found a stale hand-written run-start hold audit call:
+the generated admission operator now takes twelve arguments, including optional
+authority binding and batch key, while the audit still supplied ten. TLC stopped
+at semantic analysis. No push occurred and later runtime test gates did not run.
+Raw output is `envelope-peer-replies-normal-push.log`.
+
+The successor supplies `None` for both added arguments, preserving this audit's
+ordinary unbound input. Generated models, production code, guards, properties,
+witnesses and bounds are unchanged. Two independent source reviews confirmed
+the mapping. The existing `run_start_hold_audit.sh 12` command passed in 58.37
+seconds, including safety and all seven required reachability witnesses. Its
+optional mutant checks were not selected. Raw output is
+`envelope-run-start-hold-green.log`. Normal publication qualification remains
+pending. A full source sweep against integrated main found 66 changed admission
+signatures across the native and composition models; all 69 corresponding calls
+in the 35 tracked TLA files now supply twelve arguments, with no stale aliases
+or qualified references. This sweep is source review, not additional TLC runs.
+
 The Mac candidate adds one test-build correction to that GCP source:
 `StdioChildCustody::spawned_pid` is compiled only for Linux tests, matching its
 only caller. The Mac compile check emitted an unused-method warning for its

@@ -1948,8 +1948,19 @@ impl PublicLiveBrokerSession {
                     },
                 });
             }
-            let Some(frame) = next.map_err(map_live_error)? else {
-                if !self.state.lock().await.closed_observed {
+            // The sideband's end settles a close still held for
+            // `session.started` (#1794): there is nothing left to send it on.
+            let next = match next.map_err(map_live_error) {
+                Ok(next) => next,
+                Err(error) => {
+                    self.state.lock().await.close_pending_until_started = false;
+                    return Err(error);
+                }
+            };
+            let Some(frame) = next else {
+                let mut state = self.state.lock().await;
+                state.close_pending_until_started = false;
+                if !state.closed_observed {
                     return Err(GptLiveBrokerError::Transport {
                         class: GptLiveBrokerTerminalClass::WebSocket,
                     });
@@ -2073,6 +2084,23 @@ impl PublicLiveBrokerSession {
                     );
                 }
             }
+            // A close requested before the session started goes out once
+            // `session.started` is applied (#1794), exactly once.
+            if state.close_pending_until_started
+                && state.session_started_observed
+                && !state.closed_observed
+            {
+                state.close_pending_until_started = false;
+                match self.send_close_events().await {
+                    Ok(()) => tracing::info!(
+                        "public Live held close sent after the provider's session.started"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "public Live held close could not be sent; the transport is gone and its end settles the close"
+                    ),
+                }
+            }
             if cues_due || notices_due {
                 drop(state);
                 if notices_due {
@@ -2104,12 +2132,34 @@ impl PublicLiveBrokerSession {
         if state.close_requested || state.closed_observed {
             return Ok(());
         }
-        // Measured against gpt-live-1: a pending quiet (thinking) append is
-        // injected and acknowledged only at an input frame stall, and the
-        // provider withholds `session.closed` until then. With microphone
-        // audio still flowing that stall never comes. Muting input first
-        // creates it, so a close issued while an append is in flight can
-        // complete instead of waiting on media the client has not stopped.
+        if !state.session_started_observed {
+            // Before the provider's `session.started` the close is held and
+            // sent when that frame is applied (#1794). The request is
+            // accepted now; physical closure is confirmed only by
+            // `session.closed`, as always, and a session that never starts
+            // settles through the sideband's end or the host's bounded local
+            // retirement.
+            state.close_requested = true;
+            state.close_pending_until_started = true;
+            state.drop_held_commentary_for_close();
+            tracing::info!("public Live close held until the provider's session.started");
+            return Ok(());
+        }
+        self.send_close_events().await?;
+        state.close_requested = true;
+        state.drop_held_commentary_for_close();
+        Ok(())
+    }
+
+    /// Send `session.input_audio.mute` then `session.close`.
+    ///
+    /// Measured against gpt-live-1: a pending quiet (thinking) append is
+    /// injected and acknowledged only at an input frame stall, and the
+    /// provider withholds `session.closed` until then. With microphone audio
+    /// still flowing that stall never comes. Muting input first creates it,
+    /// so a close issued while an append is in flight can complete instead of
+    /// waiting on media the client has not stopped.
+    async fn send_close_events(&self) -> Result<(), GptLiveBrokerError> {
         let mute = ClientEvent::new(Command::InputAudioMute);
         #[cfg(feature = "test-realtime-fixtures")]
         self.record_client_event(&mute);
@@ -2118,8 +2168,6 @@ impl PublicLiveBrokerSession {
         #[cfg(feature = "test-realtime-fixtures")]
         self.record_client_event(&close);
         self.sender.send(close).await.map_err(map_live_error)?;
-        state.close_requested = true;
-        state.drop_held_commentary_for_close();
         Ok(())
     }
 }
@@ -2445,6 +2493,13 @@ struct SessionState {
     held_commentary: VecDeque<(GptLiveAppendToken, ClientEvent)>,
     close_requested: bool,
     closed_observed: bool,
+    /// The provider's `session.started` was applied on the sideband.
+    session_started_observed: bool,
+    /// `close` was requested before `session.started`: held, and sent once
+    /// the session starts (#1794). gpt-live never confirmed a `session.close`
+    /// that reached it before its own `session.started` (S99's obsolete
+    /// reopen, closed about 65 ms after open: 4 of 6 close stalls).
+    close_pending_until_started: bool,
 }
 
 impl Default for SessionState {
@@ -2494,6 +2549,8 @@ impl Default for SessionState {
             last_delegation_offset_ms: None,
             held_commentary: VecDeque::new(),
             close_requested: false,
+            session_started_observed: false,
+            close_pending_until_started: false,
             closed_observed: false,
         }
     }
@@ -2957,11 +3014,15 @@ impl SessionState {
             // Readiness is a host-owned fact established by the seed
             // acknowledgement; a sideband `session.started` (or its replay)
             // is not projected as a second readiness observation.
-            ServerEvent::Started { .. } | ServerEvent::Updated { .. } => {}
+            ServerEvent::Started { .. } => {
+                self.session_started_observed = true;
+            }
+            ServerEvent::Updated { .. } => {}
             ServerEvent::Closed { .. } => {
                 // The SDK ends the stream after the terminal event; flush the
                 // open turn so its final transcript is not lost.
                 self.closed_observed = true;
+                self.close_pending_until_started = false;
                 self.drop_held_commentary_for_close();
                 self.finish_open_turn();
                 let observations = &mut self.queued_observations;
@@ -8805,6 +8866,9 @@ mod tests {
             let held = Arc::clone(&server_held);
             async move {
                 upgrade.on_upgrade(move |mut socket| async move {
+                    // The provider starts the session first (#1794: a close
+                    // is held until `session.started`).
+                    send_json(&mut socket, json!({"type":"session.started","event_id":"s","session":{"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0}})).await;
                     send_json(&mut socket, input_delta("book a table")).await;
                     send_json(&mut socket, delegation_created("dlg_cue", "client")).await;
                     send_json(&mut socket, output_delta_span("one moment", 1500.0, 2000.0)).await;
@@ -8923,6 +8987,9 @@ mod tests {
         let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
         let attach_peer = move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| async move {
             upgrade.on_upgrade(move |mut socket| async move {
+                // The provider starts the session first (#1794: a close
+                // is held until `session.started`).
+                send_json(&mut socket, json!({"type":"session.started","event_id":"s","session":{"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0}})).await;
                 let notice = recv_json(&mut socket, &capture).await;
                 assert_eq!(notice["type"], "session.instructions.append");
                 assert_eq!(notice["delegation_id"], "dlg_peer");
@@ -9031,6 +9098,9 @@ mod tests {
         let attach_instructions =
             move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| async move {
                 upgrade.on_upgrade(move |mut socket| async move {
+                    // The provider starts the session first (#1794: a close
+                    // is held until `session.started`).
+                    send_json(&mut socket, json!({"type":"session.started","event_id":"s","session":{"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0}})).await;
                     let mut commands = Vec::new();
                     for _ in 0..3 {
                         let event = recv_json(&mut socket, &capture).await;
@@ -9523,6 +9593,237 @@ mod tests {
         server.abort();
     }
 
+    /// How the provider fake behaves around a close requested by the
+    /// client (#1794).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum CloseFixture {
+        /// `session.started` arrives only after the client's close.
+        StartedAfterClose,
+        /// `session.started` arrives before the client's close.
+        StartedBeforeClose,
+        /// The sideband ends without `session.started`.
+        EndsWithoutStarted,
+        /// `session.started` and `session.closed` back to back after the
+        /// client's close, with no read in between.
+        StartedAndClosedTogether,
+    }
+
+    /// The barrier the test pushes onto the broker's ordered outbound
+    /// channel right after `close()` returns. The channel is FIFO, so a close
+    /// sent at once is on the wire ahead of it.
+    const CLOSE_BARRIER: &str = "close-barrier";
+
+    /// What the provider fake saw: whether a close (mute or close) reached it
+    /// ahead of the barrier, and every client event it received.
+    async fn close_through_broker(fixture: CloseFixture) -> (bool, Vec<String>) {
+        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+        let early = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_early = Arc::clone(&early);
+        let attach = move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| {
+            let early = Arc::clone(&server_early);
+            async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    let started = || json!({"type":"session.started","event_id":"s","session":{"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0}});
+                    if fixture == CloseFixture::StartedBeforeClose {
+                        send_json(&mut socket, started()).await;
+                        // An observable frame after it, so the client's
+                        // observation call returns with `Started` applied.
+                        send_json(&mut socket, input_delta("hello")).await;
+                    }
+                    // Read up to the barrier: whatever the broker sent for the
+                    // close at once precedes it on the ordered channel.
+                    loop {
+                        let event = recv_json(&mut socket, &capture).await;
+                        if event["content"] == CLOSE_BARRIER {
+                            break;
+                        }
+                        if event["type"] == "session.close"
+                            || event["type"] == "session.input_audio.mute"
+                        {
+                            early.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        // A close sent at once ends the outbound channel, so
+                        // no barrier can follow it.
+                        if event["type"] == "session.close" {
+                            break;
+                        }
+                    }
+                    match fixture {
+                        CloseFixture::EndsWithoutStarted => return,
+                        CloseFixture::StartedAndClosedTogether => {
+                            send_json(&mut socket, started()).await;
+                            send_json(&mut socket, session_closed()).await;
+                            return;
+                        }
+                        CloseFixture::StartedAfterClose => {
+                            send_json(&mut socket, started()).await;
+                        }
+                        CloseFixture::StartedBeforeClose => {}
+                    }
+                    if early.load(std::sync::atomic::Ordering::SeqCst) {
+                        send_json(&mut socket, session_closed()).await;
+                        return;
+                    }
+                    loop {
+                        let event = recv_json(&mut socket, &capture).await;
+                        if event["type"] == "session.close" {
+                            send_json(&mut socket, session_closed()).await;
+                            return;
+                        }
+                    }
+                })
+            }
+        };
+        let app = Router::new()
+            .route("/v1/live/sessions", post(create_session))
+            .route("/v1/live/sessions/{session_id}/attach", get(attach))
+            .with_state(Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (_, session) = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+            &format!("http://{address}/v1/"),
+        )
+        .unwrap()
+        .open(
+            PublicLiveOpenConfig::new("v=0", "marin")
+                .unwrap()
+                .with_pending_context(),
+        )
+        .await
+        .unwrap()
+        .into_parts();
+        if fixture == CloseFixture::StartedBeforeClose {
+            // Apply the fake's started frame before closing: the transcript
+            // delta after it is the first observation.
+            session
+                .next_observation()
+                .await
+                .expect("started frame then a transcript delta");
+            assert!(session.state.lock().await.session_started_observed);
+        }
+        session.close().await.expect("close accepted");
+        let barrier = session
+            .sender
+            .send(PublicLiveBrokerSession::thinking_event(
+                GptLiveAppendToken(u64::MAX),
+                0,
+                CLOSE_BARRIER.to_owned(),
+            ))
+            .await;
+        // Only a close already sent closes the outbound channel to the
+        // barrier; a held close leaves it open.
+        assert_eq!(
+            barrier.is_err(),
+            fixture == CloseFixture::StartedBeforeClose,
+            "the outbound channel is closed exactly when the close went out at once"
+        );
+        // Drain to the session's end: `session.closed`, or the sideband's end.
+        while let Ok(Some(_)) = session.next_observation().await {}
+        assert!(
+            !session.state.lock().await.close_pending_until_started,
+            "no close is left pending"
+        );
+        server.abort();
+        let events = capture
+            .lock()
+            .unwrap()
+            .client_events
+            .iter()
+            .filter(|event| event["content"] != CLOSE_BARRIER)
+            .filter_map(|event| event["type"].as_str().map(str::to_owned))
+            .collect();
+        (early.load(std::sync::atomic::Ordering::SeqCst), events)
+    }
+
+    /// #1794: a close requested before `session.started` is held: nothing
+    /// reaches the provider until the started frame, then one mute and one
+    /// close go out and `session.closed` settles it.
+    #[tokio::test]
+    async fn a_close_before_session_started_is_sent_once_the_session_starts() {
+        let (early, events) = close_through_broker(CloseFixture::StartedAfterClose).await;
+        assert!(!early, "nothing is sent before session.started");
+        assert_eq!(events, ["session.input_audio.mute", "session.close"]);
+    }
+
+    /// Control for the barrier above: after `session.started` the close goes
+    /// out at once, so the provider fake sees it ahead of the barrier.
+    #[tokio::test]
+    async fn a_close_after_session_started_is_sent_at_once() {
+        let (early, events) = close_through_broker(CloseFixture::StartedBeforeClose).await;
+        assert!(early, "the close is on the wire at once");
+        assert_eq!(events, ["session.input_audio.mute", "session.close"]);
+    }
+
+    /// A session that ends without starting settles the held close: nothing
+    /// is sent, and the drain ends with the sideband.
+    #[tokio::test]
+    async fn a_held_close_settles_when_the_session_ends_without_starting() {
+        let (early, events) = close_through_broker(CloseFixture::EndsWithoutStarted).await;
+        assert!(!early);
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// `session.started` and `session.closed` in one burst: the held close is
+    /// released by the started frame (or made moot by the closed one), never
+    /// left pending, and the drain ends.
+    #[tokio::test]
+    async fn a_held_close_survives_started_and_closed_in_one_burst() {
+        let (early, _) = close_through_broker(CloseFixture::StartedAndClosedTogether).await;
+        assert!(!early);
+    }
+
+    /// A provider that never starts and keeps the sideband open: `close`
+    /// still returns at once with the close held, so the host's bounded
+    /// local retirement (`LIVE_CLOSE_CONFIRMATION_BOUND`, pinned by the
+    /// host's `unconfirmed_provider_closure_is_retired_locally_after_the_bound`)
+    /// settles the channel; nothing in the broker waits.
+    #[tokio::test]
+    async fn a_held_close_returns_at_once_when_the_provider_stays_silent() {
+        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+        let attach = move |State(_capture): State<SharedCapture>, upgrade: WebSocketUpgrade| async move {
+            upgrade.on_upgrade(move |socket| async move {
+                // Silent and open: never started, never closed.
+                let _socket = socket;
+                std::future::pending::<()>().await;
+            })
+        };
+        let app = Router::new()
+            .route("/v1/live/sessions", post(create_session))
+            .route("/v1/live/sessions/{session_id}/attach", get(attach))
+            .with_state(Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (_, session) = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+            &format!("http://{address}/v1/"),
+        )
+        .unwrap()
+        .open(
+            PublicLiveOpenConfig::new("v=0", "marin")
+                .unwrap()
+                .with_pending_context(),
+        )
+        .await
+        .unwrap()
+        .into_parts();
+        tokio::time::timeout(std::time::Duration::from_secs(5), session.close())
+            .await
+            .expect("close never waits on a silent provider")
+            .expect("close accepted");
+        let state = session.state.lock().await;
+        assert!(state.close_requested && state.close_pending_until_started);
+        drop(state);
+        assert!(capture.lock().unwrap().client_events.is_empty());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn thinking_append_sends_only_native_quiet_fragments_and_drains_exact_receipts() {
         for reject_middle in [false, true] {
@@ -9530,6 +9831,9 @@ mod tests {
             let attach_thinking =
                 move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| async move {
                     upgrade.on_upgrade(move |mut socket| async move {
+                    // The provider starts the session first (#1794: a close
+                    // is held until `session.started`).
+                    send_json(&mut socket, json!({"type":"session.started","event_id":"s","session":{"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0}})).await;
                     let mut commands = Vec::new();
                     for _ in 0..3 {
                         let event = recv_json(&mut socket, &capture).await;

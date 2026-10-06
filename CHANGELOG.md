@@ -395,6 +395,13 @@ them.
   re-raised, so a run that fails by panic stays classifiable. Previously the
   unwind finished the journal first and the timeline write was refused
   (#1774, for #1765).
+- `meerkat-session`'s `live_close_refuses_busy_turn_boundary_and_can_retry`
+  no longer measures how long the bounded close waited. Its 150 ms lower
+  bound was timed from inside the spawned waiter, which can start after the
+  test's own 150 ms sleep began, so a loaded run measured 149.9 ms and failed.
+  A flag set just before the turn boundary is released, and read the moment
+  the waiter settles, now proves the ordering; the waiter starts late on
+  purpose, and the 5 s timeout is only a hang guard (#1779).
 
 ## [0.8.51] - 2026-10-05
 

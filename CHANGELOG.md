@@ -410,6 +410,19 @@ them.
   A flag set just before the turn boundary is released, and read the moment
   the waiter settles, now proves the ordering; the waiter starts late on
   purpose, and the 5 s timeout is only a hang guard (#1779).
+- Turn-budget and LLM call deadlines are measured on Tokio's clock on
+  native (`time_compat::DeadlineInstant`, crate-private). In production, and
+  outside any runtime, it reads the same monotonic time as before; under a
+  paused Tokio clock it reads the paused clock, so budget and deadline tests
+  control time exactly. The LLM call wait measures its deadline on the clock
+  its timer runs on, so a timer that fires always finds the deadline reached.
+  wasm32 keeps `web_time`. No public signature changes.
+- `standalone_turn_budget_failure_allows_a_new_turn_with_a_fresh_budget` is
+  deterministic (#1776). It asserted one LLM call inside a 200 ms wall-clock
+  budget, which a loaded machine could spend before the first call. It now
+  uses a 30 s budget, a forced 300 ms stall before the first call, and a
+  call that pauses Tokio's clock once in flight, so the budget fires
+  exactly after one call; the second turn still answers with a fresh budget.
 
 ## [0.8.51] - 2026-10-05
 

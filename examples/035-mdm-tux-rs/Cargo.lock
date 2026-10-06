@@ -2506,6 +2506,7 @@ dependencies = [
  "sse-stream",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

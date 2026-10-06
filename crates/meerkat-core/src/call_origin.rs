@@ -48,7 +48,7 @@ mod tests {
             WireCallOrigin::Unavailable
         );
         for invalid in [
-            r#"{}"#,
+            r"{}",
             r#"{"kind":"admitted"}"#,
             r#"{"kind":"unavailable","requester":"claimed"}"#,
         ] {

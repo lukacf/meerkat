@@ -539,19 +539,15 @@ impl LlmError {
     }
 
     /// The configured provider endpoint answered with a redirect, which
-    /// provider HTTP clients do not follow.
-    fn redirect_refused(status: u16, location: Option<&str>, body: &str) -> Self {
-        let target = location.map_or_else(String::new, |location| format!(" to {location}"));
-        let body = if body.is_empty() {
-            String::new()
-        } else {
-            format!(": {body}")
-        };
+    /// provider HTTP clients do not follow. The message is public diagnostic
+    /// data, so it carries only the status: never the `Location` (which can
+    /// hold sensitive URL material) or the unbounded response body.
+    fn redirect_refused(status: u16) -> Self {
         Self::InvalidConfig {
             message: format!(
-                "the configured endpoint answered HTTP {status} redirect{target}; the request \
-                 reached that endpoint, and the redirect was not followed. Configure the final \
-                 endpoint as the base URL{body}"
+                "the configured endpoint answered HTTP {status} redirect; the request reached \
+                 that endpoint, and the redirect was not followed. Configure the final endpoint \
+                 as the base URL"
             ),
         }
     }
@@ -572,7 +568,7 @@ impl LlmError {
             // configured endpoint's own answer: the request reached it (and
             // may have had effect there); only the follow-up was not sent.
             // Retrying would get the same answer, so it is terminal.
-            300..=399 => Self::redirect_refused(status, None, &message),
+            300..=399 => Self::redirect_refused(status),
             401 => Self::AuthenticationFailed { message },
             // 402 is a billing failure (Anthropic `billing_error`): the key is
             // valid, the account cannot pay, and no retry clears it.
@@ -612,12 +608,6 @@ impl LlmError {
         message: String,
         headers: &reqwest::header::HeaderMap,
     ) -> Self {
-        if (300..=399).contains(&status) {
-            let location = headers
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok());
-            return Self::redirect_refused(status, location, &message);
-        }
         let retry_after_ms = headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
@@ -1040,22 +1030,27 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::LOCATION,
-            reqwest::header::HeaderValue::from_static("https://elsewhere.example/v1"),
+            reqwest::header::HeaderValue::from_static(
+                "https://elsewhere.example/v1?token=location-secret",
+            ),
         );
         for status in [301, 302, 303, 307, 308] {
-            let error = LlmError::from_http_response(status, String::new(), &headers);
+            let error = LlmError::from_http_response(status, "body-secret".to_string(), &headers);
             let LlmError::InvalidConfig { message } = &error else {
                 panic!("HTTP {status}: a typed redirect refusal, got {error:?}");
             };
-            assert!(message.contains(&format!(
-                "HTTP {status} redirect to https://elsewhere.example/v1"
-            )));
+            assert!(message.contains(&format!("HTTP {status} redirect")));
+            // Neither the Location nor the response body reaches the
+            // diagnostic.
+            for raw in ["elsewhere.example", "location-secret", "body-secret"] {
+                assert!(!message.contains(raw), "HTTP {status}: {raw} in {message}");
+            }
             // The first request did reach the configured endpoint.
             assert!(message.contains("the request reached that endpoint"));
             assert!(!error.is_retryable(), "HTTP {status} is terminal");
             assert!(matches!(
-                LlmError::from_http_status(status, String::new(), None),
-                LlmError::InvalidConfig { .. }
+                LlmError::from_http_status(status, "body-secret".to_string(), None),
+                LlmError::InvalidConfig { message } if !message.contains("body-secret")
             ));
         }
     }

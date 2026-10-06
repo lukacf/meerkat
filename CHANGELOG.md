@@ -128,8 +128,9 @@ them.
   redirects, same-origin included. A model request goes only to the endpoint
   the client was built for. A 3xx answer from it is now the terminal
   `LlmError::InvalidConfig` (it used to be followed, or mapped to the
-  retryable `LlmError::Unknown`). The error says the request reached the
-  configured endpoint and names the `Location`. Before, a cross-host
+  retryable `LlmError::Unknown`). The error carries only the status and
+  says the request reached the configured endpoint; it never includes the
+  `Location` or the response body. Before, a cross-host
   redirect re-sent the request elsewhere with provider key headers such as
   `x-api-key` and `x-goog-api-key`, which reqwest does not strip. The
   OpenAI, OpenAI-compatible and Gemini constructors no longer fall back to

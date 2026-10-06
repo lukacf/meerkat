@@ -28392,6 +28392,10 @@ fn capture_warnings() -> (CapturedWarnings, tracing::subscriber::DefaultGuard) {
             }
             let mut fields = CapturedFields::new();
             event.record(&mut FieldVisitor(&mut fields));
+            fields.insert(
+                "tracing.level".to_string(),
+                event.metadata().level().to_string(),
+            );
             self.0.lock().expect("captured warnings lock").push(fields);
         }
     }

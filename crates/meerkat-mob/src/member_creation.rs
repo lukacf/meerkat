@@ -155,8 +155,77 @@ pub enum MemberCreationError {
     Runtime(#[from] crate::MobError),
     #[error("member creation session read failed: {0}")]
     Session(#[from] meerkat_core::service::SessionError),
+    /// The source's creation facts exist but cannot be trusted: a changed or
+    /// stale binding, missing or disagreeing metadata, or conflicting history.
+    /// This is a fault, never a legitimate absence.
     #[error("member creation ancestry unavailable: {0}")]
     Unavailable(&'static str),
+    /// There are no creation facts to capture, and that is expected.
+    #[error("member creation facts absent: {0}")]
+    Absent(MemberCreationAbsence),
+}
+
+/// Why a source legitimately has no creation facts to capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MemberCreationAbsence {
+    /// The dispatch carried no origin session (a host or upcall call).
+    #[error("the call has no origin session")]
+    OwnerlessDispatch,
+    /// The source service keeps no durable session metadata.
+    #[error("the source service has no persisted metadata authority")]
+    NonDurableService,
+    /// The source is a session that is not bound to any mob member.
+    #[error("the source session is not a mob member")]
+    SourceNotAMember,
+    /// The source member predates creation tokens; its ancestry is unknown.
+    #[error("the source member predates creation tokens")]
+    LegacyCreation,
+}
+
+/// How a creation-source capture resolved for spawn admission.
+///
+/// Creation facts are optional and confer no permission, so no outcome
+/// changes spawn admission: only `Captured` proves a source, and both other
+/// outcomes record the child as unproven. They stay distinct so a fault is
+/// never mistaken for a legitimate absence.
+#[derive(Debug)]
+pub enum CreationSourceCapture {
+    /// The source's sealed creation facts.
+    Captured(MemberCreationSourceWitness),
+    /// The source legitimately has no creation facts.
+    Absent(MemberCreationAbsence),
+    /// Reading the source's creation facts failed.
+    CaptureFailed(MemberCreationError),
+}
+
+impl CreationSourceCapture {
+    /// Classify the result of a source capture.
+    pub fn classify(result: Result<MemberCreationSourceWitness, MemberCreationError>) -> Self {
+        match result {
+            Ok(witness) => Self::Captured(witness),
+            Err(MemberCreationError::Absent(absence)) => Self::Absent(absence),
+            Err(error) => Self::CaptureFailed(error),
+        }
+    }
+
+    /// The witness a spawn is admitted with. A failed capture is traced at
+    /// error level with its cause; the child is still admitted and recorded
+    /// as unproven, never as a root.
+    pub fn into_admitted_witness(self, operation: &str) -> MemberCreationSourceWitness {
+        match self {
+            Self::Captured(witness) => witness,
+            Self::Absent(_) => MemberCreationSourceWitness::unavailable(),
+            Self::CaptureFailed(error) => {
+                tracing::error!(
+                    operation,
+                    capture = "failed",
+                    error = %error,
+                    "member creation source capture failed; the child is recorded as unproven"
+                );
+                MemberCreationSourceWitness::unavailable()
+            }
+        }
+    }
 }
 
 /// Read index of immutable journal facts. Only committed event projection

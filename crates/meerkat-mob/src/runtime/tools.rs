@@ -591,35 +591,26 @@ impl MobOperatorToolDispatcher {
     /// dispatched the call. `owner` is the runtime-stamped origin session of
     /// the dispatch, never an argument.
     ///
-    /// A caller without creation facts (no owner session, or a session that
-    /// is not a bound member) yields an unavailable witness and the child is
-    /// recorded as unproven. A failed read is not absence: it refuses the
-    /// spawn rather than recording an unproven child in its place.
+    /// Creation facts are optional and confer no permission, so the outcome
+    /// never changes spawn admission: an ownerless call or a legitimately
+    /// absent source records the child as unproven, and so does a failed
+    /// read, which is classified as a capture fault and traced at error level
+    /// rather than passed off as an absence.
     async fn capture_creation_source(
         &self,
-        tool_name: &str,
         owner: Option<&SessionId>,
-    ) -> Result<crate::MemberCreationSourceWitness, ToolError> {
+    ) -> crate::CreationSourceCapture {
         let Some(session_id) = owner.cloned() else {
-            return Ok(crate::MemberCreationSourceWitness::unavailable());
+            return crate::CreationSourceCapture::Absent(
+                crate::MemberCreationAbsence::OwnerlessDispatch,
+            );
         };
         let handle = self.handle.clone();
         let captured = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
             handle.capture_member_creation_source(&session_id).await
         })
         .await;
-        match captured {
-            Ok(witness) => Ok(witness),
-            Err(crate::MemberCreationError::Unavailable(_)) => {
-                Ok(crate::MemberCreationSourceWitness::unavailable())
-            }
-            Err(crate::MemberCreationError::Runtime(error)) => {
-                Err(mob_error_to_tool_error(tool_name, error))
-            }
-            Err(error) => Err(ToolError::execution_failed(format!(
-                "tool '{tool_name}' could not read the calling member's creation facts: {error}"
-            ))),
-        }
+        crate::CreationSourceCapture::classify(captured)
     }
 
     pub(crate) fn new(
@@ -713,18 +704,37 @@ impl MobOperatorToolDispatcher {
             .map(|entry| entry.agent_identity.clone())
     }
 
+    /// The current member a supplied dispatch origin is bound to.
+    ///
+    /// A context-free call has no origin and stays ownerless. A supplied
+    /// origin that is not the session of a current member of this mob (a
+    /// stale, retired or foreign session) is refused, never downgraded to an
+    /// ownerless call. This reads the live roster only; it adds no
+    /// persistence requirement.
+    async fn validated_caller(
+        &self,
+        owner: Option<&SessionId>,
+        tool_name: &str,
+    ) -> Result<Option<AgentIdentity>, ToolError> {
+        match owner {
+            None => Ok(None),
+            Some(_) => self
+                .caller_identity(owner)
+                .await
+                .map(Some)
+                .ok_or_else(|| ToolError::access_denied(tool_name)),
+        }
+    }
+
     async fn ensure_owned_member_scope(
         &self,
         owner: Option<&SessionId>,
         tool_name: &str,
         target: &AgentIdentity,
     ) -> Result<(), ToolError> {
+        let validated = self.validated_caller(owner, tool_name).await?;
         let can_manage_mob = self.can_manage_current_mob();
-        let caller = if can_manage_mob {
-            None
-        } else {
-            self.caller_identity(owner).await
-        };
+        let caller = if can_manage_mob { None } else { validated };
         // Target presence is observed before ownership (#1234): an absent
         // member is typed not-found for every caller, and access_denied only
         // ever means a present member the caller does not own.
@@ -1330,10 +1340,11 @@ impl MobOperatorToolDispatcher {
         } else if call.name == TOOL_LIST_MEMBERS
             && self.tools.iter().any(|tool| tool.name == call.name)
         {
+            let validated = self.validated_caller(owner, call.name).await?;
             if let Err(denied) = self.ensure_current_mob_scope(call.name).await {
                 // Without manage scope a member sees only the members it
                 // spawned (its fork_off children).
-                owner_list_view = Some(self.caller_identity(owner).await.ok_or(denied)?);
+                owner_list_view = Some(validated.ok_or(denied)?);
             }
         } else if self.tools.iter().any(|tool| tool.name == call.name)
             && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
@@ -1362,7 +1373,11 @@ impl MobOperatorToolDispatcher {
                     args.runtime_mode,
                     args.backend,
                 )
-                .with_creation_source(self.capture_creation_source(call.name, owner).await?);
+                .with_creation_source(
+                    self.capture_creation_source(owner)
+                        .await
+                        .into_admitted_witness(call.name),
+                );
                 // Resolve launch mode: explicit launch_mode takes precedence,
                 // then legacy resume_session_id, then default (Fresh).
                 if let Some(launch_mode) = args.launch_mode {
@@ -1420,7 +1435,10 @@ impl MobOperatorToolDispatcher {
                     .iter()
                     .map(|spec| AgentIdentity::from(spec.member_id.as_str()))
                     .collect::<Vec<_>>();
-                let creation_source = self.capture_creation_source(call.name, owner).await?;
+                let creation_source = self
+                    .capture_creation_source(owner)
+                    .await
+                    .into_admitted_witness(call.name);
                 let specs = args
                     .specs
                     .into_iter()

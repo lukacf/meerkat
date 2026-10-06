@@ -80,10 +80,6 @@ async fn member_creation_policy_auto_spawn_has_no_attested_host_origin() {
 
 #[tokio::test]
 async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
-    // Owner from the dispatch context. Without an owner the child is recorded
-    // as unproven; with one, its creation source is the owner session. A
-    // failed read of the owner's creation facts is not absence: the spawn is
-    // refused and no unproven child is recorded in its place.
     for (bind_owner, fail_metadata) in [(false, false), (true, false), (true, true)] {
         let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
         let parent = AgentIdentity::from("operator-parent");
@@ -98,6 +94,8 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
                 true,
                 generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
             ));
+        // The owner is the dispatch context's origin session, as an agent
+        // turn of the parent session dispatches it.
         let dispatcher = if bind_owner {
             super::dispatched_from_session(dispatcher, parent_session.clone())
         } else {
@@ -119,28 +117,14 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
             ),
         ] {
             let args = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
-            let dispatched = dispatcher
+            dispatcher
                 .dispatch(ToolCallView {
                     id: "creation-ingress",
                     name: tool,
                     args: &args,
                 })
-                .await;
-            if bind_owner && fail_metadata {
-                assert!(
-                    matches!(dispatched, Err(ToolError::ExecutionFailed { .. })),
-                    "{tool}: a failed creation-facts read refuses the spawn: {dispatched:?}"
-                );
-                assert!(
-                    handle
-                        .resolve_bridge_session_id(&AgentIdentity::from(identity))
-                        .await
-                        .is_none(),
-                    "{tool}: a refused spawn records no child"
-                );
-                continue;
-            }
-            dispatched.unwrap();
+                .await
+                .unwrap();
             let session = handle
                 .resolve_bridge_session_id(&AgentIdentity::from(identity))
                 .await
@@ -165,6 +149,134 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
         service.metadata_read_failures_for.lock().unwrap().clear();
         handle.shutdown().await.unwrap();
     }
+}
+
+/// A failed read of the caller's creation facts is a classified capture
+/// fault, traced at error level with its cause, never passed off as an
+/// absence. Admission is unchanged: the child is spawned and recorded as
+/// unproven (creation facts are optional and confer no permission).
+#[tokio::test]
+async fn member_creation_operator_capture_fault_is_classified_traced_and_admits_unproven() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let parent = AgentIdentity::from("fault-operator-parent");
+    handle
+        .spawn(ProfileName::from("worker"), parent.clone(), None)
+        .await
+        .unwrap();
+    let parent_session = handle.resolve_bridge_session_id(&parent).await.unwrap();
+    service.fail_persisted_session_metadata_reads_for(parent_session.clone());
+
+    assert!(matches!(
+        crate::CreationSourceCapture::classify(
+            handle.capture_member_creation_source(&parent_session).await
+        ),
+        crate::CreationSourceCapture::CaptureFailed(crate::MemberCreationError::Session(_))
+    ));
+
+    let (captured, guard) = super::capture_warnings();
+    let dispatcher = super::dispatched_from_session(
+        Arc::new(super::super::tools::MobOperatorToolDispatcher::new(
+            handle.clone(),
+            true,
+            generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
+        )),
+        parent_session.clone(),
+    );
+    let args = serde_json::value::RawValue::from_string(
+        serde_json::json!({"profile":"worker", "member_id":"fault-child"}).to_string(),
+    )
+    .unwrap();
+    dispatcher
+        .dispatch(ToolCallView {
+            id: "capture-fault",
+            name: "spawn_member",
+            args: &args,
+        })
+        .await
+        .expect("a capture fault does not change spawn admission");
+    drop(guard);
+
+    let traced = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|fields| super::field(fields, "capture") == Some("failed"))
+        .cloned()
+        .expect("the capture fault is traced");
+    assert_eq!(super::field(&traced, "tracing.level"), Some("ERROR"));
+    assert_eq!(super::field(&traced, "operation"), Some("spawn_member"));
+    assert!(
+        super::field(&traced, "error").is_some_and(|cause| cause.contains("session read failed")),
+        "the trace carries the cause: {traced:?}"
+    );
+
+    let child_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("fault-child"))
+        .await
+        .expect("the child is admitted");
+    assert_eq!(
+        handle
+            .member_creation_for_session(&child_session)
+            .await
+            .unwrap()
+            .unwrap()
+            .creation
+            .provenance,
+        MemberCreationProvenance::Unproven,
+    );
+    service.metadata_read_failures_for.lock().unwrap().clear();
+    handle.shutdown().await.unwrap();
+}
+
+/// A supplied dispatch origin that is not a current member of the mob is
+/// refused on owned-target checks, even with manage scope, never downgraded
+/// to an ownerless call. A context-free call stays ownerless.
+#[tokio::test]
+async fn member_creation_stale_origin_is_refused_on_owned_target_checks() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let target = AgentIdentity::from("owned-target");
+    handle
+        .spawn(ProfileName::from("worker"), target.clone(), None)
+        .await
+        .unwrap();
+    let operator = || -> Arc<dyn AgentToolDispatcher> {
+        Arc::new(super::super::tools::MobOperatorToolDispatcher::new(
+            handle.clone(),
+            true,
+            generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
+        ))
+    };
+    let stale = super::dispatched_from_session(operator(), SessionId::new());
+    for (tool, args) in [
+        (
+            "member_status",
+            serde_json::json!({"member_id": "owned-target"}),
+        ),
+        ("list_members", serde_json::json!({})),
+    ] {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "stale-origin",
+            name: tool,
+            args: &raw,
+        };
+        assert!(
+            matches!(
+                stale.dispatch(call).await,
+                Err(ToolError::AccessDenied { .. })
+            ),
+            "{tool}: a stale origin is refused"
+        );
+        let call = ToolCallView {
+            id: "ownerless",
+            name: tool,
+            args: &raw,
+        };
+        operator().dispatch(call).await.unwrap_or_else(|error| {
+            panic!("{tool}: a context-free manage call is allowed: {error:?}")
+        });
+    }
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test]

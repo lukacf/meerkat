@@ -24626,16 +24626,7 @@ async fn forker_without_manage_scope_observes_and_retires_only_its_own_children(
     )
     .expect("compose dispatcher")
     .expect("operator dispatcher visible");
-    let dispatcher = match composed
-        .bind_ops_lifecycle(
-            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-            forker_session,
-        )
-        .expect("bind forker session")
-    {
-        meerkat_core::agent::BindOutcome::Bound(bound)
-        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
-    };
+    let dispatcher = dispatched_from_session(composed, forker_session);
     let call = |name: &'static str, args: serde_json::Value| {
         let dispatcher = Arc::clone(&dispatcher);
         async move {
@@ -24751,16 +24742,7 @@ async fn forker_force_cancels_only_running_members_it_owns() {
     )
     .expect("compose dispatcher")
     .expect("operator dispatcher visible");
-    let dispatcher = match composed
-        .bind_ops_lifecycle(
-            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-            forker_session,
-        )
-        .expect("bind forker session")
-    {
-        meerkat_core::agent::BindOutcome::Bound(bound)
-        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
-    };
+    let dispatcher = dispatched_from_session(composed, forker_session);
     let force_cancel = |member: &'static str| {
         let dispatcher = Arc::clone(&dispatcher);
         async move {
@@ -24858,16 +24840,36 @@ async fn owned_member_tool_dispatcher(
     )
     .expect("compose dispatcher")
     .expect("operator dispatcher visible");
-    match composed
-        .bind_ops_lifecycle(
-            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-            caller_session,
-        )
-        .expect("bind caller session")
-    {
-        meerkat_core::agent::BindOutcome::Bound(bound)
-        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
+    dispatched_from_session(composed, caller_session)
+}
+
+/// Every call through the returned dispatcher carries `session` as the
+/// runtime-stamped origin of the dispatch, the way an agent turn of that
+/// session dispatches its tools.
+pub(super) fn dispatched_from_session(
+    inner: Arc<dyn AgentToolDispatcher>,
+    session: SessionId,
+) -> Arc<dyn AgentToolDispatcher> {
+    struct DispatchedFromSession {
+        inner: Arc<dyn AgentToolDispatcher>,
+        context: meerkat_core::ToolDispatchContext,
     }
+
+    #[async_trait::async_trait]
+    impl AgentToolDispatcher for DispatchedFromSession {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.inner.tools()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            self.inner.dispatch_with_context(call, &self.context).await
+        }
+    }
+
+    Arc::new(DispatchedFromSession {
+        inner,
+        context: meerkat_core::ToolDispatchContext::default().with_runtime_identity(session, None),
+    })
 }
 
 async fn dispatch_owned_member_tool(
@@ -28390,6 +28392,10 @@ fn capture_warnings() -> (CapturedWarnings, tracing::subscriber::DefaultGuard) {
             }
             let mut fields = CapturedFields::new();
             event.record(&mut FieldVisitor(&mut fields));
+            fields.insert(
+                "tracing.level".to_string(),
+                event.metadata().level().to_string(),
+            );
             self.0.lock().expect("captured warnings lock").push(fields);
         }
     }

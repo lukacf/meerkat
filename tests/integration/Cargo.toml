@@ -138,6 +138,10 @@ tempfile.workspace = true
 base64.workspace = true
 chrono.workspace = true
 axum = { workspace = true, features = ["ws"] }
+# The e2e-fast MCP-wrapped operator spawn serves the shared rmcp test handler
+# over an in-process streamable-HTTP transport.
+mcp-test-server = { path = "../fixtures/mcp-test-server" }
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 meerkat-auth-core = { workspace = true, features = ["gcp-auth"] }
 meerkat-copilot.workspace = true
 # The e2e-fast multi-host beat #[path]-includes crates/meerkat-mob/tests/support,

@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 //! The library delivery owner applies durable job deliveries on typed wakes
 //! only: a reconcile pass at arming, then job outbox commits, runtime delivery
 //! commits, and attachment commits. No pass ever runs on a timer.

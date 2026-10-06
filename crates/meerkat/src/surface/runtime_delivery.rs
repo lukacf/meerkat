@@ -165,7 +165,7 @@ pub(crate) fn arm_default_runtime_delivery<S>(
     match owner.arm(host) {
         Ok(handle) => RuntimeDeliveryOwnerHandle::detach(handle),
         Err(RuntimeDeliveryOwnerAlreadyArmed) => {
-            tracing::debug!("the runtime delivery inbox already has a delivery owner; keeping it")
+            tracing::debug!("the runtime delivery inbox already has a delivery owner; keeping it");
         }
     }
 }

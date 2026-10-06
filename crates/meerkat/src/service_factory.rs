@@ -1122,6 +1122,10 @@ pub struct FactoryAgentBuilder {
     /// Persistence-owned realm used when a session request does not carry an
     /// explicit realm override.
     pub default_realm_id: Option<meerkat_core::RealmId>,
+    /// Every agent this builder makes waits for its pending MCP server
+    /// connections to settle before its first turn
+    /// (`AgentBuildConfig::wait_for_mcp`). Off by default.
+    pub wait_for_mcp: bool,
     /// Persistent detached-job store injected into shell-capable builds.
     #[cfg(not(target_arch = "wasm32"))]
     pub default_detached_job_store: Option<Arc<dyn meerkat_jobs::DetachedJobStore>>,
@@ -1157,6 +1161,7 @@ impl FactoryAgentBuilder {
             default_workgraph_namespace_grant: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
             default_realm_id: None,
+            wait_for_mcp: false,
             #[cfg(not(target_arch = "wasm32"))]
             default_detached_job_store: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1192,6 +1197,7 @@ impl FactoryAgentBuilder {
             default_workgraph_namespace_grant: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
             default_realm_id: None,
+            wait_for_mcp: false,
             #[cfg(not(target_arch = "wasm32"))]
             default_detached_job_store: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1441,6 +1447,9 @@ impl FactoryAgentBuilder {
     ) -> Result<FactoryAgent, SessionError> {
         let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
         build_config.external_tools = external_tools;
+        if self.wait_for_mcp {
+            build_config.wait_for_mcp = true;
+        }
 
         // Inject default LLM client if none provided.
         if build_config.llm_client_override.is_none()

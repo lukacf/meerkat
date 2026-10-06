@@ -735,9 +735,12 @@ impl MobOperatorToolDispatcher {
         let validated = self.validated_caller(owner, tool_name).await?;
         let can_manage_mob = self.can_manage_current_mob();
         let caller = if can_manage_mob { None } else { validated };
-        // Target presence is observed before ownership (#1234): an absent
-        // member is typed not-found for every caller, and access_denied only
-        // ever means a present member the caller does not own.
+        // An invalid supplied origin (a session that is not a current
+        // member's: stale, retired, rebound away or foreign) is denied above,
+        // before the target is looked at. For a valid origin or a context-free
+        // call, target presence is observed before ownership (#1234): an
+        // absent member is typed not-found, and access_denied only ever means
+        // a present member the caller does not own.
         let admission = self
             .handle
             .resolve_owned_member_target_admission(can_manage_mob, caller.as_ref(), target)

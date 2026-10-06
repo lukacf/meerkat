@@ -279,6 +279,171 @@ async fn member_creation_stale_origin_is_refused_on_owned_target_checks() {
     handle.shutdown().await.unwrap();
 }
 
+/// The Some-origin authority matrix for the operator tools, with manage
+/// scope. A supplied origin is checked against the live roster before
+/// anything else:
+/// (a) the session of a current member is admitted;
+/// (b) a retired member's session, a member's session from before it was
+///     respawned (rebound away), and another mob's member session are all
+///     denied, on every owned-target tool;
+/// (c) a denied retire or force-cancel leaves the target exactly as it was;
+/// (d) list and status answer the same way for the same origins.
+#[tokio::test]
+async fn member_creation_some_origin_authority_matrix() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let (other_mob, _other_service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let spawn = |identity: &'static str| {
+        let handle = handle.clone();
+        async move {
+            let identity = AgentIdentity::from(identity);
+            handle
+                .spawn(ProfileName::from("worker"), identity.clone(), None)
+                .await
+                .unwrap();
+            let session = handle.resolve_bridge_session_id(&identity).await.unwrap();
+            (identity, session)
+        }
+    };
+    let (target, _) = spawn("matrix-target").await;
+    let (_manager, manager_session) = spawn("matrix-manager").await;
+    let (victim, _) = spawn("matrix-victim").await;
+
+    let (retired, retired_session) = spawn("matrix-retired").await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        super::retire_to_terminal(&handle, &retired),
+    )
+    .await
+    .expect("retirement settles within the failure bound")
+    .expect("retire the caller");
+
+    let (rebound, rebound_away_session) = spawn("matrix-rebound").await;
+    handle
+        .respawn(rebound.clone(), None)
+        .await
+        .expect("respawn the caller");
+    let rebound_session = handle.resolve_bridge_session_id(&rebound).await.unwrap();
+    assert_ne!(
+        rebound_session, rebound_away_session,
+        "a respawn binds a new session"
+    );
+
+    let foreign = AgentIdentity::from("matrix-foreign");
+    other_mob
+        .spawn(ProfileName::from("worker"), foreign.clone(), None)
+        .await
+        .unwrap();
+    let foreign_session = other_mob.resolve_bridge_session_id(&foreign).await.unwrap();
+
+    let operator_from = |session: SessionId| -> Arc<dyn AgentToolDispatcher> {
+        super::dispatched_from_session(
+            Arc::new(super::super::tools::MobOperatorToolDispatcher::new(
+                handle.clone(),
+                true,
+                generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
+            )),
+            session,
+        )
+    };
+    async fn call(
+        operator: &Arc<dyn AgentToolDispatcher>,
+        tool: &'static str,
+        member: Option<&AgentIdentity>,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let args = match member {
+            Some(member) => serde_json::json!({ "member_id": member.as_str() }),
+            None => serde_json::json!({}),
+        };
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        operator
+            .dispatch(ToolCallView {
+                id: "origin-matrix",
+                name: tool,
+                args: &raw,
+            })
+            .await
+    }
+    let target_status = || {
+        let handle = handle.clone();
+        let target = target.clone();
+        async move {
+            handle
+                .member_status(&target)
+                .await
+                .expect("target status")
+                .status
+        }
+    };
+    let status_before = target_status().await;
+
+    // (b), (c), (d): every invalid origin is denied on every tool, and a
+    // denied mutation leaves the target as it was.
+    for (label, session) in [
+        ("retired", retired_session),
+        ("rebound away", rebound_away_session),
+        ("wrong mob", foreign_session),
+    ] {
+        let operator = operator_from(session);
+        for (tool, member) in [
+            ("member_status", Some(&target)),
+            ("list_members", None),
+            ("retire_member", Some(&target)),
+            ("force_cancel_member", Some(&target)),
+        ] {
+            assert!(
+                matches!(
+                    call(&operator, tool, member).await,
+                    Err(ToolError::AccessDenied { .. })
+                ),
+                "{label} origin: {tool} is denied"
+            );
+        }
+        assert_eq!(
+            target_status().await,
+            status_before,
+            "{label} origin: a denied retire or force-cancel leaves the target unchanged"
+        );
+        assert!(
+            handle.get_member(&target).await.unwrap().is_some(),
+            "{label} origin: the target is still a member"
+        );
+    }
+
+    // (a): a current member's session (the manager, and the rebound member's
+    // new session) is admitted on every tool.
+    for (label, session) in [
+        ("manager", manager_session),
+        ("rebound current", rebound_session),
+    ] {
+        let operator = operator_from(session);
+        for (tool, member) in [
+            ("member_status", Some(&target)),
+            ("list_members", None),
+            ("force_cancel_member", Some(&target)),
+        ] {
+            call(&operator, tool, member)
+                .await
+                .unwrap_or_else(|error| panic!("{label} origin: {tool} is admitted: {error:?}"));
+        }
+    }
+    call(
+        &operator_from(
+            handle
+                .resolve_bridge_session_id(&AgentIdentity::from("matrix-manager"))
+                .await
+                .unwrap(),
+        ),
+        "retire_member",
+        Some(&victim),
+    )
+    .await
+    .expect("a current member with manage scope retires a member");
+    assert!(handle.get_member(&victim).await.unwrap().is_none());
+
+    other_mob.shutdown().await.unwrap();
+    handle.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn member_creation_public_roster_snapshot_cannot_mutate_live_history() {
     let (handle, _) = create_test_mob(sample_definition()).await;

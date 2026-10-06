@@ -149,7 +149,10 @@ fn script(observed: Arc<Mutex<Observed>>) -> impl Fn(&LlmRequest) -> ScriptedTur
 async fn e2e_fast_operator_spawns_from_an_mcp_wrapped_member_record_the_parent_as_source() {
     let server = McpServer::start().await;
     let observed = Arc::new(Mutex::new(Observed::default()));
-    let fixture = CouncilFixture::new_runtime_backed(script(Arc::clone(&observed)));
+    // The member's build waits for its MCP server to finish connecting, so
+    // the first probe request's tool inventory already carries the MCP tool
+    // (an MCP server connects in the background otherwise).
+    let fixture = CouncilFixture::new_runtime_backed_waiting_for_mcp(script(Arc::clone(&observed)));
     let state = &fixture.state;
 
     let mob_id = MobId::from(format!("mcp-operator-{}", uuid::Uuid::new_v4().simple()));

@@ -441,11 +441,12 @@ pub use handle::{
     MobMemberEndpointOwner, MobMemberEndpointStatus, MobMemberListEntry, MobMemberPeerEndpoint,
     MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
     MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission,
-    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
-    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
-    SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt,
-    WorkTurnHandle, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
+    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, ResumedMemberView,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberCustomizerChain,
+    SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride, SpawnToolAdmission,
+    SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt, WorkTurnHandle,
+    mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{
     CanonicalOpsOwnerContext, ExactTurnCompletionSender, FlowOperationCustody, MemberSpawnReceipt,

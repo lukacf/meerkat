@@ -9043,6 +9043,7 @@ impl MobBuilder {
                             agent_identity: &entry.agent_identity,
                             profile,
                             definition,
+                            realm_profile_store: realm_profile_store.as_ref(),
                             external_tools: compose_external_tools_for_profile(
                                 profile,
                                 tool_bundles,
@@ -9283,6 +9284,7 @@ impl MobBuilder {
                 agent_identity: &entry.agent_identity,
                 profile: &profile,
                 definition,
+                realm_profile_store: realm_profile_store.as_ref(),
                 external_tools: compose_external_tools_for_profile(
                     &profile,
                     tool_bundles,

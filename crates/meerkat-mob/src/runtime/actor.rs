@@ -5419,6 +5419,7 @@ enum SpawnProvisionInput {
 #[derive(Clone)]
 struct DeferredResumeProvision {
     definition: Arc<MobDefinition>,
+    realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     profile_name: ProfileName,
     agent_identity: AgentIdentity,
     profile: crate::profile::Profile,
@@ -5522,6 +5523,7 @@ impl DeferredResumeProvision {
     ) -> Result<ProvisionMemberRequest, MobError> {
         let Self {
             definition,
+            realm_profile_store,
             profile_name,
             agent_identity,
             profile,
@@ -5569,6 +5571,7 @@ impl DeferredResumeProvision {
                 agent_identity: &agent_identity,
                 profile: &profile,
                 definition: &definition,
+                realm_profile_store: realm_profile_store.as_ref(),
                 external_tools,
                 compaction_curator_override,
                 context,
@@ -30175,6 +30178,7 @@ impl MobActor {
                         let external_tools = precomputed_external_tools?;
                         let deferred = DeferredResumeProvision {
                             definition: preparation_context.definition.clone(),
+                            realm_profile_store: preparation_context.realm_profile_store.clone(),
                             profile_name: profile_name.clone(),
                             agent_identity: agent_identity.clone(),
                             profile,
@@ -30253,6 +30257,9 @@ impl MobActor {
                                 agent_identity: &agent_identity,
                                 profile: &profile,
                                 definition: &preparation_context.definition,
+                                realm_profile_store: preparation_context
+                                    .realm_profile_store
+                                    .as_ref(),
                                 external_tools,
                                 compaction_curator_override: compaction_curator_override.clone(),
                                 context,
@@ -30356,6 +30363,7 @@ impl MobActor {
                 agent_identity: &agent_identity,
                 profile: &profile,
                 definition: &preparation_context.definition,
+                realm_profile_store: preparation_context.realm_profile_store.as_ref(),
                 external_tools,
                 compaction_curator_override,
                 context,
@@ -31885,7 +31893,25 @@ impl MobActor {
         let full_profile_override_requested = override_profile.is_some();
         let effective_model_override = model_override.clone();
         let mut profile = match override_profile {
-            Some(p) => p,
+            Some(mut p) => {
+                // The member host builds from the portable profile alone, so
+                // the role's current restriction rides it (see
+                // `build::build_agent_config`).
+                match build::current_role_profile(
+                    &self.definition,
+                    &profile_name,
+                    self.realm_profile_store.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(role)) => {
+                        build::conjoin_role_tool_restriction(&mut p.tools, &role.tools);
+                    }
+                    Ok(None) => {}
+                    Err(error) => fail!(error),
+                }
+                p
+            }
             None => {
                 match self
                     .definition
@@ -33364,6 +33390,7 @@ impl MobActor {
             agent_identity,
             profile: &profile,
             definition: &self.definition,
+            realm_profile_store: self.realm_profile_store.as_ref(),
             external_tools,
             compaction_curator_override,
             context,

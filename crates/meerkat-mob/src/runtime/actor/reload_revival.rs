@@ -705,6 +705,7 @@ impl MobActor {
             super::super::tools::resolve_profile_bundle_tools(&profile, &self.tool_bundles);
         Ok(Box::new(DeferredResumeProvision {
             definition: Arc::clone(&self.definition),
+            realm_profile_store: self.realm_profile_store.clone(),
             profile_name: work.entry.role.clone(),
             agent_identity: work.entry.agent_identity.clone(),
             profile,

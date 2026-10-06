@@ -37,6 +37,24 @@ them.
 
 ### Breaking
 
+- `meerkat_mob::build::BuildAgentConfigParams` gains the pub field
+  `realm_profile_store: Option<&Arc<dyn RealmProfileStore>>`, used to read a
+  realm-ref role's current tool restriction (see Fixed). Code that builds the
+  params with a struct literal must set it (`None` keeps the old behaviour
+  for inline roles only).
+- Behaviour-only (not measured by the gate): a mob member's declared tool
+  restriction (`tools.deny`, `tools.read_only`) now always includes its role's
+  CURRENT definition profile, conjoined with the profile the member was
+  spawned on (deny lists are joined, either read-only flag applies). A deny
+  the author adds to a role now applies to that role's existing members at
+  their next rebuild (process-restart restore, explicit resume or revival),
+  including members spawned on a profile snapshot (`override_profile`). A
+  deny the author later removes stays in effect for members whose snapshot
+  still carries it, until they are respawned. A running session picks up a
+  changed restriction at its next rebuild, not live. When the role no longer
+  resolves in the definition, the member's own profile carries its
+  restriction alone, as before.
+
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
   (behavior-only break). Typed MCP dispatch preserves `isError` as a failed
@@ -153,6 +171,17 @@ them.
 
 ### Fixed
 
+- A role's tool deny list is enforced for members rebuilt from a spawn-time
+  profile snapshot. A member spawned with `override_profile` (a host such as
+  an identity-first runtime snapshots the profile to carry provider params,
+  a model pin or a compaction floor) is persisted with that snapshot as its
+  `effective_profile_override`, and restore, explicit resume and revival
+  rebuilt it from the snapshot verbatim. A `tools.deny` added to the role
+  after the member's first spawn (for example the mob operator `spawn_member`
+  and `wire_members` tools) was therefore never enforced for it, while fresh
+  spawns enforced it. The build now conjoins the role's current restriction
+  (inline or realm-ref) into every member build, and a placed member's
+  portable profile carries it to its host.
 - A host's console observation path no longer overflows a 2 MiB debug worker
   stack. `MobMcpState::mob_handles_snapshot` and every mob verb that calls
   `ensure_restored` built the persistent-restore future inline, and the

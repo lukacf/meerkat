@@ -137,6 +137,7 @@ impl SpawnPreparations {
 /// Shared, immutable actor services a preparation reads through.
 pub(super) struct LocalSpawnPreparationContext {
     pub(super) definition: Arc<MobDefinition>,
+    pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
     pub(super) forked_participant_store: Option<Arc<dyn crate::store::ForkedParticipantStore>>,
@@ -150,6 +151,7 @@ impl LocalSpawnPreparationContext {
     pub(super) fn from_actor(actor: &MobActor) -> Self {
         Self {
             definition: Arc::clone(&actor.definition),
+            realm_profile_store: actor.realm_profile_store.clone(),
             session_service: Arc::clone(&actor.session_service),
             provisioner: Arc::clone(&actor.provisioner),
             forked_participant_store: actor.forked_participant_store.clone(),

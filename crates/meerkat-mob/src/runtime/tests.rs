@@ -1670,6 +1670,8 @@ struct CreateSessionRecord {
     /// The session the build is seated on, and what the build does with it.
     resume_session_id: Option<SessionId>,
     session_build_intent: meerkat_core::SessionBuildIntent,
+    /// The deny names of the build's declared tool restriction.
+    declared_deny: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3797,6 +3799,18 @@ impl MockSessionService {
                     meerkat_core::SessionBuildIntent::Mint,
                     meerkat_core::service::SessionBuildOptions::session_build_intent,
                 ),
+                declared_deny: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.declared_tool_restriction.as_ref())
+                    .map(|restriction| {
+                        restriction
+                            .deny
+                            .iter()
+                            .map(|name| name.as_str().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -34181,6 +34195,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 agent_identity: &member_identity,
                 profile,
                 definition: &definition,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -86785,4 +86800,122 @@ async fn reclaimed_retained_actor_competitor_handles_are_refused_typed() {
         "competitor handles refused",
     )
     .await;
+}
+
+/// The deny the role `worker` gains after its members were first spawned.
+const ADDED_DENY: [&str; 2] = ["spawn_member", "wire_members"];
+
+/// Spawn `member` on `worker` (with `snapshot` as its `override_profile`
+/// when given), then add [`ADDED_DENY`] to the role and restart the mob from
+/// the same storage, stopped first when `stop_first` (so an explicit resume
+/// rebuilds it). Returns the service, the restarted handle and the member's
+/// first build.
+async fn spawn_then_add_role_deny_and_restart(
+    member: &AgentIdentity,
+    snapshot: bool,
+    stop_first: bool,
+) -> (Arc<MockSessionService>, MobHandle, CreateSessionRecord) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let restart_storage = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let mut definition = sample_definition();
+    let worker = definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("inline worker profile");
+    worker.tools.mob = true;
+    worker.tools.deny.clear();
+    let snapshot_profile = worker.clone();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.override_profile = snapshot.then_some(snapshot_profile);
+    handle.spawn_spec(spec).await.expect("spawn");
+    let first = last_member_build(&service, member).await;
+    let session = handle
+        .resolve_bridge_session_id(member)
+        .await
+        .expect("session");
+    // The author adds the deny to the definition, applied below while the
+    // mob is down.
+    let mut updated = (*handle.definition()).clone();
+    updated
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("inline worker profile")
+        .tools
+        .deny = ADDED_DENY.iter().map(|name| (*name).to_string()).collect();
+    if stop_first {
+        handle.stop().await.expect("stop");
+    }
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard");
+    crash_stop_and_release_routes(handle).await;
+    restart_storage
+        .update_definition(1, updated)
+        .await
+        .expect("the author adds the deny to the stored definition");
+    let resumed = MobBuilder::for_resume(restart_storage)
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume");
+    if stop_first {
+        resumed.resume().await.expect("explicit resume");
+    }
+    (service, resumed, first)
+}
+
+fn added_deny() -> BTreeSet<String> {
+    ADDED_DENY.iter().map(|name| (*name).to_string()).collect()
+}
+
+/// 0.8.52 deny-on-resume: a member spawned on a profile snapshot that
+/// predates the role's deny is rebuilt with the role's current deny, on
+/// restart restore and on explicit resume.
+#[tokio::test]
+async fn snapshot_member_rebuild_declares_the_roles_added_deny() {
+    for stop_first in [false, true] {
+        let member = AgentIdentity::from("snapshot-worker");
+        let (service, resumed, first) =
+            spawn_then_add_role_deny_and_restart(&member, true, stop_first).await;
+        assert!(first.declared_deny.is_empty(), "seated before the deny");
+        let rebuilt = last_member_build(&service, &member).await;
+        assert!(
+            rebuilt.resume_session_id.is_some(),
+            "the member is rebuilt (explicit resume: {stop_first})"
+        );
+        assert_eq!(
+            rebuilt.declared_deny,
+            added_deny(),
+            "the rebuild declares the role's added deny (explicit resume: {stop_first})"
+        );
+        crash_stop_and_release_routes(resumed).await;
+    }
+}
+
+/// Control: a member without a snapshot is rebuilt from the role's current
+/// profile anyway, and declares the same deny.
+#[tokio::test]
+async fn member_without_snapshot_rebuild_declares_the_roles_added_deny() {
+    let member = AgentIdentity::from("plain-worker");
+    let (service, resumed, first) =
+        spawn_then_add_role_deny_and_restart(&member, false, false).await;
+    assert!(first.declared_deny.is_empty());
+    assert_eq!(
+        last_member_build(&service, &member).await.declared_deny,
+        added_deny()
+    );
+    crash_stop_and_release_routes(resumed).await;
 }

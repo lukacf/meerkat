@@ -136,6 +136,9 @@ pub struct BuildAgentConfigParams<'a> {
     pub(crate) agent_identity: &'a AgentIdentity,
     pub profile: &'a Profile,
     pub definition: &'a MobDefinition,
+    /// Resolves a realm-ref binding of `profile_name` in `definition`, so the
+    /// role's current tool restriction applies (see [`build_agent_config`]).
+    pub realm_profile_store: Option<&'a Arc<dyn crate::store::RealmProfileStore>>,
     pub external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
     /// In-process host override for compaction summary production.
     pub compaction_curator_override: Option<Arc<dyn meerkat_core::CompactionCurator>>,
@@ -199,6 +202,7 @@ pub async fn build_agent_config(
         agent_identity,
         profile,
         definition,
+        realm_profile_store,
         external_tools,
         compaction_curator_override,
         context,
@@ -210,6 +214,12 @@ pub async fn build_agent_config(
         tool_access_policy,
         system_prompt_override,
     } = params;
+    // The mob author's tool restriction is the role's CURRENT definition
+    // profile, whatever profile this build runs on: a spawn-time snapshot
+    // (`override_profile`, persisted as `effective_profile_override` and
+    // reused by restore, explicit resume and revival) can narrow it, never
+    // drop it.
+    let role_profile = current_role_profile(definition, profile_name, realm_profile_store).await?;
 
     if !profile.tools.comms {
         return Err(MobError::WiringError(format!(
@@ -409,23 +419,93 @@ pub async fn build_agent_config(
     // is persisted for children to inherit; the launch part is also recorded
     // separately, so every build, a resume included, recomputes the declaration
     // from the current profile instead of restoring an old declaration.
+    //
+    // A snapshot profile (see `current_role_profile` above) is conjoined
+    // with the role's current definition profile: its deny entries are added
+    // and its read-only flag applies, so a deny the author adds reaches an
+    // existing member at its next rebuild. The definition's MCP vocabulary
+    // comes along so its deny names stay known.
+    let author = role_profile.as_ref().map(|role| &role.tools);
     let restriction = meerkat_core::ops::DeclaredToolRestriction {
         declared_by: format!("profile '{profile_name}'"),
         enabled_families: enabled_tool_families(&profile.tools),
-        read_only: profile.tools.read_only,
+        read_only: profile.tools.read_only || author.is_some_and(|tools| tools.read_only),
         deny: {
             let mut deny = meerkat_core::ToolNameSet::new();
-            for name in &profile.tools.deny {
+            for name in profile
+                .tools
+                .deny
+                .iter()
+                .chain(author.into_iter().flat_map(|tools| tools.deny.iter()))
+            {
                 deny.insert(meerkat_core::ToolName::new(name.clone()));
             }
             deny
         },
-        vocabulary: profile_tool_vocabulary(&profile.tools),
-        deferred_mcp_servers: deferred_mcp_servers(&profile.tools),
+        vocabulary: {
+            let mut vocabulary = profile_tool_vocabulary(&profile.tools);
+            if let Some(tools) = author {
+                for (source, names) in profile_tool_vocabulary(tools) {
+                    vocabulary.entry(source).or_default().0.extend(names.0);
+                }
+            }
+            vocabulary
+        },
+        deferred_mcp_servers: {
+            let mut deferred = deferred_mcp_servers(&profile.tools);
+            if let Some(tools) = author {
+                deferred.extend(deferred_mcp_servers(tools));
+            }
+            deferred
+        },
     };
     config.declared_tool_restriction = (!restriction.is_unrestricted()).then_some(restriction);
 
     Ok(config)
+}
+
+/// The role's current definition profile, for the mob author's tool
+/// restriction. `None` when the role no longer resolves (not in the
+/// definition, or a realm profile that is gone, or a realm-ref binding with no
+/// store to read it): the profile the build runs on then carries the whole
+/// restriction, as before. Any other failure to read the realm profile fails
+/// the build closed.
+pub(crate) async fn current_role_profile(
+    definition: &MobDefinition,
+    role: &ProfileName,
+    realm_profile_store: Option<&Arc<dyn crate::store::RealmProfileStore>>,
+) -> Result<Option<Profile>, MobError> {
+    match definition.profiles.get(role) {
+        None => Ok(None),
+        Some(crate::profile::ProfileBinding::Inline(profile)) => Ok(Some((**profile).clone())),
+        Some(crate::profile::ProfileBinding::RealmRef { realm_profile }) => {
+            let Some(store) = realm_profile_store else {
+                return Ok(None);
+            };
+            Ok(store
+                .get(realm_profile)
+                .await
+                .map_err(MobError::from)?
+                .map(|stored| stored.profile))
+        }
+    }
+}
+
+/// Conjoin the role's current tool restriction (`role`, from
+/// [`current_role_profile`]) into a profile's own: the role's deny entries
+/// are added and its read-only flag applies. A profile compiled for another
+/// host (a placed member's portable profile) carries the restriction this
+/// way, since that host has no definition to read it from.
+pub(crate) fn conjoin_role_tool_restriction(
+    tools: &mut crate::profile::ToolConfig,
+    role: &crate::profile::ToolConfig,
+) {
+    tools.read_only |= role.read_only;
+    for name in &role.deny {
+        if !tools.deny.contains(name) {
+            tools.deny.push(name.clone());
+        }
+    }
 }
 
 /// The tool names a profile's deny list may name beyond the factory's
@@ -1455,6 +1535,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1487,6 +1568,7 @@ mod tests {
             agent_identity: &agent_identity,
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: Some(Arc::clone(&curator)),
             context: None,
@@ -1518,6 +1600,7 @@ mod tests {
                 agent_identity: &agent_identity,
                 profile,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: Some(Arc::clone(&curator)),
                 context: None,
@@ -1570,6 +1653,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: &profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1604,6 +1688,7 @@ mod tests {
             agent_identity: &agent_identity,
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1670,6 +1755,7 @@ mod tests {
             agent_identity: &agent_identity,
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1744,6 +1830,7 @@ mod tests {
             agent_identity: &agent_identity,
             profile: open_profile,
             definition: &open_def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1789,6 +1876,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1815,6 +1903,231 @@ mod tests {
             enabled_tool_families(&profile.tools)
         );
         assert!(!restriction.enabled_families.is_empty());
+    }
+
+    /// The restriction a build of role `lead` declares when it runs on
+    /// `profile` against `def`.
+    async fn restriction_for(
+        def: &MobDefinition,
+        profile: &Profile,
+        store: Option<&Arc<dyn crate::store::RealmProfileStore>>,
+    ) -> Option<meerkat_core::ops::DeclaredToolRestriction> {
+        build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &AgentIdentity::from("lead-1"),
+            profile,
+            definition: def,
+            realm_profile_store: store,
+            external_tools: None,
+            compaction_curator_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            tool_access_policy: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config")
+        .declared_tool_restriction
+    }
+
+    /// `def` with role `lead` denying the mob operator spawn and wire tools,
+    /// and the spawn-time snapshot of `lead` taken before that deny existed.
+    fn definition_with_added_deny() -> (MobDefinition, Profile) {
+        let mut def = sample_definition();
+        let lead = def
+            .profiles
+            .get_mut(&ProfileName::from("lead"))
+            .and_then(|binding| binding.as_inline_mut())
+            .expect("lead profile is inline");
+        lead.tools.read_only = false;
+        lead.tools.deny.clear();
+        let snapshot = lead.clone();
+        lead.tools.deny = vec!["spawn_member".to_string(), "wire_members".to_string()];
+        (def, snapshot)
+    }
+
+    fn denied(restriction: &meerkat_core::ops::DeclaredToolRestriction) -> BTreeSet<String> {
+        restriction
+            .deny
+            .iter()
+            .map(|name| name.as_str().to_string())
+            .collect()
+    }
+
+    /// #0.8.52 deny-on-resume: a build running on a spawn-time snapshot of
+    /// the role's profile (restore, explicit resume and revival reuse it)
+    /// still declares the deny the author added to the role since.
+    #[tokio::test]
+    async fn snapshot_profile_build_declares_the_roles_current_deny() {
+        let (def, snapshot) = definition_with_added_deny();
+        let restriction = restriction_for(&def, &snapshot, None)
+            .await
+            .expect("the role's deny declares a restriction");
+        assert_eq!(
+            denied(&restriction),
+            BTreeSet::from(["spawn_member".to_string(), "wire_members".to_string()])
+        );
+        assert!(!restriction.read_only);
+    }
+
+    /// The snapshot can narrow the role's restriction, never drop it: its own
+    /// deny entries add to the role's, and either read-only flag applies.
+    #[tokio::test]
+    async fn snapshot_restriction_narrows_the_roles_and_never_drops_it() {
+        let (mut def, mut snapshot) = definition_with_added_deny();
+        snapshot.tools.deny = vec!["task_create".to_string()];
+        let restriction = restriction_for(&def, &snapshot, None)
+            .await
+            .expect("restriction");
+        assert_eq!(
+            denied(&restriction),
+            BTreeSet::from([
+                "spawn_member".to_string(),
+                "wire_members".to_string(),
+                "task_create".to_string(),
+            ])
+        );
+        assert!(!restriction.read_only);
+
+        def.profiles
+            .get_mut(&ProfileName::from("lead"))
+            .and_then(|binding| binding.as_inline_mut())
+            .expect("lead")
+            .tools
+            .read_only = true;
+        assert!(
+            restriction_for(&def, &snapshot, None)
+                .await
+                .expect("restriction")
+                .read_only,
+            "the role's read-only applies to the snapshot"
+        );
+        def.profiles
+            .get_mut(&ProfileName::from("lead"))
+            .and_then(|binding| binding.as_inline_mut())
+            .expect("lead")
+            .tools
+            .read_only = false;
+        snapshot.tools.read_only = true;
+        assert!(
+            restriction_for(&def, &snapshot, None)
+                .await
+                .expect("restriction")
+                .read_only,
+            "the snapshot's own read-only still applies"
+        );
+    }
+
+    /// A role that no longer resolves in the definition leaves the snapshot's
+    /// own restriction, as before.
+    #[tokio::test]
+    async fn unresolved_role_leaves_the_snapshot_restriction_alone() {
+        let (mut def, mut snapshot) = definition_with_added_deny();
+        def.profiles.remove(&ProfileName::from("lead"));
+        assert_eq!(restriction_for(&def, &snapshot, None).await, None);
+        snapshot.tools.deny = vec!["task_create".to_string()];
+        assert_eq!(
+            denied(
+                &restriction_for(&def, &snapshot, None)
+                    .await
+                    .expect("restriction")
+            ),
+            BTreeSet::from(["task_create".to_string()])
+        );
+    }
+
+    /// A realm-ref role reads its current restriction from the realm profile
+    /// store; without a store, or once the realm profile is gone, the
+    /// snapshot's own restriction applies.
+    #[tokio::test]
+    async fn realm_ref_role_restriction_comes_from_the_realm_profile() {
+        let (mut def, snapshot) = definition_with_added_deny();
+        let realm = def
+            .profiles
+            .get(&ProfileName::from("lead"))
+            .and_then(ProfileBinding::as_inline)
+            .expect("lead")
+            .clone();
+        def.profiles.insert(
+            ProfileName::from("lead"),
+            ProfileBinding::RealmRef {
+                realm_profile: "household-lead".to_string(),
+            },
+        );
+        let store: Arc<dyn crate::store::RealmProfileStore> =
+            Arc::new(crate::store::InMemoryRealmProfileStore::new());
+        assert_eq!(
+            restriction_for(&def, &snapshot, Some(&store)).await,
+            None,
+            "a realm profile that is gone leaves the snapshot alone"
+        );
+        store
+            .create("household-lead", &realm)
+            .await
+            .expect("store the realm profile");
+        assert_eq!(
+            denied(
+                &restriction_for(&def, &snapshot, Some(&store))
+                    .await
+                    .expect("the realm profile's deny declares a restriction")
+            ),
+            BTreeSet::from(["spawn_member".to_string(), "wire_members".to_string()])
+        );
+        assert_eq!(
+            restriction_for(&def, &snapshot, None).await,
+            None,
+            "without a store the snapshot alone applies"
+        );
+    }
+
+    /// One declared stdio MCP server exposing `tool` (mapped from `raw_<tool>`).
+    fn snapshot_mcp_server_with_tool(
+        name: &str,
+        tool: &str,
+    ) -> Vec<meerkat_core::mcp_config::McpServerConfig> {
+        let mut server = meerkat_core::mcp_config::McpServerConfig::stdio(
+            name,
+            name.to_string(),
+            Vec::new(),
+            std::collections::HashMap::new(),
+        );
+        server
+            .tool_names
+            .insert(format!("raw_{tool}"), tool.to_string());
+        vec![server]
+    }
+
+    /// A deny name the role reaches through its own declared MCP server stays
+    /// known when the snapshot predates that server.
+    #[tokio::test]
+    async fn roles_mcp_vocabulary_comes_with_its_deny() {
+        let (mut def, snapshot) = definition_with_added_deny();
+        let lead = def
+            .profiles
+            .get_mut(&ProfileName::from("lead"))
+            .and_then(|binding| binding.as_inline_mut())
+            .expect("lead");
+        lead.tools.mcp_servers = snapshot_mcp_server_with_tool("calendar", "calendar_delete");
+        lead.tools.deny.push("calendar_delete".to_string());
+        let restriction = restriction_for(&def, &snapshot, None)
+            .await
+            .expect("restriction");
+        assert!(restriction.deny.contains("calendar_delete"));
+        assert!(
+            restriction
+                .vocabulary
+                .get(&meerkat_core::ToolVocabularySource::McpServer(
+                    "calendar".to_string()
+                ))
+                .is_some_and(|names| names.contains("calendar_delete")),
+            "{:?}",
+            restriction.vocabulary
+        );
     }
 
     #[test]
@@ -1874,6 +2187,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1941,6 +2255,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("w-1"),
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -1984,6 +2299,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2019,6 +2335,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2077,6 +2394,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2130,6 +2448,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2209,6 +2528,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("w-inherit"),
             profile: &profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2264,6 +2584,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2335,6 +2656,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-operator"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2384,6 +2706,7 @@ mod tests {
                 agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -2448,6 +2771,7 @@ mod tests {
                 agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: Some(app_context.clone()),
@@ -2510,6 +2834,7 @@ mod tests {
                 agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -2572,6 +2897,7 @@ mod tests {
                 agent_identity: &AgentIdentity::from("lead-1"),
                 profile: &lead,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -2664,6 +2990,7 @@ mod tests {
                 agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -2765,6 +3092,7 @@ mod tests {
                 agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -2813,6 +3141,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2861,6 +3190,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2900,6 +3230,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2941,6 +3272,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -2985,6 +3317,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3029,6 +3362,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3067,6 +3401,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3096,6 +3431,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3127,6 +3463,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3200,6 +3537,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3256,6 +3594,7 @@ mod tests {
                 agent_identity: &AgentIdentity::from("lead-1"),
                 profile: lead,
                 definition: &def,
+                realm_profile_store: None,
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
@@ -3323,6 +3662,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3374,6 +3714,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3410,6 +3751,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: Some(ctx.clone()),
@@ -3443,6 +3785,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3492,6 +3835,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3603,6 +3947,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -3677,6 +4022,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("lead-1"),
             profile: lead,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,
@@ -4369,6 +4715,7 @@ mod tests {
             agent_identity: &AgentIdentity::from("w-1"),
             profile: worker,
             definition: &def,
+            realm_profile_store: None,
             external_tools: None,
             compaction_curator_override: None,
             context: None,

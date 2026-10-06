@@ -2733,6 +2733,10 @@ impl HostMemberMaterializer {
             agent_identity: &decompiled.agent_identity,
             profile: &decompiled.profile,
             definition: &decompiled.definition,
+            // The decompiled definition binds the role to the portable
+            // profile the controlling host sent, which already carries the
+            // role's restriction.
+            realm_profile_store: None,
             // The member-operator FORWARDING dispatcher (D-X2) binds to the
             // member's OWN comms runtime, which is constructed after this
             // compile — `mount_member_operator_tools` sets

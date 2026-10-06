@@ -250,3 +250,137 @@ async fn homecore_deny_set_builds_without_the_agent_mob_tool_factory() {
     probe_homecore_member(&fixture.state, &final_results, MOUNTED_DENIED, MOUNTED_KEPT).await;
     fixture.teardown().await;
 }
+
+/// The member's model for the snapshot tests: on every probe turn, call
+/// `spawn_member` and `wire_members` with arguments that would create and wire
+/// a real child if the gate let them through, then record the results that
+/// turn saw (results of earlier turns are not counted).
+fn snapshot_probe_script(
+    turn_results: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+) -> impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static {
+    move |request| {
+        if !last_user_text(request).contains(PROBE) {
+            return ScriptedTurn::Text("ok".to_string());
+        }
+        let turn_start = request
+            .messages
+            .iter()
+            .rposition(|message| matches!(message, Message::User(_)))
+            .unwrap_or(0);
+        let results = tool_results(&request.messages[turn_start..]);
+        match results.len() {
+            0 => ScriptedTurn::ToolCall {
+                id: "call-spawn_member".to_string(),
+                name: "spawn_member".to_string(),
+                args: serde_json::json!({
+                    "profile": "participant",
+                    "member_id": "probe-child",
+                }),
+            },
+            1 => ScriptedTurn::ToolCall {
+                id: "call-wire_members".to_string(),
+                name: "wire_members".to_string(),
+                args: serde_json::json!({
+                    "member_id": "kitchen",
+                    "peer_member_id": "probe-child",
+                }),
+            },
+            _ => {
+                turn_results.lock().unwrap().push(results);
+                ScriptedTurn::Text("probed".to_string())
+            }
+        }
+    }
+}
+
+/// Drive one probe turn on `kitchen` and check both calls were refused by
+/// the gate and no child was created.
+async fn probe_snapshot_member(
+    handle: &meerkat_mob::MobHandle,
+    turn_results: &Mutex<Vec<BTreeMap<String, String>>>,
+    expected_turns: usize,
+) {
+    let turn = handle
+        .member(&AgentIdentity::from("kitchen"))
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text(PROBE.to_string()),
+            HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("probe turn admitted");
+    tokio::time::timeout(Duration::from_secs(60), turn.wait())
+        .await
+        .expect("the probe turn completes")
+        .expect("gate denials do not fail the turn");
+    let turns = turn_results.lock().unwrap().clone();
+    assert_eq!(turns.len(), expected_turns, "{turns:?}");
+    let results = turns.last().expect("this turn's results");
+    for tool in ["spawn_member", "wire_members"] {
+        let text = results
+            .get(&format!("call-{tool}"))
+            .unwrap_or_else(|| panic!("{tool} was called"));
+        assert!(
+            text.contains("\"error\":\"access_denied\""),
+            "{tool} is denied by the role's current profile: {text}"
+        );
+    }
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("probe-child"))
+            .await
+            .expect("read roster")
+            .is_none(),
+        "no child is created"
+    );
+}
+
+/// 0.8.52 deny-on-resume regression: a member spawned with a profile
+/// snapshot (`override_profile`, as an identity-first host takes for provider
+/// params) that predates the role's deny list is denied spawn_member and
+/// wire_members by the role's CURRENT profile, on its fresh build and again
+/// after an explicit resume rebuilds it from the persisted snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_member_is_denied_by_the_roles_current_profile_fresh_and_resumed() {
+    let turn_results = Arc::new(Mutex::new(Vec::new()));
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = wired_state(
+        temp.path(),
+        ScriptedCouncilClient::new(snapshot_probe_script(Arc::clone(&turn_results))),
+    );
+    let mob_id = MobId::from(format!("homecore-{}", uuid::Uuid::new_v4().simple()));
+    let definition = homecore_definition(&mob_id);
+    let mut snapshot = definition.profiles[&ProfileName::from("participant")]
+        .as_inline()
+        .expect("inline participant profile")
+        .clone();
+    snapshot.tools.deny.clear();
+    state
+        .mob_create_definition(definition)
+        .await
+        .expect("create the mob");
+    let mut spec = meerkat_mob::SpawnMemberSpec::new(
+        ProfileName::from("participant"),
+        AgentIdentity::from("kitchen"),
+    );
+    spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    spec.backend = Some(MobBackendKind::Session);
+    spec.override_profile = Some(snapshot);
+    state
+        .mob_spawn_spec(&mob_id, spec)
+        .await
+        .expect("spawn the member on a snapshot without the deny");
+    let handle = state.handle_for(&mob_id).await.expect("mob handle");
+    probe_snapshot_member(&handle, &turn_results, 1).await;
+
+    handle.stop().await.expect("stop");
+    handle
+        .resume()
+        .await
+        .expect("explicit resume rebuilds the member from its snapshot");
+    probe_snapshot_member(&handle, &turn_results, 2).await;
+    let _ = state.mob_destroy(&mob_id).await;
+}

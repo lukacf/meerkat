@@ -3695,6 +3695,239 @@ mod tests {
         Ok(())
     }
 
+    /// Ops-capable external dispatcher whose observations live outside it, so
+    /// the test holds no handle to the dispatcher itself.
+    struct ObservedOpsProbe {
+        seen: Arc<Mutex<Option<(Arc<dyn OpsLifecycleRegistry>, SessionId)>>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentToolDispatcher for ObservedOpsProbe {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "noop".to_string(), false).into())
+        }
+
+        fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+            meerkat_core::agent::DispatcherCapabilities {
+                ops_lifecycle: true,
+            }
+        }
+
+        fn bind_ops_lifecycle(
+            self: Arc<Self>,
+            registry: Arc<dyn OpsLifecycleRegistry>,
+            owner_bridge_session_id: SessionId,
+        ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError>
+        {
+            let this = Arc::try_unwrap(self)
+                .map_err(|_| meerkat_core::agent::OpsLifecycleBindError::SharedOwnership)?;
+            *this.seen.lock().expect("probe lock") = Some((registry, owner_bridge_session_id));
+            Ok(meerkat_core::agent::BindOutcome::Bound(Arc::new(this)))
+        }
+    }
+
+    struct OwnedRequestFixture {
+        _temp: TempDir,
+        builder: FactoryAgentBuilder,
+        request: CreateSessionRequest,
+        session_id: SessionId,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+    }
+
+    async fn owned_request_fixture(
+        external: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    ) -> Result<OwnedRequestFixture, String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "ok" }));
+        let runtime_adapter = MeerkatMachine::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| format!("prepare bindings: {err}"))?;
+        let registry = Arc::clone(bindings.ops_lifecycle());
+        let request = CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "hello".to_string().into(),
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                resume_session: Some(session),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                external_tools: Some(external),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        };
+        Ok(OwnedRequestFixture {
+            _temp: temp,
+            builder,
+            request,
+            session_id,
+            registry,
+        })
+    }
+
+    /// The owned-request build moves the request's external dispatcher into
+    /// the agent, so an ops-capable one is genuinely bound: to the session's
+    /// own registry and the session as owner. The request keeps every other
+    /// field.
+    #[tokio::test]
+    async fn owned_request_binds_an_external_ops_dispatcher_to_owner_and_registry()
+    -> Result<(), String> {
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let mut fixture = owned_request_fixture(external).await?;
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let agent = fixture
+            .builder
+            .build_agent_taking_tools(&mut fixture.request, event_tx)
+            .await
+            .map_err(|err| err.to_string())?;
+        drop(agent);
+
+        let build = fixture.request.build.as_ref().expect("build options stay");
+        assert!(
+            build.external_tools.is_none(),
+            "the external dispatcher moved into the agent"
+        );
+        assert!(
+            matches!(
+                build.runtime_build_mode,
+                meerkat_core::RuntimeBuildMode::SessionOwned(_)
+            ),
+            "the rest of the request stays readable"
+        );
+        let (registry, owner) = seen
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "the external dispatcher was not bound".to_string())?;
+        assert!(Arc::ptr_eq(&registry, &fixture.registry));
+        assert_eq!(owner, fixture.session_id);
+        Ok(())
+    }
+
+    /// A host that still holds a second handle to an ops-capable external
+    /// dispatcher cannot have it rebound. The build fails with the typed
+    /// shared-ownership refusal instead of running with it silently unbound.
+    #[tokio::test]
+    async fn retained_external_ops_dispatcher_fails_the_build_with_shared_ownership()
+    -> Result<(), String> {
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let retained = Arc::clone(&external);
+        let mut fixture = owned_request_fixture(external).await?;
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let error = match fixture
+            .builder
+            .build_agent_taking_tools(&mut fixture.request, event_tx)
+            .await
+        {
+            Ok(_) => return Err("a shared ops-capable dispatcher must not build".to_string()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("shared ownership"),
+            "the refusal names shared ownership: {error}"
+        );
+        assert!(seen.lock().expect("probe lock").is_none());
+        drop(retained);
+        Ok(())
+    }
+
+    /// The borrowed build leaves the request holding its handle, so the same
+    /// dispatcher is refused there too rather than silently left unbound.
+    #[tokio::test]
+    async fn borrowed_request_build_refuses_an_ops_dispatcher_it_cannot_own() -> Result<(), String>
+    {
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let fixture = owned_request_fixture(external).await?;
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let error = match fixture
+            .builder
+            .build_agent(&fixture.request, event_tx)
+            .await
+        {
+            Ok(_) => return Err("a borrowed shared dispatcher must not build".to_string()),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("shared ownership"), "{error}");
+        assert!(seen.lock().expect("probe lock").is_none());
+        Ok(())
+    }
+
+    /// The ephemeral create path moves only the external dispatcher out of the
+    /// request: the eager initial turn still applies the request's initial
+    /// turn metadata after the owned build, and the moved ops-capable
+    /// dispatcher is bound.
+    #[tokio::test]
+    async fn eager_initial_turn_metadata_survives_the_owned_request_build() -> Result<(), String> {
+        const MARKER: &str = "EAGER-INITIAL-SYSTEM-MARKER";
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let fixture = owned_request_fixture(external).await?;
+        let mut request = fixture.request;
+        request.initial_turn = meerkat_core::service::InitialTurnPolicy::RunImmediately;
+        if let Some(build) = request.build.as_mut() {
+            build.initial_turn_metadata = Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+                    system_prompts: vec![MARKER.to_string()],
+                    ..Default::default()
+                },
+            );
+        }
+        let service = EphemeralSessionService::new(fixture.builder, 1);
+        let created = service
+            .create_session(request)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(created.session_id, fixture.session_id);
+        let snapshot = service
+            .export_session(&fixture.session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            snapshot.messages().iter().any(|message| match message {
+                meerkat_core::Message::System(system) => system.content.contains(MARKER),
+                _ => false,
+            }),
+            "the eager turn applied the initial turn metadata's system prompt"
+        );
+        let (_, owner) = seen
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "the moved external dispatcher was not bound".to_string())?;
+        assert_eq!(owner, fixture.session_id);
+        Ok(())
+    }
+
     fn mock_input_cmd(session_id: &SessionId) -> CommsCommand {
         CommsCommand::Input {
             session_id: session_id.clone(),

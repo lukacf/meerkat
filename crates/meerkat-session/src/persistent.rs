@@ -17576,6 +17576,70 @@ mod tests {
         Ok(())
     }
 
+    /// A builder that only implements the borrowed `build_agent` is reached
+    /// through the owned-request default on the persistent create path, and
+    /// the default leaves the request's tool dispatchers in place.
+    #[tokio::test]
+    async fn borrowed_only_builder_is_built_through_the_owned_request_default()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        struct NoTools;
+
+        #[async_trait::async_trait]
+        impl meerkat_core::AgentToolDispatcher for NoTools {
+            fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+                Arc::from([])
+            }
+
+            async fn dispatch(
+                &self,
+                call: meerkat_core::ToolCallView<'_>,
+            ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+                Err(meerkat_core::ToolError::not_found(call.name))
+            }
+        }
+
+        let builds = Arc::new(AtomicUsize::new(0));
+        let builder = CountingBuilder {
+            builds: Arc::clone(&builds),
+        };
+        let mut request = create_request("hello", InitialTurnPolicy::Defer);
+        request
+            .build
+            .get_or_insert_with(Default::default)
+            .external_tools = Some(Arc::new(NoTools));
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        builder
+            .build_agent_taking_tools(&mut request, event_tx)
+            .await?;
+        assert_eq!(builds.load(Ordering::Acquire), 1);
+        assert!(
+            request
+                .build
+                .as_ref()
+                .is_some_and(|build| build.external_tools.is_some()),
+            "the borrowed default takes nothing out of the request"
+        );
+
+        let service = PersistentSessionService::new(
+            CountingBuilder {
+                builds: Arc::clone(&builds),
+            },
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        service
+            .create_session(create_request("hello", InitialTurnPolicy::Defer))
+            .await?;
+        assert_eq!(
+            builds.load(Ordering::Acquire),
+            2,
+            "the persistent create path reaches the borrowed-only builder"
+        );
+        Ok(())
+    }
+
     struct RecordingEventStore {
         events: Mutex<HashMap<SessionId, Vec<StoredEvent>>>,
         projection_halts: Mutex<HashMap<SessionId, crate::event_store::EventProjectionHaltMarker>>,

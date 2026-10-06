@@ -32,6 +32,28 @@ pub(crate) struct ReqwestStreamableHttpClient {
     headers: HeaderMap,
     auth_challenge: AuthChallengeRecorder,
     protected_metadata: ProtectedMetadataState,
+    session_expiry: SessionExpiryRecorder,
+}
+
+/// Typed, sticky record that the server dropped this connection's session
+/// (a `404` on a request that carried the session id). The transport never
+/// re-initializes or re-sends after it; the connection reads this record to
+/// type the in-flight call's outcome as uncertain and to refuse later calls
+/// before they are sent.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SessionExpiryRecorder {
+    expired: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SessionExpiryRecorder {
+    fn record(&self) {
+        self.expired
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn expired(&self) -> bool {
+        self.expired.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl std::fmt::Debug for ReqwestStreamableHttpClient {
@@ -115,6 +137,7 @@ impl ReqwestStreamableHttpClient {
             headers,
             auth_challenge,
             protected_metadata: Default::default(),
+            session_expiry: Default::default(),
         }
     }
 
@@ -126,11 +149,17 @@ impl ReqwestStreamableHttpClient {
             headers,
             auth_challenge: AuthChallengeRecorder::default(),
             protected_metadata: Default::default(),
+            session_expiry: Default::default(),
         }
     }
 
     pub(crate) fn with_protected_metadata(mut self, state: ProtectedMetadataState) -> Self {
         self.protected_metadata = state;
+        self
+    }
+
+    pub(crate) fn with_session_expiry(mut self, recorder: SessionExpiryRecorder) -> Self {
+        self.session_expiry = recorder;
         self
     }
 
@@ -364,15 +393,12 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
         if status == reqwest::StatusCode::NOT_FOUND && session_was_attached {
-            if self.protected_metadata.has_protected_calls() {
-                // rmcp retries SessionExpired by creating a new session and
-                // replaying the queued request. Once protected calls use this
-                // connection, even an unselected request must not reset their
-                // generation. Require an explicit router reconnect.
-                return Err(StreamableHttpError::UnexpectedServerResponse(
-                    "protected MCP session expired; reconnect required".into(),
-                ));
-            }
+            // The transport is built with `reinit_on_expired_session(false)`,
+            // so this request is never re-initialized and re-sent: a server
+            // or proxy that ran it before answering 404 must not run it
+            // twice. The record types the outcome and refuses later calls;
+            // only an explicit reconnect starts a new session.
+            self.session_expiry.record();
             return Err(StreamableHttpError::SessionExpired);
         }
         let content_type = response

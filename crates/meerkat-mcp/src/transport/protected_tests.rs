@@ -450,16 +450,22 @@ async fn sse_preserves_messages_across_comments_heartbeats_and_empty_event_types
 }
 
 #[tokio::test]
-async fn protected_connection_session_expiry_never_enters_rmcp_replay_branch() {
+async fn session_expiry_is_typed_and_recorded_for_ordinary_and_protected_posts() {
+    // The only transport is built with `reinit_on_expired_session(false)`, so
+    // no 404 is ever re-initialized and re-sent. The typed expiry is
+    // recorded for every post, protected or not, and types the call outcome.
     let server = HttpFixture::start(axum::Router::new().route(
         "/mcp",
         axum::routing::post(|| async { axum::http::StatusCode::NOT_FOUND }),
     ))
     .await;
     let state = ProtectedMetadataState::default();
+    let expiry = crate::transport::streamable_http::SessionExpiryRecorder::default();
     let client =
         ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
-            .with_protected_metadata(state.clone());
+            .with_protected_metadata(state.clone())
+            .with_session_expiry(expiry.clone());
+    assert!(!expiry.expired());
     let ordinary = client
         .post_message(
             server.url.clone().into(),
@@ -470,6 +476,7 @@ async fn protected_connection_session_expiry_never_enters_rmcp_replay_branch() {
         )
         .await;
     assert!(matches!(ordinary, Err(StreamableHttpError::SessionExpired)));
+    assert!(expiry.expired());
     state.register(&metadata()).unwrap();
     for selected in [true, false] {
         let error = client
@@ -481,10 +488,7 @@ async fn protected_connection_session_expiry_never_enters_rmcp_replay_branch() {
                 Default::default(),
             )
             .await;
-        assert!(matches!(
-            error,
-            Err(StreamableHttpError::UnexpectedServerResponse(_))
-        ));
+        assert!(matches!(error, Err(StreamableHttpError::SessionExpired)));
     }
 }
 

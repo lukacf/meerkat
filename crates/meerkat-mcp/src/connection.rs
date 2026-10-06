@@ -31,6 +31,9 @@ pub struct McpConnection {
     service: ConnectedClient,
     /// The stdio server's process, owned until `close` observes its exit.
     stdio_child: Option<StdioChildCustody>,
+    /// Set once a Streamable HTTP server drops this connection's session.
+    /// Never set for stdio or SSE connections.
+    session_expiry: crate::transport::streamable_http::SessionExpiryRecorder,
 }
 
 /// After the process group is killed, how long [`StdioChildCustody::terminate`]
@@ -361,6 +364,7 @@ impl McpConnection {
             protected_metadata,
             service,
             stdio_child,
+            session_expiry: Default::default(),
         })
     }
 
@@ -505,11 +509,17 @@ impl McpConnection {
                 auth: Default::default(),
             })?;
         let protected_metadata = ProtectedMetadataState::default();
+        let session_expiry = crate::transport::streamable_http::SessionExpiryRecorder::default();
         let recorder = recorder.unwrap_or_default();
         let http_client =
             ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone())
-                .with_protected_metadata(protected_metadata.clone());
-        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+                .with_protected_metadata(protected_metadata.clone())
+                .with_session_expiry(session_expiry.clone());
+        // Never re-initialize and re-send a request after a session expiry
+        // (rmcp defaults to one transparent replay): a call's effect may
+        // already have happened, so its outcome is reported as uncertain.
+        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string())
+            .reinit_on_expired_session(false);
         if let Some(token) = bearer_token {
             transport_config = transport_config.auth_header(token);
         }
@@ -527,6 +537,7 @@ impl McpConnection {
             protected_metadata,
             service,
             stdio_child: None,
+            session_expiry,
         })
     }
 
@@ -689,6 +700,14 @@ impl McpConnection {
             }
             None => CallToolRequestParams::new(name.to_string()),
         };
+        // A dropped session is never resumed under another session: the
+        // call is refused before it is sent, until the server is reconnected.
+        if self.session_expiry.expired() {
+            return Err(McpError::ServerUnavailable {
+                server: self.config.name.clone(),
+                state: "session expired; reconnect required".into(),
+            });
+        }
         let mut request = CallToolRequest::new(params);
         if let Some(metadata) = metadata {
             self.protected_metadata.register(&metadata)?;
@@ -698,9 +717,20 @@ impl McpConnection {
             .service
             .send_request(request.into())
             .await
-            .map_err(|error| McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: error.to_string(),
+            .map_err(|error| {
+                // The session expired while this call was in flight: it was
+                // sent once and may have taken effect.
+                if self.session_expiry.expired() {
+                    McpError::SessionExpired {
+                        server: self.config.name.clone(),
+                        tool: name.to_string(),
+                    }
+                } else {
+                    McpError::ToolCallFailed {
+                        tool: name.to_string(),
+                        reason: error.to_string(),
+                    }
+                }
             })?;
         match result {
             ServerResult::CallToolResult(result) => Ok(result),

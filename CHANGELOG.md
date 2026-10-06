@@ -37,6 +37,17 @@ them.
 
 ### Breaking
 
+- MCP Streamable HTTP no longer re-sends a request after a session expiry
+  (see Fixed), which changes these Rust types:
+  - `ToolError` gains `OutcomeUncertain { name, reason }` (error code
+    `outcome_uncertain`), and `ToolDispatchTerminalErrorKind` gains
+    `OutcomeUncertain`;
+  - `McpError` gains `SessionExpired { server, tool }`.
+  Behaviour-only (not measured by the gate): a `tools/call` whose session
+  the server drops (`404`) is reported as `outcome_uncertain` instead of
+  being re-sent in a new session, and later calls on that connection are
+  refused unsent until the server is reconnected.
+
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
   (behavior-only break). Typed MCP dispatch preserves `isError` as a failed
@@ -251,6 +262,16 @@ them.
     `authConnectorStatus`.
 
 ### Fixed
+
+- An MCP `tools/call` over Streamable HTTP could run twice. On a `404`
+  session expiry the transport re-initialized and re-sent the in-flight
+  request (rmcp's default), so a server or proxy that ran the call before
+  answering `404` ran it again under the same JSON-RPC id, and the caller
+  saw one result. The transport now never re-sends: the call is sent
+  exactly once, its outcome is the typed `ToolError::OutcomeUncertain`
+  (neither success nor denial, and the dispatch gate settles it as
+  `Unknown`), and the dead connection refuses later calls unsent until an
+  explicit reconnect.
 
 - Turbo S S106: a reopen whose retained conversation summary was followed by
   more rows than the startup input holds generated a fresh summary, and when

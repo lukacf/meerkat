@@ -2842,10 +2842,7 @@ impl AgentToolDispatcher for McpRouter {
                 ))
             })
             .await
-            .map_err(|error| match error {
-                McpError::ToolNotFound(name) => ToolError::NotFound { name },
-                other => ToolError::execution_failed(other.to_string()),
-            })?;
+            .map_err(|error| tool_call_error(call.name, error))?;
         Ok(result.into())
     }
 
@@ -2857,6 +2854,19 @@ impl AgentToolDispatcher for McpRouter {
 impl Default for McpRouter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The tool-surface error of a failed MCP `tools/call`.
+fn tool_call_error(tool: &str, error: McpError) -> ToolError {
+    match error {
+        McpError::ToolNotFound(name) => ToolError::NotFound { name },
+        // Sent once, never re-sent, result lost with the session: neither
+        // success nor denial.
+        error @ McpError::SessionExpired { .. } => {
+            ToolError::outcome_uncertain(tool, error.to_string())
+        }
+        other => ToolError::execution_failed(other.to_string()),
     }
 }
 
@@ -2896,6 +2906,35 @@ mod tests {
             generated_surface_handle(),
             removal_timeout,
         )
+    }
+
+    #[test]
+    fn an_expired_session_types_the_call_outcome_as_uncertain() {
+        let error = tool_call_error(
+            "effect",
+            McpError::SessionExpired {
+                server: "remote".into(),
+                tool: "effect".into(),
+            },
+        );
+        assert!(
+            matches!(&error, ToolError::OutcomeUncertain { name, .. } if name == "effect"),
+            "{error:?}"
+        );
+        assert_eq!(error.error_code(), "outcome_uncertain");
+        assert_eq!(
+            meerkat_core::ops::ToolDispatchTerminalErrorKind::from(&error),
+            meerkat_core::ops::ToolDispatchTerminalErrorKind::OutcomeUncertain
+        );
+        // A call refused unsent on a dead session is not uncertain.
+        let refused = tool_call_error(
+            "effect",
+            McpError::ServerUnavailable {
+                server: "remote".into(),
+                state: "session expired; reconnect required".into(),
+            },
+        );
+        assert_eq!(refused.error_code(), "execution_failed");
     }
 
     #[derive(Default)]

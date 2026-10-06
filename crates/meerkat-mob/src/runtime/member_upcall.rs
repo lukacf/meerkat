@@ -171,6 +171,7 @@ pub(crate) enum UpcallToolErrorClass {
     Timeout,
     InactivityTimeout,
     AccessDenied,
+    OutcomeUncertain,
     PolicyDenied,
     PolicyIndeterminate,
     Other,
@@ -267,6 +268,14 @@ impl UpcallToolOutcome {
             ToolError::AccessDenied { name } => UpcallToolError {
                 class: UpcallToolErrorClass::AccessDenied,
                 message: error.to_string(),
+                name: Some(name.clone()),
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: None,
+            },
+            ToolError::OutcomeUncertain { name, reason } => UpcallToolError {
+                class: UpcallToolErrorClass::OutcomeUncertain,
+                message: reason.clone(),
                 name: Some(name.clone()),
                 timeout_ms: None,
                 unavailable_reason: None,
@@ -393,6 +402,9 @@ impl UpcallToolError {
                 ToolError::inactivity_timeout(name, self.timeout_ms.unwrap_or_default())
             }
             UpcallToolErrorClass::AccessDenied => ToolError::access_denied(name),
+            UpcallToolErrorClass::OutcomeUncertain => {
+                ToolError::outcome_uncertain(name, self.message)
+            }
             UpcallToolErrorClass::PolicyDenied => self
                 .data
                 .and_then(|data| serde_json::from_value(data).ok())
@@ -1395,6 +1407,7 @@ mod tests {
             ToolError::timeout("mob_run_flow", 90_000),
             ToolError::inactivity_timeout("stream_scan", 30_000),
             ToolError::access_denied("retire_member"),
+            ToolError::outcome_uncertain("mob_run_flow", "transport session expired"),
             ToolError::other("misc"),
         ];
         for error in errors {

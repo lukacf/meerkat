@@ -311,6 +311,11 @@ struct TestState {
     pause_refresh: AtomicBool,
     refresh_started: Notify,
     refresh_release: Notify,
+    /// `scopes_supported` the authorization-server metadata advertises.
+    authorization_scopes_supported: Mutex<Option<Vec<String>>>,
+    /// Serve the authorization-server metadata only through OpenID Connect
+    /// discovery: the RFC 8414 well-known path is absent.
+    authorization_metadata_via_openid_configuration: AtomicBool,
 }
 
 struct RecordingBrowser {
@@ -573,10 +578,20 @@ async fn authorization_metadata(
     if state.redirect_authorization_metadata.load(Ordering::SeqCst) {
         return Redirect::temporary("/redirected").into_response();
     }
+    if state
+        .authorization_metadata_via_openid_configuration
+        .load(Ordering::SeqCst)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let host = headers
         .get("host")
         .and_then(|value| value.to_str().ok())
         .unwrap();
+    Json(authorization_server_document(&state, host)).into_response()
+}
+
+fn authorization_server_document(state: &TestState, host: &str) -> Value {
     let issuer = state
         .issuer_override
         .lock()
@@ -591,7 +606,10 @@ async fn authorization_metadata(
     if *state.include_registration_endpoint.lock() {
         body["registration_endpoint"] = serde_json::json!("/register");
     }
-    Json(body).into_response()
+    if let Some(scopes) = state.authorization_scopes_supported.lock().clone() {
+        body["scopes_supported"] = serde_json::json!(scopes);
+    }
+    body
 }
 
 async fn register_client(
@@ -713,7 +731,16 @@ async fn openid_configuration(
         .get("host")
         .and_then(|value| value.to_str().ok())
         .unwrap();
-    let mut body = serde_json::json!({ "issuer": format!("http://{host}") });
+    let mut body = if state
+        .authorization_metadata_via_openid_configuration
+        .load(Ordering::SeqCst)
+    {
+        // OpenID Connect discovery carries the authorization-server facts
+        // when the RFC 8414 document is absent.
+        authorization_server_document(&state, host)
+    } else {
+        serde_json::json!({ "issuer": format!("http://{host}") })
+    };
     if !*state.omit_userinfo_endpoint.lock() {
         let endpoint = state
             .userinfo_endpoint_override
@@ -2985,10 +3012,24 @@ fn oidc_target(base: &str, account: &str) -> McpServerIdentity {
         .unwrap()
 }
 
+/// The `scope` query parameter of an authorize URL, as a set.
+fn authorize_scopes(url: &str) -> std::collections::BTreeSet<String> {
+    reqwest::Url::parse(url)
+        .unwrap()
+        .query_pairs()
+        .find(|(name, _)| name == "scope")
+        .map(|(_, scope)| scope.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+fn scope_set(scopes: &[&str]) -> std::collections::BTreeSet<String> {
+    scopes.iter().map(|scope| (*scope).to_owned()).collect()
+}
+
 #[tokio::test]
 async fn oidc_userinfo_strategy_binds_subject_and_requests_openid() {
     let (base, state) = spawn_oauth_fixture().await;
-    *state.token_scope_override.lock() = Some("openid".to_owned());
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
     let store = Arc::new(EphemeralTokenStore::new());
     let authority = oidc_authority(store.clone());
     let target = oidc_target(&base, "oidc-subject-7");
@@ -2996,13 +3037,21 @@ async fn oidc_userinfo_strategy_binds_subject_and_requests_openid() {
         .login_start(&target, SPLIT_REDIRECT, None)
         .await
         .unwrap();
-    assert!(start.authorize_url.contains("scope=openid"));
+    // The strategy's `openid` evidence scope plus the resource's
+    // `scopes_supported` from its protected resource metadata.
+    assert_eq!(
+        authorize_scopes(&start.authorize_url),
+        scope_set(&["mcp.read", "openid"])
+    );
     let complete = authority
         .login_complete(&target, split_callback(&start, &start.state))
         .await
         .expect("OIDC subject matches the selected account");
     assert_eq!(complete.account_id.as_deref(), Some("oidc-subject-7"));
-    assert_eq!(complete.scopes, vec!["openid".to_owned()]);
+    assert_eq!(
+        complete.scopes,
+        vec!["mcp.read".to_owned(), "openid".to_owned()]
+    );
     assert_eq!(
         state.userinfo_requests.lock().clone(),
         vec![Some("Bearer access-token".to_owned())]
@@ -3012,7 +3061,7 @@ async fn oidc_userinfo_strategy_binds_subject_and_requests_openid() {
 #[tokio::test]
 async fn oidc_userinfo_strategy_refuses_other_subject_without_persisting() {
     let (base, state) = spawn_oauth_fixture().await;
-    *state.token_scope_override.lock() = Some("openid".to_owned());
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
     *state.userinfo_sub.lock() = Some("someone-else".to_owned());
     let store = Arc::new(EphemeralTokenStore::new());
     let authority = oidc_authority(store.clone());
@@ -3025,7 +3074,12 @@ async fn oidc_userinfo_strategy_refuses_other_subject_without_persisting() {
         .login_complete(&target, split_callback(&start, &start.state))
         .await;
     assert!(
-        matches!(refused, Err(McpOAuthError::Verification(_))),
+        matches!(
+            refused,
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::AccountMismatch
+            ))
+        ),
         "got {refused:?}"
     );
     assert!(store.list().await.unwrap().is_empty());
@@ -3039,10 +3093,11 @@ async fn oidc_userinfo_strategy_refuses_other_subject_without_persisting() {
 }
 
 #[tokio::test]
-async fn oidc_userinfo_strategy_refuses_missing_userinfo_or_openid_grant() {
-    for (omit_userinfo, scope) in [(true, "openid"), (false, "mcp.read")] {
+async fn oidc_userinfo_strategy_refuses_a_grant_missing_a_required_scope() {
+    // `openid` is the strategy's evidence scope and `mcp.read` the
+    // resource's advertised scope; each is required.
+    for scope in ["mcp.read", "openid"] {
         let (base, state) = spawn_oauth_fixture().await;
-        *state.omit_userinfo_endpoint.lock() = omit_userinfo;
         *state.token_scope_override.lock() = Some(scope.to_owned());
         let store = Arc::new(EphemeralTokenStore::new());
         let authority = oidc_authority(store.clone());
@@ -3055,11 +3110,247 @@ async fn oidc_userinfo_strategy_refuses_missing_userinfo_or_openid_grant() {
             .login_complete(&target, split_callback(&start, &start.state))
             .await;
         assert!(
-            matches!(refused, Err(McpOAuthError::Verification(_))),
-            "omit_userinfo={omit_userinfo} scope={scope}: got {refused:?}"
+            matches!(
+                refused,
+                Err(McpOAuthError::Verification(
+                    ConnectorOAuthRefusal::MissingScopes
+                ))
+            ),
+            "granted only {scope}: got {refused:?}"
         );
         assert!(store.list().await.unwrap().is_empty());
     }
+}
+
+/// G2a: the account strategy's prerequisites are checked when the attempt
+/// starts, before client registration and before any human consent, so an
+/// issuer that cannot prove the account is refused up front.
+#[tokio::test]
+async fn oidc_start_refuses_an_unverifiable_issuer_before_registration() {
+    for case in ["no userinfo endpoint", "remote http userinfo endpoint"] {
+        let (base, state) = spawn_oauth_fixture().await;
+        match case {
+            "no userinfo endpoint" => *state.omit_userinfo_endpoint.lock() = true,
+            _ => {
+                *state.userinfo_endpoint_override.lock() =
+                    Some("http://userinfo.example/userinfo".into());
+            }
+        }
+        let store = Arc::new(EphemeralTokenStore::new());
+        let authority = oidc_authority(store.clone());
+        let target = oidc_target(&base, "oidc-subject-7");
+        let refused = authority.login_start(&target, SPLIT_REDIRECT, None).await;
+        assert!(
+            matches!(
+                refused,
+                Err(McpOAuthError::Verification(
+                    ConnectorOAuthRefusal::VerificationUnavailable
+                ))
+            ),
+            "{case}: got {refused:?}"
+        );
+        assert!(
+            state.registration_requests.lock().is_empty(),
+            "{case}: no client registration before account evidence is available"
+        );
+        assert!(state.userinfo_requests.lock().is_empty(), "{case}");
+        assert!(store.list().await.unwrap().is_empty(), "{case}");
+        // Nothing was admitted: once the issuer is fixed, a start admits a
+        // fresh attempt rather than joining a stale one.
+        *state.omit_userinfo_endpoint.lock() = false;
+        *state.userinfo_endpoint_override.lock() = None;
+        let start = authority
+            .login_start(&target, SPLIT_REDIRECT, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            start.disposition,
+            McpOAuthLoginDisposition::Started,
+            "{case}"
+        );
+    }
+}
+
+/// MCP authorization (2026-07-28): the `scope` of the 401 challenge wins
+/// over the resource's `scopes_supported` when the caller observed one.
+#[tokio::test]
+async fn login_requests_the_challenge_scope_over_resource_metadata_scopes() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = oidc_authority(store);
+    let target = oidc_target(&base, "oidc-subject-7");
+    let challenge = r#"Bearer error="invalid_token", resource_metadata="/.well-known/oauth-protected-resource/mcp", scope="mcp.write mcp.tools""#;
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, Some(challenge))
+        .await
+        .unwrap();
+    assert_eq!(
+        authorize_scopes(&start.authorize_url),
+        scope_set(&["mcp.tools", "mcp.write", "openid"])
+    );
+    *state.token_scope_override.lock() = Some("openid mcp.write".to_owned());
+    assert!(
+        matches!(
+            authority
+                .login_complete(&target, split_callback(&start, &start.state))
+                .await,
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::MissingScopes
+            ))
+        ),
+        "every challenged scope is required"
+    );
+}
+
+/// `offline_access` is requested when the authorization server advertises
+/// it, but a grant without it still completes: refresh capability is the
+/// server's choice, not an access requirement. A joined projection requests
+/// the same scopes.
+#[tokio::test]
+async fn login_requests_offline_access_when_advertised_without_requiring_it() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.authorization_scopes_supported.lock() = Some(vec![
+        "openid".to_owned(),
+        "mcp.read".to_owned(),
+        "offline_access".to_owned(),
+    ]);
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = oidc_authority(store);
+    let target = oidc_target(&base, "oidc-subject-7");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let requested = scope_set(&["mcp.read", "offline_access", "openid"]);
+    assert_eq!(authorize_scopes(&start.authorize_url), requested);
+    let joined = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    assert_eq!(joined.disposition, McpOAuthLoginDisposition::Joined);
+    assert_eq!(authorize_scopes(&joined.authorize_url), requested);
+    let complete = authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("a grant without offline_access still completes");
+    assert_eq!(
+        complete.scopes,
+        vec!["mcp.read".to_owned(), "openid".to_owned()]
+    );
+}
+
+/// MCP authorization (2026-07-28): dynamic registration declares the
+/// application type, `native` for a loopback redirect.
+#[tokio::test]
+async fn dynamic_registration_declares_a_native_application_type() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "application-type");
+    authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let registrations = state.registration_requests.lock().clone();
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(registrations[0]["application_type"], "native");
+    assert_eq!(registrations[0]["redirect_uris"][0], SPLIT_REDIRECT);
+}
+
+/// MCP authorization (2026-07-28): authorization-server metadata comes from
+/// RFC 8414 or, when that document is absent, OpenID Connect discovery.
+#[tokio::test]
+async fn authorization_server_metadata_falls_back_to_openid_connect_discovery() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .authorization_metadata_via_openid_configuration
+        .store(true, Ordering::SeqCst);
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = oidc_authority(store);
+    let target = oidc_target(&base, "oidc-subject-7");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .expect("OpenID Connect discovery supplies the authorization server");
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("completion re-reads the same discovery document");
+    let paths = state.request_paths.lock().clone();
+    let rfc8414 = paths
+        .iter()
+        .position(|path| path == "/.well-known/oauth-authorization-server")
+        .expect("RFC 8414 is tried first");
+    let oidc = paths
+        .iter()
+        .position(|path| path == "/.well-known/openid-configuration")
+        .expect("OpenID Connect discovery is the fallback");
+    assert!(rfc8414 < oidc, "{paths:?}");
+}
+
+/// #1808 item 5 at the MCP level: an attempt admitted before a process
+/// restart is restored by the durable flow owner and commits exactly once;
+/// the replayed completion is refused without a second code exchange.
+#[tokio::test]
+async fn restored_attempt_completes_once_after_flow_owner_restart() {
+    use meerkat_runtime::store::{RuntimeStore, sqlite::SqliteRuntimeStore};
+
+    let (base, state) = spawn_oauth_fixture().await;
+    let tokens = Arc::new(EphemeralTokenStore::new());
+    let persistence =
+        ProviderAuthPersistence::new(tokens.clone(), Arc::new(InMemoryCoordinator::new()));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.sqlite");
+    let target = split_target(&base, "restart");
+    let native_over = |store: &Arc<dyn RuntimeStore>| {
+        let owner = test_auth_lease();
+        let flows = Arc::new(
+            RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+                MCP_INTERACTIVE_LOGIN_TIMEOUT,
+                owner.lifecycle,
+                store,
+            ),
+        );
+        McpOAuthAuthority::with_http(persistence.clone(), no_redirect_client(), owner.generated)
+            .with_interactive_strategy(flows, Arc::new(FixtureAccountStrategy))
+            .unwrap()
+    };
+
+    let start = {
+        let store: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+        let before = native_over(&store);
+        before
+            .login_start(&target, SPLIT_REDIRECT, None)
+            .await
+            .unwrap()
+        // The process ends here with the attempt pending.
+    };
+
+    let reopened: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+    let after = native_over(&reopened);
+    let complete = after
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("the restored attempt commits");
+    assert_eq!(complete.account_id.as_deref(), Some("fixture-account-42"));
+    assert_eq!(state.token_requests.lock().len(), 1);
+    assert!(matches!(
+        after
+            .login_complete(&target, split_callback(&start, &start.state))
+            .await,
+        Err(McpOAuthError::Flow(_))
+    ));
+    assert_eq!(
+        state.token_requests.lock().len(),
+        1,
+        "a replayed completion never reaches the token endpoint"
+    );
 }
 
 // --- Join, typed cancel and advisory launch -------------------------------
@@ -3253,7 +3544,7 @@ async fn failed_browser_launch_is_advisory_and_runs_off_the_runtime() {
 #[tokio::test]
 async fn oidc_subject_match_is_exact() {
     let (base, state) = spawn_oauth_fixture().await;
-    *state.token_scope_override.lock() = Some("openid".to_owned());
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
     *state.userinfo_sub.lock() = Some("OIDC-SUBJECT-7".to_owned());
     let store = Arc::new(EphemeralTokenStore::new());
     let authority = oidc_authority(store.clone());
@@ -3274,8 +3565,7 @@ async fn oidc_subject_match_is_exact() {
 #[tokio::test]
 async fn oidc_userinfo_endpoint_must_be_https_or_loopback_from_issuer_metadata() {
     let (base, state) = spawn_oauth_fixture().await;
-    *state.token_scope_override.lock() = Some("openid".to_owned());
-    *state.userinfo_endpoint_override.lock() = Some("http://userinfo.example/userinfo".into());
+    *state.token_scope_override.lock() = Some("openid mcp.read".to_owned());
     let store = Arc::new(EphemeralTokenStore::new());
     let authority = oidc_authority(store.clone());
     let target = oidc_target(&base, "oidc-subject-7");
@@ -3283,6 +3573,9 @@ async fn oidc_userinfo_endpoint_must_be_https_or_loopback_from_issuer_metadata()
         .login_start(&target, SPLIT_REDIRECT, None)
         .await
         .unwrap();
+    // The issuer's metadata changes between start and completion: the
+    // completion-time check still refuses before any bearer is sent.
+    *state.userinfo_endpoint_override.lock() = Some("http://userinfo.example/userinfo".into());
     assert!(matches!(
         authority
             .login_complete(&target, split_callback(&start, &start.state))

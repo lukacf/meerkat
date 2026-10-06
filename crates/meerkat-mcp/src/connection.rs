@@ -1531,6 +1531,248 @@ pub mod tests {
             "the failed attempt already terminated and reaped the server"
         );
     }
+
+    // --- Per-request OAuth bearer on established connections -----------------
+
+    /// An OAuth-protected MCP server whose accepted bearer the test rotates,
+    /// recording the `Authorization` header of every `tools/call`.
+    struct RotatingMcpState {
+        accepted: Mutex<String>,
+        tool_call_authorizations: Mutex<Vec<Option<String>>>,
+    }
+
+    impl RotatingMcpState {
+        fn accept(&self, token: &str) {
+            *self.accepted.lock().unwrap() = token.to_owned();
+        }
+
+        fn tool_calls(&self) -> Vec<Option<String>> {
+            self.tool_call_authorizations.lock().unwrap().clone()
+        }
+    }
+
+    async fn spawn_rotating_mcp_server(accepted: &str) -> (String, Arc<RotatingMcpState>) {
+        let state = Arc::new(RotatingMcpState {
+            accepted: Mutex::new(accepted.to_owned()),
+            tool_call_authorizations: Mutex::new(Vec::new()),
+        });
+        let app = Router::new()
+            .route("/mcp", post(rotating_mcp_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, state)
+    }
+
+    async fn rotating_mcp_handler(
+        State(state): State<Arc<RotatingMcpState>>,
+        headers: HeaderMap,
+        Json(request): Json<Value>,
+    ) -> axum::response::Response {
+        let authorization = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let method = request.get("method").and_then(Value::as_str);
+        if method == Some("tools/call") {
+            state
+                .tool_call_authorizations
+                .lock()
+                .unwrap()
+                .push(authorization.clone());
+        }
+        let accepted = format!("Bearer {}", state.accepted.lock().unwrap());
+        if authorization.as_deref() != Some(accepted.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(
+                    http::header::WWW_AUTHENTICATE,
+                    "Bearer error=\"invalid_token\", resource_metadata=\"/.well-known/oauth-protected-resource/mcp\"",
+                )],
+            )
+                .into_response();
+        }
+        let Some(id) = request.get("id").cloned() else {
+            return StatusCode::ACCEPTED.into_response();
+        };
+        let result = match method {
+            Some("initialize") => serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "rotating-mcp-test-server", "version": "0.1.0" }
+            }),
+            Some("tools/list") => serde_json::json!({
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echo input",
+                    "inputSchema": { "type": "object", "properties": {} }
+                }]
+            }),
+            Some("tools/call") => serde_json::json!({
+                "content": [{ "type": "text", "text": "echoed" }]
+            }),
+            other => {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": format!("unsupported {other:?}") }
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+        )
+            .into_response()
+    }
+
+    /// The native credential owner as seen through the resolver: the stored
+    /// credential changes when the owner refreshes or loses it.
+    struct StoredCredentialResolver {
+        stored: Mutex<Result<Option<String>, ()>>,
+    }
+
+    impl StoredCredentialResolver {
+        fn new(token: &str) -> Self {
+            Self {
+                stored: Mutex::new(Ok(Some(token.to_owned()))),
+            }
+        }
+
+        fn store(&self, token: &str) {
+            *self.stored.lock().unwrap() = Ok(Some(token.to_owned()));
+        }
+
+        fn require_reauth(&self) {
+            *self.stored.lock().unwrap() = Err(());
+        }
+    }
+
+    #[async_trait]
+    impl McpAuthResolver for StoredCredentialResolver {
+        async fn stored_bearer_token(
+            &self,
+            target: &McpServerIdentity,
+        ) -> Result<Option<String>, McpOAuthError> {
+            self.stored
+                .lock()
+                .unwrap()
+                .clone()
+                .map_err(|()| McpOAuthError::ReauthRequired {
+                    server_name: target.server_name().to_owned(),
+                })
+        }
+
+        async fn interactive_login(
+            &self,
+            target: &McpServerIdentity,
+            _www_authenticate: Option<&str>,
+        ) -> Result<String, McpOAuthError> {
+            Err(McpOAuthError::HumanAuthorizationRequired {
+                server_name: target.server_name().to_owned(),
+            })
+        }
+    }
+
+    async fn connect_rotating(
+        token: &str,
+    ) -> (
+        McpServerConfig,
+        McpConnection,
+        Arc<RotatingMcpState>,
+        Arc<StoredCredentialResolver>,
+    ) {
+        let (url, state) = spawn_rotating_mcp_server(token).await;
+        let config = McpServerConfig::streamable_http("rotating", url, HashMap::new());
+        let resolver = Arc::new(StoredCredentialResolver::new(token));
+        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Interactive,
+            Some(resolver.clone()),
+        )
+        .await
+        .expect("the stored credential connects");
+        assert!(tools.iter().any(|tool| tool.name == "echo"));
+        (config, conn, state, resolver)
+    }
+
+    /// G5: an established connection reads the bearer from the credential
+    /// owner on every request, so a refreshed credential is used without a
+    /// reconnect. (Fails-old: the connect-time token stayed on the transport.)
+    #[tokio::test]
+    async fn oauth_connection_resolves_the_bearer_per_request() {
+        let (_config, conn, state, resolver) = connect_rotating("token-a").await;
+        state.accept("token-b");
+        resolver.store("token-b");
+
+        let blocks = conn
+            .call_tool("echo", &serde_json::json!({}))
+            .await
+            .expect("the refreshed credential is used");
+
+        assert_eq!(meerkat_core::types::text_content(&blocks), "echoed");
+        assert_eq!(
+            state.tool_calls(),
+            vec![Some("Bearer token-b".to_owned())],
+            "the call carries the owner's current credential"
+        );
+        conn.close().await.expect("close");
+    }
+
+    /// G5: a 401 on an established connection is the typed host status, and
+    /// the refused call is not replayed. (Fails-old: an untyped tool failure.)
+    #[tokio::test]
+    async fn oauth_call_refused_with_401_is_typed_and_not_replayed() {
+        let (config, conn, state, _resolver) = connect_rotating("token-a").await;
+        state.accept("token-after-revocation");
+
+        let error = conn
+            .call_tool("echo", &serde_json::json!({}))
+            .await
+            .expect_err("the provider revoked the credential");
+
+        let McpError::AuthorizationRequired { target } = &error else {
+            panic!("expected typed authorization-required, got {error:?}");
+        };
+        assert_eq!(**target, McpServerIdentity::from_config(&config).unwrap());
+        assert_eq!(
+            state.tool_calls(),
+            vec![Some("Bearer token-a".to_owned())],
+            "exactly one dispatch: the refused call is never replayed"
+        );
+        conn.close().await.expect("close");
+    }
+
+    /// G5: when the owner has no usable credential (reauthentication
+    /// required), the call fails typed before anything is sent.
+    /// (Fails-old: the stale connect-time token was still sent.)
+    #[tokio::test]
+    async fn oauth_call_without_a_usable_credential_fails_typed_before_dispatch() {
+        let (_config, conn, state, resolver) = connect_rotating("token-a").await;
+        resolver.require_reauth();
+
+        let error = conn
+            .call_tool("echo", &serde_json::json!({}))
+            .await
+            .expect_err("no usable credential");
+
+        assert!(
+            matches!(error, McpError::AuthorizationRequired { .. }),
+            "got {error:?}"
+        );
+        assert!(
+            state.tool_calls().is_empty(),
+            "nothing is dispatched without a usable credential"
+        );
+        conn.close().await.expect("close");
+    }
 }
 
 #[cfg(test)]

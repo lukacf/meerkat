@@ -130,8 +130,8 @@ formatting passed. Strict Clippy rejected the runtime admission closure at
 128 bytes. Later gates did not execute and no push occurred. Raw output is
 `envelope-main-retention-normal-push.log` in the same evidence directory.
 
-The narrow repair boxes the owned `HookDenied.denial` and
-`PolicyIndeterminate.failure` payloads. These nested error variants enlarged
+The narrow repair boxes the owned `ToolError::HookDenied.denial` and
+`AgentError::PolicyIndeterminate.failure` payloads. These nested error variants enlarged
 `SessionError`; the admission guard and closure are unchanged from main.
 Typed classification, serialized hook denial shape and settlement diagnostics
 remain intact. The allocation occurs only when constructing those failures.
@@ -149,6 +149,24 @@ siblings after refusal, exact hook payload roundtrips, the original infrastructu
 failure class, joined admission capacity and the terminal carrier. Raw output is
 `envelope-error-payload-focused-green.log`. Normal publication qualification
 remains pending; these scoped passes do not qualify the broad candidate.
+
+That repair committed as `e89d3cae0c6be29e49852ba01e2ab87055b54838`, tree
+`33a7e23fe8b63540aa5947abe7f629959782a015`, after normal applicable commit
+hooks passed in 10.32 seconds. Its normal push started at 23:58:57 UTC on
+2026-10-05 and exited 1 after 3,152.13 seconds. Terminal state and full process
+group drain were observed at 00:51:34 UTC on 2026-10-06. Preliminary checks and
+formatting passed. Broad strict Clippy found two test-only `ToolResult` literals
+in `meerkat-mob-mcp/src/live_delegation/peer_replies.rs` that omitted the added
+`settlement_failures` field. Later gates did not execute and no push occurred;
+the remote branch remained at `afb79ea29d8cdf30689345d884b43bc6c5baa428`.
+Raw output is `envelope-error-payload-normal-push.log` in the same evidence
+directory. The successor initializes both fixtures with an empty diagnostics
+vector, matching the existing constructors and preserving all positive and
+negative assertions. Independent source review confirmed that neither fixture
+represents a settlement failure. A whole-workspace source sweep, including
+live/replay fixtures, examples and the core result alias, found no other
+incomplete literals. Production code is unchanged. Normal publication
+qualification remains pending.
 
 The Mac candidate adds one test-build correction to that GCP source:
 `StdioChildCustody::spawned_pid` is compiled only for Linux tests, matching its

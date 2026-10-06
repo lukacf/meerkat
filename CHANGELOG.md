@@ -373,6 +373,24 @@ them.
   rebuilds its v1.8.0 pre-release in place, so PR, nightly and BuildBuddy
   lanes could run different TLC builds. The PR, nightly and `cargo.yml`
   TLC lanes and `setup-buildbuddy-ci` now all install through the action.
+- Pull-request CI now runs the checks that only the nightly Bazel graph and
+  feature matrix ran before, so feature-combination breaks are caught before
+  merge rather than at the release tag (#1687, #1108):
+  - A new `feature-check` lane (two jobs per clippy shard) compiles each
+    changed package with the exact feature set its generated `BUILD.bazel`
+    gives its tests (`--no-default-features`, `--lib --bins --tests`) and
+    with its other Bazel library and binary sets, and runs the
+    `make test-minimal` / `test-feature-matrix-lib` check rows. #1595 broke
+    `meerkat-mob-mcp`'s lib tests under `openai-live` alone; #1558 broke
+    `meerkat-mob --no-default-features`.
+  - `make wasm-check` runs on pull requests whose changed packages reach
+    `meerkat-web-runtime`.
+  - The example web lane runs the Web SDK's `npm test`, which type-checks
+    `tests/` against the generated events (#1469).
+  - The xtask integration suite also runs on `sdks/` changes, because its
+    tests read the SDK manifests and generated types.
+  - A nightly dispatch with `graph_only=true` runs only the full BuildBuddy
+    graph, for the pre-tag check on a release branch.
 
 - Turbo S S101's premature-outcome oracle no longer reads a duration as the
   second job (#1713). "The 25 second one just finished." names job 1, the

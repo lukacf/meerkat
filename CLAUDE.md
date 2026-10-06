@@ -386,15 +386,30 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   '*'`) of each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs`
   whose trigger packages or paths changed (meerkat-runtime;
   meerkat-machine-codegen, whose parity tests also trigger on meerkat-mob;
-  xtask with machine-authority, also on any `.github/workflows/` edit,
-  because its tests pin the workflows), on PRs and main pushes.
+  xtask with machine-authority, also on any `.github/workflows/` or `sdks/`
+  edit, because its tests pin the workflows and read the SDK manifests and
+  generated types), on PRs and main pushes.
   The unit lanes run `--lib --bins` only, so no other PR lane runs a
   crate's integration tests.
 - `closure-check`: `cargo check --all-features` (lib and bin targets) over
   the reverse-dependency closure of the changed packages.
+- `feature-check` (two jobs per clippy shard, Bazel set and matrix): compile-only checks of the
+  shard's packages under the feature sets the Bazel graph builds them with
+  (`--no-default-features` plus exactly the set their generated
+  `BUILD.bazel` gives their tests, `--lib --bins --tests`; then each other
+  Bazel library/binary set, such as production variants without
+  `test-support` and surface variants) and the `$(CARGO) check` rows of
+  `make test-minimal` and `make test-feature-matrix-lib`. Feature names are
+  read from `BUILD.bazel` and the Makefile and validated against cargo
+  metadata, so a renamed feature fails the plan.
+- `wasm-check` (`make wasm-check`: wasm32 check and clippy of the web
+  runtime and the crates it links): every Rust-relevant main push, and pull
+  requests whose changed packages reach `meerkat-web-runtime`. The
+  `example-web` lane also runs the Web SDK's `npm test` (type tests over the
+  generated events, node unit suites).
 - `push: main` only (no budget): `main-unit` over the whole workspace in
-  eight shards, `wasm-check`, `sdk-host`. A red main run is a failed
-  `CI gate` on the main commit and blocks `require_ci_green`.
+  eight shards, `sdk-host`. A red main run is a failed `CI gate` on the main
+  commit and blocks `require_ci_green`.
 - `gate` (`CI gate`, the only required context): fail-closed aggregate; on
   pull requests a 1500-second lane execution budget (classification plus
   each lane's own run time, runner queue excluded) and a 2700-second
@@ -410,14 +425,19 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   `!cancelled()` so superseded runs surface as cancelled.
 
 Integration-fast, e2e-fast, the dense Mob topology stress, the bounded TLC
-`machine-verify --all` sweep, the feature matrices, audit, the SDK suites, and
-the whole BuildBuddy/Bazel graph do not run in PR CI. `cargo.yml` remains a separate reusable/manually
-dispatchable Cargo workflow with its own `Cargo lane gate`; `ci.yml` does not
-call it. Local Make commands still default to Cargo.
+`machine-verify --all` sweep, the feature-matrix test runs, audit, the SDK
+suites, and the whole BuildBuddy/Bazel graph do not run in PR CI. `cargo.yml`
+remains a separate reusable/manually dispatchable Cargo workflow with its own
+`Cargo lane gate`; `ci.yml` does not call it. Local Make commands still
+default to Cargo.
 
 **Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) owns everything
-PR CI does not: `workspace-unit` (`make test-unit`), `workspace-int`
-(`make test-int`), `e2e-fast`, `dense-topology` (`mob-dense-topology.yml`),
+PR CI does not. A dispatch with `graph_only=true` runs only `gcp-buildbuddy`:
+the release final gate runs it on the release branch tip before the tag
+(`gh workflow run nightly.yml --ref release/X -f graph_only=true`), which
+also warms the remote cache for the tag run. The full nightly set is:
+`workspace-unit` (`make test-unit`), `workspace-int` (`make test-int`),
+`e2e-fast`, `dense-topology` (`mob-dense-topology.yml`),
 `machine-verify` (bounded TLC, including every non-skipped composition
 witness with its completion proof), `machine-verify-deep` (`make
 machine-verify-deep-compositions`: Deep TLC over the compositions that fit

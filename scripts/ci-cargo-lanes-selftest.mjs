@@ -529,6 +529,10 @@ for (const path of [
   const workflow = planFor([".github/workflows/nightly.yml"]);
   assert.equal(workflow.rust_changed, false);
   assert.deepEqual(names(workflow), ["xtask"], "a workflow-only edit runs the xtask workflow pins");
+  // buildbuddy_static_lanes reads the SDK manifests and generated types.
+  for (const path of ["sdks/web/package.json", "sdks/typescript/src/generated/types.ts", "sdks/python/meerkat/generated/types.py"]) {
+    assert.ok(names(planFor([path])).includes("xtask"), `${path} runs the xtask integration suite`);
+  }
   const github = run(["--format", "github", "--", "crates/meerkat-runtime/src/lib.rs"]);
   assert.equal(github.status, 0, github.stderr);
   const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
@@ -660,6 +664,83 @@ for (const path of [
     const lines = Object.fromEntries(result.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
     assert.equal(lines.example_web, "true", `${path} selects the suites in GitHub output`);
   }
+}
+
+// Feature-combination checks (#1687): each clippy shard gives a Bazel-set job
+// (its packages under their Bazel test feature set) and a matrix job (their
+// other Bazel library/binary sets and their Make feature-matrix rows).
+{
+  const rows = (plan) => plan.feature_check_jobs.flatMap((job) => job.commands);
+  // #1595: meerkat-mob-mcp's lib tests under Bazel's `openai-live` alone.
+  const mobMcp = planFor(["crates/meerkat-mob-mcp/src/lib.rs"]);
+  assert.deepEqual(
+    mobMcp.feature_check_jobs.map((job) => job.name),
+    mobMcp.shards.flatMap((shard) => [`${shard.name} bazel set`, `${shard.name} matrix`]).filter((name) =>
+      mobMcp.feature_check_jobs.some((job) => job.name === name),
+    ),
+  );
+  assert.equal(mobMcp.feature_check_jobs[0].name, `${mobMcp.shards[0].name} bazel set`);
+  assert.equal(mobMcp.feature_check_jobs[0].commands.length, 1, "the Bazel-set job holds only the Bazel row");
+  assert.equal(
+    rows(mobMcp)[0],
+    "-p meerkat-mob-mcp --no-default-features --features meerkat-mob-mcp/openai-live --lib --bins --tests",
+  );
+  // #1558: `meerkat-mob --no-default-features` from the Make feature matrix,
+  // and the production library variant without `test-support`.
+  const mob = planFor(["crates/meerkat-mob/src/lib.rs"]);
+  assert.match(rows(mob)[0], /^-p meerkat-mob --no-default-features --features \S*meerkat-mob\/test-support\S* --lib --tests$/);
+  assert.ok(rows(mob).includes("-p meerkat-mob --no-default-features"), "the Make matrix row for meerkat-mob runs");
+  assert.ok(rows(mob).includes("-p meerkat-mob --no-default-features --features runtime-adapter"));
+  assert.ok(
+    rows(mob).some((row) => /^-p meerkat-mob --no-default-features --features \S+ --lib$/.test(row) && !row.includes("test-support")),
+    "the production library set without test-support is checked",
+  );
+  // A bin-only package gets no --lib; weak dependency features stay out.
+  const cli = planFor(["crates/meerkat-cli/src/main.rs"]);
+  assert.match(rows(cli)[0], /^-p rkat --no-default-features --features \S+ --bins --tests$/);
+  assert.ok(!rows(cli)[0].includes("?"), "weak dependency features are not passed to Cargo");
+  for (const row of rows(cli)) {
+    assert.match(row, /^-p rkat /, `${row} belongs to the changed package`);
+  }
+  // A workspace plan checks every package, shard by shard, and runs every
+  // Make feature-matrix check row with the shard that holds its package.
+  const workspace = planFor(["Cargo.toml"]);
+  assert.ok(workspace.feature_check_jobs.length <= 2 * workspace.shards.length);
+  for (const job of workspace.feature_check_jobs) {
+    const shard = workspace.shards.find(
+      (candidate) => job.name === `${candidate.name} bazel set` || job.name === `${candidate.name} matrix`,
+    );
+    assert.ok(shard, `feature-check job ${job.name} follows a clippy shard`);
+    for (const row of job.commands) {
+      for (const [, name] of row.matchAll(/-p (\S+)/g)) {
+        assert.ok(shard.packages.includes(name), `${job.name}: ${name} belongs to the shard`);
+      }
+    }
+  }
+  const bazelChecked = new Set(
+    workspace.feature_check_jobs
+      .filter((job) => job.name.endsWith(" bazel set"))
+      .flatMap((job) => [...job.commands[0].matchAll(/-p (\S+)/g)].map((match) => match[1])),
+  );
+  for (const name of ["meerkat", "meerkat-mob", "meerkat-mob-mcp", "rkat", "meerkat-core"]) {
+    assert.ok(bazelChecked.has(name), `the workspace plan checks ${name} under its Bazel test set`);
+  }
+  for (const row of [
+    "-p meerkat-client --no-default-features",
+    "-p meerkat-tools --no-default-features --features comms,mcp",
+    "-p meerkat --no-default-features --features session-store,meerkat-store/jsonl",
+  ]) {
+    assert.ok(rows(workspace).includes(row), `workspace plan runs the Make row ${row}`);
+  }
+  // A plan without a Rust change has no feature checks; GitHub output keeps
+  // a well-formed placeholder matrix behind a zero count.
+  const docs = planFor(["docs/guides/deploying.mdx"]);
+  assert.deepEqual(docs.feature_check_jobs, []);
+  const github = run(["--format", "github", "--", "docs/guides/deploying.mdx"]);
+  assert.equal(github.status, 0, github.stderr);
+  const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  assert.equal(lines.feature_check_count, "0");
+  assert.deepEqual(JSON.parse(lines.feature_check_matrix).include, [{ name: "none", commands: "" }]);
 }
 
 // A change to the lane definitions runs the lanes they define.

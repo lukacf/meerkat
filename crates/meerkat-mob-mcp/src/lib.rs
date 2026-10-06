@@ -442,6 +442,9 @@ pub struct MobMcpState {
     tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     /// The host's explicit application tool policy for child mob members.
     child_application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
+    /// The host's spawn customizer for child mob members, run before the
+    /// internal child policy customizer.
+    child_spawn_member_customizer: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
     persistent_storage_root: Option<PathBuf>,
     /// Legacy infallible persistent-root construction records setup failure so
     /// every managed-mob operation fails closed rather than using ephemeral
@@ -583,6 +586,7 @@ impl MobMcpState {
             child_mcp_servers: std::sync::RwLock::new(ChildMcpServers::default()),
             tool_consequence_policy_registry: None,
             child_application_tool_policy: None,
+            child_spawn_member_customizer: None,
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
             mobs: Arc::new(RwLock::new(BTreeMap::new())),
@@ -1365,6 +1369,23 @@ impl MobMcpState {
         self
     }
 
+    /// A host [`meerkat_mob::SpawnMemberCustomizer`] for every mob this state
+    /// creates or restores, child mobs included: fresh spawns, process-restart
+    /// restore and explicit resume (where it is asked through
+    /// [`meerkat_mob::SpawnMemberCustomizer::customize_resume`] with the
+    /// member's persisted identity).
+    ///
+    /// It runs before the internal child application tool policy, so in a
+    /// child mob the policy always has the last word: a host customizer
+    /// cannot widen a child member's application tool policy.
+    pub fn with_child_spawn_member_customizer(
+        mut self,
+        customizer: Arc<dyn meerkat_mob::SpawnMemberCustomizer>,
+    ) -> Self {
+        self.child_spawn_member_customizer = Some(customizer);
+        self
+    }
+
     /// Refuse child mob creation (the agent `mob_create` tool, and the
     /// implicit mob `delegate` helpers run in) up front when the host's child
     /// policy cannot be applied (a managed host without a child policy, a
@@ -1487,6 +1508,54 @@ impl MobMcpState {
         })
     }
 
+    /// The activation hook for a restored mob: classify it from its persisted
+    /// owner bridge authority, then run the host's own hook. A cold resume
+    /// calls it before any member is restored, so every restored member of a
+    /// child mob is built under the child policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restore_scope_hook(
+        &self,
+        scope: child_tool_policy::ChildMobScope,
+    ) -> meerkat_mob::MobBeforeActivation {
+        let host = self.before_activation.get().cloned();
+        Arc::new(move |handle: meerkat_mob::MobReadHandle| {
+            if handle
+                .owner_bridge_session_lifecycle_authority()
+                .is_some_and(|authority| {
+                    child_tool_policy::is_child_mob(authority.destroy_on_owner_archive)
+                })
+            {
+                scope.mark_child();
+            }
+            match &host {
+                Some(host) => host(handle),
+                None => Box::pin(async { Ok(()) }),
+            }
+        })
+    }
+
+    /// The spawn customizer of every mob this state builds: the host's, then
+    /// the child policy. Policy last: the child policy overrides whatever the
+    /// host customizer set.
+    fn member_customizer(
+        &self,
+        scope: child_tool_policy::ChildMobScope,
+    ) -> Arc<dyn meerkat_mob::SpawnMemberCustomizer> {
+        let child_policy: Arc<dyn meerkat_mob::SpawnMemberCustomizer> =
+            Arc::new(child_tool_policy::ChildPolicyCustomizer {
+                policy: self.child_tool_policy(),
+                scope,
+            });
+        match &self.child_spawn_member_customizer {
+            Some(host) => Arc::new(
+                meerkat_mob::SpawnMemberCustomizerChain::new()
+                    .then(Arc::clone(host))
+                    .then(child_policy),
+            ),
+            None => child_policy,
+        }
+    }
+
     fn configure_builder(
         &self,
         mut builder: MobBuilder,
@@ -1507,12 +1576,7 @@ impl MobMcpState {
         if let Some(registry) = &self.tool_consequence_policy_registry {
             builder = builder.with_tool_consequence_policy_registry(Arc::clone(registry));
         }
-        builder = builder.with_spawn_member_customizer(Arc::new(
-            child_tool_policy::ChildPolicyCustomizer {
-                policy: self.child_tool_policy(),
-                scope,
-            },
-        ));
+        builder = builder.with_spawn_member_customizer(self.member_customizer(scope));
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
         }
@@ -1698,16 +1762,9 @@ impl MobMcpState {
                 let scope = child_tool_policy::ChildMobScope::default();
                 let handle = self
                     .configure_builder(MobBuilder::for_resume(storage), scope.clone())
+                    .before_activation(self.restore_scope_hook(scope))
                     .resume()
                     .await?;
-                if handle
-                    .owner_bridge_session_lifecycle_authority()
-                    .is_some_and(|authority| {
-                        child_tool_policy::is_child_mob(authority.destroy_on_owner_archive)
-                    })
-                {
-                    scope.mark_child();
-                }
                 let mob_id = handle.definition().id.clone();
                 match self.mobs.write().await.entry(mob_id.clone()) {
                     Entry::Vacant(entry) => {
@@ -7971,6 +8028,9 @@ mod tests {
         /// meaningful; unprimed sessions keep reporting zero.
         session_usage: RwLock<HashMap<SessionId, Usage>>,
         runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+        /// The application tool policy of every build, by session, in order.
+        build_policies:
+            std::sync::Mutex<Vec<(SessionId, meerkat_core::ApplicationToolPolicyBinding)>>,
     }
 
     impl MockSessionSvc {
@@ -7989,6 +8049,7 @@ mod tests {
                 persisted_metadata_loads: AtomicU64::new(0),
                 session_usage: RwLock::new(HashMap::new()),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                build_policies: std::sync::Mutex::default(),
             }
         }
 
@@ -8013,6 +8074,27 @@ mod tests {
                 .unwrap_or_default()
         }
 
+        fn build_policies_snapshot(
+            &self,
+        ) -> Vec<(SessionId, meerkat_core::ApplicationToolPolicyBinding)> {
+            self.build_policies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        /// The application tool policy of every build on `session_id`.
+        fn build_policies_for(
+            &self,
+            session_id: &SessionId,
+        ) -> Vec<meerkat_core::ApplicationToolPolicyBinding> {
+            self.build_policies_snapshot()
+                .into_iter()
+                .filter(|(session, _)| session == session_id)
+                .map(|(_, policy)| policy)
+                .collect()
+        }
+
         async fn cold_restart(&self) -> Self {
             let persisted_sessions = self.persisted_sessions.read().await.clone();
             let archive_failures = self.archive_failures.read().await.clone();
@@ -8032,6 +8114,7 @@ mod tests {
                 persisted_metadata_loads: AtomicU64::new(0),
                 session_usage: RwLock::new(self.session_usage.read().await.clone()),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                build_policies: std::sync::Mutex::new(self.build_policies_snapshot()),
             }
         }
 
@@ -8046,6 +8129,12 @@ mod tests {
                 .and_then(|build| build.resume_session.clone())
                 .unwrap_or_default();
             let sid = persisted_session.id().clone();
+            if let Some(build) = build.as_ref() {
+                self.build_policies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((sid.clone(), build.application_tool_policy.clone()));
+            }
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
             let is_keep_alive = build
                 .as_ref()
@@ -11817,6 +11906,392 @@ mod tests {
         let mobs = restored.mob_list().await.expect("restore mob list");
         assert_eq!(mobs.len(), 1);
         assert_eq!(mobs[0].0, mob_id);
+    }
+
+    /// A host spawn customizer that widens every member's application tool
+    /// policy to Unmanaged, recording each call: the mob, the spawn source,
+    /// the member and, on a resume, the session of its resume view.
+    #[derive(Default)]
+    struct WideningHostCustomizer {
+        calls: std::sync::Mutex<
+            Vec<(
+                MobId,
+                meerkat_mob::SpawnSource,
+                AgentIdentity,
+                Option<SessionId>,
+            )>,
+        >,
+    }
+
+    impl WideningHostCustomizer {
+        fn record(
+            &self,
+            ctx: &meerkat_mob::SpawnCustomizationContext,
+            spec: &mut SpawnMemberSpec,
+            view: Option<SessionId>,
+        ) {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((
+                    ctx.mob_id.clone(),
+                    ctx.spawn_source,
+                    spec.identity.clone(),
+                    view,
+                ));
+            spec.application_tool_policy = meerkat_core::ApplicationToolPolicyBinding::Unmanaged;
+        }
+
+        fn calls(
+            &self,
+        ) -> Vec<(
+            MobId,
+            meerkat_mob::SpawnSource,
+            AgentIdentity,
+            Option<SessionId>,
+        )> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl meerkat_mob::SpawnMemberCustomizer for WideningHostCustomizer {
+        fn customize_spawn(
+            &self,
+            ctx: &meerkat_mob::SpawnCustomizationContext,
+            spec: &mut SpawnMemberSpec,
+        ) -> Result<(), MobError> {
+            self.record(ctx, spec, None);
+            Ok(())
+        }
+
+        fn customize_resume(
+            &self,
+            ctx: &meerkat_mob::SpawnCustomizationContext,
+            durable: &meerkat_mob::ResumedMemberView,
+            spec: &mut SpawnMemberSpec,
+        ) -> Result<(), MobError> {
+            self.record(ctx, spec, Some(durable.session_id.clone()));
+            Ok(())
+        }
+    }
+
+    fn managed_policy_registry() -> Arc<meerkat_core::ToolConsequencePolicyRegistry> {
+        Arc::new(
+            meerkat_core::ToolConsequencePolicyRegistry::new(
+                Vec::new(),
+                meerkat_core::PolicyEvaluationSupervisorConfig::default(),
+                None,
+            )
+            .expect("policy registry"),
+        )
+    }
+
+    fn host_child_policy() -> meerkat_core::ApplicationToolPolicyBinding {
+        meerkat_core::ApplicationToolPolicyBinding::Provider {
+            provider_id: meerkat_core::PolicyProviderId::new("host").expect("provider id"),
+            policy_id: meerkat_core::PolicyId::new("child-tools").expect("policy id"),
+        }
+    }
+
+    /// #1701: the host's spawn customizer reaches the members of every mob the
+    /// state builds; in a child mob the child policy runs after it, so a host
+    /// customizer that widens the application tool policy is overridden. In a
+    /// host-created mob the child policy does not govern, and the host's
+    /// choice stands.
+    #[tokio::test]
+    async fn host_spawn_customizer_runs_first_and_the_child_policy_has_the_last_word() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let host = Arc::new(WideningHostCustomizer::default());
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .with_tool_consequence_policy_registry(managed_policy_registry())
+                .with_child_application_tool_policy(host_child_policy())
+                .with_child_spawn_member_customizer(host.clone()),
+        );
+        let child = state
+            .mob_create_definition_with_owner_bridge_session(
+                explicit_definition("customized-child"),
+                SessionId::new(),
+                true,
+                false,
+            )
+            .await
+            .expect("create child mob");
+        let root = state
+            .mob_create_definition(explicit_definition("customized-root"))
+            .await
+            .expect("create host mob");
+        let worker = AgentIdentity::from("worker-1");
+        let mut sessions = Vec::new();
+        for mob_id in [&child, &root] {
+            state
+                .mob_spawn(
+                    mob_id,
+                    ProfileName::from("worker"),
+                    worker.clone(),
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("spawn worker");
+            sessions.push(
+                state
+                    .mob_resolve_bridge_session_id(mob_id, &worker)
+                    .await
+                    .expect("resolve bridge session")
+                    .expect("worker bridge session"),
+            );
+        }
+        assert_eq!(
+            svc.build_policies_for(&sessions[0]),
+            [host_child_policy()],
+            "the child policy overrides the host customizer's widening"
+        );
+        assert_eq!(
+            svc.build_policies_for(&sessions[1]),
+            [meerkat_core::ApplicationToolPolicyBinding::Unmanaged],
+            "outside child mobs the host customizer's choice stands"
+        );
+        let calls = host.calls();
+        for mob_id in [&child, &root] {
+            assert!(
+                calls.iter().any(|(mob, source, member, view)| mob == mob_id
+                    && *source != meerkat_mob::SpawnSource::Resume
+                    && member == &worker
+                    && view.is_none()),
+                "the host customizer customizes the spawn into {mob_id}: {calls:?}"
+            );
+        }
+    }
+
+    /// Create a mob (a child mob when `child`) under `root`, seat `worker-1`
+    /// and retire the state's supervisor route, as a process exit does.
+    /// Returns the restarted session service (live sessions gone, persisted
+    /// ones kept), the mob and the worker's session.
+    async fn seat_worker_then_exit(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+        child: bool,
+        mob_name: &str,
+    ) -> (Arc<MockSessionSvc>, MobId, SessionId) {
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .with_persistent_storage_root(Some(root.to_path_buf())),
+        );
+        let mob_id = if child {
+            // A child mob outlives a restart only with its owner session.
+            let owner = SessionId::new();
+            svc.insert_persisted_session(Session::with_id(owner.clone()))
+                .await;
+            state
+                .mob_create_definition_with_owner_bridge_session(
+                    explicit_definition(mob_name),
+                    owner,
+                    true,
+                    false,
+                )
+                .await
+                .expect("create child mob")
+        } else {
+            state
+                .mob_create_definition(explicit_definition(mob_name))
+                .await
+                .expect("create host mob")
+        };
+        let worker = AgentIdentity::from("worker-1");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                worker.clone(),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let session = state
+            .mob_resolve_bridge_session_id(&mob_id, &worker)
+            .await
+            .expect("resolve bridge session")
+            .expect("worker bridge session");
+        state
+            .handle_for(&mob_id)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        (Arc::new(svc.cold_restart().await), mob_id, session)
+    }
+
+    /// #1701: restoring a child mob asks the host customizer for each member's
+    /// rebuild through `customize_resume`, with the member's bound session.
+    #[tokio::test]
+    async fn restored_child_mob_members_are_customized_with_their_resume_view() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (svc, mob_id, session) =
+            seat_worker_then_exit(&svc, root.path(), true, "restored-customized-child").await;
+        let host = Arc::new(WideningHostCustomizer::default());
+        let restored = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_child_spawn_member_customizer(host.clone()),
+        );
+        let status = restored
+            .mob_member_status(&mob_id, &AgentIdentity::from("worker-1"))
+            .await
+            .expect("restore member status");
+        assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);
+        let calls = host.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|(mob, source, member, view)| mob == &mob_id
+                    && *source == meerkat_mob::SpawnSource::Resume
+                    && member.as_str() == "worker-1"
+                    && view.as_ref() == Some(&session)),
+            "the restore asks the host customizer with the worker's session: {calls:?}"
+        );
+    }
+
+    /// #1701 restore ordering, under the joint child-policy decision: a
+    /// restored mob is classified as a child mob before any member is
+    /// restored, so its members' rebuilds run under the child policy. A
+    /// managed host without a child policy still restores everything: the
+    /// child mob comes up, and its members are not brought back unconstrained.
+    /// Each carries a typed restore failure saying why and naming the fixes,
+    /// and calls into it return that refusal. (Recovery once the refusal
+    /// lifts is proved in meerkat-mob:
+    /// `refused_restore_is_per_member_and_recovers_once_admitted`.)
+    #[tokio::test]
+    async fn unconfigured_child_policy_refuses_restored_child_members_not_the_restore() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let worker = AgentIdentity::from("worker-1");
+        let seating = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+        let owner = SessionId::new();
+        svc.insert_persisted_session(Session::with_id(owner.clone()))
+            .await;
+        let child = seating
+            .mob_create_definition_with_owner_bridge_session(
+                explicit_definition("restored-policy-child"),
+                owner,
+                true,
+                false,
+            )
+            .await
+            .expect("create child mob");
+        let host_mob = seating
+            .mob_create_definition(explicit_definition("restored-policy-host"))
+            .await
+            .expect("create host mob");
+        for mob_id in [&child, &host_mob] {
+            seating
+                .mob_spawn(
+                    mob_id,
+                    ProfileName::from("worker"),
+                    worker.clone(),
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("spawn worker");
+            seating
+                .handle_for(mob_id)
+                .await
+                .expect("predecessor mob handle")
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+        }
+        let svc = Arc::new(svc.cold_restart().await);
+
+        let unconfigured = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_tool_consequence_policy_registry(managed_policy_registry()),
+        );
+        let mobs = unconfigured
+            .mob_list()
+            .await
+            .expect("the restore completes");
+        for mob_id in [&child, &host_mob] {
+            assert!(
+                mobs.iter().any(|(id, _)| id == mob_id),
+                "{mob_id} is restored: {mobs:?}"
+            );
+        }
+        assert_eq!(
+            unconfigured
+                .mob_member_status(&host_mob, &worker)
+                .await
+                .expect("host mob member status")
+                .status,
+            meerkat_mob::MobMemberStatus::Active,
+            "the host mob's member restores"
+        );
+        let refusal = unconfigured
+            .handle_for(&child)
+            .await
+            .expect("the child mob is restored")
+            .member(&worker)
+            .await
+            .err()
+            .expect("the child member is refused");
+        let MobError::MemberRestoreFailed { reason, .. } = &refusal else {
+            panic!("a typed restore failure, got {refusal:?}");
+        };
+        for needle in [
+            "no child application tool policy is configured",
+            "MobMcpState::with_child_application_tool_policy(binding)",
+            "child_application_tool_policy",
+            "ApplicationToolPolicyBinding::Unmanaged",
+        ] {
+            assert!(reason.contains(needle), "{needle} missing from: {reason}");
+        }
+    }
+
+    /// #1701 control: the managed host without a child policy that refuses a
+    /// restored child mob's members (above) restores a host-created mob's
+    /// members as before: it is never classified as a child mob, so the child
+    /// policy does not govern its members' rebuilds.
+    #[tokio::test]
+    async fn host_mob_restore_is_untouched_by_the_child_policy() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (svc, mob_id, session) =
+            seat_worker_then_exit(&svc, root.path(), false, "restored-host-mob").await;
+        let restored = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_tool_consequence_policy_registry(managed_policy_registry()),
+        );
+        let worker = AgentIdentity::from("worker-1");
+        let status = restored
+            .mob_member_status(&mob_id, &worker)
+            .await
+            .expect("the host mob restores");
+        assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);
+        let rebuilt_on = restored
+            .mob_resolve_bridge_session_id(&mob_id, &worker)
+            .await
+            .expect("resolve bridge session")
+            .expect("the restored member has a session");
+        assert_eq!(
+            svc.build_policies_for(&rebuilt_on).last(),
+            svc.build_policies_for(&session).last(),
+            "the restored member is built with the binding it was seated with"
+        );
     }
 
     #[tokio::test]

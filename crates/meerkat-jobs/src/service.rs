@@ -750,6 +750,12 @@ impl DetachedJobService {
             };
             return match outcome {
                 PredicateDeliveryCommitOutcome::Committed { job, receipt } => {
+                    if notification_projection
+                        .as_ref()
+                        .is_some_and(|(_, _, deduplicated)| !deduplicated)
+                    {
+                        self.store.outbox_commit_signal().record_commit();
+                    }
                     Ok(PredicateDeliveryOutcome::Applied {
                         receipt,
                         snapshot: job_snapshot(job)?,
@@ -1127,8 +1133,22 @@ impl DetachedJobService {
             .store
             .compare_and_swap(expected_revision, replacement)
             .await?;
+        if effects.iter().any(effect_commits_outbox_entry) {
+            self.store.outbox_commit_signal().record_commit();
+        }
         Ok((committed, effects))
     }
+}
+
+/// Whether a generated effect is a committed outbox entry the delivery owner
+/// must project: the realization of the routed `TerminalCommitted` and
+/// `NotificationCommitted` dispositions.
+fn effect_commits_outbox_entry(effect: &dsl::DetachedJobEffect) -> bool {
+    matches!(
+        effect,
+        dsl::DetachedJobEffect::TerminalCommitted { .. }
+            | dsl::DetachedJobEffect::NotificationCommitted { .. }
+    )
 }
 
 fn apply_predicate_bundle_step(

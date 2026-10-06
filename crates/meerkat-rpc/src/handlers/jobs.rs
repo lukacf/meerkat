@@ -690,15 +690,9 @@ macro_rules! host_mutation {
             let mutation: Result<_, DetachedJobError> = async { $body.await }.await;
             match mutation {
                 Ok(_) => match projected(runtime, &$job_id).await {
-                    Ok(job) => {
-                        let delivery_runtime = Arc::clone(runtime);
-                        tokio::spawn(async move {
-                            if let Err(error) = delivery_runtime.drain_job_deliveries().await {
-                                tracing::warn!(%error, "post-mutation durable job delivery drain failed");
-                            }
-                        });
-                        RpcResponse::success(id, MobkitJobMutationResult { job })
-                    }
+                    // The job service signals the delivery owner on every
+                    // commit that carries an outbox entry.
+                    Ok(job) => RpcResponse::success(id, MobkitJobMutationResult { job }),
                     Err(error) => response_error(id, error),
                 },
                 Err(error) => response_error(id, error),

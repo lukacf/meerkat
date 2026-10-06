@@ -5899,7 +5899,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     "Session task dropped the reply channel".to_string(),
                 ))
             })?
-            .map_err(SessionError::Agent)
+            .map_err(|error| match error {
+                // Retryable once the callback batch resolves.
+                AgentError::ControlAppendBlockedByCallbackBatch => {
+                    SessionError::Busy { id: id.clone() }
+                }
+                other => SessionError::Agent(other),
+            })
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]

@@ -4012,9 +4012,11 @@ pub const LIVE_SUPERSEDING_SPEECH_HEADING: &str =
 /// that the speech did not change. Ending on the correction alone, gpt-live-1
 /// dropped the whole typed update (Turbo S S99: only the code word was
 /// corrected aloud, and the model answered the pre-typed favourite flower;
-/// s99re R1 and the 0.8.51 live gate, #1629).
-pub const LIVE_SUPERSEDED_TYPED_STILL_CURRENT: &str =
-    "Everything in the typed text above that this later speech does not change is still current.";
+/// s99re R1 and the 0.8.51 live gate, #1629). It also ranks that content
+/// above the late summary, which was snapshotted before the row was typed and
+/// still states the replaced value as current: without it the model kept the
+/// summary's flower (S99 "Cobalt and daffodil", #1800).
+pub const LIVE_SUPERSEDED_TYPED_STILL_CURRENT: &str = "Everything in the typed text above that this later speech does not change is still current, and replaces what any conversation history summary says about it.";
 
 /// Line after [`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`] on a superseded typed
 /// user input only: a typed request the later speech did not replace still
@@ -5561,6 +5563,10 @@ mod tests {
         )
         .expect("superseding speech present");
         assert!(composed.ends_with(super::LIVE_SUPERSEDED_TYPED_STILL_CURRENT));
+        // #1800: the typed content outranks the earlier summary's values.
+        assert!(
+            composed.ends_with("and replaces what any conversation history summary says about it.")
+        );
         assert!(!composed.contains(super::LIVE_SUPERSEDED_TYPED_REQUEST_STILL_OPEN));
         assert!(!composed.contains("needs a response"));
     }

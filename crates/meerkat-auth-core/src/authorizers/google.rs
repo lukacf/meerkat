@@ -61,6 +61,14 @@ pub enum GoogleAuthError {
     MetadataEndpoint { status: u16, body: String },
     #[error("network error: {0}")]
     Network(String),
+    /// A token or metadata endpoint answered with a redirect, refused by
+    /// its status alone (no `Location` or body is kept).
+    #[error(
+        "google credential endpoint answered with a redirect (status {status}); redirects are refused"
+    )]
+    RedirectRefused { status: u16 },
+    #[error(transparent)]
+    HttpClientUnavailable(#[from] crate::auth_oauth::CredentialHttpClientUnavailable),
 }
 
 impl From<GoogleAuthError> for AuthError {
@@ -76,6 +84,9 @@ impl From<GoogleAuthError> for AuthError {
             }
             GoogleAuthError::Json(msg) => AuthError::Other(format!("google json: {msg}")),
             GoogleAuthError::JwtSign(msg) => AuthError::Other(format!("google jwt sign: {msg}")),
+            GoogleAuthError::RedirectRefused { .. } | GoogleAuthError::HttpClientUnavailable(_) => {
+                AuthError::RefreshFailed(e.to_string())
+            }
         }
     }
 }
@@ -132,7 +143,9 @@ pub struct GoogleAuthAuthorizer {
     cache: Arc<Mutex<Option<CachedToken>>>,
     env_lookup: EnvLookup,
     home_dir: Option<PathBuf>,
-    http: reqwest::Client,
+    /// Follows no redirects. A build failure is kept and every token
+    /// request fails with it; nothing falls back to a default client.
+    http: Result<reqwest::Client, crate::auth_oauth::CredentialHttpClientUnavailable>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     label: String,
     token_url_override: Option<String>,
@@ -162,7 +175,7 @@ impl GoogleAuthAuthorizer {
             cache: Arc::new(Mutex::new(None)),
             env_lookup,
             home_dir: dirs::home_dir(),
-            http: reqwest::Client::new(),
+            http: crate::auth_oauth::credential_http_client(),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             label,
             token_url_override: None,
@@ -354,13 +367,18 @@ impl GoogleAuthAuthorizer {
             ("assertion", &jwt),
         ];
         let resp = self
-            .http
+            .http()?
             .post(&token_url)
             .form(&form)
             .send()
             .await
             .map_err(|e| GoogleAuthError::Network(e.to_string()))?;
         let status = resp.status();
+        if status.is_redirection() {
+            return Err(GoogleAuthError::RedirectRefused {
+                status: status.as_u16(),
+            });
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(GoogleAuthError::TokenEndpoint {
@@ -397,13 +415,18 @@ impl GoogleAuthAuthorizer {
             ("refresh_token", adc.refresh_token),
         ];
         let resp = self
-            .http
+            .http()?
             .post(&token_url)
             .form(&form)
             .send()
             .await
             .map_err(|e| GoogleAuthError::Network(e.to_string()))?;
         let status = resp.status();
+        if status.is_redirection() {
+            return Err(GoogleAuthError::RedirectRefused {
+                status: status.as_u16(),
+            });
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(GoogleAuthError::TokenEndpoint {
@@ -422,15 +445,24 @@ impl GoogleAuthAuthorizer {
         })
     }
 
+    fn http(&self) -> Result<&reqwest::Client, GoogleAuthError> {
+        self.http.as_ref().map_err(|error| (*error).into())
+    }
+
     async fn fetch_from_metadata(&self) -> Result<CachedToken, GoogleAuthError> {
         let resp = self
-            .http
+            .http()?
             .get(self.metadata_url())
             .header("Metadata-Flavor", "Google")
             .send()
             .await
             .map_err(|e| GoogleAuthError::Network(e.to_string()))?;
         let status = resp.status();
+        if status.is_redirection() {
+            return Err(GoogleAuthError::RedirectRefused {
+                status: status.as_u16(),
+            });
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(GoogleAuthError::MetadataEndpoint {
@@ -461,7 +493,9 @@ fn google_refresh_failure_observation(err: &GoogleAuthError) -> RefreshFailureOb
         GoogleAuthError::TokenEndpoint { status, body } => {
             oauth_endpoint_failure_observation(*status, body)
         }
-        GoogleAuthError::MetadataEndpoint { .. } => RefreshFailureObservation::transient(),
+        GoogleAuthError::MetadataEndpoint { .. }
+        | GoogleAuthError::RedirectRefused { .. }
+        | GoogleAuthError::HttpClientUnavailable(_) => RefreshFailureObservation::transient(),
     }
 }
 
@@ -490,5 +524,33 @@ impl HttpAuthorizer for GoogleAuthAuthorizer {
 
     fn expires_at(&self) -> Option<DateTime<Utc>> {
         self.cached_expires_at()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn metadata_endpoint_redirect_is_refused_without_following_it() {
+        use crate::auth_oauth::redirect_fixture::{
+            BODY_CANARY, LOCATION_CANARY, spawn_redirecting_endpoint,
+        };
+        let (url, target_hits) = spawn_redirecting_endpoint().await;
+        let authorizer =
+            GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::ComputeOnly, Arc::new(|_| None))
+                .with_metadata_url_override(url);
+        let error = match authorizer.fetch_from_metadata().await {
+            Err(error) => error,
+            Ok(_) => panic!("a redirect answer must not yield a token"),
+        };
+        assert!(
+            matches!(error, GoogleAuthError::RedirectRefused { status: 302 }),
+            "{error:?}"
+        );
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains(LOCATION_CANARY) && !rendered.contains(BODY_CANARY));
+        assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

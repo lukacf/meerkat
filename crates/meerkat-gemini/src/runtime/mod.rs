@@ -302,6 +302,12 @@ async fn post_code_assist_json<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|err| ProviderAuthError::SourceResolutionFailed(err.to_string()))?;
     let status = response.status();
+    if status.is_redirection() {
+        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "Google Code Assist setup request answered with a redirect (status {}); redirects are refused",
+            status.as_u16(),
+        )));
+    }
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
@@ -331,6 +337,12 @@ async fn get_code_assist_json<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|err| ProviderAuthError::SourceResolutionFailed(err.to_string()))?;
     let status = response.status();
+    if status.is_redirection() {
+        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "Google Code Assist operation request answered with a redirect (status {}); redirects are refused",
+            status.as_u16(),
+        )));
+    }
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
@@ -378,7 +390,10 @@ async fn resolve_code_assist_user_project(
             tier: None,
         });
     }
-    let http = reqwest::Client::new();
+    // Bearer-carrying setup requests follow no redirects, and a client
+    // build failure is kept rather than replaced by a default client.
+    let http = meerkat_auth_core::auth_oauth::credential_http_client()
+        .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
     let mut load_body = serde_json::Map::new();
     if let Some(project_id) = project_hint.as_deref() {
         load_body.insert(
@@ -1190,6 +1205,107 @@ mod copilot_structured_output_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    mod redirect_fixture {
+        #![allow(clippy::unwrap_used)]
+        /// A credential endpoint that answers every request with a `302` to a
+        /// second listener, which counts the requests that reach it. The
+        /// `Location` and the body carry canaries that must never be rendered.
+        pub(super) const LOCATION_CANARY: &str = "redirect-location-secret-canary";
+        pub(super) const BODY_CANARY: &str = "redirect-body-secret-canary";
+
+        pub(super) async fn spawn_redirecting_endpoint()
+        -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
+
+            async fn read_request(stream: &mut tokio::net::TcpStream) {
+                let mut buffer = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let Ok(read) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&buffer);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= end + 4 + length {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            let hits = Arc::new(AtomicUsize::new(0));
+            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target_addr = target.local_addr().unwrap();
+            let counted = Arc::clone(&hits);
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = target.accept().await {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    read_request(&mut stream).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                }
+            });
+            let endpoint = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint_addr = endpoint.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = endpoint.accept().await {
+                    read_request(&mut stream).await;
+                    let response = format!(
+                        "HTTP/1.1 302 Found\r\nlocation: http://{target_addr}/token?leak={LOCATION_CANARY}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{BODY_CANARY}",
+                        BODY_CANARY.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            });
+            (format!("http://{endpoint_addr}/token"), hits)
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    async fn code_assist_setup_never_follows_a_redirect() {
+        use redirect_fixture::{BODY_CANARY, LOCATION_CANARY, spawn_redirecting_endpoint};
+        let (url, target_hits) = spawn_redirecting_endpoint().await;
+        let http = meerkat_auth_core::auth_oauth::credential_http_client().unwrap();
+        let error = match post_code_assist_json::<serde_json::Value>(
+            &http,
+            "bearer-secret",
+            url,
+            serde_json::json!({}),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a redirect was not refused"),
+        };
+        let rendered = format!("{error} {error:?}");
+        assert!(rendered.contains("redirect"), "{rendered}");
+        assert!(!rendered.contains(LOCATION_CANARY) && !rendered.contains(BODY_CANARY));
+        assert!(!rendered.contains("bearer-secret"));
+        assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
     #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     use std::sync::Mutex;
 

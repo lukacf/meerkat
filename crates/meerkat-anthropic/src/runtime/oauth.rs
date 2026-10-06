@@ -136,7 +136,9 @@ impl AnthropicIdClaims {
 }
 
 pub struct AnthropicOAuthRuntime {
-    http: reqwest::Client,
+    /// Follows no redirects. A build failure is kept and every token
+    /// request fails with it; nothing falls back to a default client.
+    http: Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
     persistence: ProviderAuthPersistence,
     endpoints: OAuthEndpoints,
     key: TokenKey,
@@ -149,11 +151,16 @@ impl AnthropicOAuthRuntime {
         key: TokenKey,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: meerkat_auth_core::auth_oauth::credential_http_client(),
             persistence,
             endpoints,
             key,
         }
+    }
+
+    /// The redirect-free credential client, or its typed build failure.
+    fn http(&self) -> Result<&reqwest::Client, OAuthError> {
+        self.http.as_ref().map_err(|error| OAuthError::from(*error))
     }
 
     pub fn endpoints(&self) -> &OAuthEndpoints {
@@ -178,7 +185,7 @@ impl AnthropicOAuthRuntime {
         force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
         let preparation = ManagedStoreOAuthRefreshPreparationSlot::new(prepare_fn);
-        let http = self.http.clone();
+        let http = self.http()?.clone();
         let endpoints = self.endpoints.clone();
         let token_store = self.token_store();
         let key = self.key.clone();
@@ -278,7 +285,7 @@ impl AnthropicOAuthRuntime {
         state: &str,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
         let result = exchange_authorization_code_with_state(
-            &self.http,
+            self.http()?,
             &self.endpoints,
             code,
             pkce_verifier,
@@ -298,7 +305,7 @@ impl AnthropicOAuthRuntime {
         access_token: &str,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
         let resp = self
-            .http
+            .http()?
             .post(API_KEY_CREATE_URL)
             .bearer_auth(access_token)
             .header(OAUTH_BETA_HEADER_NAME, OAUTH_BETA_HEADER_VALUE)
@@ -306,6 +313,7 @@ impl AnthropicOAuthRuntime {
             .await
             .map_err(|e| AnthropicOAuthError::Network(e.to_string()))?;
         let status = resp.status();
+        meerkat_auth_core::auth_oauth::refuse_credential_redirect(status)?;
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(AnthropicOAuthError::ApiKeyProvisioning {

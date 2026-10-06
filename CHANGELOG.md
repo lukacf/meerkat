@@ -37,6 +37,19 @@ them.
 
 ### Breaking
 
+- Server-to-server credential requests follow no redirects (see Fixed),
+  which changes these Rust types:
+  - `OAuthError` gains `RedirectRefused { status }` and
+    `HttpClientUnavailable(CredentialHttpClientUnavailable)`;
+  - `GoogleAuthError` and `AzureAuthError` gain `RedirectRefused { status }`
+    and `HttpClientUnavailable`.
+  Behaviour-only (not measured by the gate): a `3xx` answer from a token,
+  refresh, device-code, credential-exchange, Copilot token or Code Assist
+  setup endpoint is now a typed refusal instead of being followed, and a
+  redirect-free client that fails to build fails each request instead of
+  falling back to a default client. `HostAuthService::with_http_client`
+  must be given a client that follows no redirects.
+
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
   (behavior-only break). Typed MCP dispatch preserves `isError` as a failed
@@ -251,6 +264,19 @@ them.
     `authConnectorStatus`.
 
 ### Fixed
+
+- Credential routes no longer follow redirects. The token and refresh
+  exchange, device-code requests, the Claude, ChatGPT and Code Assist OAuth
+  runtimes (including Claude API-key provisioning), the Google and Azure
+  credential exchanges, the Code Assist onboarding client, the Copilot
+  token exchange and the host auth service each use one redirect-free
+  client (`auth_oauth::credential_http_client`). A `3xx` answer is refused
+  by its status before any header or body is read, so neither `Location`
+  nor the body is kept or rendered, and no grant, refresh token, device
+  code or bearer reaches the redirect target. A client build failure is
+  kept as `CredentialHttpClientUnavailable` instead of falling back to a
+  default client. Browser authorization redirects and loopback callbacks
+  are unchanged.
 
 - Turbo S S106: a reopen whose retained conversation summary was followed by
   more rows than the startup input holds generated a fresh summary, and when

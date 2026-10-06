@@ -459,7 +459,9 @@ pub enum HostAuthError {
 pub struct HostAuthService {
     persistence: ProviderAuthPersistence,
     authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
-    http: reqwest::Client,
+    /// Token and device-code requests follow no redirects. A build failure
+    /// is kept and every exchange fails with it.
+    http: Result<reqwest::Client, meerkat_providers::auth_oauth::CredentialHttpClientUnavailable>,
     mcp_account_strategy: Arc<dyn McpOAuthAccountStrategy>,
     connector_strategies: ConnectorStrategies,
 }
@@ -472,7 +474,7 @@ impl HostAuthService {
         Self {
             persistence,
             authority,
-            http: reqwest::Client::new(),
+            http: meerkat_providers::auth_oauth::credential_http_client(),
             mcp_account_strategy: Arc::new(OidcUserInfoAccountStrategy::new()),
             connector_strategies: ConnectorStrategies::with_defaults(),
         }
@@ -547,8 +549,17 @@ impl HostAuthService {
         Ok(self.connector_oauth_authority()?.status(slot).await?)
     }
 
+    /// The redirect-free token-exchange client, or its typed build failure.
+    fn http(&self) -> Result<&reqwest::Client, HostAuthError> {
+        self.http
+            .as_ref()
+            .map_err(|error| HostAuthError::OAuthExchange(OAuthError::from(*error)))
+    }
+
+    /// Use `http` for token and device-code requests. It must not follow
+    /// redirects (reqwest `redirect::Policy::none()`).
     pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
-        self.http = http;
+        self.http = Ok(http);
         self
     }
 
@@ -834,7 +845,7 @@ impl HostAuthService {
         )?;
         let oauth = oauth_provider_resolution(target.provider, redirect_uri.clone());
         let exchanged = exchange_authorization_code_with_state(
-            &self.http,
+            self.http()?,
             &oauth.endpoints,
             code.as_ref(),
             &flow.pkce_verifier,
@@ -893,7 +904,7 @@ impl HostAuthService {
         if oauth.endpoints.device_code_url.is_none() {
             return Err(HostAuthError::DeviceFlowUnsupported(target.provider));
         }
-        let device = request_device_code(&self.http, &oauth.endpoints).await?;
+        let device = request_device_code(self.http()?, &oauth.endpoints).await?;
         let lease_key = LeaseKey::from_credential_identity(&resolved.credential_identity);
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
         self.authority.oauth_flow_authority().admit_device_code(
@@ -930,7 +941,7 @@ impl HostAuthService {
             .oauth_flow_authority()
             .begin_device_code_poll(device_code, &resolved.credential_identity, target.provider)?;
         let outcome = poll_device_code(
-            &self.http,
+            self.http()?,
             &oauth.endpoints,
             device_code,
             oauth.client_secret,

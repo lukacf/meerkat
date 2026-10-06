@@ -135,7 +135,9 @@ impl ChatGptIdClaims {
 // ---------------------------------------------------------------------
 
 pub struct OpenAiOAuthRuntime {
-    http: reqwest::Client,
+    /// Follows no redirects. A build failure is kept and every token
+    /// request fails with it; nothing falls back to a default client.
+    http: Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
     persistence: ProviderAuthPersistence,
     endpoints: OAuthEndpoints,
     key: TokenKey,
@@ -148,11 +150,16 @@ impl OpenAiOAuthRuntime {
         key: TokenKey,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: meerkat_auth_core::auth_oauth::credential_http_client(),
             persistence,
             endpoints,
             key,
         }
+    }
+
+    /// The redirect-free credential client, or its typed build failure.
+    fn http(&self) -> Result<&reqwest::Client, OAuthError> {
+        self.http.as_ref().map_err(|error| OAuthError::from(*error))
     }
 
     pub fn endpoints(&self) -> &OAuthEndpoints {
@@ -177,7 +184,7 @@ impl OpenAiOAuthRuntime {
         force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let preparation = ManagedStoreOAuthRefreshPreparationSlot::new(prepare_fn);
-        let http = self.http.clone();
+        let http = self.http()?.clone();
         let endpoints = self.endpoints.clone();
         let token_store = self.token_store();
         let key = self.key.clone();
@@ -275,7 +282,7 @@ impl OpenAiOAuthRuntime {
         pkce_verifier: &str,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let result =
-            exchange_authorization_code(&self.http, &self.endpoints, code, pkce_verifier, None)
+            exchange_authorization_code(self.http()?, &self.endpoints, code, pkce_verifier, None)
                 .await?;
         // Lift JWT claims from id_token if present, to populate account_id.
         let account_id = if let Some(ref id_token) = result.id_token {

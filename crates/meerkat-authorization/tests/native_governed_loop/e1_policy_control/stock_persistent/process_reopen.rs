@@ -562,7 +562,10 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
         COLD_PERMITTED_CALL,
     );
     let frozen_final = serde_json::to_value(&final_row).unwrap();
-    machine.unregister_session(&session_id).await.unwrap();
+    machine
+        .unregister_current_session_registration_until_terminal(&session_id)
+        .await
+        .unwrap();
     service.discard_live_session(&session_id).await.unwrap();
     drop(cleanup.lock().unwrap().take().unwrap());
     assert_eq!(
@@ -615,7 +618,7 @@ async fn run_reader(root: &std::path::Path) {
         Some(
             tokio::time::timeout(
                 Duration::from_secs(10),
-                machine.unregister_session(&session),
+                machine.unregister_current_session_registration_until_terminal(&session),
             )
             .await,
         )

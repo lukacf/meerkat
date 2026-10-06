@@ -67751,8 +67751,17 @@ async fn test_abandoned_member_status_observation_leaves_no_lane_entry() {
 async fn test_member_status_read_past_deadline_holds_capacity_and_is_not_duplicated() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let identity = AgentIdentity::from("status-draining");
+    // A turn-driven member: no autonomous turn runs on the runtime loops'
+    // threads, so the paused clock below cannot auto-advance past a bound
+    // while the test runtime waits on work running elsewhere.
     let session_id = handle
-        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
         .await
         .expect("spawn draining member")
         .bridge_session_id()

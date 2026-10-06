@@ -729,7 +729,7 @@ async fn stock_persistent_revalidates_requester_before_admission_and_preserves_a
         Some(
             tokio::time::timeout(
                 Duration::from_secs(10),
-                machine.unregister_session(&session),
+                machine.unregister_current_session_registration_until_terminal(&session),
             )
             .await,
         )

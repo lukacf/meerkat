@@ -1792,8 +1792,12 @@ async fn materialize_identity_mismatch_preserves_durable_session_and_quiesces_bo
         panic!("corrupted create result must reject, got {reply:?}");
     };
     assert_eq!(cause, BridgeRejectionCause::Internal);
+    // Exactly the typed mismatch: an unproven cleanup reports
+    // `UnrecordedSessionCleanup`, whose reason embeds this one, and
+    // fail-stops the host, so a containment check would pass it here and
+    // only the retry below would fail.
     assert!(
-        reason.contains("session service returned"),
+        reason.starts_with("session service returned"),
         "typed mismatch reason must survive successful cleanup: {reason}"
     );
 
@@ -1868,13 +1872,14 @@ async fn materialize_identity_mismatch_preserves_durable_session_and_quiesces_bo
     // Exact volatile cleanup converged, so this was a retryable typed mismatch
     // rather than sticky uncertainty. The same request now builds under an
     // honest result; reaching attachment also proves no stale sidecar survived.
-    assert!(matches!(
-        probe
-            .send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT)
-            .await
-            .expect("retry after converged mismatch cleanup"),
-        BridgeReply::MemberMaterialized(_)
-    ));
+    let retry = probe
+        .send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT)
+        .await
+        .expect("retry after converged mismatch cleanup");
+    assert!(
+        matches!(retry, BridgeReply::MemberMaterialized(_)),
+        "retry after converged mismatch cleanup must materialize, got {retry:?}"
+    );
 
     fixture.shutdown().await;
 }

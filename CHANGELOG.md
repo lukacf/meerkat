@@ -447,6 +447,39 @@ them.
 
 ### Testing
 
+- Five tests that failed only under heavy host load (hooked pushes at load
+  30-236) now wait on the owned work they observe instead of a timer that
+  also covered cleanup (#1730):
+  - The `stock_persistent` whole-blob reopen pair and the separate-process
+    reopen test (and the revalidation test's identical outer cleanup)
+    treated the plain `unregister_session` as terminal teardown. Its 2 s
+    caller grace answers a saga still running with `UnregisterInProgress`.
+    The fixtures now join the owned saga with
+    `unregister_current_session_registration_until_terminal`, inside their
+    unchanged outer bounds.
+  - `fork_relink`'s `relink_rearms_max_run_from_the_original_start` bounded
+    the whole re-link by 5 s, including the 2 s member retire grace that
+    retiring the still-held child waits out (about 2.9 s of the run on an
+    idle host). It now observes the limit's decision as the job's
+    `max_run_elapsed` record landing in the forker's transcript, concurrently
+    with the re-link and within the existing 30 s record wait, and the job
+    starts five minutes earlier, so a limit measured from the re-link would
+    decide five minutes late. The re-link's retirement has only a hang guard.
+  - `test_member_status_read_past_deadline_holds_capacity_and_is_not_duplicated`
+    pauses tokio time. Its autonomous member ran a kickoff turn on the
+    runtime loops' threads, so the paused clock could jump past the test's
+    3 s bound while the test runtime waited on that work. The member is now
+    turn-driven, as in the stalled-read test.
+
+  `host_materialize_serving`'s identity-mismatch test now checks its first
+  rejection exactly and prints the retry's reply. An unproven rollback
+  reports `UnrecordedSessionCleanup`, which embeds the mismatch text and
+  fail-stops the host, so the old containment check passed it and the
+  retry failed with no detail. With four copies on two pinned cores, each
+  changed integration test passes 80 of 80; the member-status test failed 7
+  of 60 with ten copies on two cores before the change and passes 200 of
+  200 after.
+
 - The fork_off build-parity e2e test selects the forker's tool-round request
   by the position of `call_fork`'s output instead of the last user text
   (#1798). The child's background completion notice can be that request's

@@ -719,9 +719,12 @@ async fn exercise_stock_persistent(
     let old_machine = Arc::downgrade(&machine);
 
     // Close the actual original owners, not just another database facade.
-    // The outer cleanup slot remains available until teardown succeeds.
+    // The outer cleanup slot remains available until teardown succeeds. Join
+    // the owned saga until terminal: the plain unregister's bounded caller
+    // grace answers a saga still running under load with typed
+    // `UnregisterInProgress`, which is not a failed teardown.
     machine
-        .unregister_session(&session_id)
+        .unregister_current_session_registration_until_terminal(&session_id)
         .await
         .expect("original persistent worker reaches terminal teardown");
     service
@@ -1132,7 +1135,7 @@ async fn exercise_stock_persistent(
     // Observe the no-replay effect oracle after the recovered worker drains.
     // A delayed replay cannot pass by racing the reconstruction assertions.
     machine
-        .unregister_session(&session_id)
+        .unregister_current_session_registration_until_terminal(&session_id)
         .await
         .expect("reconstructed worker reaches terminal teardown");
     service
@@ -1237,11 +1240,14 @@ async fn run_stock_persistent_case_with_host(
     .await;
     server.receiver.finish.notify_one();
     let retained = cleanup.lock().unwrap().take();
+    // The bound guards a hung teardown; the saga itself is joined until
+    // terminal rather than answered `UnregisterInProgress` after the plain
+    // unregister's caller grace.
     let cleanup_result = if let Some((machine, session)) = retained {
         Some(
             tokio::time::timeout(
                 Duration::from_secs(10),
-                machine.unregister_session(&session),
+                machine.unregister_current_session_registration_until_terminal(&session),
             )
             .await,
         )

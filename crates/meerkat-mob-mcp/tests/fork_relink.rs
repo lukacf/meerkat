@@ -548,8 +548,10 @@ async fn relink_rearms_max_run_from_the_original_start() {
     gate.wait_entered(1).await;
     end_old_process_supervisor(run).await;
 
-    // The durable record as a restarted host reads it, with a limit that
-    // ends 800 ms from now when measured from the original start.
+    // The durable record as a restarted host reads it. Its original start is
+    // five minutes back, and its limit ends 800 ms from now when measured from
+    // that start; measured from the re-link instead, the same limit would end
+    // five minutes later.
     let mut job = handle
         .roster()
         .await
@@ -560,32 +562,48 @@ async fn relink_rearms_max_run_from_the_original_start() {
         job.prefix_message_count > 0,
         "the fork prefix length is recorded"
     );
-    let now_ms = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    job.max_run_ms = Some(now_ms.saturating_sub(job.started_at_ms) + 800);
+    job.started_at_ms = job.started_at_ms.saturating_sub(300_000);
+    job.max_run_ms = Some(now_ms().saturating_sub(job.started_at_ms) + 800);
+    let deadline_ms = job.started_at_ms + job.max_run_ms.unwrap();
 
-    let rearmed_at = tokio::time::Instant::now();
-    let action = meerkat_mob_mcp::fork_relink::relink_child(
-        fixture.state.session_service(),
-        &relink_delivery(&fixture),
-        &fixture.source_mob_id(),
-        &handle,
-        &child,
-        &job,
-    )
-    .await;
+    // The limit's decision is observed as the job's completion record landing
+    // in the forker's transcript, concurrently with the re-link: delivery
+    // follows the decision, while the re-link goes on to retire the child,
+    // which waits out the member retire grace. That retirement is cleanup,
+    // bounded only by its own hang guard. The record must land within
+    // `await_completion_record`'s 30 s, far inside the five minutes a limit
+    // reset at the re-link would add.
+    let relink = async {
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            meerkat_mob_mcp::fork_relink::relink_child(
+                fixture.state.session_service(),
+                &relink_delivery(&fixture),
+                &fixture.source_mob_id(),
+                &handle,
+                &child,
+                &job,
+            ),
+        )
+        .await
+        .expect("the re-link's retirement settles; the bound is a hang guard only")
+    };
+    let recorded = async {
+        await_completion_record(&fixture, &owner, &job_id).await;
+        now_ms()
+    };
+    let (action, recorded_ms) = tokio::join!(relink, recorded);
     assert_eq!(action, ForkRelinkAction::Delivered);
-    let fired_after = rearmed_at.elapsed();
+    // The record cannot land before the limit decides, and the limit decides
+    // only once its deadline has passed: a record seen earlier means the
+    // limit decided early.
     assert!(
-        fired_after >= Duration::from_millis(500) && fired_after < Duration::from_secs(5),
-        "the limit fired {fired_after:?} after the re-link; it counts from the original start"
+        recorded_ms >= deadline_ms,
+        "the limit's record landed {} ms before its deadline",
+        deadline_ms - recorded_ms
     );
-    await_completion_record(&fixture, &owner, &job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, &job_id).await;
+    assert_eq!(outcome["status"], "max_run_elapsed", "{outcome}");
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
     let persisted = <meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
         fixture.service.as_ref(),

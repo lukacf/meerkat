@@ -115,6 +115,10 @@ impl DetachedJobStore for ContendedStore {
     fn is_persistent(&self) -> bool {
         false
     }
+
+    fn outbox_commit_signal(&self) -> meerkat_jobs::JobOutboxCommitSignal {
+        self.inner.outbox_commit_signal()
+    }
 }
 
 #[tokio::test]

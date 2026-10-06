@@ -33,8 +33,8 @@ pub use service::DetachedJobService;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite_store::{JOBS_DOMAIN, SqliteDetachedJobStore};
 pub use store::{
-    DetachedJobStore, InsertJobOutcome, MemoryDetachedJobStore, MemoryDetachedJobStoreSnapshot,
-    PredicateDeliveryCommitOutcome, StoredJob,
+    DetachedJobStore, InsertJobOutcome, JobOutboxCommitSignal, MemoryDetachedJobStore,
+    MemoryDetachedJobStoreSnapshot, PredicateDeliveryCommitOutcome, StoredJob,
 };
 pub use types::{
     AttemptClaim, AttemptClaimReceipt, AttemptId, AttemptWriteAuthority, CanonicalArgumentsHash,
@@ -43,8 +43,9 @@ pub use types::{
     JobHealthSnapshot, JobId, JobNotification, JobNotificationReceipt, JobOutboxEntry,
     JobOutboxPayload, JobPhase, JobProgress, JobProgressKind, JobReceipt, JobReference,
     JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey, JobSubscription, JobSubscriptionId,
-    JobTerminalKind, JobTerminalResult, NotificationId, NotificationIdempotencyKey, OriginMemberId,
-    PredicateDeliveryCommit, PredicateDeliveryIdempotencyKey, PredicateDeliveryIdentity,
+    JobTerminalApplication, JobTerminalKind, JobTerminalResult, NotificationId,
+    NotificationIdempotencyKey, OriginMemberId, PredicateDeliveryCommit,
+    PredicateDeliveryIdempotencyKey, PredicateDeliveryIdentity,
     PredicateDeliveryNotificationReceipt, PredicateDeliveryOutcome, PredicateDeliveryReceipt,
     PredicateEvaluationReceipt, RestartClass, RunnerHandleRef, RunnerIdentity,
     RunnerSpecificationRef, ToolIdentity, WorkerId,

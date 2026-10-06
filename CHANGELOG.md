@@ -65,6 +65,34 @@ them.
 
   The JSON of MCP cancel requests and results is unchanged.
 
+- Durable job delivery through the library owner (#1497; see Added and
+  Fixed) changes these Rust types:
+  - `DetachedJobStore` gains the required `outbox_commit_signal()`; a store
+    returns the `JobOutboxCommitSignal` it owns and a wrapping store returns
+    its inner store's.
+  - `SqliteDetachedJobStore` (which now owns its `JobOutboxCommitSignal`) is
+    no longer `UnwindSafe` or `RefUnwindSafe`.
+  - `JobSpec` gains `terminal_application: JobTerminalApplication`
+    (`JobSpec::new` sets `Subscribers`). It is fixed at admission: a replay
+    under the same submission key returns the original job with its original
+    value, and no compare-and-swap can rewrite it.
+  - `PreparedJobDelivery` gains `producer_applied`.
+  - `SystemMessageAppendError` gains `CallbackBatchPending` and
+    `CallbackBatchUnreadable`.
+  - meerkat-rpc removes `SessionRuntime::arm_job_delivery_driver`,
+    `SessionRuntime::drain_job_deliveries` and `JobDeliveryDrainSummary`;
+    `SessionRuntime::arm_runtime_delivery_owner` and
+    `SessionRuntime::subscribe_job_delivery_passes` replace them.
+  - Behaviour-only: an `Event` job subscription delivery now wakes an idle
+    origin session instead of waiting queued for an unrelated turn, and the
+    CLI, REST and MCP server now apply job deliveries.
+  - Behaviour-only: a host `append_system_context` while the session's
+    callback tool batch awaits its results is now refused as a retryable
+    `SessionError::Busy` (RPC `SESSION_BUSY`) instead of being appended.
+    Retry it after the callback results are staged and the run resumes. The
+    live session agent reports it as the new
+    `AgentError::ControlAppendBlockedByCallbackBatch`.
+
 - `meerkat_contracts::WireBackendProfile` gains the pub field
   `prompt_cache_applicable: Option<bool>` (#1781; see Added). Code that
   builds a `WireBackendProfile` with a struct literal must set it; the wire
@@ -97,6 +125,29 @@ them.
 
 
 ### Added
+
+- Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
+  runtime delivery inbox's exclusive delivery ownership
+  (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is
+  `RuntimeDeliveryOwnerAlreadyArmed`), runs one reconcile pass over the
+  pending job outbox and every runtime with backlog, then projects and
+  applies only on typed wakes:
+  - a job outbox commit (`JobOutboxCommitSignal`, recorded by
+    `DetachedJobService` for every commit carrying `TerminalCommitted` or
+    `NotificationCommitted`);
+  - a runtime delivery commit, draining exactly the committed runtimes;
+  - an attachment commit or a run settlement
+    (`MeerkatMachine::subscribe_attachment_commits`,
+    `subscribe_run_settlements`), retrying sessions that refused a delivery.
+
+  There is no polling driver and no retry timer: a row whose application
+  fails stays pending until a wake names its session or the owner is armed
+  again. Hosts apply deliveries through a `RuntimeDeliveryHost`; every pass is
+  observable as a `RuntimeDeliveryPass`. `PersistenceBundle::runtime_delivery_owner`
+  wires a bundle, and the hosted composition
+  (`build_runtime_backed_service_with_default_reconfigure_host`) arms it with
+  `SessionServiceDeliveryHost` for every surface built through it. Mob realm
+  rows drain on the same owner.
 
 - Hosts can see whether Meerkat's OpenAI prompt-cache fields apply on a
   backend: `WireBackendProfile.prompt_cache_applicable` (in a realm's
@@ -201,6 +252,25 @@ them.
 
 ### Fixed
 
+- Durable job deliveries now reach sessions on every surface (#1497). Only
+  RPC applied runtime inbox rows, on a 1 s timer backing off to 60 s, so on
+  the CLI, REST and MCP server subscription notifications, events and
+  job-await closures never arrived. RPC's timer driver is replaced by the
+  library delivery owner, and the other surfaces arm the same owner.
+- A job `Event` delivery wakes an idle origin session (#1497). It was
+  admitted without a wake, so it waited queued until some unrelated turn.
+- A detached shell job no longer gets a duplicate "reached terminal state"
+  System message (#1497). The shell applies its own terminal and then
+  acknowledged the delivery row, which a delivery owner could apply first.
+  Jobs whose producer applies the terminal (`JobTerminalApplication::Producer`)
+  now commit that row already acknowledged in one inbox compare-and-swap
+  (`RuntimeDeliveryInbox::submit_acknowledged`).
+- An ordinary System-message append (a host `append_system_context` or a job
+  notification) while a callback tool batch awaits its results no longer
+  wedges the session (#1497). It was pushed after the assistant tool-use tail,
+  so the batch could never resolve; it is now refused as a retryable busy
+  (`Session::append_system_message_control_idempotent`) without touching the
+  transcript.
 - A host's console observation path no longer overflows a 2 MiB debug worker
   stack. `MobMcpState::mob_handles_snapshot` and every mob verb that calls
   `ensure_restored` built the persistent-restore future inline, and the

@@ -6502,6 +6502,7 @@ impl MeerkatMachine {
                 }
                 wake_tx
             };
+            self.record_attachment_commit();
             if should_wake {
                 let _ = wake_tx.try_send(());
             }
@@ -6674,10 +6675,26 @@ impl MeerkatMachine {
             }
             wake_tx
         };
+        self.record_attachment_commit();
         if should_wake {
             let _ = wake_tx.try_send(());
         }
         Ok(witness.clone())
+    }
+
+    /// Observe runtime attachments becoming serving.
+    ///
+    /// The generation advances once each time an executor attachment is
+    /// committed as serving, after the session entry publishes it, so a
+    /// session whose earlier delivery failed because it was not attached can
+    /// be retried on a typed signal instead of a timer. In-process only.
+    pub fn subscribe_attachment_commits(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.attachment_commits.subscribe()
+    }
+
+    fn record_attachment_commit(&self) {
+        self.attachment_commits
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     pub(super) async fn abort_pending_executor_attachment(

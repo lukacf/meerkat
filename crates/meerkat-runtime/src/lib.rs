@@ -535,7 +535,8 @@ pub use completion::{
 };
 pub use delivery_inbox::{
     RuntimeDeliveryAcknowledgement, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
-    RuntimeDeliveryKind, RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
+    RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership,
+    RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use exact_operation::{

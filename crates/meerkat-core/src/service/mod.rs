@@ -514,6 +514,13 @@ impl SystemMessageAppendError {
                 id: id.clone(),
                 key,
             },
+            // Retryable once the callback batch resolves.
+            Self::CallbackBatchPending => {
+                SessionControlError::Session(SessionError::Busy { id: id.clone() })
+            }
+            error @ Self::CallbackBatchUnreadable(_) => SessionControlError::Session(
+                SessionError::Agent(crate::error::AgentError::InternalError(error.to_string())),
+            ),
         }
     }
 }

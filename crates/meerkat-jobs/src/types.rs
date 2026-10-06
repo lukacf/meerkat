@@ -311,6 +311,19 @@ pub type RestartClass = dsl::DetachedJobRestartClass;
 pub type JobPhase = dsl::DetachedJobPhase;
 pub type JobTerminalKind = dsl::DetachedJobTerminalKind;
 
+/// Who applies a job's terminal outcome to the runtime that awaits it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTerminalApplication {
+    /// The delivery owner applies the terminal row to every subscription.
+    #[default]
+    Subscribers,
+    /// The in-process producer applies the terminal itself and re-derives it
+    /// from the job store after a crash. Its runtime delivery row is committed
+    /// already acknowledged, so no delivery sink ever runs for it.
+    Producer,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSpec {
     pub realm_id: String,
@@ -325,6 +338,7 @@ pub struct JobSpec {
     pub canonical_arguments_hash: CanonicalArgumentsHash,
     pub credential_context_refs: Vec<ToolCredentialContextRef>,
     pub submission_key: JobSubmissionKey,
+    pub terminal_application: JobTerminalApplication,
 }
 
 impl JobSpec {
@@ -353,7 +367,16 @@ impl JobSpec {
             canonical_arguments_hash,
             credential_context_refs: Vec::new(),
             submission_key,
+            terminal_application: JobTerminalApplication::Subscribers,
         }
+    }
+
+    pub fn with_terminal_application(
+        mut self,
+        terminal_application: JobTerminalApplication,
+    ) -> Self {
+        self.terminal_application = terminal_application;
+        self
     }
 
     pub fn with_origin_member_id(mut self, origin_member_id: OriginMemberId) -> Self {
@@ -389,6 +412,18 @@ impl JobSpec {
             && self.restart_class == other.restart_class
             && self.canonical_arguments_hash == other.canonical_arguments_hash
             && self.credential_context_refs == other.credential_context_refs
+    }
+
+    /// [`Self::equivalent_submission`] plus the admission-time facts that are
+    /// not part of replay identity but never change after submit.
+    ///
+    /// `terminal_application` is one: a replay under the same submission key
+    /// returns the original job with the value it was admitted with (a job
+    /// committed before the field existed reads as `Subscribers`, and a newer
+    /// producer replaying it must still find it), while no compare-and-swap
+    /// may rewrite it.
+    pub(crate) fn same_admission(&self, other: &Self) -> bool {
+        self.equivalent_submission(other) && self.terminal_application == other.terminal_application
     }
 }
 

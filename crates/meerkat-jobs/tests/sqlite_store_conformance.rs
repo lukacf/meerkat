@@ -656,3 +656,92 @@ async fn a_stale_census_live_column_fails_closed_on_read() {
         "the refusal must name the disagreement: {error}"
     );
 }
+
+/// Who applies a job's terminal survives reopen. It is admission data, not
+/// replay identity: a replay under the same submission key with another value
+/// (a newer producer replaying a job committed before the field existed)
+/// returns the original job, which keeps the value it was admitted with.
+#[tokio::test]
+async fn sqlite_reopen_preserves_terminal_application() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.sqlite3");
+    let admitted = spec("terminal-application", RestartClass::Adoptable);
+    let job_id = {
+        let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("open"));
+        DetachedJobService::new(store)
+            .submit(admitted.clone())
+            .await
+            .expect("submit")
+            .job_id
+    };
+    let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("reopen"));
+    assert_eq!(
+        store
+            .get(&job_id)
+            .await
+            .expect("read")
+            .expect("job survives reopen")
+            .spec
+            .terminal_application,
+        meerkat_jobs::JobTerminalApplication::Subscribers
+    );
+
+    let replay = DetachedJobService::new(store.clone())
+        .submit(admitted.with_terminal_application(meerkat_jobs::JobTerminalApplication::Producer))
+        .await
+        .expect("a replay with another terminal application is still a replay");
+    assert!(replay.deduplicated);
+    assert_eq!(replay.job_id, job_id);
+    assert_eq!(
+        store
+            .get(&job_id)
+            .await
+            .expect("reread")
+            .expect("job")
+            .spec
+            .terminal_application,
+        meerkat_jobs::JobTerminalApplication::Subscribers,
+        "the original admission stands"
+    );
+}
+
+/// `terminal_application` is admission data: no compare-and-swap, in either
+/// store, may rewrite it after submit.
+#[tokio::test]
+async fn compare_and_swap_cannot_rewrite_terminal_application() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let stores: Vec<Arc<dyn DetachedJobStore>> = vec![
+        Arc::new(MemoryDetachedJobStore::new()),
+        Arc::new(SqliteDetachedJobStore::open(temp.path().join("jobs.sqlite3")).expect("open")),
+    ];
+    for store in stores {
+        let job_id = DetachedJobService::new(store.clone())
+            .submit(
+                spec("immutable-terminal-application", RestartClass::Adoptable)
+                    .with_terminal_application(meerkat_jobs::JobTerminalApplication::Producer),
+            )
+            .await
+            .expect("submit")
+            .job_id;
+        let mut rewritten = store.get(&job_id).await.expect("read").expect("job");
+        rewritten.spec.terminal_application = meerkat_jobs::JobTerminalApplication::Subscribers;
+        let expected_revision = rewritten.revision;
+        assert!(
+            store
+                .compare_and_swap(expected_revision, rewritten)
+                .await
+                .is_err(),
+            "a compare-and-swap cannot change who applies the terminal"
+        );
+        assert_eq!(
+            store
+                .get(&job_id)
+                .await
+                .expect("reread")
+                .expect("job")
+                .spec
+                .terminal_application,
+            meerkat_jobs::JobTerminalApplication::Producer
+        );
+    }
+}

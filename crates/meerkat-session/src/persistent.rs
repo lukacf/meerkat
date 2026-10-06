@@ -14718,16 +14718,20 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         };
         self.reject_if_archived_session(id, &session).await?;
         let status = session
-            .append_system_message_idempotent(
+            .append_system_message_control_idempotent(
                 req.content.render_text(),
                 req.source,
                 req.idempotency_key,
                 meerkat_core::types::message_timestamp_now(),
             )
-            .map_err(|error| {
-                SessionControlError::Session(SessionError::Agent(AgentError::ConfigError(
-                    error.to_string(),
-                )))
+            .map_err(|error| match error {
+                // Retryable once the callback batch resolves.
+                meerkat_core::session::SystemMessageAppendError::CallbackBatchPending => {
+                    SessionControlError::Session(SessionError::Busy { id: id.clone() })
+                }
+                other => SessionControlError::Session(SessionError::Agent(
+                    AgentError::ConfigError(other.to_string()),
+                )),
             })?;
         if status == meerkat_core::service::AppendSystemContextStatus::Duplicate {
             return Ok(AppendSystemContextResult { status });

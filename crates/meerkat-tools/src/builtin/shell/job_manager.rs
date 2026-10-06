@@ -24,8 +24,9 @@ use meerkat_jobs::{
     AttemptClaim, AttemptWriteAuthority, CanonicalArgumentsHash, DetachedJobError,
     DetachedJobService, DetachedJobStore, ExecutionIntentId, InteractionLineageId, JobFailureCode,
     JobHealthCondition, JobNotification, JobPhase, JobProgress, JobResultRef, JobSpec,
-    JobSubmissionKey, JobSubscription, JobSubscriptionId, JobTerminalResult, RestartClass,
-    RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef, ToolIdentity, WorkerId,
+    JobSubmissionKey, JobSubscription, JobSubscriptionId, JobTerminalApplication,
+    JobTerminalResult, RestartClass, RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef,
+    ToolIdentity, WorkerId,
 };
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 use serde::{Deserialize, Serialize};
@@ -783,7 +784,10 @@ impl JobManager {
             canonical_arguments_hash,
             submission_key,
         )
-        .with_runner_specification_ref(spec_ref);
+        .with_runner_specification_ref(spec_ref)
+        // The shell projects the terminal into its own completion feed and
+        // re-derives it from the job store on recovery.
+        .with_terminal_application(JobTerminalApplication::Producer);
         let service = durable.service();
         let receipt = service.submit(spec).await.map_err(shell_job_error)?;
         let public_job_id = JobId::from_string(receipt.job_id.as_str());
@@ -3397,6 +3401,10 @@ mod durable_tests {
 
         fn is_persistent(&self) -> bool {
             true
+        }
+
+        fn outbox_commit_signal(&self) -> meerkat_jobs::JobOutboxCommitSignal {
+            self.inner.outbox_commit_signal()
         }
     }
 

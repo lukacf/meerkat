@@ -291,7 +291,17 @@ async fn member_creation_stale_origin_is_refused_on_owned_target_checks() {
 #[tokio::test]
 async fn member_creation_some_origin_authority_matrix() {
     let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
-    let (other_mob, _other_service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    // The test mob id is thread-local, so the second mob needs its own
+    // explicit id to be a genuinely different mob (and to hold its own
+    // supervisor route).
+    let mut other_definition = sample_definition_with_mob_tools();
+    other_definition.id = MobId::from(format!("other-mob-{}", uuid::Uuid::new_v4().simple()));
+    let (other_mob, _other_service) = create_test_mob(other_definition).await;
+    assert_ne!(
+        handle.mob_id(),
+        other_mob.mob_id(),
+        "the wrong-mob origin comes from a different mob"
+    );
     let spawn = |identity: &'static str| {
         let handle = handle.clone();
         async move {

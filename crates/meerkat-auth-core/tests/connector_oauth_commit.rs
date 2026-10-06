@@ -93,6 +93,23 @@ async fn connector_commit_refuses_unbound_tokens_then_consumes_and_publishes_exa
     let mut token = tokens();
     token.auth_mode = meerkat_core::auth::token_store::PersistedAuthMode::McpOauth;
     token.scopes = vec!["service.read".into()];
+    token.account_id = Some("verified-account".into());
+    // An MCP credential must carry the account binding of its descriptor.
+    assert!(
+        save_oauth_tokens_and_consume_browser_flow(
+            persistence.clone(),
+            auth_lease.clone(),
+            target.clone(),
+            token.clone(),
+            flow.clone()
+        )
+        .await
+        .is_err()
+    );
+    token.metadata = serde_json::json!({
+        "account_binding":
+            meerkat_auth_core::connector_oauth::McpCredentialBinding::for_descriptor(&descriptor),
+    });
     token.account_id = Some("wrong-account".into());
     assert!(
         save_oauth_tokens_and_consume_browser_flow(

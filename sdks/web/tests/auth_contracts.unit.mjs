@@ -388,6 +388,7 @@ test('MCP attempt status, cancel by reference and logout keep their shapes', asy
     {
       mcp,
       phase: 'authorization_required',
+      account_verification: 'verified',
       attempt: { ref: 'oauth-action:00ff', phase: 'pending', expires_at: '2026-10-06T18:00:00Z' },
     },
     { mcp, cancelled: true },
@@ -416,8 +417,42 @@ test('MCP attempt status, cancel by reference and logout keep their shapes', asy
   );
   const malformed = new Auth({
     async request() {
-      return { mcp, phase: 'authorization_required', attempt: { ref: 'r', phase: 'done', expires_at: 'x' } };
+      return {
+        mcp,
+        phase: 'authorization_required',
+        account_verification: 'verified',
+        attempt: { ref: 'r', phase: 'done', expires_at: 'x' },
+      };
     },
   });
   await assert.rejects(() => malformed.mcpStatus(mcp), /attempt\.phase/);
+});
+
+test('MCP account selection and verification are typed and never imply an account', async () => {
+  const mcp = {
+    server_name: 'glean',
+    server_url: 'https://glean.example/mcp',
+    oauth_account_selection: 'unverified',
+  };
+  const reply = (status) => new Auth({ async request() { return status; } });
+  const status = await reply({ mcp, phase: 'authorized', account_verification: 'unverified' }).mcpStatus(mcp);
+  assert.equal(status.account_verification, 'unverified');
+  assert.equal(status.account_id, undefined);
+  await assert.rejects(
+    () => reply({ mcp, phase: 'authorized' }).mcpStatus(mcp),
+    /account_verification/,
+  );
+  await assert.rejects(
+    () => reply({ mcp, phase: 'authorized', account_verification: 'maybe' }).mcpStatus(mcp),
+    /account_verification/,
+  );
+  await assert.rejects(
+    () =>
+      reply({
+        mcp: { ...mcp, oauth_account_selection: 'none' },
+        phase: 'authorized',
+        account_verification: 'unverified',
+      }).mcpStatus(mcp),
+    /oauth_account_selection/,
+  );
 });

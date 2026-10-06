@@ -411,6 +411,7 @@ mod mcp_login_target {
                     server_name: "glean".into(),
                     server_url: "https://glean.example/mcp".into(),
                     oauth_account: None,
+                    oauth_account_selection: None,
                 },
                 disposition: meerkat_contracts::WireMcpLoginDisposition::Joined,
             }),
@@ -430,8 +431,10 @@ mod mcp_login_target {
                     server_name: "glean".into(),
                     server_url: "https://glean.example/mcp".into(),
                     oauth_account: Some("subject-7".into()),
+                    oauth_account_selection: None,
                 },
                 account_id: Some("subject-7".into()),
+                account_verification: meerkat_contracts::WireMcpAccountVerification::Verified,
             }),
             expires_at: None,
             has_refresh_token: true,
@@ -642,14 +645,69 @@ mod mcp_login_target {
     }
 
     #[test]
+    fn mcp_account_selection_and_verification_wire_forms() {
+        let target: WireMcpAuthTarget = serde_json::from_value(json!({
+            "server_name": "s",
+            "server_url": "https://s.example/mcp",
+            "oauth_account_selection": "unverified",
+        }))
+        .unwrap();
+        assert_eq!(
+            target.oauth_account_selection,
+            Some(meerkat_contracts::WireMcpAccountSelection::Unverified)
+        );
+        assert!(
+            serde_json::from_value::<WireMcpAuthTarget>(json!({
+                "server_name": "s",
+                "server_url": "https://s.example/mcp",
+                "oauth_account_selection": "none",
+            }))
+            .is_err(),
+            "only discover and unverified are selections"
+        );
+        for (verification, wire) in [
+            (
+                meerkat_contracts::WireMcpAccountVerification::Verified,
+                "verified",
+            ),
+            (
+                meerkat_contracts::WireMcpAccountVerification::Unverified,
+                "unverified",
+            ),
+            (
+                meerkat_contracts::WireMcpAccountVerification::Legacy,
+                "legacy",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(verification).unwrap(), json!(wire));
+        }
+        let ready = WireLoginReady {
+            state: None,
+            target: WireLoginReadyTarget::Mcp(WireMcpLoginReady {
+                mcp: target,
+                account_id: None,
+                account_verification: meerkat_contracts::WireMcpAccountVerification::Unverified,
+            }),
+            expires_at: None,
+            has_refresh_token: false,
+            scopes: Vec::new(),
+        };
+        let value = serde_json::to_value(&ready).unwrap();
+        assert_eq!(value["account_verification"], "unverified");
+        assert!(value.get("account_id").is_none());
+    }
+
+    #[test]
     fn mcp_status_reports_a_pending_attempt_by_reference_only() {
         let status = meerkat_contracts::WireMcpAuthStatus {
             mcp: WireMcpAuthTarget {
                 server_name: "glean".into(),
                 server_url: "https://glean.example/mcp".into(),
                 oauth_account: Some("subject-7".into()),
+                oauth_account_selection: None,
             },
             phase: meerkat_contracts::WireMcpAuthPhase::AuthorizationRequired,
+            account_verification: meerkat_contracts::WireMcpAccountVerification::Verified,
             expires_at: None,
             account_id: None,
             attempt: Some(meerkat_contracts::WireMcpAuthAttempt {
@@ -722,6 +780,7 @@ mod mcp_login_target {
                     server_name: "glean".into(),
                     server_url: "https://glean.example/mcp".into(),
                     oauth_account: None,
+                    oauth_account_selection: None,
                 },
                 cleared: true,
             });

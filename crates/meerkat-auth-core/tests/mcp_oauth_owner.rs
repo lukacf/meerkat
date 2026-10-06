@@ -636,7 +636,13 @@ async fn authorize(
     State(state): State<Arc<TestState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let redirect_uri = state.redirect_uri.lock().clone().unwrap();
+    // The authorize request names its loopback redirect; a reconnect reuses
+    // the registered client with a new loopback port (RFC 8252 section 7.3).
+    let redirect_uri = params
+        .get("redirect_uri")
+        .cloned()
+        .or_else(|| state.redirect_uri.lock().clone())
+        .unwrap();
     let state_param = params.get("state").unwrap();
     match *state.authorize_outcome.lock() {
         AuthorizeOutcome::Success => Redirect::temporary(&format!(
@@ -2193,6 +2199,9 @@ async fn actual_mcp_exchange_refuses_crossed_account_and_scope_downgrade_and_ret
                     client: "client-123",
                     resource: target.server_url(),
                     redirect_uri: &redirect,
+                    account: &meerkat_auth_core::connector_oauth::AccountSelection::Known(
+                        "fixture-account-42".into(),
+                    ),
                 },
             )
             .unwrap();
@@ -2330,7 +2339,8 @@ fn selected_account_partitions_token_and_lifecycle_identity_without_debug_disclo
     let diagnostic = format!("{a:?} {a:#?} {:?}", a.token_key().unwrap());
     assert!(!diagnostic.contains("subject-a-private"));
     assert!(!diagnostic.contains("subject-b-private"));
-    assert!(diagnostic.contains("account_selected"));
+    assert!(diagnostic.contains("account_selection"));
+    assert!(diagnostic.contains("known"));
 }
 
 #[test]
@@ -4109,4 +4119,770 @@ async fn logout_clears_the_credential_and_releases_its_lifecycle() {
         .await
         .unwrap();
     assert_eq!(next.disposition, McpOAuthLoginDisposition::Started);
+}
+
+// ---------------------------------------------------------------------------
+// Account selection modes: Known, Discover and the explicitly unverified
+// resource-bound grant (host configuration only).
+// ---------------------------------------------------------------------------
+
+use meerkat_auth_core::connector_oauth::AccountVerification;
+use meerkat_core::mcp_config::McpOAuthAccountSelection;
+
+/// Fixture provider evidence that honours the attempt's account selection:
+/// `Discover` binds whatever subject it observes, `Known` must match it.
+struct SelectionStrategy {
+    subject: Mutex<String>,
+    unavailable: AtomicBool,
+    strategy_id: &'static str,
+    preflights: std::sync::atomic::AtomicUsize,
+    observations: std::sync::atomic::AtomicUsize,
+}
+
+impl SelectionStrategy {
+    fn new(subject: &str) -> Arc<Self> {
+        Self::with_id(subject, "test-selection-evidence")
+    }
+
+    fn with_id(subject: &str, strategy_id: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            subject: Mutex::new(subject.to_owned()),
+            unavailable: AtomicBool::new(false),
+            strategy_id,
+            preflights: std::sync::atomic::AtomicUsize::new(0),
+            observations: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl McpOAuthAccountStrategy for SelectionStrategy {
+    fn descriptor(
+        &self,
+        _target: &McpServerIdentity,
+        context: &McpOAuthCeremonyContext<'_>,
+    ) -> Result<ConnectorOAuthDescriptor, ConnectorOAuthRefusal> {
+        meerkat_auth_core::connector_oauth::ConnectorOAuthParameters {
+            issuer: context.issuer.to_owned(),
+            client: context.client.to_owned(),
+            resource: context.resource.to_owned(),
+            redirect_uri: context.redirect_uri.to_owned(),
+            scopes: ["mcp.read".to_owned()].into(),
+            expected_account: context.account.clone(),
+            strategy_id: self.strategy_id.into(),
+        }
+        .try_into()
+    }
+
+    async fn observe_account(
+        &self,
+        _descriptor: &ConnectorOAuthDescriptor,
+        tokens: &OAuthTokenResult,
+    ) -> Result<ConnectorAccountObservation, ConnectorOAuthRefusal> {
+        self.observations.fetch_add(1, Ordering::SeqCst);
+        if self.unavailable.load(Ordering::SeqCst) || tokens.access_token != "access-token" {
+            return Err(ConnectorOAuthRefusal::VerificationUnavailable);
+        }
+        Ok(ConnectorAccountObservation {
+            account: self.subject.lock().clone(),
+            granted_scopes: ["mcp.read".to_owned()].into(),
+        })
+    }
+
+    async fn preflight(&self, _issuer: &str) -> Result<(), ConnectorOAuthRefusal> {
+        self.preflights.fetch_add(1, Ordering::SeqCst);
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(ConnectorOAuthRefusal::VerificationUnavailable);
+        }
+        Ok(())
+    }
+}
+
+impl FixtureAuthority {
+    fn with_strategy(
+        token_store: Arc<EphemeralTokenStore>,
+        browser: Arc<dyn TestBrowser>,
+        owner: TestAuthAuthority,
+        strategy: Arc<dyn McpOAuthAccountStrategy>,
+    ) -> Self {
+        let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
+            MCP_INTERACTIVE_LOGIN_TIMEOUT,
+            owner.lifecycle,
+        ));
+        let native = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(token_store, Arc::new(InMemoryCoordinator::new())),
+            Client::new(),
+            owner.generated.clone(),
+        )
+        .with_interactive_strategy(flows.clone(), strategy)
+        .expect("fixture uses the actual matched runtime flow owner");
+        Self {
+            native,
+            auth_lease: owner.generated,
+            flows,
+            browser,
+        }
+    }
+
+    /// The authority over the same owners with another account strategy
+    /// (for example a host that installed a different one).
+    fn with_other_strategy(&self, strategy: Arc<dyn McpOAuthAccountStrategy>) -> McpOAuthAuthority {
+        self.native
+            .stored_only()
+            .with_interactive_strategy(self.flows.clone(), strategy)
+            .unwrap()
+    }
+}
+
+/// Admit an attempt and drive the browser to its callback, without
+/// completing it: the host still holds the callback.
+async fn admit_and_authorize(
+    authority: &McpOAuthAuthority,
+    browser: &dyn TestBrowser,
+    target: &McpServerIdentity,
+) -> Result<(McpOAuthLoginStart, McpOAuthCallback), McpOAuthError> {
+    let binding = meerkat_auth_core::auth_oauth::bind_loopback_callback(MCP_OAUTH_CALLBACK_PATH)
+        .await
+        .unwrap();
+    let start = match authority
+        .login_start(target, &binding.redirect_url, None)
+        .await
+    {
+        Ok(start) => start,
+        Err(error) => {
+            let _ = binding.cancel().await;
+            return Err(error);
+        }
+    };
+    let callback = binding.expect_state(start.state.clone());
+    browser.open(&start.authorize_url).await?;
+    let outcome = callback.wait(Duration::from_secs(10)).await.unwrap();
+    let callback = McpOAuthCallback {
+        redirect_uri: start.redirect_uri.clone(),
+        state: outcome.state,
+        code: outcome.code,
+    };
+    Ok((start, callback))
+}
+
+fn mode_target(base: &str, selection: McpOAuthAccountSelection) -> McpServerIdentity {
+    McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_account_selection(selection)
+}
+
+fn userinfo_or_openid_requests(state: &TestState) -> usize {
+    state
+        .request_paths
+        .lock()
+        .iter()
+        .filter(|path| path.contains("openid-configuration") || path.contains("userinfo"))
+        .count()
+}
+
+#[test]
+fn every_selection_mode_has_its_own_slot_and_only_config_selects_it() {
+    let base = McpServerIdentity::from_server_config("glean", "https://glean.example/mcp");
+    let known = base.clone().with_expected_account("subject-7").unwrap();
+    let discover = base
+        .clone()
+        .with_account_selection(McpOAuthAccountSelection::Discover);
+    let unverified = base
+        .clone()
+        .with_account_selection(McpOAuthAccountSelection::Unverified);
+    let keys = [&base, &known, &discover, &unverified]
+        .map(|target| target.token_key().unwrap())
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys.len(),
+        4,
+        "legacy, Known, Discover and Unverified slots differ"
+    );
+    assert_eq!(base.account_verification(), None);
+    assert_eq!(
+        discover.account_verification(),
+        Some(AccountVerification::Verified)
+    );
+    assert_eq!(
+        unverified.account_verification(),
+        Some(AccountVerification::Unverified)
+    );
+    let debug = format!("{known:?} {unverified:?}");
+    assert!(!debug.contains("subject-7"), "{debug}");
+    assert!(debug.contains("unverified"), "{debug}");
+
+    // Host configuration is the only selector, and a conflicting
+    // configuration is refused rather than resolved either way.
+    let configured = |account: Option<&str>, selection: Option<McpOAuthAccountSelection>| {
+        let mut config = meerkat_core::McpServerConfig::streamable_http(
+            "glean",
+            "https://glean.example/mcp",
+            HashMap::new(),
+        );
+        if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport {
+            http.oauth_account = account.map(str::to_owned);
+            http.oauth_account_selection = selection;
+        }
+        McpServerIdentity::from_config(&config)
+    };
+    assert_eq!(
+        configured(None, Some(McpOAuthAccountSelection::Unverified)).unwrap(),
+        unverified
+    );
+    assert!(matches!(
+        configured(
+            Some("subject-7"),
+            Some(McpOAuthAccountSelection::Unverified)
+        ),
+        Err(McpOAuthError::InvalidAccountSelection)
+    ));
+    assert_eq!(configured(None, None).unwrap(), base);
+}
+
+#[test]
+fn explicit_unverified_selection_refuses_static_authorization_and_other_transports() {
+    for selection in [
+        McpOAuthAccountSelection::Unverified,
+        McpOAuthAccountSelection::Discover,
+    ] {
+        let mut static_auth = meerkat_core::McpServerConfig::streamable_http(
+            "glean",
+            "https://glean.example/mcp",
+            HashMap::from([("Authorization".to_owned(), "Bearer fixed".to_owned())]),
+        );
+        let mut sse = meerkat_core::McpServerConfig::sse(
+            "glean",
+            "https://glean.example/mcp",
+            HashMap::new(),
+        );
+        for config in [&mut static_auth, &mut sse] {
+            if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport
+            {
+                http.oauth_account_selection = Some(selection);
+            }
+            assert!(matches!(
+                McpServerIdentity::from_config(config),
+                Err(McpOAuthError::UnsupportedAccountSelection)
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_preflight_refuses_before_registration_or_browser() {
+    for selection in [
+        McpOAuthAccountSelection::Discover,
+        McpOAuthAccountSelection::Unverified,
+    ] {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let strategy = SelectionStrategy::new("subject-7");
+        strategy.unavailable.store(true, Ordering::SeqCst);
+        let authority = FixtureAuthority::with_strategy(
+            store.clone(),
+            recording_browser(state.clone()),
+            test_auth_lease(),
+            strategy.clone(),
+        );
+        let target = mode_target(&base, selection);
+        let result = authority.interactive_login(&target, None).await;
+        match selection {
+            // A verified mode runs the strategy preflight first.
+            McpOAuthAccountSelection::Discover => {
+                assert!(matches!(
+                    result,
+                    Err(McpOAuthError::Verification(
+                        ConnectorOAuthRefusal::VerificationUnavailable
+                    ))
+                ));
+                assert!(state.registration_requests.lock().is_empty());
+                assert!(state.opened_url.lock().is_none());
+                assert!(store.list().await.unwrap().is_empty());
+            }
+            // An unverified grant runs no account strategy at all, so an
+            // unavailable verifier neither blocks nor verifies it.
+            McpOAuthAccountSelection::Unverified => {
+                assert_eq!(result.unwrap(), "access-token");
+                assert_eq!(strategy.preflights.load(Ordering::SeqCst), 0);
+                assert_eq!(strategy.observations.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_verification_never_downgrades_to_unverified_or_legacy() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let strategy = SelectionStrategy::new("subject-7");
+    let authority = FixtureAuthority::with_strategy(
+        store.clone(),
+        recording_browser(state.clone()),
+        test_auth_lease(),
+        strategy.clone(),
+    );
+    let discover = mode_target(&base, McpOAuthAccountSelection::Discover);
+    // Verification fails only after consent and exchange.
+    let (_start, callback) = admit_and_authorize(&authority, authority.browser.as_ref(), &discover)
+        .await
+        .unwrap();
+    strategy.unavailable.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        authority.login_complete(&discover, callback).await,
+        Err(McpOAuthError::Verification(
+            ConnectorOAuthRefusal::VerificationUnavailable
+        ))
+    ));
+    // Nothing is published anywhere: not the Discover slot, not the
+    // unverified slot, not the legacy slot.
+    assert!(store.list().await.unwrap().is_empty());
+    let unverified = mode_target(&base, McpOAuthAccountSelection::Unverified);
+    let legacy = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+    assert_eq!(
+        authority.stored_bearer_token(&discover).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        authority.stored_bearer_token(&unverified).await.unwrap(),
+        None
+    );
+    assert!(matches!(
+        authority
+            .login_start(&legacy, "http://127.0.0.1:1/cb", None)
+            .await,
+        Err(McpOAuthError::AccountSelectionRequired)
+    ));
+    assert!(matches!(
+        authority.require_stored_bearer_token(&discover).await,
+        Err(McpOAuthError::MissingStoredToken { .. })
+    ));
+}
+
+#[tokio::test]
+async fn empty_discover_binds_the_verified_subject_and_reconnects_only_it() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let strategy = SelectionStrategy::new("subject-7");
+    let authority = FixtureAuthority::with_strategy(
+        store.clone(),
+        recording_browser(state.clone()),
+        test_auth_lease(),
+        strategy.clone(),
+    );
+    let target = mode_target(&base, McpOAuthAccountSelection::Discover);
+    assert_eq!(
+        authority.interactive_login(&target, None).await.unwrap(),
+        "access-token"
+    );
+    let stored = store
+        .load(&target.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.account_id.as_deref(), Some("subject-7"));
+    assert_eq!(state.registration_requests.lock().len(), 1);
+
+    // Same-account reconnect: admitted as Known(subject-7) in the Discover
+    // slot, with the admitted client (no second registration).
+    assert_eq!(
+        authority.interactive_login(&target, None).await.unwrap(),
+        "access-token"
+    );
+    assert_eq!(state.registration_requests.lock().len(), 1);
+    let reconnected = store
+        .load(&target.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reconnected.account_id.as_deref(), Some("subject-7"));
+
+    // Changed subject: refused at the account check, the slot is unchanged.
+    *strategy.subject.lock() = "subject-8".to_owned();
+    assert!(matches!(
+        authority.interactive_login(&target, None).await,
+        Err(McpOAuthError::Verification(
+            ConnectorOAuthRefusal::AccountMismatch
+        ))
+    ));
+    assert_eq!(
+        store.load(&target.token_key().unwrap()).await.unwrap(),
+        Some(reconnected.clone())
+    );
+
+    // Changed context (another strategy): refused before the browser.
+    *strategy.subject.lock() = "subject-7".to_owned();
+    let other =
+        authority.with_other_strategy(SelectionStrategy::with_id("subject-7", "other-evidence"));
+    *state.opened_url.lock() = None;
+    let binding = meerkat_auth_core::auth_oauth::bind_loopback_callback(MCP_OAUTH_CALLBACK_PATH)
+        .await
+        .unwrap();
+    assert!(matches!(
+        other
+            .login_start(&target, &binding.redirect_url, None)
+            .await,
+        Err(McpOAuthError::DisconnectRequired { .. })
+    ));
+    let _ = binding.cancel().await;
+    assert!(state.opened_url.lock().is_none());
+    assert_eq!(
+        store.load(&target.token_key().unwrap()).await.unwrap(),
+        Some(reconnected)
+    );
+}
+
+#[tokio::test]
+async fn discover_commit_refuses_a_racing_occupant_even_with_the_same_subject() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let strategy = SelectionStrategy::new("subject-7");
+    let authority = FixtureAuthority::with_strategy(
+        store.clone(),
+        recording_browser(state.clone()),
+        test_auth_lease(),
+        strategy,
+    );
+    let target = mode_target(&base, McpOAuthAccountSelection::Discover);
+    authority.interactive_login(&target, None).await.unwrap();
+    let occupant = store
+        .load(&target.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    authority.logout(&target).await.unwrap();
+
+    // The attempt is admitted while the slot is empty, as Discover.
+    let (_start, callback) = admit_and_authorize(&authority, authority.browser.as_ref(), &target)
+        .await
+        .unwrap();
+    // A racing commit occupies the slot with the same subject.
+    let key = target.token_key().unwrap();
+    let raced = authority
+        .publish_login_tokens_via_lease(&target, &key, &occupant)
+        .unwrap();
+    store.save(&key, &raced).await.unwrap();
+
+    assert!(matches!(
+        authority.login_complete(&target, callback).await,
+        Err(McpOAuthError::CredentialSlot {
+            refusal: meerkat_auth_core::auth_store::CredentialSlotRefusal::Occupied,
+            ..
+        })
+    ));
+    assert_eq!(store.load(&key).await.unwrap(), Some(raced));
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn known_refresh_reobserves_the_subject_and_keeps_unavailable_distinct() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let strategy = SelectionStrategy::new("subject-7");
+    let authority = FixtureAuthority::with_strategy(
+        store.clone(),
+        recording_browser(state.clone()),
+        test_auth_lease(),
+        strategy.clone(),
+    );
+    for target in [
+        McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+            .with_expected_account("subject-7")
+            .unwrap(),
+        mode_target(&base, McpOAuthAccountSelection::Discover),
+    ] {
+        *strategy.subject.lock() = "subject-7".to_owned();
+        strategy.unavailable.store(false, Ordering::SeqCst);
+        authority.interactive_login(&target, None).await.unwrap();
+        let expire = |tokens: &mut PersistedTokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        };
+
+        // The refreshed token belongs to another subject: refused, nothing
+        // published.
+        let expired = republish_stored_tokens(&authority, store.as_ref(), &target, expire).await;
+        *strategy.subject.lock() = "subject-8".to_owned();
+        assert!(matches!(
+            authority.stored_bearer_token(&target).await,
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::AccountMismatch
+            ))
+        ));
+        assert_eq!(
+            store.load(&target.token_key().unwrap()).await.unwrap(),
+            Some(expired.clone())
+        );
+
+        // The subject cannot be observed: a refresh failure, not a mismatch.
+        let expired = republish_stored_tokens(&authority, store.as_ref(), &target, expire).await;
+        *strategy.subject.lock() = "subject-7".to_owned();
+        strategy.unavailable.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            authority.stored_bearer_token(&target).await,
+            Err(McpOAuthError::RefreshFailed { .. })
+        ));
+        assert_eq!(
+            store.load(&target.token_key().unwrap()).await.unwrap(),
+            Some(expired)
+        );
+
+        // The same subject: published, still bound to it.
+        strategy.unavailable.store(false, Ordering::SeqCst);
+        republish_stored_tokens(&authority, store.as_ref(), &target, expire).await;
+        assert_eq!(
+            authority
+                .stored_bearer_token(&target)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("access-token")
+        );
+        let refreshed = store
+            .load(&target.token_key().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.account_id.as_deref(), Some("subject-7"));
+        assert!(refreshed.expires_at.unwrap() > Utc::now());
+    }
+}
+
+#[tokio::test]
+async fn unverified_grant_has_no_account_through_login_refresh_and_relogin() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let strategy = SelectionStrategy::new("subject-7");
+    let authority = FixtureAuthority::with_strategy(
+        store.clone(),
+        recording_browser(state.clone()),
+        test_auth_lease(),
+        strategy.clone(),
+    );
+    let target = mode_target(&base, McpOAuthAccountSelection::Unverified);
+    let (_start, callback) = admit_and_authorize(&authority, authority.browser.as_ref(), &target)
+        .await
+        .unwrap();
+    let completed = authority.login_complete(&target, callback).await.unwrap();
+    assert_eq!(completed.account_id, None);
+    assert_eq!(
+        completed.account_verification,
+        AccountVerification::Unverified
+    );
+    let stored = store
+        .load(&target.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.account_id, None);
+    assert_eq!(
+        meerkat_auth_core::connector_oauth::McpCredentialBinding::from_tokens(&stored)
+            .unwrap()
+            .verification,
+        AccountVerification::Unverified
+    );
+
+    // Refresh keeps it unverified: no account is observed or invented.
+    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+        tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    })
+    .await;
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+    let refreshed = store
+        .load(&target.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.account_id, None);
+    assert!(refreshed.expires_at.unwrap() > Utc::now());
+    assert_eq!(strategy.preflights.load(Ordering::SeqCst), 0);
+    assert_eq!(strategy.observations.load(Ordering::SeqCst), 0);
+    assert_eq!(userinfo_or_openid_requests(&state), 0);
+
+    // Re-login over an occupied unverified slot needs an explicit
+    // disconnect, refused before any network I/O.
+    let requests = state.request_paths.lock().len();
+    assert!(matches!(
+        authority
+            .login_start(&target, "http://127.0.0.1:1/mcp/oauth/callback", None)
+            .await,
+        Err(McpOAuthError::DisconnectRequired { .. })
+    ));
+    assert_eq!(state.request_paths.lock().len(), requests);
+    authority.logout(&target).await.unwrap();
+    authority.interactive_login(&target, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn absent_account_evidence_never_satisfies_an_account_dependent_target() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = FixtureAuthority::with_strategy(
+        store.clone(),
+        recording_browser(state.clone()),
+        test_auth_lease(),
+        SelectionStrategy::new("subject-7"),
+    );
+    let unverified = mode_target(&base, McpOAuthAccountSelection::Unverified);
+    authority
+        .interactive_login(&unverified, None)
+        .await
+        .unwrap();
+    let grant = store
+        .load(&unverified.token_key().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let known = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("subject-7")
+        .unwrap();
+    let discover = mode_target(&base, McpOAuthAccountSelection::Discover);
+    for target in [&known, &discover] {
+        // The resource-bound grant is usable for its own target, but no
+        // account-dependent target ever materializes it ...
+        assert_eq!(authority.stored_bearer_token(target).await.unwrap(), None);
+        // ... even if its bytes were placed into that target's slot.
+        let key = target.token_key().unwrap();
+        let placed = authority
+            .publish_login_tokens_via_lease(target, &key, &grant)
+            .unwrap();
+        store.save(&key, &placed).await.unwrap();
+        assert!(matches!(
+            authority.stored_bearer_token(target).await,
+            Err(McpOAuthError::Verification(
+                ConnectorOAuthRefusal::AccountMismatch
+            ))
+        ));
+        store.clear(&key).await.unwrap();
+    }
+    assert_eq!(
+        authority
+            .stored_bearer_token(&unverified)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+}
+
+#[tokio::test]
+async fn empty_slot_logout_retires_pending_attempt_before_a_delayed_completion() {
+    for selection in [
+        McpOAuthAccountSelection::Discover,
+        McpOAuthAccountSelection::Unverified,
+    ] {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let authority = FixtureAuthority::with_strategy(
+            store.clone(),
+            recording_browser(state.clone()),
+            test_auth_lease(),
+            SelectionStrategy::new("subject-7"),
+        );
+        let target = mode_target(&base, selection);
+        let (_start, callback) =
+            admit_and_authorize(&authority, authority.browser.as_ref(), &target)
+                .await
+                .unwrap();
+        assert!(authority.pending_attempt(&target).unwrap().is_some());
+        assert!(store.list().await.unwrap().is_empty(), "the slot is empty");
+
+        authority.logout(&target).await.unwrap();
+        assert!(authority.pending_attempt(&target).unwrap().is_none());
+
+        // The callback admitted before the disconnect cannot repopulate it.
+        assert!(matches!(
+            authority.login_complete(&target, callback).await,
+            Err(McpOAuthError::Flow(OAuthFlowError::Missing))
+        ));
+        assert!(store.list().await.unwrap().is_empty());
+        assert!(
+            state
+                .token_requests
+                .lock()
+                .iter()
+                .all(|request| request["grant_type"] != "authorization_code"),
+            "the retired attempt's code is never exchanged"
+        );
+    }
+}
+
+#[tokio::test]
+async fn joined_attempts_reuse_their_preflight_or_are_retired() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let strategy = SelectionStrategy::new("subject-7");
+    let authority = FixtureAuthority::with_strategy(
+        store.clone(),
+        recording_browser(state.clone()),
+        test_auth_lease(),
+        strategy.clone(),
+    );
+    let target = mode_target(&base, McpOAuthAccountSelection::Discover);
+    let redirect = "http://127.0.0.1:1/mcp/oauth/callback";
+    let started = authority
+        .login_start(&target, redirect, None)
+        .await
+        .unwrap();
+    assert_eq!(started.disposition, McpOAuthLoginDisposition::Started);
+    assert_eq!(strategy.preflights.load(Ordering::SeqCst), 1);
+
+    // A join reuses this attempt's retained preflight: no second preflight,
+    // registration or attempt.
+    let joined = authority
+        .login_start(&target, redirect, None)
+        .await
+        .unwrap();
+    assert_eq!(joined.disposition, McpOAuthLoginDisposition::Joined);
+    assert_eq!(joined.state, started.state);
+    assert_eq!(strategy.preflights.load(Ordering::SeqCst), 1);
+    assert_eq!(state.registration_requests.lock().len(), 1);
+    authority.login_cancel(&target, &started).unwrap();
+
+    // An attempt admitted without this process's preflight (for example
+    // restored from before a restart) is retired, never joined: the next
+    // start admits a fresh, preflighted attempt.
+    let credential_identity: meerkat_core::AuthCredentialIdentity =
+        target.auth_binding_ref().unwrap().into();
+    let descriptor: ConnectorOAuthDescriptor =
+        meerkat_auth_core::connector_oauth::ConnectorOAuthParameters {
+            issuer: base.clone(),
+            client: "client-123".into(),
+            resource: format!("{base}/mcp"),
+            redirect_uri: redirect.into(),
+            scopes: ["mcp.read".to_owned()].into(),
+            expected_account: meerkat_auth_core::connector_oauth::AccountSelection::Discover,
+            strategy_id: "test-selection-evidence".into(),
+        }
+        .try_into()
+        .unwrap();
+    let unreceipted = meerkat_auth_core::oauth_flow::OAuthFlowAuthority::start(
+        authority.flows.as_ref(),
+        credential_identity,
+        descriptor.into(),
+        redirect.into(),
+        "v".repeat(64),
+    )
+    .unwrap();
+    let fresh = authority
+        .login_start(&target, redirect, None)
+        .await
+        .unwrap();
+    assert_eq!(fresh.disposition, McpOAuthLoginDisposition::Started);
+    assert_ne!(fresh.state, unreceipted);
+    assert_eq!(strategy.preflights.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        authority
+            .pending_attempt(&target)
+            .unwrap()
+            .unwrap()
+            .attempt_ref,
+        OAuthBrowserActionRef::project(&fresh.state)
+    );
+    authority.login_cancel(&target, &fresh).unwrap();
 }

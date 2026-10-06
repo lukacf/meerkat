@@ -489,16 +489,31 @@ pub struct WireBackendProfile {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub options: serde_json::Value,
+    /// For an OpenAI backend: whether Meerkat's OpenAI prompt-cache fields
+    /// (`prompt_cache_enabled`, `prompt_cache_key`, `prompt_cache_retention`,
+    /// `prompt_cache_options`) and its model cache defaults apply on requests
+    /// through this backend. A backend that has not admitted them receives
+    /// none, whoever set them. Omitted for other providers, and for an OpenAI
+    /// backend kind this version does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_applicable: Option<bool>,
 }
 
 impl From<&meerkat_core::BackendProfile> for WireBackendProfile {
     fn from(value: &meerkat_core::BackendProfile) -> Self {
+        // Read from the one owner of the decision, which the OpenAI client
+        // also applies on the wire.
+        let prompt_cache_applicable = (value.provider == meerkat_core::Provider::OpenAI)
+            .then(|| meerkat_core::provider_matrix::OpenAiBackendKind::parse(&value.backend_kind))
+            .flatten()
+            .map(meerkat_core::provider_matrix::OpenAiBackendKind::admits_prompt_cache_fields);
         Self {
             id: value.id.clone(),
             provider: value.provider.as_str().to_string(),
             backend_kind: value.backend_kind.clone(),
             base_url: value.base_url.clone(),
             options: value.options.clone(),
+            prompt_cache_applicable,
         }
     }
 }

@@ -11195,9 +11195,11 @@ mod tests {
                 run_id: crate::lifecycle::RunId::new(),
                 tool_use_order: vec!["callback-1".to_string()],
                 pending_tool_use_ids: vec!["callback-1".to_string()],
+                callback_settlement_failures: BTreeMap::new(),
                 completed_results: Vec::new(),
                 session_effects: Vec::new(),
                 async_ops: Vec::new(),
+                deferred_failure: None,
             })
             .expect("stage callback batch");
         let messages_before = session.messages().len();

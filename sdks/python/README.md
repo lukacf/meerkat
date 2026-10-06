@@ -2,7 +2,7 @@
 
 Python SDK for the [Meerkat](https://github.com/lukacf/meerkat) runtime.
 
-- **Contract version:** `0.8.40`
+- **Contract version:** the same as the package version (`meerkat.CONTRACT_VERSION`)
 - **Python:** `>=3.10`
 - **Package:** `meerkat-sdk`
 
@@ -269,7 +269,7 @@ A missing type or malformed payload for a handwritten parser class arrives as
 `event.data`. The `Retrying` and `HookFailed` parsers still expect legacy flat
 fields; current payloads carry `retry` and `reason`, respectively, so they take
 this malformed path. See the [event compatibility
-reference](../../docs/sdks/python/reference.mdx#event-compatibility-note) for details.
+reference](https://docs.rkat.ai/sdks/python/reference#event-compatibility-note) for details.
 
 ## Run tests
 

@@ -2,7 +2,7 @@
 
 TypeScript client for the [Meerkat](https://github.com/lukacf/meerkat) runtime. The SDK is a thin session-first wrapper over the same runtime-backed contracts used by the CLI, REST, JSON-RPC, and MCP surfaces. It communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
 
-Current contract version: `0.8.40`.
+The contract version is the same as the package version (`CONTRACT_VERSION`).
 
 ## Installation
 
@@ -12,7 +12,7 @@ npm install @rkat/sdk
 
 ## Prerequisites
 
-- **`rkat-rpc` binary on PATH** -- build the Meerkat repo through `make build`, then ensure the resulting `rkat-rpc` binary is in your `$PATH`. The SDK can also resolve and download a release binary automatically.
+- **`rkat-rpc` binary on PATH** -- install it with `brew install lukacf/meerkat/rkat` or from the release archive for your platform ([Linux without Homebrew](https://docs.rkat.ai/quickstart#linux-without-homebrew)). The SDK can also resolve and download a release binary automatically.
 - **Node.js >= 18** (uses `node:child_process`, `node:readline`, `node:test`).
 - **API key** for at least one LLM provider set in your environment (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`).
 
@@ -381,7 +381,7 @@ A missing type or malformed payload for a handwritten parser case arrives as
 `event.raw`. The `RetryingEvent` and `HookFailedEvent` parsers still expect
 legacy flat fields; current payloads carry `retry` and `reason`, respectively,
 so they take this malformed path. See the [event compatibility
-reference](../../docs/sdks/typescript/reference.mdx#typed-events) for details.
+reference](https://docs.rkat.ai/sdks/typescript/reference#typed-events) for details.
 
 Use the built-in client helpers directly for capability and skill flows:
 
@@ -499,14 +499,14 @@ try {
 
 ## Version Compatibility
 
-The SDK exports `CONTRACT_VERSION` (currently `"0.8.40"`). During `connect()`, the SDK checks that the server's contract version is compatible:
+The SDK exports `CONTRACT_VERSION`, which equals the installed package version. During `connect()`, the SDK checks that the server's contract version is compatible:
 
 - While the major version is `0`, minor versions must match exactly (e.g. SDK `0.1.x` requires server `0.1.x`).
 - Once `1.0.0` is reached, major versions must match (standard semver).
 
 ```ts
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // "0.8.40"
+console.log(CONTRACT_VERSION);  // the installed @rkat/sdk version
 ```
 
 If the versions are incompatible, `connect()` throws a `MeerkatError` with code `"VERSION_MISMATCH"`.

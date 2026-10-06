@@ -22757,6 +22757,59 @@ mod tests {
                     )),
                     "the superseded typed row carries its correction after it"
                 );
+                // #1800: the late summary was snapshotted before the typed row,
+                // so the wire append that carries the row ranks it above the
+                // summary, both up front and in the reassertion after the
+                // correction (S99 kept the summary's superseded flower).
+                let superseded = commands
+                    .iter()
+                    .find_map(|command| match command {
+                        LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.starts_with(LIVE_SUPERSEDED_TYPED_PREFIX)
+                                && text.contains("Newer code: Amber.") =>
+                        {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .expect("the superseded typed append is on the wire");
+                assert!(superseded.contains(
+                    "It is newer than any conversation history summary you have, and replaces the summary's value wherever they differ."
+                ));
+                let spoken_at = superseded
+                    .find("Spoken code: Cyan.")
+                    .expect("the correction rides in the same append");
+                let reasserted_at = superseded
+                    .find(meerkat_runtime::live_execution::LIVE_SUPERSEDED_TYPED_STILL_CURRENT)
+                    .expect("the typed content is reasserted after the correction");
+                assert!(spoken_at < reasserted_at);
+                assert!(
+                    meerkat_runtime::live_execution::LIVE_SUPERSEDED_TYPED_STILL_CURRENT.ends_with(
+                        "and replaces what any conversation history summary says about it."
+                    )
+                );
+                let summary_at = commands
+                    .iter()
+                    .position(|command| {
+                        matches!(
+                            command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
+                        )
+                    })
+                    .expect("summary on the wire");
+                let superseded_at = commands
+                    .iter()
+                    .position(|command| {
+                        matches!(
+                            command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.as_str() == superseded
+                        )
+                    })
+                    .expect("superseded append position");
+                assert!(
+                    summary_at < superseded_at,
+                    "the typed row that outranks the summary arrives after it"
+                );
                 assert!(
                     commands.iter().any(|command| matches!(
                         command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }

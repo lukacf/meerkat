@@ -137,14 +137,14 @@ impl ProtectedMetadataState {
                     for message in &mut result.messages {
                         match &mut message.content {
                             PromptMessageContent::Image { image } => {
-                                strip_meta(&keys, &mut image.raw.meta)
+                                strip_meta(&keys, &mut image.raw.meta);
                             }
                             PromptMessageContent::Resource { resource } => {
                                 strip_meta(&keys, &mut resource.raw.meta);
                                 strip_resource(&keys, &mut resource.raw.resource);
                             }
                             PromptMessageContent::ResourceLink { link } => {
-                                strip_meta(&keys, &mut link.raw.meta)
+                                strip_meta(&keys, &mut link.raw.meta);
                             }
                             PromptMessageContent::Text { .. } => {}
                         }
@@ -168,13 +168,13 @@ impl ProtectedMetadataState {
                         for content in contents {
                             match content {
                                 SamplingMessageContent::Text(content) => {
-                                    strip_meta(&keys, &mut content.meta)
+                                    strip_meta(&keys, &mut content.meta);
                                 }
                                 SamplingMessageContent::Image(content) => {
-                                    strip_meta(&keys, &mut content.meta)
+                                    strip_meta(&keys, &mut content.meta);
                                 }
                                 SamplingMessageContent::ToolUse(content) => {
-                                    strip_meta(&keys, &mut content.meta)
+                                    strip_meta(&keys, &mut content.meta);
                                 }
                                 SamplingMessageContent::ToolResult(content) => {
                                     strip_meta(&keys, &mut content.meta);

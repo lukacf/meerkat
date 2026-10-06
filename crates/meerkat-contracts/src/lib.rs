@@ -520,6 +520,8 @@ pub use wire::{
     WireLoginStart,
     WireLoginStartTarget,
     WireLoginTarget,
+    WireMcpAccountSelection,
+    WireMcpAccountVerification,
     WireMcpAuthAttempt,
     WireMcpAuthAttemptPhase,
     WireMcpAuthPhase,

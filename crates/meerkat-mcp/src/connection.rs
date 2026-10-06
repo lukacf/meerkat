@@ -222,13 +222,14 @@ pub trait McpAuthResolver: Send + Sync {
 
 #[async_trait]
 impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
-    /// Unselected targets (no `oauth_account`) keep their stored-only
-    /// semantics, so servers that need no OAuth connect as before.
+    /// Unselected targets (no `oauth_account` or `oauth_account_selection`)
+    /// keep their stored-only semantics, so servers that need no OAuth
+    /// connect as before.
     async fn stored_bearer_token(
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
-        if target.expected_account().is_none() {
+        if !target.is_selected() {
             return self.stored_only().stored_bearer_token(target).await;
         }
         self.stored_bearer_token(target).await
@@ -236,13 +237,13 @@ impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
 
     /// The native authority has no browser: human authorization is a host
     /// obligation, reported as typed status instead of opening anything.
-    /// Interactive login needs a selected account.
+    /// Interactive login needs an account selection.
     async fn interactive_login(
         &self,
         target: &McpServerIdentity,
         _www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
-        if target.expected_account().is_none() {
+        if !target.is_selected() {
             return Err(McpOAuthError::AccountSelectionRequired);
         }
         Err(McpOAuthError::HumanAuthorizationRequired {
@@ -290,7 +291,7 @@ impl McpConnection {
         if matches!(config.transport, McpTransportConfig::Http(_)) {
             let target = McpServerIdentity::from_config(config)
                 .map_err(mcp_auth_error_to_connection_failed)?;
-            if target.expected_account().is_some() && auth_resolver.is_none() {
+            if target.is_selected() && auth_resolver.is_none() {
                 return Err(McpError::OAuthAccountRejected(
                     McpOAuthError::UnsupportedAccountSelection,
                 ));
@@ -405,7 +406,7 @@ impl McpConnection {
         let mut force_interactive_reauth = false;
         if let Some(resolver) = auth_resolver.as_deref() {
             match resolver.stored_bearer_token(&target).await {
-                Ok(None) if target.expected_account().is_some() => {
+                Ok(None) if target.is_selected() => {
                     if matches!(auth_mode, McpAuthMode::Interactive) {
                         force_interactive_reauth = true;
                     } else {

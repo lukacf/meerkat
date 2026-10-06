@@ -386,6 +386,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireLoginStart": schema_for!(crate::wire::WireLoginStart),
         "WireLoginReady": schema_for!(crate::wire::WireLoginReady),
         "WireMcpAuthTarget": schema_for!(crate::wire::WireMcpAuthTarget),
+        "WireMcpAccountSelection": schema_for!(crate::wire::WireMcpAccountSelection),
+        "WireMcpAccountVerification": schema_for!(crate::wire::WireMcpAccountVerification),
         "WireLoginCancelled": schema_for!(crate::wire::WireLoginCancelled),
         "WireMcpAuthStatus": schema_for!(crate::wire::WireMcpAuthStatus),
         "WireMcpAuthAttempt": schema_for!(crate::wire::WireMcpAuthAttempt),

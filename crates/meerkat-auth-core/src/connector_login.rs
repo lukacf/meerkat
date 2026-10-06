@@ -364,6 +364,11 @@ impl ConnectorOAuthAuthority {
         redirect_uri: &str,
     ) -> Result<ConnectorLoginStart, ConnectorLoginError> {
         require_loopback_redirect(redirect_uri)?;
+        // A connector credential is always account-verified; the unverified
+        // resource grant is an MCP-only host opt-in.
+        if target.account.is_unverified() {
+            return Err(ConnectorOAuthRefusal::InvalidDescriptor.into());
+        }
         let strategy = self.strategies.get(&target.strategy_id)?;
         let descriptor: ConnectorOAuthDescriptor = ConnectorOAuthParameters {
             issuer: target.issuer.clone(),

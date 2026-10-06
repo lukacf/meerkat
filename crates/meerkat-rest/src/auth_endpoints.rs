@@ -1414,6 +1414,7 @@ pub async fn complete_login(
                         mcp_server = %mcp.server_name,
                         action = "login_mcp_oauth_complete",
                         has_refresh_token = %completed.has_refresh_token,
+                        account_verification = ?completed.account_verification,
                         "MCP OAuth login completed via REST"
                     );
                     (
@@ -1423,6 +1424,9 @@ pub async fn complete_login(
                             target: WireLoginReadyTarget::Mcp(WireMcpLoginReady {
                                 mcp,
                                 account_id: completed.account_id,
+                                account_verification: meerkat::mcp_account_verification_to_wire(
+                                    Some(completed.account_verification),
+                                ),
                             }),
                             expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
                             has_refresh_token: completed.has_refresh_token,
@@ -3096,6 +3100,7 @@ mod tests {
             server_name: "canary".to_string(),
             server_url: fixture.mcp_url(),
             oauth_account: Some(SUBJECT.to_string()),
+            oauth_account_selection: None,
         };
         let target = meerkat::McpServerIdentity::from_server_config("canary", fixture.mcp_url())
             .with_expected_account(SUBJECT)
@@ -3313,6 +3318,7 @@ mod tests {
                 server_name: name.to_string(),
                 server_url: recorder_url.clone(),
                 oauth_account: Some("subject-7".to_string()),
+                oauth_account_selection: None,
             };
             let start = start_login(
                 State(state.clone()),

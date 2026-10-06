@@ -26,10 +26,12 @@ use crate::auth_store::{
     RefreshCoordinator, RefreshError, TokenKey, TokenStore,
 };
 use crate::connector_oauth::{
-    ConnectorAccountObservation, ConnectorOAuthDescriptor, ConnectorOAuthRefusal,
-    OAuthBrowserActionRef,
+    AccountSelection, AccountVerification, ConnectorAccountObservation, ConnectorOAuthDescriptor,
+    ConnectorOAuthParameters, ConnectorOAuthRefusal, McpCredentialBinding, OAuthBrowserActionRef,
 };
-use crate::oauth_flow::{OAuthBrowserFlowIdentity, OAuthFlowAuthority, OAuthFlowError};
+use crate::oauth_flow::{
+    OAuthBrowserFlowCompletion, OAuthBrowserFlowIdentity, OAuthFlowAuthority, OAuthFlowError,
+};
 use crate::{BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow};
 use meerkat_core::auth::RefreshFailureDisposition;
 use meerkat_core::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
@@ -66,7 +68,47 @@ pub enum McpAuthMode {
 pub struct McpServerIdentity {
     server_name: String,
     server_url: String,
-    expected_account: Option<String>,
+    selection: McpAccountSelection,
+}
+
+/// How an MCP target's OAuth credential is bound to a provider account.
+/// Only host configuration selects it; each mode has its own credential
+/// slot, so a mode change never reuses or migrates another mode's
+/// credential.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum McpAccountSelection {
+    /// No selection (no `oauth_account` or `oauth_account_selection`):
+    /// stored-credential use with its pre-selection semantics. Interactive
+    /// login refuses it.
+    Legacy,
+    /// The provider subject the credential must prove.
+    Known(String),
+    /// Bind the subject the account strategy verifies at the first login.
+    Discover,
+    /// Explicit opt-in to a resource-bound credential with no account
+    /// evidence. It never establishes, verifies or represents an account.
+    Unverified,
+}
+
+/// The Known subject is not rendered.
+impl std::fmt::Debug for McpAccountSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Known(_) => f.write_str("Known(..)"),
+            other => f.write_str(other.mode_name()),
+        }
+    }
+}
+
+impl McpAccountSelection {
+    fn mode_name(&self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Known(_) => "known",
+            Self::Discover => "discover",
+            Self::Unverified => "unverified",
+        }
+    }
 }
 
 impl McpServerIdentity {
@@ -78,7 +120,7 @@ impl McpServerIdentity {
         Self {
             server_name: server_name.into(),
             server_url: server_url.into(),
-            expected_account: None,
+            selection: McpAccountSelection::Legacy,
         }
     }
 
@@ -96,12 +138,55 @@ impl McpServerIdentity {
         {
             return Err(McpOAuthError::InvalidAccountSelection);
         }
-        self.expected_account = Some(account);
+        self.selection = McpAccountSelection::Known(account);
         Ok(self)
     }
 
+    /// Select account discovery or the explicitly unverified resource-bound
+    /// mode. Only host configuration may call this; agent input, start
+    /// parameters, a failed verification or a legacy credential never do.
+    pub fn with_account_selection(
+        mut self,
+        selection: meerkat_core::mcp_config::McpOAuthAccountSelection,
+    ) -> Self {
+        use meerkat_core::mcp_config::McpOAuthAccountSelection as Configured;
+        self.selection = match selection {
+            Configured::Discover => McpAccountSelection::Discover,
+            Configured::Unverified => McpAccountSelection::Unverified,
+        };
+        self
+    }
+
+    /// The Known subject, when the target names one.
     pub fn expected_account(&self) -> Option<&str> {
-        self.expected_account.as_deref()
+        match &self.selection {
+            McpAccountSelection::Known(account) => Some(account),
+            McpAccountSelection::Legacy
+            | McpAccountSelection::Discover
+            | McpAccountSelection::Unverified => None,
+        }
+    }
+
+    pub fn selection(&self) -> &McpAccountSelection {
+        &self.selection
+    }
+
+    /// Whether the target has any account selection (Known, Discover or
+    /// Unverified). Every selected target uses its OAuth resolver only.
+    pub fn is_selected(&self) -> bool {
+        self.selection != McpAccountSelection::Legacy
+    }
+
+    /// The account verification the target's credential carries: `None`
+    /// for a legacy (unselected) target.
+    pub fn account_verification(&self) -> Option<AccountVerification> {
+        match self.selection {
+            McpAccountSelection::Legacy => None,
+            McpAccountSelection::Known(_) | McpAccountSelection::Discover => {
+                Some(AccountVerification::Verified)
+            }
+            McpAccountSelection::Unverified => Some(AccountVerification::Unverified),
+        }
     }
 
     /// Use the same persisted selection for native connections and login.
@@ -111,10 +196,14 @@ impl McpServerIdentity {
             return Err(McpOAuthError::UnsupportedAccountSelection);
         };
         let target = Self::from_server_config(config.name.clone(), http.url.clone());
-        let Some(account) = &http.oauth_account else {
-            return Ok(target);
+        let target = match (&http.oauth_account, http.oauth_account_selection) {
+            (None, None) => return Ok(target),
+            (Some(_), Some(_)) => return Err(McpOAuthError::InvalidAccountSelection),
+            (Some(account), None) => target.with_expected_account(account.clone())?,
+            (None, Some(selection)) => target.with_account_selection(selection),
         };
-        let target = target.with_expected_account(account.clone())?;
+        // Every selection uses its OAuth resolver alone: a static
+        // Authorization header or another transport would bypass it.
         if http.transport.unwrap_or_default() != McpHttpTransport::StreamableHttp
             || http
                 .headers
@@ -142,9 +231,16 @@ impl McpServerIdentity {
         hasher.update(self.server_name.as_bytes());
         hasher.update(b"\0");
         hasher.update(self.server_url.as_bytes());
-        if let Some(account) = self.expected_account() {
-            hasher.update(b"\0mcp-account-v1\0");
-            hasher.update(account.as_bytes());
+        // Each selection mode has its own key tag, so the slots of Known,
+        // Discover, Unverified and legacy targets never coincide.
+        match &self.selection {
+            McpAccountSelection::Legacy => {}
+            McpAccountSelection::Known(account) => {
+                hasher.update(b"\0mcp-account-v1\0");
+                hasher.update(account.as_bytes());
+            }
+            McpAccountSelection::Discover => hasher.update(b"\0mcp-account-discover-v1"),
+            McpAccountSelection::Unverified => hasher.update(b"\0mcp-account-unverified-v1"),
         }
         let digest = URL_SAFE_NO_PAD.encode(hasher.finalize());
         let name_slug = slug_component(&self.server_name);
@@ -192,7 +288,7 @@ impl std::fmt::Debug for McpServerIdentity {
         f.debug_struct("McpServerIdentity")
             .field("server_name", &self.server_name)
             .field("server_url", &self.server_url)
-            .field("account_selected", &self.expected_account.is_some())
+            .field("account_selection", &self.selection.mode_name())
             .finish()
     }
 }
@@ -230,6 +326,10 @@ pub struct McpOAuthCeremonyContext<'a> {
     pub client: &'a str,
     pub resource: &'a str,
     pub redirect_uri: &'a str,
+    /// The account this attempt must prove: the target's Known subject, the
+    /// bound subject when an occupied Discover slot reconnects, or
+    /// `Discover` for an empty Discover slot. Never `Unverified`.
+    pub account: &'a AccountSelection,
 }
 
 /// Provider-specific account verification supplied by the trusted embedding
@@ -260,6 +360,10 @@ pub trait McpOAuthAccountStrategy: Send + Sync {
 
 /// Stable strategy identifier bound into OIDC UserInfo descriptors.
 pub const OIDC_USERINFO_STRATEGY_ID: &str = "oidc-userinfo-v1";
+
+/// Strategy identifier the native owner binds into explicitly unverified
+/// resource-bound descriptors. No account strategy runs for them.
+pub const UNVERIFIED_RESOURCE_STRATEGY_ID: &str = "unverified-resource-v1";
 
 /// Production account strategy: the issuer's OpenID Connect UserInfo
 /// response, fetched with the exchanged access token, is the authenticated
@@ -333,9 +437,10 @@ impl McpOAuthAccountStrategy for OidcUserInfoAccountStrategy {
         target: &McpServerIdentity,
         context: &McpOAuthCeremonyContext<'_>,
     ) -> Result<ConnectorOAuthDescriptor, ConnectorOAuthRefusal> {
-        let expected_account = target
-            .expected_account()
-            .ok_or(ConnectorOAuthRefusal::InvalidDescriptor)?;
+        let _ = target;
+        if context.account.is_unverified() {
+            return Err(ConnectorOAuthRefusal::InvalidDescriptor);
+        }
         let mut scopes = self.required_scopes.clone();
         scopes.insert("openid".to_owned());
         crate::connector_oauth::ConnectorOAuthParameters {
@@ -344,7 +449,7 @@ impl McpOAuthAccountStrategy for OidcUserInfoAccountStrategy {
             resource: context.resource.to_owned(),
             redirect_uri: context.redirect_uri.to_owned(),
             scopes,
-            expected_account: expected_account.into(),
+            expected_account: context.account.clone(),
             strategy_id: OIDC_USERINFO_STRATEGY_ID.to_owned(),
         }
         .try_into()
@@ -726,7 +831,9 @@ pub struct McpOAuthPendingAttempt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpOAuthLoginComplete {
     pub target: McpServerIdentity,
+    /// The verified subject; always `None` for an unverified grant.
     pub account_id: Option<String>,
+    pub account_verification: AccountVerification,
     pub expires_at: Option<DateTime<Utc>>,
     pub has_refresh_token: bool,
     pub scopes: Vec<String>,
@@ -774,6 +881,20 @@ pub enum McpOAuthError {
     ReauthRequired { server_name: String },
     #[error("MCP OAuth credential lifecycle error for '{server_name}': {reason}")]
     AuthLifecycle { server_name: String, reason: String },
+    /// The target's credential slot is occupied by a credential this login
+    /// may not replace (an unverified grant, another context or a
+    /// credential without an account binding). Disconnect first.
+    #[error(
+        "MCP server '{server_name}' already has a credential this login cannot replace; disconnect it first"
+    )]
+    DisconnectRequired { server_name: String },
+    /// The credential slot refused the commit inside its exclusive
+    /// mutation (for example a racing occupant of a Discover slot).
+    #[error("MCP OAuth credential slot for '{server_name}' refused the login: {refusal}")]
+    CredentialSlot {
+        server_name: String,
+        refusal: crate::auth_store::CredentialSlotRefusal,
+    },
 }
 
 impl McpOAuthError {
@@ -791,6 +912,8 @@ impl McpOAuthError {
             | Self::MissingStoredToken { .. }
             | Self::HumanAuthorizationRequired { .. }
             | Self::ReauthRequired { .. }
+            | Self::DisconnectRequired { .. }
+            | Self::CredentialSlot { .. }
             | Self::TokenKey { .. } => true,
             Self::Callback { .. }
             | Self::DiscoveryFailed { .. }
@@ -878,7 +1001,7 @@ impl McpOAuthAuthority {
         &self,
         target: &McpServerIdentity,
     ) -> Result<(), McpOAuthError> {
-        if target.expected_account().is_none() {
+        if !target.is_selected() {
             return Err(McpOAuthError::AccountSelectionRequired);
         }
         if self.interactive.is_none() {
@@ -899,7 +1022,7 @@ impl McpOAuthAuthority {
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
-        if self.interactive.is_some() && target.expected_account().is_none() {
+        if self.interactive.is_some() && !target.is_selected() {
             return Err(McpOAuthError::AccountSelectionRequired);
         }
         let key = target.token_key()?;
@@ -983,9 +1106,6 @@ impl McpOAuthAuthority {
         www_authenticate: Option<&str>,
     ) -> Result<McpOAuthLoginStart, McpOAuthError> {
         self.validate_interactive_selection(target)?;
-        let expected_account = target
-            .expected_account()
-            .ok_or(McpOAuthError::AccountSelectionRequired)?;
         let (authority, strategy) = self
             .interactive
             .as_ref()
@@ -998,38 +1118,67 @@ impl McpOAuthAuthority {
             .pending_connector_browser_attempt(&credential_identity)
             .map_err(McpOAuthError::Flow)?
         {
-            // `None`: the pending attempt no longer matches the server and
-            // could never complete; it was retired, so admit a fresh one.
-            if let Some(joined) = self
-                .join_pending_attempt(target, expected_account, &state, record)
-                .await?
-            {
+            // `None`: the pending attempt no longer matches the server, or
+            // its preflight is not retained; it was retired, so admit a
+            // fresh one.
+            if let Some(joined) = self.join_pending_attempt(target, &state, record).await? {
                 return Ok(joined);
             }
         }
+        // The slot's current credential decides what this attempt may
+        // publish. The commit re-checks it inside the slot's exclusive
+        // mutation; this read only refuses early, before any network I/O.
+        let occupant = self.slot_occupant(target).await?;
+        let selection = attempt_selection(target, occupant.as_ref())?;
         let (mut discovery, requested) = self
             .discover(target, www_authenticate, redirect_uri)
             .await?;
         // Before client registration and before the human is asked to
         // consent: an issuer the strategy cannot verify is refused here.
-        strategy.preflight(&discovery.authorization_server).await?;
-        let client = self
-            .register_client(target, &discovery, redirect_uri)
-            .await?;
-        let descriptor = require_resource_scopes(
-            strategy.descriptor(
-                target,
-                &McpOAuthCeremonyContext {
-                    issuer: &discovery.authorization_server,
-                    client: &client.client_id,
-                    resource: &discovery.resource,
-                    redirect_uri,
-                },
-            )?,
-            &requested.resource_scopes,
-        )?;
+        // An unverified resource grant runs no account strategy.
+        if !selection.is_unverified() {
+            strategy.preflight(&discovery.authorization_server).await?;
+        }
+        let client = match &occupant {
+            // Reconnect with the admitted client: a fresh registration would
+            // change the credential's context. A loopback redirect may use
+            // any port (RFC 8252 section 7.3).
+            Some(occupant) => {
+                if occupant.metadata.discovery.authorization_server
+                    != discovery.authorization_server
+                    || occupant.metadata.discovery.resource != discovery.resource
+                {
+                    return Err(McpOAuthError::DisconnectRequired {
+                        server_name: target.server_name().to_owned(),
+                    });
+                }
+                StoredMcpOAuthClient {
+                    redirect_uri: redirect_uri.to_owned(),
+                    ..occupant.metadata.client.clone()
+                }
+            }
+            None => {
+                self.register_client(target, &discovery, redirect_uri)
+                    .await?
+            }
+        };
+        let context = McpOAuthCeremonyContext {
+            issuer: &discovery.authorization_server,
+            client: &client.client_id,
+            resource: &discovery.resource,
+            redirect_uri,
+            account: &selection,
+        };
+        let descriptor = if selection.is_unverified() {
+            unverified_descriptor(&context, &requested.resource_scopes)?
+        } else {
+            require_resource_scopes(
+                strategy.descriptor(target, &context)?,
+                &requested.resource_scopes,
+            )?
+        };
         let facts = descriptor.parameters();
-        if facts.expected_account.known() != Some(expected_account) {
+        if facts.expected_account != selection {
             return Err(ConnectorOAuthRefusal::AccountMismatch.into());
         }
         if facts.issuer != discovery.authorization_server
@@ -1040,6 +1189,13 @@ impl McpOAuthAuthority {
             return Err(McpOAuthError::Verification(
                 ConnectorOAuthRefusal::DescriptorMismatch,
             ));
+        }
+        if let Some(occupant) = &occupant
+            && occupant.binding.stable_context != descriptor.stable_context()
+        {
+            return Err(McpOAuthError::DisconnectRequired {
+                server_name: target.server_name().to_owned(),
+            });
         }
         discovery.scopes = facts.scopes.iter().cloned().collect();
         let pkce = PkcePair::generate_s256();
@@ -1052,6 +1208,9 @@ impl McpOAuthAuthority {
                 pkce.verifier.secret().to_owned(),
             )
             .map_err(McpOAuthError::Flow)?;
+        // This attempt passed its strategy preflight (or needs none); a
+        // later join reuses this receipt instead of repeating discovery.
+        retain_preflight_receipt(&state);
         let expires_at = std::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
         let authorize_url = authorize_endpoints(&discovery, &client, requested.offline_access)
             .authorize_url_with_pkce(&pkce.challenge, &state);
@@ -1066,24 +1225,52 @@ impl McpOAuthAuthority {
         })
     }
 
+    /// The `McpOauth` credential currently in `target`'s slot, if any, with
+    /// its stored metadata and account binding. An occupant this target may
+    /// never reconnect over (no binding, or another verification mode) is
+    /// refused here: it needs an explicit disconnect.
+    async fn slot_occupant(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Result<Option<SlotOccupant>, McpOAuthError> {
+        let Some(tokens) = self
+            .token_store()
+            .load(&target.token_key()?)
+            .await
+            .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let disconnect = || McpOAuthError::DisconnectRequired {
+            server_name: target.server_name().to_owned(),
+        };
+        if tokens.auth_mode != PersistedAuthMode::McpOauth {
+            return Err(disconnect());
+        }
+        let binding = McpCredentialBinding::from_tokens(&tokens).ok_or_else(disconnect)?;
+        let metadata = stored_metadata_for_target(target, &tokens).map_err(|_| disconnect())?;
+        if Some(binding.verification) != target.account_verification() {
+            return Err(disconnect());
+        }
+        Ok(Some(SlotOccupant {
+            account_id: tokens.account_id,
+            binding,
+            metadata,
+        }))
+    }
+
     /// Re-project the attempt already pending for `target` from its admitted
     /// descriptor. Only the recorded issuer's authorization-server metadata
-    /// is fetched (no client registration). A stale attempt is retired and
-    /// `None` returned.
+    /// is fetched (no client registration, no account preflight). An
+    /// attempt that no longer matches the target, or whose preflight this
+    /// process does not retain, is retired and `None` returned.
     async fn join_pending_attempt(
         &self,
         target: &McpServerIdentity,
-        expected_account: &str,
         state: &str,
         record: crate::oauth_flow::OAuthFlowRecord,
     ) -> Result<Option<McpOAuthLoginStart>, McpOAuthError> {
-        let OAuthBrowserFlowIdentity::Connector { connector } = &record.provider else {
-            return Ok(None);
-        };
-        let facts = connector.parameters();
-        if facts.expected_account.known() != Some(expected_account)
-            || facts.resource != target.server_url()
-        {
+        if !pending_attempt_matches(target, &record) || !preflight_receipt_retained(state) {
             if let Some((authority, _)) = self.interactive.as_ref() {
                 let _ = authority.expire(
                     state,
@@ -1094,6 +1281,10 @@ impl McpOAuthAuthority {
             }
             return Ok(None);
         }
+        let OAuthBrowserFlowIdentity::Connector { connector } = &record.provider else {
+            return Ok(None);
+        };
+        let facts = connector.parameters();
         let endpoints = self
             .discover_authorization_server(target, &facts.issuer)
             .await?;
@@ -1207,30 +1398,27 @@ impl McpOAuthAuthority {
                 &redirect_uri,
             )
             .map_err(McpOAuthError::Flow)?;
+        if !pending_attempt_matches(target, &record) {
+            return Err(ConnectorOAuthRefusal::AccountMismatch.into());
+        }
         let OAuthBrowserFlowIdentity::Connector { connector } = &record.provider else {
             return Err(McpOAuthError::Flow(OAuthFlowError::BrowserIdentityMismatch));
         };
         let facts = connector.parameters();
-        if target.expected_account().is_none()
-            || target.expected_account() != facts.expected_account.known()
-        {
-            return Err(ConnectorOAuthRefusal::AccountMismatch.into());
-        }
-        if facts.resource != target.server_url() {
-            return Err(McpOAuthError::Verification(
-                ConnectorOAuthRefusal::DescriptorMismatch,
-            ));
-        }
-        let strategy_descriptor = strategy.descriptor(
-            target,
-            &McpOAuthCeremonyContext {
-                issuer: &facts.issuer,
-                client: &facts.client,
-                resource: &facts.resource,
-                redirect_uri: &facts.redirect_uri,
-            },
-        )?;
-        if !admitted_extends_strategy_descriptor(connector, &strategy_descriptor) {
+        let unverified = facts.expected_account.is_unverified();
+        let context = McpOAuthCeremonyContext {
+            issuer: &facts.issuer,
+            client: &facts.client,
+            resource: &facts.resource,
+            redirect_uri: &facts.redirect_uri,
+            account: &facts.expected_account,
+        };
+        let expected_descriptor = if unverified {
+            unverified_descriptor(&context, &BTreeSet::new())?
+        } else {
+            strategy.descriptor(target, &context)?
+        };
+        if !admitted_extends_strategy_descriptor(connector, &expected_descriptor) {
             return Err(McpOAuthError::Verification(
                 ConnectorOAuthRefusal::DescriptorMismatch,
             ));
@@ -1261,12 +1449,28 @@ impl McpOAuthAuthority {
             server_name: target.server_name().to_owned(),
             reason: "authorization-code exchange failed".into(),
         })?;
-        let evidence = descriptor
-            .verify_account(strategy.observe_account(descriptor, &token).await?, &token)?;
-        let mut persisted =
-            persisted_tokens_from_result(&token, &discovery, &client, target, Utc::now())?;
-        persisted.account_id = Some(evidence.account().to_owned());
-        persisted.scopes = evidence.granted_scopes().iter().cloned().collect();
+        let binding = McpCredentialBinding::for_descriptor(descriptor);
+        let mut persisted = persisted_tokens_from_result(
+            &token,
+            &discovery,
+            &client,
+            target,
+            &binding,
+            Utc::now(),
+        )?;
+        let completion: OAuthBrowserFlowCompletion = if unverified {
+            // No account is observed, inferred or reported for this grant.
+            let grant = descriptor.accept_unverified_grant(&token)?;
+            persisted.account_id = None;
+            persisted.scopes = grant.granted_scopes().iter().cloned().collect();
+            grant.into()
+        } else {
+            let evidence = descriptor
+                .verify_account(strategy.observe_account(descriptor, &token).await?, &token)?;
+            persisted.account_id = Some(evidence.account().to_owned());
+            persisted.scopes = evidence.granted_scopes().iter().cloned().collect();
+            evidence.into()
+        };
         let committed = save_oauth_tokens_and_consume_browser_flow(
             self.provider_auth_persistence.clone(),
             self.auth_lease.clone(),
@@ -1275,7 +1479,7 @@ impl McpOAuthAuthority {
             BrowserOAuthFlowCommit {
                 authority: authority.clone(),
                 state,
-                completion: evidence.into(),
+                completion,
                 redirect_uri: record.redirect_uri.clone(),
             },
         )
@@ -1292,6 +1496,7 @@ impl McpOAuthAuthority {
         Ok(McpOAuthLoginComplete {
             target: target.clone(),
             account_id: committed.account_id.clone(),
+            account_verification: binding.verification,
             expires_at: committed.expires_at,
             has_refresh_token: committed.refresh_token.is_some(),
             scopes: committed.scopes,
@@ -1354,13 +1559,13 @@ impl McpOAuthAuthority {
     /// nothing, and performs no network I/O. A host uses it to find an
     /// attempt it no longer holds, for example after its own restart, when
     /// the flow owner restored an attempt whose callback listener is gone.
-    /// Only the selected account's attempt for this exact resource is
+    /// Only an attempt of the target's selection for this exact resource is
     /// reported; an unselected target has none.
     pub fn pending_attempt(
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<McpOAuthPendingAttempt>, McpOAuthError> {
-        if target.expected_account().is_none() {
+        if !target.is_selected() {
             return Ok(None);
         }
         let (authority, _) = self
@@ -1422,13 +1627,33 @@ impl McpOAuthAuthority {
             .map_err(McpOAuthError::Flow)
     }
 
-    /// Disconnect `target`: remove its stored credential and release the
-    /// credential lifecycle, through the same coordinated mutation that
-    /// guards refresh and login commits. A pending attempt is unaffected,
-    /// and nothing is revoked at the provider.
+    /// Disconnect `target`: retire every browser attempt pending for its
+    /// slot, then remove its stored credential and release the credential
+    /// lifecycle through the same coordinated mutation that guards refresh
+    /// and login commits. Both happen even when no credential is stored, so
+    /// a callback admitted before the disconnect cannot repopulate the slot:
+    /// its commit finds the attempt retired. Nothing is revoked at the
+    /// provider.
     pub async fn logout(&self, target: &McpServerIdentity) -> Result<(), McpOAuthError> {
         let credential_identity: meerkat_core::AuthCredentialIdentity =
             target.auth_binding_ref()?.into();
+        if let Some((authority, _)) = self.interactive.as_ref() {
+            // The flow owner holds at most one attempt per slot; each pass
+            // retires the one it reports, so this ends when none is left.
+            while let Some((state, record)) = authority
+                .pending_connector_browser_attempt(&credential_identity)
+                .map_err(McpOAuthError::Flow)?
+            {
+                authority
+                    .expire(
+                        &state,
+                        &credential_identity,
+                        record.provider,
+                        &record.redirect_uri,
+                    )
+                    .map_err(McpOAuthError::Flow)?;
+            }
+        }
         meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
             self.provider_auth_persistence.clone(),
             self.auth_lease.clone(),
@@ -1679,12 +1904,51 @@ impl McpOAuthAuthority {
                 });
             }
         };
+        // Subject: a verified credential's refreshed token must still be the
+        // bound account. An unverified grant stays unverified: nothing is
+        // observed for it.
+        if let Some(bound) = admitted
+            .tokens
+            .account_id
+            .as_deref()
+            .filter(|_| target.account_verification() == Some(AccountVerification::Verified))
+        {
+            match self
+                .observe_refreshed_subject(target, metadata, bound, &refreshed)
+                .await
+            {
+                Ok(observed) if observed == bound => {}
+                Ok(_) => {
+                    let observation = meerkat_core::RefreshFailureObservation::transient();
+                    return Err(
+                        match self.auth_lease.refresh_failed(&lease_key, observation) {
+                            Ok(()) => RefreshError::CredentialIdentityMismatch,
+                            Err(error) => RefreshError::Refresh(format!(
+                                "refreshed MCP OAuth subject differs from the bound account; AuthMachine refresh_failed rejected closure: {error}"
+                            )),
+                        },
+                    );
+                }
+                Err(reason) => {
+                    let observation = meerkat_core::RefreshFailureObservation::transient();
+                    return Err(
+                        match self.auth_lease.refresh_failed(&lease_key, observation) {
+                            Ok(()) => RefreshError::Refresh(reason.to_owned()),
+                            Err(error) => RefreshError::Refresh(format!(
+                                "{reason}; AuthMachine refresh_failed rejected closure: {error}"
+                            )),
+                        },
+                    );
+                }
+            }
+        }
         let refreshed_at = Utc::now();
-        let mut persisted = match persisted_tokens_from_result(
+        let mut persisted = match persisted_tokens_from_result_with_binding(
             &refreshed,
             &metadata.discovery,
             &metadata.client,
             target,
+            metadata.account_binding.as_ref(),
             refreshed_at,
         ) {
             Ok(persisted) => persisted,
@@ -1700,7 +1964,8 @@ impl McpOAuthAuthority {
                 return Err(RefreshError::Refresh(error.to_string()));
             }
         };
-        // Refresh preserves the verified credential subject; a server label is never an account.
+        // Refresh keeps the bound subject (re-observed above when verified,
+        // absent for an unverified grant); a server label is never an account.
         persisted.account_id = admitted.tokens.account_id.clone();
         if persisted.refresh_token.is_none() {
             persisted.refresh_token = Some(refresh_token);
@@ -1782,6 +2047,47 @@ impl McpOAuthAuthority {
                 .await);
         }
         Ok(published)
+    }
+
+    /// The subject the account strategy observes for a refreshed token of a
+    /// verified credential bound to `bound`. `Err` means the subject could
+    /// not be observed (no strategy, another strategy or context, or the
+    /// provider evidence was unavailable), which is distinct from a
+    /// different subject.
+    async fn observe_refreshed_subject(
+        &self,
+        target: &McpServerIdentity,
+        metadata: &StoredMcpOAuthMetadata,
+        bound: &str,
+        refreshed: &OAuthTokenResult,
+    ) -> Result<String, &'static str> {
+        let Some((_, strategy)) = self.interactive.as_ref() else {
+            return Err("MCP OAuth account strategy is not installed");
+        };
+        let account = AccountSelection::Known(bound.to_owned());
+        let descriptor = strategy
+            .descriptor(
+                target,
+                &McpOAuthCeremonyContext {
+                    issuer: &metadata.discovery.authorization_server,
+                    client: &metadata.client.client_id,
+                    resource: &metadata.discovery.resource,
+                    redirect_uri: &metadata.client.redirect_uri,
+                    account: &account,
+                },
+            )
+            .map_err(|_| "MCP OAuth account strategy refused the stored context")?;
+        if let Some(binding) = &metadata.account_binding
+            && (binding.stable_context != descriptor.stable_context()
+                || binding.strategy_id != descriptor.parameters().strategy_id)
+        {
+            return Err("installed MCP OAuth account strategy differs from the bound one");
+        }
+        strategy
+            .observe_account(&descriptor, refreshed)
+            .await
+            .map(|observation| observation.account)
+            .map_err(|_| "refreshed MCP OAuth subject could not be observed")
     }
 
     /// Close every begun refresh through AuthMachine. Permanently unusable
@@ -2169,16 +2475,140 @@ fn stored_metadata_for_target(
     Ok(metadata)
 }
 
+/// Whether a stored credential belongs to `target`'s selection: the Known
+/// subject; a verified Discover subject; or an unverified grant with no
+/// account. A legacy target keeps its pre-selection semantics. A recorded
+/// binding must carry the target's verification mode.
 fn verify_stored_account(
     target: &McpServerIdentity,
     tokens: &PersistedTokens,
 ) -> Result<(), McpOAuthError> {
-    if let Some(expected) = target.expected_account()
-        && tokens.account_id.as_deref() != Some(expected)
-    {
-        return Err(ConnectorOAuthRefusal::AccountMismatch.into());
+    if stored_credential_matches_selection(target, tokens) {
+        Ok(())
+    } else {
+        Err(ConnectorOAuthRefusal::AccountMismatch.into())
     }
-    Ok(())
+}
+
+/// See [`verify_stored_account`]. Hosts use it to project status from a
+/// stored credential without admitting it.
+pub fn stored_credential_matches_selection(
+    target: &McpServerIdentity,
+    tokens: &PersistedTokens,
+) -> bool {
+    let binding = McpCredentialBinding::from_tokens(tokens);
+    let verification = binding.as_ref().map(|binding| binding.verification);
+    match target.selection() {
+        McpAccountSelection::Legacy => true,
+        // A Known credential committed before account bindings were
+        // recorded has none; its subject still has to match.
+        McpAccountSelection::Known(account) => {
+            tokens.account_id.as_deref() == Some(account.as_str())
+                && verification.is_none_or(|mode| mode == AccountVerification::Verified)
+        }
+        McpAccountSelection::Discover => {
+            tokens
+                .account_id
+                .as_deref()
+                .is_some_and(|account| !account.is_empty())
+                && verification == Some(AccountVerification::Verified)
+        }
+        McpAccountSelection::Unverified => {
+            tokens.account_id.is_none() && verification == Some(AccountVerification::Unverified)
+        }
+    }
+}
+
+/// A credential occupying the slot a login would publish into.
+struct SlotOccupant {
+    account_id: Option<String>,
+    binding: McpCredentialBinding,
+    metadata: StoredMcpOAuthMetadata,
+}
+
+/// The account selection one attempt is admitted with. An empty Discover
+/// slot discovers; an occupied one reconnects only its bound subject,
+/// admitted as Known while keeping the Discover slot. An occupied
+/// unverified slot never reconnects: replacing it needs a disconnect.
+fn attempt_selection(
+    target: &McpServerIdentity,
+    occupant: Option<&SlotOccupant>,
+) -> Result<AccountSelection, McpOAuthError> {
+    let disconnect = || McpOAuthError::DisconnectRequired {
+        server_name: target.server_name().to_owned(),
+    };
+    match (target.selection(), occupant) {
+        (McpAccountSelection::Legacy, _) => Err(McpOAuthError::AccountSelectionRequired),
+        (McpAccountSelection::Known(account), None) => Ok(AccountSelection::Known(account.clone())),
+        (McpAccountSelection::Known(account), Some(occupant)) => {
+            if occupant.account_id.as_deref() == Some(account.as_str()) {
+                Ok(AccountSelection::Known(account.clone()))
+            } else {
+                Err(disconnect())
+            }
+        }
+        (McpAccountSelection::Discover, None) => Ok(AccountSelection::Discover),
+        (McpAccountSelection::Discover, Some(occupant)) => occupant
+            .account_id
+            .clone()
+            .filter(|account| !account.is_empty())
+            .map(AccountSelection::Known)
+            .ok_or_else(disconnect),
+        (McpAccountSelection::Unverified, None) => Ok(AccountSelection::Unverified),
+        (McpAccountSelection::Unverified, Some(_)) => Err(disconnect()),
+    }
+}
+
+/// The natively built descriptor of an explicitly unverified attempt: the
+/// admitted issuer, client, resource and redirect, the resource's scopes,
+/// no account, and the unverified strategy identifier.
+fn unverified_descriptor(
+    context: &McpOAuthCeremonyContext<'_>,
+    resource_scopes: &BTreeSet<String>,
+) -> Result<ConnectorOAuthDescriptor, McpOAuthError> {
+    if !context.account.is_unverified() {
+        return Err(ConnectorOAuthRefusal::InvalidDescriptor.into());
+    }
+    Ok(ConnectorOAuthParameters {
+        issuer: context.issuer.to_owned(),
+        client: context.client.to_owned(),
+        resource: context.resource.to_owned(),
+        scopes: resource_scopes.clone(),
+        redirect_uri: context.redirect_uri.to_owned(),
+        expected_account: AccountSelection::Unverified,
+        strategy_id: UNVERIFIED_RESOURCE_STRATEGY_ID.to_owned(),
+    }
+    .try_into()?)
+}
+
+/// Attempts this process admitted after a successful strategy preflight
+/// (or for a mode that needs none), keyed by the non-secret reference of
+/// their state. A join reuses this receipt; an attempt without one (for
+/// example restored after a restart) is retired and admitted afresh, so no
+/// attempt reaches the browser without its preflight.
+fn preflight_receipts()
+-> &'static parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static RECEIPTS: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    RECEIPTS.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn retain_preflight_receipt(state: &str) {
+    let now = std::time::Instant::now();
+    let mut receipts = preflight_receipts().lock();
+    // A receipt is useless once its attempt has expired.
+    receipts.retain(|_, admitted| now.duration_since(*admitted) < MCP_INTERACTIVE_LOGIN_TIMEOUT);
+    receipts.insert(
+        OAuthBrowserActionRef::project(state).as_str().to_owned(),
+        now,
+    );
+}
+
+fn preflight_receipt_retained(state: &str) -> bool {
+    preflight_receipts()
+        .lock()
+        .contains_key(OAuthBrowserActionRef::project(state).as_str())
 }
 
 /// Serializes start-or-join per MCP target within this process, so a target
@@ -2366,7 +2796,8 @@ fn authorize_endpoints(
 }
 
 /// Whether a pending connector attempt belongs to `target`: its descriptor
-/// names the target's resource and selected account.
+/// names the target's resource and an account selection of the target's
+/// mode.
 fn pending_attempt_matches(
     target: &McpServerIdentity,
     record: &crate::oauth_flow::OAuthFlowRecord,
@@ -2375,9 +2806,25 @@ fn pending_attempt_matches(
         return false;
     };
     let facts = connector.parameters();
-    target.expected_account().is_some()
-        && facts.expected_account.known() == target.expected_account()
-        && facts.resource == target.server_url()
+    if facts.resource != target.server_url() {
+        return false;
+    }
+    let unverified = facts.expected_account.is_unverified()
+        && facts.strategy_id == UNVERIFIED_RESOURCE_STRATEGY_ID;
+    match target.selection() {
+        McpAccountSelection::Legacy => false,
+        McpAccountSelection::Known(account) => {
+            facts.expected_account.known() == Some(account.as_str())
+        }
+        // An empty Discover slot admits Discover; an occupied one reconnects
+        // its bound subject as Known. The slot key already scopes the
+        // attempt to this target's Discover slot.
+        McpAccountSelection::Discover => {
+            !facts.expected_account.is_unverified()
+                && facts.strategy_id != UNVERIFIED_RESOURCE_STRATEGY_ID
+        }
+        McpAccountSelection::Unverified => unverified,
+    }
 }
 
 fn persisted_tokens_from_result(
@@ -2385,6 +2832,20 @@ fn persisted_tokens_from_result(
     discovery: &StoredMcpOAuthDiscovery,
     client: &StoredMcpOAuthClient,
     target: &McpServerIdentity,
+    binding: &McpCredentialBinding,
+    now: DateTime<Utc>,
+) -> Result<PersistedTokens, McpOAuthError> {
+    persisted_tokens_from_result_with_binding(result, discovery, client, target, Some(binding), now)
+}
+
+/// Refresh keeps the credential's recorded binding (or its absence, for a
+/// credential that predates account bindings) unchanged.
+fn persisted_tokens_from_result_with_binding(
+    result: &OAuthTokenResult,
+    discovery: &StoredMcpOAuthDiscovery,
+    client: &StoredMcpOAuthClient,
+    target: &McpServerIdentity,
+    binding: Option<&McpCredentialBinding>,
     now: DateTime<Utc>,
 ) -> Result<PersistedTokens, McpOAuthError> {
     let expires_at =
@@ -2404,6 +2865,7 @@ fn persisted_tokens_from_result(
         server_url: target.server_url().to_string(),
         discovery: discovery.clone(),
         client: client.clone(),
+        account_binding: binding.cloned(),
     };
     Ok(PersistedTokens {
         auth_mode: PersistedAuthMode::McpOauth,
@@ -2435,9 +2897,9 @@ fn map_coordinated_login_error(
             server_name: target.server_name().to_string(),
             reason,
         },
-        CredentialMutationError::SlotRefused(refusal) => McpOAuthError::AuthLifecycle {
+        CredentialMutationError::SlotRefused(refusal) => McpOAuthError::CredentialSlot {
             server_name: target.server_name().to_string(),
-            reason: refusal.to_string(),
+            refusal,
         },
         CredentialMutationError::Cancelled => McpOAuthError::AuthLifecycle {
             server_name: target.server_name().to_string(),
@@ -2687,6 +3149,9 @@ struct StoredMcpOAuthMetadata {
     server_url: String,
     discovery: StoredMcpOAuthDiscovery,
     client: StoredMcpOAuthClient,
+    /// Read by [`McpCredentialBinding::from_tokens`] under this exact name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_binding: Option<McpCredentialBinding>,
 }
 
 struct AdmittedMcpCredential {

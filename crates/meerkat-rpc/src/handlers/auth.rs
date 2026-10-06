@@ -1656,6 +1656,7 @@ pub async fn handle_auth_login_complete(
                 mcp_server = %mcp.server_name,
                 action = "login_mcp_oauth_complete",
                 has_refresh_token = %completed.has_refresh_token,
+                account_verification = ?completed.account_verification,
                 "MCP OAuth login completed via RPC"
             );
             return RpcResponse::success(
@@ -1665,6 +1666,9 @@ pub async fn handle_auth_login_complete(
                     target: WireLoginReadyTarget::Mcp(WireMcpLoginReady {
                         mcp,
                         account_id: completed.account_id,
+                        account_verification: meerkat::mcp_account_verification_to_wire(Some(
+                            completed.account_verification,
+                        )),
                     }),
                     expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
                     has_refresh_token: completed.has_refresh_token,

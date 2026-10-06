@@ -173,7 +173,10 @@ fn untagged_target_one_of(schema: &mut schemars::Schema) {
 ///
 /// `server_name` and `server_url` identify the configured server;
 /// `oauth_account` is the selected account the login must prove (the OIDC
-/// subject for the default account strategy). Login is host-driven: the
+/// subject for the default account strategy), and `oauth_account_selection`
+/// the configured `discover` or `unverified` mode. Both only name the host
+/// configuration: a value that differs from it is refused, and neither can
+/// select or downgrade a mode. Login is host-driven: the
 /// authorize URL and state are host-channel data and must never reach an
 /// agent, tool result, transcript or log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +187,33 @@ pub struct WireMcpAuthTarget {
     pub server_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account_selection: Option<WireMcpAccountSelection>,
+}
+
+/// Configured account binding of an MCP server that names no account.
+/// `discover` binds the provider-verified account at the first login;
+/// `unverified` is resource-bound access with no account evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMcpAccountSelection {
+    Discover,
+    Unverified,
+}
+
+/// Whether an MCP server's credential proves an account. `verified`: a
+/// known or discovered account was verified by the account strategy.
+/// `unverified`: the host opted into resource-bound access; no account is
+/// verified and `account_id` is always absent. `legacy`: the server has no
+/// account selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMcpAccountVerification {
+    Verified,
+    Unverified,
+    Legacy,
 }
 
 /// Credential slot of a connector credential: a realm-scoped storage
@@ -898,6 +928,7 @@ pub struct WireMcpLoginReady {
     pub mcp: WireMcpAuthTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    pub account_verification: WireMcpAccountVerification,
 }
 
 /// `POST /auth/login/device/start` success body.
@@ -1017,6 +1048,9 @@ pub enum WireMcpAuthPhase {
 pub struct WireMcpAuthStatus {
     pub mcp: WireMcpAuthTarget,
     pub phase: WireMcpAuthPhase,
+    /// How the server's credential relates to an account. Host UI must say
+    /// "account not verified" for `unverified`.
+    pub account_verification: WireMcpAccountVerification,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -83,7 +83,7 @@ impl OAuthBearer {
     async fn resolve(&self) -> Result<Option<String>, StreamableHttpError<reqwest::Error>> {
         match self.resolver.stored_bearer_token(&self.target).await {
             Ok(Some(token)) => Ok(Some(token)),
-            Ok(None) if self.target.expected_account().is_none() => Ok(None),
+            Ok(None) if !self.target.is_selected() => Ok(None),
             Ok(None)
             | Err(
                 McpOAuthError::ReauthRequired { .. }

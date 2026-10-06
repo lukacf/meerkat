@@ -344,7 +344,8 @@ pub use host_auth::{
     HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget, HostMcpAuthPhase,
     HostMcpAuthStatus, HostMcpTargetRefusal, connector_ready_to_wire, connector_slot_from_wire,
     connector_slot_to_wire, connector_status_to_wire, connector_target_from_wire,
-    mcp_auth_target_to_wire, mcp_login_disposition_to_wire, resolve_configured_mcp_target,
+    mcp_account_verification_to_wire, mcp_auth_target_to_wire, mcp_login_disposition_to_wire,
+    resolve_configured_mcp_target,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};

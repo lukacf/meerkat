@@ -137,8 +137,28 @@ slow-timeout = { period = "60s" }
 # can therefore exhaust the 16k ephemeral-port range because every comms
 # envelope opens a fresh TCP connection. This group restores the intended
 # serialization for only that network cohort; unrelated tests stay parallel.
+# e2e_fast_lane's cross_host_live_member and multi_host_* modules compose the
+# same real-loopback mob support (crates/meerkat-mob/tests/support) as the
+# cross_host_* binaries, so those modules (not the rest of the binary) join.
 [test-groups.mob-real-comms-macos]
 max-threads = 1
+
+# Downstream Cargo canaries: the downstream_* tests of
+# crates/meerkat/tests/agent_builder_policy_canary.rs each run a nested
+# `cargo check`/`build` of a fixture crate, which takes every core by default.
+# Run side by side they multiply the job count. One at a time, on every
+# platform. A new test that shells out to Cargo joins this filter.
+[test-groups.downstream-cargo-canary]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'binary(agent_builder_policy_canary) and test(/^downstream_/)'
+test-group = 'downstream-cargo-canary'
+
+[[profile.fast.overrides]]
+# Mirrors the default override above, as the cohort overrides below do.
+filter = 'binary(agent_builder_policy_canary) and test(/^downstream_/)'
+test-group = 'downstream-cargo-canary'
 
 [[profile.fast.overrides]]
 filter = '''
@@ -146,6 +166,7 @@ binary(cross_host_events)
 or binary(cross_host_flows)
 or binary(cross_host_live)
 or binary(cross_host_wiring)
+or (binary(e2e_fast_lane) and test(/^(cross_host_live_member|multi_host_[a-z_]+)::/))
 or binary(host_actor_persistence)
 or binary(host_bind_ceremony)
 or binary(host_materialize_serving)
@@ -173,6 +194,7 @@ binary(cross_host_events)
 or binary(cross_host_flows)
 or binary(cross_host_live)
 or binary(cross_host_wiring)
+or (binary(e2e_fast_lane) and test(/^(cross_host_live_member|multi_host_[a-z_]+)::/))
 or binary(host_actor_persistence)
 or binary(host_bind_ceremony)
 or binary(host_materialize_serving)

@@ -405,9 +405,10 @@ pub async fn build_agent_config(
 
     // The profile's read-only and deny declarations are the mob author's tool
     // restriction. The factory conjoins it with the per-spawn policy at the
-    // execution gate (a spawn narrows, never widens it) and persists only the
-    // spawn part, so every build, a resume included, recomputes the
-    // declaration from the current profile.
+    // execution gate (a spawn narrows, never widens it). The effective policy
+    // is persisted for children to inherit; the launch part is also recorded
+    // separately, so every build, a resume included, recomputes the declaration
+    // from the current profile instead of restoring an old declaration.
     let restriction = meerkat_core::ops::DeclaredToolRestriction {
         declared_by: format!("profile '{profile_name}'"),
         enabled_families: enabled_tool_families(&profile.tools),

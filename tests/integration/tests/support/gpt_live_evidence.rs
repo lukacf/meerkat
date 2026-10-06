@@ -2163,6 +2163,20 @@ impl std::fmt::Display for Fault {
 }
 impl std::error::Error for Fault {}
 
+/// Run `record` once a scenario body has settled into `outcome`, whether it
+/// returned or panicked, and hand the outcome back unchanged (#1765).
+/// Lag-rule evidence (the browser timeline) must be journaled before a panic
+/// is resumed: resuming unwinds through the scenario's [`FailureGuard`],
+/// which finishes the journal, and any record after that is
+/// [`Fault::AfterFinish`].
+pub async fn record_before_resuming<T>(
+    outcome: std::thread::Result<T>,
+    record: impl std::future::Future<Output = ()>,
+) -> std::thread::Result<T> {
+    record.await;
+    outcome
+}
+
 pub struct FailureGuard(pub Journal);
 impl Drop for FailureGuard {
     fn drop(&mut self) {
@@ -2764,6 +2778,72 @@ mod tests {
             + entries[0]["detail"]["speech_ms"].as_i64().unwrap();
         let input_final = entries[1]["detail"]["t_ms"].as_i64().unwrap();
         assert_eq!(input_final - speech_end, 900);
+    }
+
+    /// A scenario body that panics still journals its timeline: the record
+    /// runs before the panic resumes through the `FailureGuard` (#1765).
+    /// Resuming first, as S99 did, finishes the journal and the timeline
+    /// write is refused as `AfterFinish`.
+    #[test]
+    fn a_panicking_body_journals_its_timeline_before_the_guard_finishes() {
+        use super::super::TimelineKind;
+        let root = root();
+        let timeline = || Record::Timeline {
+            channel: 1,
+            entries: vec![TimelineEntry {
+                t_ms: 1_000,
+                kind: TimelineKind::FixtureStart,
+                detail: serde_json::json!({"name": "recall", "speech_ms": 2_000}),
+            }],
+        };
+        let journal = Journal::at(
+            &root.path().join("panicked"),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let resumed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = FailureGuard(journal.clone());
+            let outcome = std::panic::catch_unwind(|| -> () {
+                std::panic::resume_unwind(Box::new("scenario assertion failed"))
+            });
+            let outcome = futures::executor::block_on(record_before_resuming(outcome, async {
+                journal.record(timeline()).unwrap();
+            }));
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+        }));
+        assert!(resumed.is_err(), "the scenario's panic still propagates");
+        assert_eq!(journal.check(), Ok(()));
+        let text = std::fs::read_to_string(journal.path()).unwrap();
+        let kinds: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .map(|line| line["record"]["kind"].clone())
+            .collect();
+        let timeline_at = kinds.iter().position(|kind| kind == "timeline");
+        let outcome_at = kinds.iter().position(|kind| kind == "outcome");
+        assert!(
+            timeline_at.is_some() && timeline_at < outcome_at,
+            "timeline before the guard's outcome: {kinds:?}"
+        );
+
+        // The old order: the panic resumes (the guard finishes the journal)
+        // before the timeline is recorded.
+        let late = Journal::at(
+            &root.path().join("late-timeline"),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = FailureGuard(late.clone());
+            std::panic::resume_unwind(Box::new("scenario assertion failed"));
+        }));
+        assert_eq!(late.record(timeline()), Err(Fault::AfterFinish));
     }
 
     #[test]

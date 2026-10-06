@@ -588,6 +588,20 @@ pub(crate) struct MobOperatorToolDispatcher {
 }
 
 impl MobOperatorToolDispatcher {
+    async fn capture_creation_source(&self) -> crate::MemberCreationSourceWitness {
+        let Some(session_id) = self.owner_bridge_session_id.clone() else {
+            return crate::MemberCreationSourceWitness::unavailable();
+        };
+        let handle = self.handle.clone();
+        meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            handle
+                .capture_member_creation_source(&session_id)
+                .await
+                .unwrap_or_else(|_| crate::MemberCreationSourceWitness::unavailable())
+        })
+        .await
+    }
+
     pub(crate) fn new(
         handle: MobHandle,
         enable_mob: bool,
@@ -1303,7 +1317,8 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     args.initial_message,
                     args.runtime_mode,
                     args.backend,
-                );
+                )
+                .with_creation_source(self.capture_creation_source().await);
                 // Resolve launch mode: explicit launch_mode takes precedence,
                 // then legacy resume_session_id, then default (Fresh).
                 if let Some(launch_mode) = args.launch_mode {
@@ -1362,6 +1377,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .iter()
                     .map(|spec| AgentIdentity::from(spec.member_id.as_str()))
                     .collect::<Vec<_>>();
+                let creation_source = self.capture_creation_source().await;
                 let specs = args
                     .specs
                     .into_iter()
@@ -1372,7 +1388,8 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             spec.initial_message,
                             spec.runtime_mode,
                             spec.backend,
-                        );
+                        )
+                        .with_creation_source(creation_source.clone());
                         if let Some(launch_mode) = spec.launch_mode {
                             spawn_spec = spawn_spec.with_launch_mode(launch_mode);
                         } else if let Some(session_id) =

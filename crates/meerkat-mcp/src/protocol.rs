@@ -162,6 +162,22 @@ pub(crate) fn convert_tool_result(
     result: CallToolResult,
     name: &str,
 ) -> Result<Vec<ContentBlock>, McpError> {
+    let (blocks, is_error) = project_tool_result(result, name)?;
+    if is_error {
+        return Err(McpError::ToolCallFailed {
+            tool: name.to_string(),
+            reason: tool_error_reason(&blocks),
+        });
+    }
+    Ok(blocks)
+}
+
+/// Dispatcher projection preserves the MCP error bit and all result content.
+pub(crate) fn project_tool_result(
+    result: CallToolResult,
+    name: &str,
+) -> Result<(Vec<ContentBlock>, bool), McpError> {
+    let is_error = result.is_error.unwrap_or(false);
     let mut blocks = extract_content_blocks(result.content);
     if let Some(data) = result.structured_content {
         // MCP asks servers that return structuredContent to also serialize it
@@ -175,13 +191,7 @@ pub(crate) fn convert_tool_result(
         })?;
         blocks.push(block);
     }
-    if result.is_error.unwrap_or(false) {
-        return Err(McpError::ToolCallFailed {
-            tool: name.to_string(),
-            reason: tool_error_reason(&blocks),
-        });
-    }
-    Ok(blocks)
+    Ok((blocks, is_error))
 }
 
 /// True when `block` is text whose content parses to JSON equal to `data`.

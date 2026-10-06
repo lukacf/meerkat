@@ -37,8 +37,16 @@ them.
 
 ### Breaking
 
+- `McpError` gains `CallContext(McpCallContextError)` for fixed host context
+  refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
+  (behavior-only break). Typed MCP dispatch preserves `isError` as a failed
+  `ToolResult` with its content instead of flattening it into a transport error;
+  content-only convenience calls retain their existing error projection.
+
 - Connector OAuth (#1631; see Added) changes these Rust types:
-  - `PersistedAuthMode` gains `ConnectorOauth`.
+  - `PersistedAuthMode` gains `ConnectorOauth` before `ExternalTokens`, so
+    the implicit discriminants of `PersistedAuthMode::*` after it shift
+    (`ExternalTokens`, `ExternalAuthorizer`, `Command`).
   - `CredentialMutationError` gains `SlotRefused(CredentialSlotRefusal)`.
   - `RefreshError` gains `RequiredScopesNotGranted`.
   - `ConnectorOAuthParameters::expected_account` is an `AccountSelection`
@@ -47,8 +55,13 @@ them.
   - `OAuthFlowRecord` and `PersistedOAuthBrowserFlow` gain `nonce`.
   - `OAuthFlowRegistry::insert_browser_flow_with_pruned` takes the nonce,
     and `insert_restored_browser_flow` takes the whole `OAuthFlowRecord`.
-  - `LoginCancelParams` and `WireLoginCancelled` become target unions
-    (`Mcp` or `Connector`).
+  - `LoginCancelParams` changes from a struct to a target union
+    (`Mcp(McpLoginCancelParams)` or `Connector(ConnectorLoginCancelParams)`),
+    and `WireLoginCancelled` replaces its `mcp` field with a flattened
+    `target` (`WireLoginCancelledTarget`: `Mcp` or `Connector`).
+  - `WireLoginTarget`, `WireLoginStartTarget`, `WireLoginReadyTarget`,
+    `AuthStatusParams` and `WireAuthStatusResult` gain a `Connector` variant.
+  - `HostAuthError` gains `Connector` and `ConnectorTarget`.
 
   The JSON of MCP cancel requests and results is unchanged.
 
@@ -80,6 +93,12 @@ them.
     live session agent reports it as the new
     `AgentError::ControlAppendBlockedByCallbackBatch`.
 
+- `meerkat_contracts::WireBackendProfile` gains the pub field
+  `prompt_cache_applicable: Option<bool>` (#1781; see Added). Code that
+  builds a `WireBackendProfile` with a struct literal must set it; the wire
+  form is unchanged for existing fields and the new field is omitted when
+  `None`.
+
 ### Added
 
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
@@ -104,6 +123,58 @@ them.
   (`build_runtime_backed_service_with_default_reconfigure_host`) arms it with
   `SessionServiceDeliveryHost` for every surface built through it. Mob realm
   rows drain on the same owner.
+
+- Hosts can see whether Meerkat's OpenAI prompt-cache fields apply on a
+  backend: `WireBackendProfile.prompt_cache_applicable` (in a realm's
+  connection set and binding listings) is `true` for the public OpenAI API,
+  `false` for the ChatGPT backend and Azure OpenAI, and omitted for other
+  providers (#1781). It comes from the same decision the OpenAI client
+  applies on the wire, `OpenAiBackendKind::admits_prompt_cache_fields`, so
+  hosts no longer infer it from the backend kind. The SDKs' generated types
+  carry it.
+- Process-local `McpCallContextProvider` and `AgentFactory::mcp_call_context_provider`
+  prepare per-call metadata for an exact MCP destination and physical connection.
+  Metadata remains opaque until final serialization, cleanup follows cancellation,
+  and unavailable origin uses the strict shared `WireCallOrigin` codec. A trusted
+  provider can declare read-only operations; execution policy rechecks the actual
+  destination after asynchronous decisions and reloads.
+- `ChildMcpServers` supplies host-attested public descriptors to inline child and
+  delegate profiles. Protected connection credentials stay in host composition;
+  conflicting persisted descriptors refuse without replacement.
+
+- `MobSessionService::load_retained_session_metadata` returns the latest
+  committed metadata of an exact retained session, including archived sessions,
+  through the persistent service's authoritative metadata owner. Unsupported
+  backends return a typed error. Ordinary visibility, resume and write rules
+  are unchanged; this read provides no revision or currentness guarantee.
+- `meerkat_mob::event::MemberSpawnedEvent` gains the public `creation` field.
+  Journals without that field remain readable as unknown provenance with no
+  creation token; replay never invents an ancestor or a proven root.
+- `meerkat-mob` records runtime-issued member creation identities and exact
+  spawn, fork and successor provenance in the existing member-created journal.
+  `MemberCreationId`, `MemberCreationRecord`, `MemberCreationProvenance`,
+  `MemberCreationSource`, `MemberCreationSnapshot`, `MemberCreationSourceWitness`
+  and `MemberCreationError` expose those facts.
+  `MobHandle::{member_creation_for_session, member_creation_journal_cursor}`
+  read retained creation facts and their journal position;
+  `MobHandle::capture_member_creation_source` captures a sealed source witness
+  for `SpawnMemberSpec::with_creation_source` before delegation. These
+  facts prove ancestry, not permission to execute tools or access a resource.
+  New unproven ancestry is distinct from missing legacy data, and a provenance
+  read failure does not prevent ordinary spawn, fork or delegation execution.
+- `SpawnMemberSpec::host_root` explicitly marks trusted host-origin creation.
+  `SpawnMemberSpec::new` defaults to unproven ancestry; agent-lane handles
+  downgrade host-root requests. Policy auto-spawn also remains unproven.
+- `MobBuilder::before_activation` accepts a `MobBeforeActivation` host hook
+  before fresh or restored members execute. Hosts can bind optional services
+  to the current roster and session authority before the first tool call.
+  Its `MobReadHandle`, also available through `MobHandle::read_handle`, exposes
+  direct reads and no actor commands.
+  A failed hook aborts startup; no hook runs unless explicitly configured.
+- `MobMcpState::{set_before_activation, set_additional_child_tool_bundles}`
+  propagate optional host service binding and tool factories to delegated
+  child mobs. Factories resolve each executing caller independently; child
+  registration does not reuse a parent's access decision.
 
 - Generic connector OAuth (#1631). A trusted host names a credential slot
   (`{realm_id, slot_id}`, a storage address, never account proof) and a
@@ -152,6 +223,47 @@ them.
   so the batch could never resolve; it is now refused as a retryable busy
   (`Session::append_system_message_control_idempotent`) without touching the
   transcript.
+
+- OpenAI: prompt-cache fields reach only a backend that has admitted them
+  (#1669). The public OpenAI API admits them; the ChatGPT backend and Azure
+  OpenAI do not, but two paths sent them there anyway:
+  - an explicit `provider_params` tag (`prompt_cache_enabled`, `_key`,
+    `_retention`, `_options`) was lowered for every backend, and
+    `prompt_cache_enabled: true` alone became `prompt_cache_options: {mode:
+    "implicit"}`;
+  - after an explicit model change with `auth_binding: Clear`, the request
+    defaults were computed for an unresolved binding, so a session whose
+    client resolved a ChatGPT-backend binding received the public API's cache
+    defaults.
+  The OpenAI client's backend now owns the decision for every request: on a
+  backend that has not admitted prompt-cache fields it drops them, with no
+  input breakpoints and no cache breakpoint claims, whoever set them. The
+  factory no longer applies its own backend gate to the defaults.
+
+- The hand-written TLC audits' per-run watchdog
+  (`specs/machines/meerkat_machine/tlc_run_cap.sh`) no longer orphans its
+  `sleep`. When TLC ended first, the watchdog could be stopped between
+  starting its sleep and recording the sleep's pid, leaving a `sleep 900`
+  that held a caller's `$(...)` capture open. That intermittently stalled
+  `make path-classifier-selftest`, which PR CI runs, for the whole cap. The
+  watchdog is now its own process group, ended as a group, with its stdio on
+  `/dev/null`.
+- Resuming a callback-pending turn with an ordinary `Input::Continuation`
+  now completes on runtime-backed services (#1772). Before this fix it
+  failed with `DSL authority (RunCompleted): guard rejected transition from
+  Running`. Such a continuation carries no conversation appends, so the
+  runtime loop treated it like the transient-context class and signalled no
+  turn start. The agent then found the previous run's terminal turn state,
+  started the resumed run under a fresh identity of its own, and rebound the
+  machine's `current_run_id` away from the runtime's run. The runtime now
+  applies `StartConversationRun` (content shape `Empty`) for this exact run
+  whenever the staged primitive's execution kind is `ResumePending`. Other
+  appends-empty primitives still start no turn. A new runtime-backed test
+  covers the whole path: callback-pending, then `stage_tool_results`, then an
+  ordinary continuation, then completion.
+- Read-only agents can search and load deferred tools through the catalog
+  control plane. Loading affects session visibility only; a loaded mutating
+  operation still fails the execution policy gate.
 
 - BuildBuddy runs no longer sit idle for 600 s after every build (#1744).
   Since the Bazel client started running under an environment allowlist,
@@ -269,12 +381,46 @@ them.
 
 ### Testing
 
+- The Rust changed-path selector no longer treats the per-crate license
+  symlinks (`crates/*/LICENSE-MIT`, `LICENSE-APACHE`) as embedded compile
+  inputs. Since those links landed, the repo-root license files mapped to
+  whichever crate came first in path order (`meerkat-agent-build-authority`),
+  so a license edit selected that crate in the agent gates and the CI
+  classifier, and `rust-lane-doctor`'s selector selftest (part of
+  `make agent-gate`) failed on a clean main. License links are package
+  metadata and select no package. The selftest pins that exemption.
+- `.config/nextest.toml`: the three `downstream_*` tests of
+  `meerkat`'s `agent_builder_policy_canary` each run a nested Cargo build
+  that takes every core, and now run one at a time (`downstream-cargo-canary`
+  test group). The `cross_host_live_member` and `multi_host_*` modules of
+  `e2e_fast_lane` join the macOS real-loopback comms group: they use the same
+  comms support as the cross-host binaries already serialized there; the rest
+  of that binary stays parallel.
+- Pre-push: the machine/protocol drift check runs once per push instead of
+  twice. The clippy hook's governance gate ran `make machine-check-drift --all`
+  (about 108 s) on top of the machine hook's own codegen clean-tree check. The
+  machine hook is now two hooks behind the same machine-authority classifier
+  and the exact pushed refs:
+  - `machine-codegen-drift` runs machine and protocol codegen under the
+    clean-tree contract. It is the only local drift check, and the
+    dispatcher refuses `SKIP=machine-codegen-drift`.
+  - `machine-codegen-verify` runs the canonical TLC lane. Skipping it skips
+    only TLC.
+
+  The agent gates leave drift to the hook when given
+  `--machine-drift-by-hook`, which only the clippy hook passes.
 - `meerkat-memory` `released_v2_store_with_empty_rows_is_purged_on_open` no
   longer treats approximate HNSW search recall as an exact oracle. Its final
   reopen check asserted three hits for one query and failed 5 of 200 serial
   runs on main. It now checks the rebuilt index cardinality and the exact
   durable texts (780/780 under serial and 48-way stress).
 
+- A `meerkat-mob` reload-lane test
+  (`queued_reload_and_predecessor_settle_before_topology_acquires_graph_fence`)
+  no longer flakes: its trust gate parks only topology's own trust source, so
+  a member's comms-drain startup publish can no longer be caught as a
+  topology mutation, and the test pins that this publish lands after
+  readiness (#1755, for #1748).
 - The real-stack spawn test (`meerkat-mob` `tests/spawn_while_member_turn_runs.rs`, #1542/#1558) now catches stalls below the spawn timeout:
   - Four workers spawn at once while a member's turn runs.
   - Each worker's bridge-session and supervisor-trust stage must finish within 5 s.
@@ -315,6 +461,31 @@ them.
   audio over the user's last word while its transcript kept the whole answer
   (#1717). The browser peer counts decoded speech before its playback gate,
   so no duck causes it.
+- The Turbo S S97 and S99 live scenarios record their journal timeline, the
+  evidence the provider-degradation lag rule reads, before a panic is
+  re-raised, so a run that fails by panic stays classifiable. Previously the
+  unwind finished the journal first and the timeline write was refused
+  (#1774, for #1765).
+- `meerkat-session`'s `live_close_refuses_busy_turn_boundary_and_can_retry`
+  no longer measures how long the bounded close waited. Its 150 ms lower
+  bound was timed from inside the spawned waiter, which can start after the
+  test's own 150 ms sleep began, so a loaded run measured 149.9 ms and failed.
+  A flag set just before the turn boundary is released, and read the moment
+  the waiter settles, now proves the ordering; the waiter starts late on
+  purpose, and the 5 s timeout is only a hang guard (#1779).
+- Turn-budget and LLM call deadlines are measured on Tokio's clock on
+  native (`time_compat::DeadlineInstant`, crate-private). In production, and
+  outside any runtime, it reads the same monotonic time as before; under a
+  paused Tokio clock it reads the paused clock, so budget and deadline tests
+  control time exactly. The LLM call wait measures its deadline on the clock
+  its timer runs on, so a timer that fires always finds the deadline reached.
+  wasm32 keeps `web_time`. No public signature changes.
+- `standalone_turn_budget_failure_allows_a_new_turn_with_a_fresh_budget` is
+  deterministic (#1776). It asserted one LLM call inside a 200 ms wall-clock
+  budget, which a loaded machine could spend before the first call. It now
+  uses a 30 s budget, a forced 300 ms stall before the first call, and a
+  call that pauses Tokio's clock once in flight, so the budget fires
+  exactly after one call; the second turn still answers with a fresh budget.
 
 ## [0.8.51] - 2026-10-05
 

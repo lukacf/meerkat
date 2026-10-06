@@ -3027,6 +3027,7 @@ pub fn compile_layer(
         .map(|spec| {
             validate_identifier("agent_identity", &spec.identity)?;
             Ok(SpawnMemberSpec::new(spec.profile, spec.identity)
+                .with_creation_source(crate::MemberCreationSourceWitness::unavailable())
                 .with_initial_message(spec.initial_message)
                 .with_budget_limits_if_present(spec.budget_limits))
         })

@@ -16,11 +16,16 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
   </Step>
   <Step title="Install the RPC binary">
     ```bash
-    make build
-    # Ensure the resulting rkat-rpc binary is on your $PATH
+    brew install lukacf/meerkat/rkat
     ```
 
-    By default the SDK can also auto-resolve and download `rkat-rpc` for the current platform, so a manual binary install is optional unless you want to control the binary path yourself.
+    Homebrew installs `rkat-rpc` with the other binaries. Without Homebrew,
+    download the `rkat-rpc` release archive for your platform and put it on
+    your `PATH` (see [Linux without Homebrew](/quickstart#linux-without-homebrew)).
+    By default the SDK can also auto-resolve and download `rkat-rpc` for the
+    current platform, so a manual binary install is optional unless you want
+    to control the binary path yourself. Contributors working from a
+    checkout can build it with `make build` instead.
 
     You also need an API key for at least one LLM provider (e.g. `ANTHROPIC_API_KEY`).
   </Step>

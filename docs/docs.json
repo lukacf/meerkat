@@ -220,6 +220,7 @@
                 "group": "Operations",
                 "pages": [
                   "guides/storage-operations",
+                  "guides/upgrading",
                   "reference/build-and-ci",
                   "guides/cd-and-distribution",
                   "guides/deploying"

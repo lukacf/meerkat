@@ -21,4 +21,4 @@ if [[ -n "${PRE_COMMIT_FROM_REF:-}" && -n "${PRE_COMMIT_TO_REF:-}" ]]; then
   fi
 fi
 
-exec "$AGENT_GATE" --committed --clippy-only "$@"
+exec "$AGENT_GATE" --committed --clippy-only --machine-drift-by-hook "$@"

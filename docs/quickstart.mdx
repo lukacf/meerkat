@@ -12,8 +12,9 @@ icon: "bolt"
     brew install lukacf/meerkat/rkat
     ```
 
-    The tap supports macOS and Linux. Release archives also contain `rkat`,
-    `rkat-rpc`, `rkat-rest`, and `rkat-mcp`.
+    The tap supports macOS and Linux and installs `rkat`, `rkat-rpc`,
+    `rkat-rest` and `rkat-mcp`. Without Homebrew, use the release archives
+    (see [Linux without Homebrew](#linux-without-homebrew)).
   </Tab>
   <Tab title="Python">
     ```bash
@@ -55,8 +56,41 @@ icon: "bolt"
     ```bash
     cargo install rkat
     ```
+
+    This builds from source and installs `rkat` only. It needs Rust 1.94 or
+    later, a C compiler and libc headers (for bundled SQLite and aws-lc-sys),
+    and several GiB of RAM; see [Building and deploying](/guides/deploying).
+    The other binaries come from their own crates: `cargo install
+    meerkat-rpc` (`rkat-rpc`), `meerkat-rest` (`rkat-rest`) and
+    `meerkat-mcp-server` (`rkat-mcp`).
   </Tab>
 </Tabs>
+
+### Linux without Homebrew
+
+Each GitHub release has one archive per binary per target, plus
+`checksums.sha256`. Download the binaries you need, verify them, and put
+them on your `PATH`:
+
+```bash
+VERSION=<version>   # for example 0.8.51
+TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu
+BASE=https://github.com/lukacf/meerkat/releases/download/v$VERSION
+curl -LO "$BASE/checksums.sha256"
+for bin in rkat rkat-rpc; do
+  curl -LO "$BASE/$bin-$VERSION-$TARGET.tar.gz"
+done
+sha256sum --ignore-missing -c checksums.sha256
+for bin in rkat rkat-rpc; do
+  tar -xzf "$bin-$VERSION-$TARGET.tar.gz"
+done
+mkdir -p ~/.local/bin && mv rkat rkat-rpc ~/.local/bin/
+```
+
+Add `rkat-rest` or `rkat-mcp` to the loops if you need them. `rkat-rpc` is
+the binary the Python and TypeScript SDKs drive. The Linux binaries need
+glibc 2.31 or later; musl distributions such as Alpine are not supported
+(see [Linux glibc floor](/guides/deploying#linux-glibc-floor)).
 
 ## Configure One Provider
 

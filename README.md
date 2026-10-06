@@ -44,9 +44,15 @@ npm install @rkat/sdk
 npm install @rkat/web
 ```
 
-Release archives contain `rkat`, `rkat-rpc`, `rkat-rest`, and
-`rkat-mcp`. The Python and TypeScript SDKs resolve and can download a
-compatible `rkat-rpc` automatically.
+GitHub release assets are one archive per binary per target
+(`rkat-<version>-<target>.tar.gz`, and the same for `rkat-rpc`, `rkat-rest`
+and `rkat-mcp`), with `checksums.sha256`. The
+[quickstart](https://docs.rkat.ai/quickstart#linux-without-homebrew) shows a
+Linux install without Homebrew. `cargo install rkat` builds from source and
+installs `rkat` only; see [Building and
+deploying](https://docs.rkat.ai/guides/deploying). The Python and TypeScript
+SDKs resolve a compatible `rkat-rpc` and can download one automatically. To
+move to a new release, see [Upgrading](https://docs.rkat.ai/guides/upgrading).
 
 <details>
 <summary>Provider environment variables</summary>

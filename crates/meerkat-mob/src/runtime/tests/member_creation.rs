@@ -80,6 +80,10 @@ async fn member_creation_policy_auto_spawn_has_no_attested_host_origin() {
 
 #[tokio::test]
 async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
+    // Owner from the dispatch context. Without an owner the child is recorded
+    // as unproven; with one, its creation source is the owner session. A
+    // failed read of the owner's creation facts is not absence: the spawn is
+    // refused and no unproven child is recorded in its place.
     for (bind_owner, fail_metadata) in [(false, false), (true, false), (true, true)] {
         let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
         let parent = AgentIdentity::from("operator-parent");
@@ -95,16 +99,7 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
                 generated_mob_operator_authority_with_scope(handle.mob_id().as_str()),
             ));
         let dispatcher = if bind_owner {
-            match dispatcher
-                .bind_ops_lifecycle(
-                    Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                    parent_session.clone(),
-                )
-                .unwrap()
-            {
-                meerkat_core::agent::BindOutcome::Bound(bound)
-                | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
-            }
+            super::dispatched_from_session(dispatcher, parent_session.clone())
         } else {
             dispatcher
         };
@@ -124,14 +119,28 @@ async fn member_creation_operator_ingress_proves_owner_or_records_unproven() {
             ),
         ] {
             let args = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
-            dispatcher
+            let dispatched = dispatcher
                 .dispatch(ToolCallView {
                     id: "creation-ingress",
                     name: tool,
                     args: &args,
                 })
-                .await
-                .unwrap();
+                .await;
+            if bind_owner && fail_metadata {
+                assert!(
+                    matches!(dispatched, Err(ToolError::ExecutionFailed { .. })),
+                    "{tool}: a failed creation-facts read refuses the spawn: {dispatched:?}"
+                );
+                assert!(
+                    handle
+                        .resolve_bridge_session_id(&AgentIdentity::from(identity))
+                        .await
+                        .is_none(),
+                    "{tool}: a refused spawn records no child"
+                );
+                continue;
+            }
+            dispatched.unwrap();
             let session = handle
                 .resolve_bridge_session_id(&AgentIdentity::from(identity))
                 .await

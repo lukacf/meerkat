@@ -1404,7 +1404,43 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<FactoryAgent, SessionError> {
+        let external_tools = req
+            .build
+            .as_ref()
+            .and_then(|build| build.external_tools.clone());
+        self.build_agent_with_external_tools(req, external_tools, event_tx)
+            .await
+    }
+
+    async fn build_agent_taking_tools(
+        &self,
+        req: &mut CreateSessionRequest,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<FactoryAgent, SessionError> {
+        let external_tools = req
+            .build
+            .as_mut()
+            .and_then(|build| build.external_tools.take());
+        self.build_agent_with_external_tools(req, external_tools, event_tx)
+            .await
+    }
+}
+
+impl FactoryAgentBuilder {
+    /// Build the agent for `req`, with `external_tools` as the request's
+    /// external tool dispatcher.
+    ///
+    /// The caller decides how the dispatcher is held. When it was moved out
+    /// of an owned request, the composed tool surface owns it exclusively and
+    /// session-time binding (owner session, ops registry) reaches it.
+    async fn build_agent_with_external_tools(
+        &self,
+        req: &CreateSessionRequest,
+        external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<FactoryAgent, SessionError> {
         let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
+        build_config.external_tools = external_tools;
 
         // Inject default LLM client if none provided.
         if build_config.llm_client_override.is_none()

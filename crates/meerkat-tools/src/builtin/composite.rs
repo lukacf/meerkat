@@ -1122,15 +1122,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
         #[allow(clippy::redundant_clone)]
         // clone needed on non-wasm32 where owner_bridge_session_id is reused
         let rebound_external = match owned.external.take() {
+            // An external dispatcher that needs the binding but is still
+            // shared cannot be rebound. Leaving it unbound would silently drop
+            // its owner session and registry, so the bind is rejected.
             Some(external)
-                if external.capabilities().ops_lifecycle && Arc::strong_count(&external) == 1 =>
+                if external.capabilities().ops_lifecycle && Arc::strong_count(&external) != 1 =>
             {
-                Some(
-                    external
-                        .bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?
-                        .into_dispatcher(),
-                )
+                return Err(OpsLifecycleBindError::SharedOwnership);
             }
+            Some(external) if external.capabilities().ops_lifecycle => Some(
+                external
+                    .bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?
+                    .into_dispatcher(),
+            ),
             other => other,
         };
 
@@ -1885,6 +1889,60 @@ mod tests {
             1,
             "bind_external_tool_surface_handle must forward to the external dispatcher"
         );
+    }
+
+    /// An external dispatcher that needs the ops binding but is still shared
+    /// rejects the composite's bind instead of staying silently unbound.
+    #[test]
+    fn shared_ops_capable_external_rejects_the_bind() {
+        struct OpsCapableExternal;
+
+        #[async_trait::async_trait]
+        impl AgentToolDispatcher for OpsCapableExternal {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([])
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::not_found(call.name))
+            }
+
+            fn capabilities(&self) -> DispatcherCapabilities {
+                DispatcherCapabilities {
+                    ops_lifecycle: true,
+                }
+            }
+
+            fn bind_ops_lifecycle(
+                self: Arc<Self>,
+                _registry: Arc<dyn OpsLifecycleRegistry>,
+                _owner_bridge_session_id: SessionId,
+            ) -> Result<BindOutcome, OpsLifecycleBindError> {
+                Ok(BindOutcome::Bound(self))
+            }
+        }
+
+        let shared: Arc<dyn AgentToolDispatcher> = Arc::new(OpsCapableExternal);
+        let dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            Some(Arc::clone(&shared)),
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        match Arc::new(dispatcher).bind_ops_lifecycle(registry, SessionId::new()) {
+            Err(OpsLifecycleBindError::SharedOwnership) => {}
+            Err(other) => panic!("expected SharedOwnership, got {other:?}"),
+            Ok(_) => panic!("a shared ops-capable external must not be left unbound"),
+        }
+        drop(shared);
     }
 
     #[test]

@@ -497,13 +497,16 @@ impl AgentMobToolSurface {
 
     /// Capture the authenticated source's immutable creation facts, including
     /// when it delegates into another mob. Arguments never select the source.
+    ///
+    /// A source without creation facts yields an unavailable witness and the
+    /// child is recorded as unproven. A failed read is not absence: it is
+    /// returned as an error, so the spawn is refused rather than recorded
+    /// as an unproven child.
     async fn capture_creation_source(
         state: Arc<MobMcpState>,
         owner_bridge_session_id: SessionId,
-    ) -> meerkat_mob::MemberCreationSourceWitness {
-        Self::try_capture_creation_source(&state, &owner_bridge_session_id)
-            .await
-            .unwrap_or_else(|_| meerkat_mob::MemberCreationSourceWitness::unavailable())
+    ) -> Result<meerkat_mob::MemberCreationSourceWitness, MobError> {
+        Self::try_capture_creation_source(&state, &owner_bridge_session_id).await
     }
 
     async fn try_capture_creation_source(
@@ -1076,7 +1079,8 @@ impl AgentMobToolSurface {
             meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
                 Self::capture_creation_source(source_state, source_session).await
             })
-            .await,
+            .await
+            .map_err(|error| Self::map_mob_error(call, error))?,
         );
         member.placement = lower_wire_placement(args.placement);
         member.additional_instructions = args.additional_instructions.map(|value| vec![value]);
@@ -1828,7 +1832,7 @@ impl AgentMobToolSurface {
             move || async move {
                 let source =
                     Self::capture_creation_source(source_state, owner_bridge_session_id.clone())
-                        .await;
+                        .await?;
                 handle
                     .spawn_spec_with_generated_owner_context(
                         spec.with_creation_source(source),

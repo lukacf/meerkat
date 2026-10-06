@@ -47308,9 +47308,10 @@ impl MobActor {
             BTreeMap::new();
         if destroy_input_needed {
             for entry in &entries {
-                let plan = match self
-                    .member_retire_trust_cleanup_plan(&entry.agent_identity, entry)
-                    .await
+                let plan = match boxed_arm_future(|| {
+                    self.member_retire_trust_cleanup_plan(&entry.agent_identity, entry)
+                })
+                .await
                 {
                     Ok(plan) => plan,
                     Err(error) => {
@@ -47382,7 +47383,9 @@ impl MobActor {
         }
         if destroy_input_needed {
             for entry in &entries {
-                if let Err(error) = self.admit_member_retire_for_destroy(entry).await {
+                if let Err(error) =
+                    boxed_arm_future(|| self.admit_member_retire_for_destroy(entry)).await
+                {
                     report.push_error(format!(
                         "{}: destroy retire admission failed: {error}",
                         entry.agent_identity
@@ -47509,7 +47512,7 @@ impl MobActor {
             // strand Destroy behind the replacement-map-empty guard.
             let tracked_hosts = Self::host_ids_requiring_destroy_revoke(self.dsl_authority.state());
             for host_id in tracked_hosts {
-                if let Err(error) = self.handle_revoke_host(&host_id).await {
+                if let Err(error) = boxed_arm_future(|| self.handle_revoke_host(&host_id)).await {
                     report.push_error(format!(
                         "host '{host_id}' revoke during destroy failed: {error}"
                     ));

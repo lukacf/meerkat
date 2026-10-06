@@ -1,6 +1,7 @@
 pub mod audit_generated_headers;
 pub mod bridge_classifier;
 pub mod effect_authority;
+pub mod generated_files;
 pub mod machine_alphabet;
 #[cfg(feature = "machine-authority")]
 pub mod machines;

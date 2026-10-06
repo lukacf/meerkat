@@ -310,6 +310,14 @@ them.
 
 ### Testing
 
+- `cargo xtask protocol-codegen` and `machine-codegen` write a generated
+  artifact only when its bytes change. Before, both rewrote every artifact on
+  every run, and the pre-push machine hook runs both. A byte-identical
+  rewrite of `crates/meerkat-core/src/generated/session_document.rs` bumped
+  its mtime, which Cargo tracks, so a retry that only touched TLA or docs
+  rebuilt meerkat-core and everything downstream. Generation and drift
+  checks are unchanged. A rerun on an unchanged tree now writes nothing (51
+  protocol artifacts reported `unchanged`).
 - The Rust changed-path selector no longer treats the per-crate license
   symlinks (`crates/*/LICENSE-MIT`, `LICENSE-APACHE`) as embedded compile
   inputs. Since those links landed, the repo-root license files mapped to

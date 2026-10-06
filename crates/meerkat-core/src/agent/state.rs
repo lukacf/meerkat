@@ -8160,6 +8160,11 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                 };
                 async move {
                     let start = crate::time_compat::Instant::now();
+                    // The call's deadline runs from here, including any wait
+                    // for a dispatch slot. It is measured on
+                    // `DeadlineInstant`, the clock the timeout timer runs on,
+                    // so the admission check below and the timer agree.
+                    let deadline_started = crate::time_compat::DeadlineInstant::now();
                     let resolution_context =
                         match crate::ToolDeadlineChain::new(vec![core_deadline]) {
                             Ok(deadlines) => crate::ToolExecutionResolutionContext::new(deadlines),
@@ -8216,8 +8221,8 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                         deadline_chain = %plan.deadlines().diagnostic(),
                         "resolved tool execution plan"
                     );
-                    let remaining_timeout =
-                        effective_timeout.map(|timeout| timeout.saturating_sub(start.elapsed()));
+                    let remaining_timeout = effective_timeout
+                        .map(|timeout| timeout.saturating_sub(deadline_started.elapsed()));
                     let advertised_timeout_ms = effective_timeout
                         .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX))
                         .unwrap_or(0);
@@ -8233,6 +8238,20 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                     }
                     let admitted_dispatch = async {
                         match dispatch_semaphore.acquire().await {
+                            // Admission is a deadline transition: a call whose
+                            // deadline passed while it waited for the slot
+                            // never enters its tool body. The timeout below
+                            // polls this future before its timer, so when the
+                            // slot frees in the same poll that would have
+                            // fired an already expired timer (a stalled
+                            // executor), only this check stops the body.
+                            Ok(_permit)
+                                if effective_timeout.is_some_and(|timeout| {
+                                    deadline_started.elapsed() >= timeout
+                                }) =>
+                            {
+                                Err(ToolError::timeout(tc.name.clone(), advertised_timeout_ms))
+                            }
                             Ok(_permit) => {
                                 crate::dispatch_tool_execution_plan_fenced(
                                     &tools_ref,
@@ -16150,7 +16169,12 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    /// The clock is paused, so the occupant's 50 ms hold and the queued call's
+    /// 5 ms deadline are virtual: the runtime advances to the earliest timer
+    /// only when idle, so the deadline fires while the slot is held whatever
+    /// the machine load (a real-time stall once let both timers expire before
+    /// the next poll; see the stalled-admission test below).
+    #[tokio::test(start_paused = true)]
     async fn resolved_deadline_includes_time_waiting_for_dispatch_admission() {
         struct QueueRecordingDispatcher {
             tools: Arc<[Arc<ToolDef>]>,
@@ -16231,6 +16255,139 @@ mod tests {
             body_entries.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the queued call must expire before its tool body is entered"
+        );
+    }
+
+    /// A stalled executor can free the dispatch slot in the same poll that
+    /// would fire a queued call's already expired deadline. The timeout polls
+    /// the admission future first, so admission itself must refuse a call
+    /// whose deadline has passed: its tool body is never entered. The stall is
+    /// forced exactly: the queued call signals once its plan is validated (its
+    /// deadline is running and its next step is admission), then the occupant
+    /// blocks the executor thread past that deadline and releases the slot,
+    /// with no poll in between.
+    #[tokio::test]
+    async fn a_deadline_that_expires_while_waiting_for_admission_never_enters_the_tool_body() {
+        struct Catalog {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for Catalog {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::execution_failed("catalog only"))
+            }
+        }
+
+        struct StallingDispatcher {
+            catalog: Catalog,
+            body_entries: Arc<std::sync::atomic::AtomicUsize>,
+            queued_awaits_admission: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for StallingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                self.catalog.tools()
+            }
+
+            fn validate_resolved_execution_plan(
+                &self,
+                call: ToolCallView<'_>,
+                resolution_context: &crate::ToolExecutionResolutionContext,
+                plan: &crate::ResolvedToolExecutionPlan,
+            ) -> Result<(), crate::ToolExecutionResolutionError> {
+                let validated =
+                    self.catalog
+                        .validate_resolved_execution_plan(call, resolution_context, plan);
+                if call.name == "queued" {
+                    self.queued_awaits_admission.notify_one();
+                }
+                validated
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.body_entries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call.name == "occupies_slot" {
+                    self.queued_awaits_admission.notified().await;
+                    // The stall: real time passes the queued deadline while
+                    // the executor polls nothing, then the slot frees.
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Ok(ToolResult::new(call.id.to_string(), "done".to_string(), false).into())
+            }
+        }
+
+        let body_entries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatcher = Arc::new(StallingDispatcher {
+            catalog: Catalog {
+                tools: Arc::from([
+                    Arc::new(ToolDef::new(
+                        "occupies_slot",
+                        "holds the sole dispatch slot",
+                        serde_json::json!({"type": "object"}),
+                    )),
+                    Arc::new(ToolDef::new(
+                        "queued",
+                        "must expire before entering its body",
+                        serde_json::json!({"type": "object"}),
+                    )),
+                ]),
+            },
+            body_entries: Arc::clone(&body_entries),
+            queued_awaits_admission: Arc::new(tokio::sync::Notify::new()),
+        });
+        let calls = ["occupies_slot", "queued"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                (
+                    index,
+                    ToolCallOwned {
+                        id: format!("call-{index}"),
+                        name: name.to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    },
+                )
+            })
+            .collect();
+
+        let results = dispatch_tool_calls_boxed(
+            dispatcher,
+            crate::ToolDispatchContext::default(),
+            std::time::Duration::from_secs(1),
+            std::collections::HashMap::from([(
+                "queued".to_string(),
+                std::time::Duration::from_millis(5),
+            )]),
+            1,
+            calls,
+        )
+        .await;
+
+        assert!(results[0].2.is_ok());
+        assert!(matches!(
+            &results[1].2,
+            Err(ToolError::Timeout {
+                name,
+                timeout_ms: 5,
+            }) if name == "queued"
+        ));
+        assert_eq!(
+            body_entries.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a call whose deadline passed while it waited for admission never enters its body"
         );
     }
 

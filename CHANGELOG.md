@@ -254,6 +254,16 @@ them.
 
 ### Fixed
 
+- A tool call whose deadline passed while it waited for a dispatch slot no
+  longer enters its tool body. The per-call timeout polled admission before
+  its timer, so when a stalled executor freed the slot in the same poll that
+  would have fired the expired timer, the call ran anyway. Admission now
+  checks the deadline, measured on the clock the timer runs on. This also
+  makes the meerkat-core test
+  `resolved_deadline_includes_time_waiting_for_dispatch_admission`
+  deterministic: it flaked under load (1 in 12,518 tests in a VM pre-push
+  gate), and it now runs on a paused clock.
+
 - Connector credential status and bearer reads reuse their held lifecycle
   guard when restoring a committed credential into a fresh runtime owner.
   Cold reads no longer wait on their own guard. Connector logout uses the

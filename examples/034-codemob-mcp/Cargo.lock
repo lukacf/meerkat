@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-authorization-contracts"
-version = "0.8.50"
+version = "0.8.51"
 dependencies = [
  "meerkat-core",
  "serde",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sandbox"
-version = "0.8.50"
+version = "0.8.51"
 dependencies = [
  "meerkat-core",
  "nix 0.29.0",

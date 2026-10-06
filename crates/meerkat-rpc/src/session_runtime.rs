@@ -12090,6 +12090,9 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
+    // The module-level import is `mcp`-gated; tests use Duration in every
+    // feature set (the governed JSONL lane builds without `mcp`).
+    use std::time::Duration;
 
     fn mutate_test_session(session: &mut Session, mutate: impl FnOnce(&mut Session)) {
         mutate(session);

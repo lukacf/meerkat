@@ -142,9 +142,18 @@ test-sdk-typescript:
 
 # Web SDK test suite. test:packed smokes the package as npm ships it: the
 # packed wasm's stack and one turn through the packed JS and wasm.
+# wasm-pack runs plain `cargo`, so without CARGO_TARGET_DIR the release wasm
+# build lands in the checkout's own target/, which the pre-push dispatcher's
+# `git clean -ffdqx` deletes before every hook run: each push rebuilt it cold.
+# Hand the build the repo-cargo lane target (an explicit CARGO_TARGET_DIR, as
+# CI sets, wins) so its Rust artifacts survive between runs.
 test-sdk-web:
 	@echo "$(GREEN)Running Web SDK tests...$(NC)"
-	@(cd sdks/web && \
+	@target_dir="$${CARGO_TARGET_DIR:-$$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')}"; \
+	if [ -z "$$target_dir" ]; then echo "error: could not resolve the repo-cargo lane CARGO_TARGET_DIR" >&2; exit 1; fi; \
+	echo "Web SDK wasm build target: $$target_dir"; \
+	(cd sdks/web && \
+		export CARGO_TARGET_DIR="$$target_dir" && \
 		npm install --ignore-scripts && \
 		npm run build && \
 		npm test && \

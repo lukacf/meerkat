@@ -310,6 +310,14 @@ them.
 
 ### Testing
 
+- `make test-sdk-web` builds the release wasm into the repo-cargo lane
+  target instead of the checkout's own `target/`. wasm-pack runs plain
+  `cargo`, so the build used to land in the detached hook worktree's
+  `target/`. The pre-push dispatcher's `git clean -ffdqx` deleted that before
+  every run, so every push rebuilt the release wasm cold. An explicit
+  `CARGO_TARGET_DIR`, as CI sets, still wins. A forced rebuild after a first
+  build now finishes the Rust part in under a second; wasm-opt and
+  packaging still run.
 - The Rust changed-path selector no longer treats the per-crate license
   symlinks (`crates/*/LICENSE-MIT`, `LICENSE-APACHE`) as embedded compile
   inputs. Since those links landed, the repo-root license files mapped to

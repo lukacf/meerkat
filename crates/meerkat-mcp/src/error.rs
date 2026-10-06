@@ -5,6 +5,9 @@ use meerkat_core::handles::DslTransitionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
+    /// A trusted host refused preparation; never carries host payload text.
+    #[error(transparent)]
+    CallContext(#[from] crate::McpCallContextError),
     /// Preserve selected-account refusal without turning it into an
     /// interactive retry or losing its typed cause in a connection string.
     #[error(transparent)]

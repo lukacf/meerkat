@@ -1,15 +1,18 @@
-use futures::StreamExt;
+use super::protected::{
+    ProtectedMetadataState, has_protected_metadata, protected_http_client, protected_sse_stream,
+    read_bounded_body, serialize_bounded_message,
+};
 use futures::stream::BoxStream;
 use http::header::WWW_AUTHENTICATE;
 use http::{HeaderName, HeaderValue};
-use reqwest::header::{ACCEPT, HeaderMap};
-use sse_stream::{Sse, SseStream};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
+use sse_stream::Sse;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use rmcp::model::{ClientJsonRpcMessage, JsonRpcMessage, ServerJsonRpcMessage};
+use rmcp::model::{ClientJsonRpcMessage, JsonRpcMessage};
 use rmcp::transport::common::http_header::{
     EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID, HEADER_MCP_PROTOCOL_VERSION, HEADER_SESSION_ID,
     JSON_MIME_TYPE,
@@ -28,6 +31,7 @@ pub(crate) struct ReqwestStreamableHttpClient {
     client: reqwest::Client,
     headers: HeaderMap,
     auth_challenge: AuthChallengeRecorder,
+    protected_metadata: ProtectedMetadataState,
 }
 
 impl std::fmt::Debug for ReqwestStreamableHttpClient {
@@ -110,6 +114,7 @@ impl ReqwestStreamableHttpClient {
             client: DEFAULT_HTTP_CLIENT.clone(),
             headers,
             auth_challenge,
+            protected_metadata: Default::default(),
         }
     }
 
@@ -120,7 +125,13 @@ impl ReqwestStreamableHttpClient {
             client,
             headers,
             auth_challenge: AuthChallengeRecorder::default(),
+            protected_metadata: Default::default(),
         }
+    }
+
+    pub(crate) fn with_protected_metadata(mut self, state: ProtectedMetadataState) -> Self {
+        self.protected_metadata = state;
+        self
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -186,13 +197,6 @@ fn extract_scope_from_header(header: &str) -> Option<String> {
     None
 }
 
-fn parse_json_rpc_error(body: &str) -> Option<ServerJsonRpcMessage> {
-    match serde_json::from_str::<ServerJsonRpcMessage>(body) {
-        Ok(message @ JsonRpcMessage::Error(_)) => Some(message),
-        _ => None,
-    }
-}
-
 impl StreamableHttpClient for ReqwestStreamableHttpClient {
     type Error = reqwest::Error;
 
@@ -243,7 +247,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
                 return Err(StreamableHttpError::UnexpectedContentType(None));
             }
         }
-        let event_stream = SseStream::from_byte_stream(response.bytes_stream()).boxed();
+        let event_stream = protected_sse_stream(response, self.protected_metadata.clone(), false);
         Ok(event_stream)
     }
 
@@ -278,13 +282,22 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
     async fn post_message(
         &self,
         uri: Arc<str>,
-        message: ClientJsonRpcMessage,
+        mut message: ClientJsonRpcMessage,
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        let mut request = self
-            .client
+        let protected_call = has_protected_metadata(&message);
+        let client = if protected_call {
+            protected_http_client().map_err(|_| {
+                StreamableHttpError::UnexpectedServerResponse(
+                    "protected MCP HTTP client unavailable".into(),
+                )
+            })?
+        } else {
+            &self.client
+        };
+        let mut request = client
             .post(uri.as_ref())
             .header(ACCEPT, [EVENT_STREAM_MIME_TYPE, JSON_MIME_TYPE].join(", "));
         request = self.apply_headers(request);
@@ -296,9 +309,19 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         if let Some(session_id) = session_id {
             request = request.header(HEADER_SESSION_ID, session_id.as_ref());
         }
-        let response = request
-            .json(&message)
-            .send()
+        let mut request = request.build().map_err(StreamableHttpError::Client)?;
+        let bytes = serialize_bounded_message(&mut message).map_err(|_| {
+            StreamableHttpError::UnexpectedServerResponse(
+                "invalid or oversized MCP JSON-RPC frame".into(),
+            )
+        })?;
+        request
+            .headers_mut()
+            .entry(CONTENT_TYPE)
+            .or_insert(HeaderValue::from_static(JSON_MIME_TYPE));
+        *request.body_mut() = Some(bytes.into());
+        let response = client
+            .execute(request)
             .await
             .map_err(StreamableHttpError::Client)?;
         self.auth_challenge.record(&response);
@@ -341,6 +364,15 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
         if status == reqwest::StatusCode::NOT_FOUND && session_was_attached {
+            if self.protected_metadata.has_protected_calls() {
+                // rmcp retries SessionExpired by creating a new session and
+                // replaying the queued request. Once protected calls use this
+                // connection, even an unselected request must not reset their
+                // generation. Require an explicit router reconnect.
+                return Err(StreamableHttpError::UnexpectedServerResponse(
+                    "protected MCP session expired; reconnect required".into(),
+                ));
+            }
             return Err(StreamableHttpError::SessionExpired);
         }
         let content_type = response
@@ -365,38 +397,40 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read response body>".to_owned());
+            let body = read_bounded_body(response).await.map_err(|_| {
+                StreamableHttpError::UnexpectedServerResponse(
+                    "invalid or oversized MCP response".into(),
+                )
+            })?;
             if content_type
                 .as_deref()
                 .is_some_and(|ct| ct.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()))
+                && let Ok(message @ JsonRpcMessage::Error(_)) = self.protected_metadata.parse(&body)
             {
-                if let Some(message) = parse_json_rpc_error(&body) {
-                    return Ok(StreamableHttpPostResponse::Json(message, session_id));
-                }
-                tracing::warn!("HTTP {status}: could not parse JSON body as a JSON-RPC error");
+                return Ok(StreamableHttpPostResponse::Json(message, session_id));
             }
             return Err(StreamableHttpError::UnexpectedServerResponse(Cow::Owned(
-                format!("HTTP {status}: {body}"),
+                format!("HTTP {status}: MCP request refused"),
             )));
         }
         match content_type.as_deref() {
             Some(ct) if ct.as_bytes().starts_with(EVENT_STREAM_MIME_TYPE.as_bytes()) => {
-                let event_stream = SseStream::from_byte_stream(response.bytes_stream()).boxed();
+                let event_stream =
+                    protected_sse_stream(response, self.protected_metadata.clone(), false);
                 Ok(StreamableHttpPostResponse::Sse(event_stream, session_id))
             }
             Some(ct) if ct.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()) => {
-                match response.json::<ServerJsonRpcMessage>().await {
-                    Ok(message) => Ok(StreamableHttpPostResponse::Json(message, session_id)),
-                    Err(error) => {
-                        tracing::warn!(
-                            "could not parse JSON response as ServerJsonRpcMessage, treating as accepted: {error}"
-                        );
-                        Ok(StreamableHttpPostResponse::Accepted)
-                    }
-                }
+                let body = read_bounded_body(response).await.map_err(|_| {
+                    StreamableHttpError::UnexpectedServerResponse(
+                        "invalid or oversized MCP response".into(),
+                    )
+                })?;
+                let message = self.protected_metadata.parse(&body).map_err(|_| {
+                    StreamableHttpError::UnexpectedServerResponse(
+                        "invalid MCP JSON-RPC response".into(),
+                    )
+                })?;
+                Ok(StreamableHttpPostResponse::Json(message, session_id))
             }
             _ => Err(StreamableHttpError::UnexpectedContentType(content_type)),
         }

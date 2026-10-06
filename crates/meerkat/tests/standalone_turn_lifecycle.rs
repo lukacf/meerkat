@@ -25,12 +25,21 @@ enum Reply {
     Tool,
     Fail,
     Block,
+    /// Never answers, and pauses Tokio's clock once the call is in flight, so
+    /// the turn budget's timer around this call fires as soon as the runtime
+    /// is idle instead of after real wall-clock time.
+    BlockUntilTurnBudget,
 }
 
 struct Client {
     replies: Mutex<VecDeque<Reply>>,
     calls: AtomicUsize,
     started: Notify,
+    /// Blocking delay taken once, the next time the agent reads its tool
+    /// catalog. The catalog is read at the CallingLlm boundary, after the turn
+    /// budget is armed and before the LLM call, so this stands in for a slow,
+    /// loaded machine between turn start and the first call.
+    pre_call_delay: Mutex<Option<Duration>>,
 }
 
 #[async_trait]
@@ -47,6 +56,10 @@ impl LlmClient for Client {
         self.started.notify_one();
         match self.replies.lock().unwrap().pop_front().unwrap() {
             Reply::Block => Box::pin(stream::pending()),
+            Reply::BlockUntilTurnBudget => {
+                tokio::time::pause();
+                Box::pin(stream::pending())
+            }
             Reply::Fail => Box::pin(stream::iter([Err(LlmError::AuthenticationFailed {
                 message: "synthetic non-retryable failure".into(),
             })])),
@@ -108,11 +121,16 @@ impl LlmClient for Client {
     }
 }
 
-struct NoopTool;
+struct NoopTool {
+    client: Arc<Client>,
+}
 
 #[async_trait]
 impl meerkat_core::AgentToolDispatcher for NoopTool {
     fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        if let Some(delay) = self.client.pre_call_delay.lock().unwrap().take() {
+            std::thread::sleep(delay);
+        }
         Arc::from([Arc::new(meerkat_core::types::ToolDef::new(
             "synthetic_noop",
             "Deterministic no-effect test tool",
@@ -160,13 +178,16 @@ fn fixture_with_config(
         replies: Mutex::new(replies.into_iter().collect()),
         calls: AtomicUsize::new(0),
         started: Notify::new(),
+        pre_call_delay: Mutex::new(None),
     });
     let factory = AgentFactory::new(directory.path().join("sessions"))
         .project_root(directory.path())
         .memory(false);
     let mut builder = FactoryAgentBuilder::new(factory, config);
     builder.default_llm_client = Some(client.clone());
-    builder.default_tool_dispatcher = Some(Arc::new(NoopTool));
+    builder.default_tool_dispatcher = Some(Arc::new(NoopTool {
+        client: client.clone(),
+    }));
     let service = EphemeralSessionService::new(builder, 4);
     (directory, client, service)
 }
@@ -253,18 +274,27 @@ async fn standalone_provider_failure_then_two_successful_turns() {
     .unwrap();
 }
 
+/// The turn budget is far longer than any setup, even on a loaded machine
+/// (a forced 300 ms stall before the first LLM call stands in for one), so the
+/// first turn always reaches its LLM call. That call never answers and pauses
+/// Tokio's clock, so the budget's timer around it fires deterministically and
+/// the turn ends as `TimeBudgetExceeded` after exactly one call. The second
+/// turn then gets a fresh budget and answers. The outer hang guard is longer
+/// than the budget so it can never fire first on the paused clock.
 #[tokio::test]
 async fn standalone_turn_budget_failure_allows_a_new_turn_with_a_fresh_budget() {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    const TURN_BUDGET: Duration = Duration::from_secs(30);
+    tokio::time::timeout(TURN_BUDGET * 4, async {
         let mut config = Config::default();
-        config.limits.max_turn_duration = Some(Duration::from_millis(200));
+        config.limits.max_turn_duration = Some(TURN_BUDGET);
         let (_directory, client, service) =
-            fixture_with_config([Reply::Block, Reply::Answer], config);
+            fixture_with_config([Reply::BlockUntilTurnBudget, Reply::Answer], config);
         let session_id = service
             .create_session(create(InitialTurnPolicy::Defer))
             .await
             .unwrap()
             .session_id;
+        *client.pre_call_delay.lock().unwrap() = Some(Duration::from_millis(300));
         let result = service.start_turn(&session_id, turn()).await;
         assert!(
             matches!(

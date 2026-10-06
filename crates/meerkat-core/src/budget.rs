@@ -3,7 +3,7 @@
 //! Tracks and enforces resource limits (tokens, time, tool calls).
 
 use crate::error::AgentError;
-use crate::time_compat::{Duration, Instant};
+use crate::time_compat::{DeadlineInstant, Duration};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -180,9 +180,9 @@ pub struct Budget {
     limits: BudgetLimits,
     accounting: Arc<BudgetAccounting>,
     /// Agent-lifetime horizon epoch. Set once at construction, never re-armed.
-    start_time: Instant,
+    start_time: DeadlineInstant,
     /// Per-turn horizon epoch. Re-armed by [`Budget::begin_turn`] at run entry.
-    turn_start: Instant,
+    turn_start: DeadlineInstant,
 }
 
 #[derive(Debug)]
@@ -194,7 +194,7 @@ struct BudgetAccounting {
 impl Budget {
     /// Create a new budget with the given limits
     pub fn new(limits: BudgetLimits) -> Self {
-        let now = Instant::now();
+        let now = DeadlineInstant::now();
         Self {
             limits,
             accounting: Arc::new(BudgetAccounting {
@@ -215,7 +215,7 @@ impl Budget {
     /// callback and later resumed re-arms: the parked wall-clock belongs to
     /// whoever chose when to resume, not to the loop.
     pub fn begin_turn(&mut self) {
-        self.turn_start = Instant::now();
+        self.turn_start = DeadlineInstant::now();
     }
 
     /// Create an unlimited budget
@@ -447,7 +447,7 @@ impl Budget {
             limits: self.limits.clone(),
             accounting: Arc::clone(&self.accounting),
             start_time: self.start_time,
-            turn_start: Instant::now(),
+            turn_start: DeadlineInstant::now(),
         }
     }
 }
@@ -478,7 +478,7 @@ pub struct BudgetPool {
     /// Tokens actually used by completed operations
     used_tokens: AtomicU64,
     /// Start time for the pool
-    start_time: Instant,
+    start_time: DeadlineInstant,
 }
 
 impl BudgetPool {
@@ -488,7 +488,7 @@ impl BudgetPool {
             limits,
             allocated_tokens: AtomicU64::new(0),
             used_tokens: AtomicU64::new(0),
-            start_time: Instant::now(),
+            start_time: DeadlineInstant::now(),
         }
     }
 
@@ -650,6 +650,52 @@ mod tests {
             exceeded.to_agent_error(),
             AgentError::TimeBudgetExceeded { .. }
         ));
+        assert_eq!(budget.remaining_duration(), Some(Duration::ZERO));
+    }
+
+    /// Outside any Tokio runtime the deadline clock is real monotonic time,
+    /// so a budget built and observed off-runtime still expires on wall-clock.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deadline_clock_reads_real_time_outside_a_runtime() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test must run outside any runtime"
+        );
+        let start = DeadlineInstant::now();
+        let budget =
+            Budget::new(BudgetLimits::default().with_max_turn_duration(Duration::from_millis(20)));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(start.elapsed() >= Duration::from_millis(30));
+        assert!(budget.observe().exceeded().is_some());
+        assert_eq!(budget.remaining_duration(), Some(Duration::ZERO));
+    }
+
+    /// Under a paused Tokio clock the turn horizon moves only when the clock
+    /// is advanced: real time passing never spends it, and it expires exactly
+    /// at its limit.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn paused_clock_moves_the_turn_horizon_only_when_advanced() {
+        let mut budget =
+            Budget::new(BudgetLimits::default().with_max_turn_duration(Duration::from_secs(10)));
+        budget.begin_turn();
+
+        // Real time passes; the paused clock does not.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(budget.observe(), BudgetObservation::WithinLimit);
+        assert_eq!(budget.remaining_duration(), Some(Duration::from_secs(10)));
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert_eq!(budget.observe(), BudgetObservation::WithinLimit);
+        assert_eq!(budget.remaining_duration(), Some(Duration::from_secs(1)));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let exceeded = budget
+            .observe()
+            .exceeded()
+            .expect("the turn horizon expires exactly at its limit");
+        assert_eq!(exceeded.dimension, BudgetDimension::Time);
         assert_eq!(budget.remaining_duration(), Some(Duration::ZERO));
     }
 

@@ -1800,6 +1800,26 @@ pub trait MobSessionService:
             })
     }
 
+    /// Read the latest committed retained metadata for this exact session id.
+    ///
+    /// Archived sessions remain observable through this metadata-only seam.
+    /// No successor is substituted, an absent authoritative document is `None`,
+    /// and corrupt metadata remains an error. This is an observation, not a
+    /// revision-pinned snapshot, lease, or guarantee of continued currentness.
+    /// It does not grant ordinary visibility, resume permission, or write
+    /// authority, and it never materializes a transcript.
+    ///
+    /// Services without a retained metadata authority report `Unsupported`;
+    /// they must not substitute a live-session or compatibility-projection read.
+    async fn load_retained_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        Err(SessionError::Unsupported(format!(
+            "retained metadata authority is unavailable for session {session_id}"
+        )))
+    }
+
     /// Observe session-document visibility without requiring its contents.
     ///
     /// This is a raw backend observation for MobMachine's shutdown input, not
@@ -3400,6 +3420,13 @@ where
             return Ok(None);
         }
         Ok(Some(view))
+    }
+
+    async fn load_retained_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        self.load_authoritative_session_metadata(session_id).await
     }
 
     async fn session_known_to_archive_authority(

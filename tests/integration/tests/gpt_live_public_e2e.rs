@@ -1736,7 +1736,7 @@ async fn run_s97_client_context_vertical(
     evidence.stage(EvidenceStage::Connected)?;
     // The lag rule's input is recorded whether the phases pass or fail: a
     // failing run must be classifiable as provider-degraded or valid.
-    let phases: Result<_, Box<dyn std::error::Error>> = async {
+    let phases = AssertUnwindSafe(async {
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -2004,18 +2004,28 @@ async fn run_s97_client_context_vertical(
         "durable delegated executor spawn did not materialize in canonical mob events"
     );
 
-        Ok((
+        Ok::<_, Box<dyn std::error::Error>>((
             provider_delegation_ref_digest,
             delegation_index,
             delegation_outputs,
             commentary_acks,
             worker_identity,
         ))
-    }
+    })
+    .catch_unwind()
     .await;
-    if let Err(error) = peer.record_timeline().await {
-        eprintln!("S97: the browser timeline could not be recorded: {error}");
-    }
+    // The lag-rule input, recorded whether the phases passed, failed or
+    // panicked; a panic resumes only after it (#1765).
+    let phases = evidence::record_before_resuming(phases, async {
+        if let Err(error) = peer.record_timeline().await {
+            eprintln!("S97: the browser timeline could not be recorded: {error}");
+        }
+    })
+    .await;
+    let phases = match phases {
+        Ok(phases) => phases,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
     let (
         provider_delegation_ref_digest,
         delegation_index,
@@ -3109,14 +3119,28 @@ async fn s99_exchange(
             .iter()
             .find(|event| is_client_delegation(event))
         {
-            assert!(
-                allow_delegation,
-                "history and correction exchanges must use native voice, not delegated text or TTS"
-            );
             let delegation_id = delegation["delegation"]["id"]
                 .as_str()
                 .ok_or("client delegation without an id")?
                 .to_owned();
+            // Recorded before the native-voice check, so every soak counts
+            // the delegations that fail it (#1719).
+            {
+                let evidence = s99_evidence(live)?;
+                record_metric(
+                    evidence,
+                    evidence.current_channel()?,
+                    "S99",
+                    "recall_delegated",
+                    format!(
+                        "fixture={fixture} allowed={allow_delegation} delegation={delegation_id}"
+                    ),
+                )?;
+            }
+            assert!(
+                allow_delegation,
+                "history and correction exchanges must use native voice, not delegated text or TTS"
+            );
             let audio = live.peer.audio_evidence().await?;
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
                 exchange,
@@ -3177,6 +3201,22 @@ async fn s99_exchange(
                     "GPT_LIVE_MODEL_SILENT_AFTER_INPUT scenario=S99 exchange={fixture} last_input_start_ms={last_input_start_ms} waited_ms=90000"
                 );
             }
+            // Diagnosis only: the provider's transcript carries the right
+            // answer but the browser decoded no speech for it. gpt-live cut
+            // its own audio when the user kept talking (full duplex) while
+            // its transcript kept the whole word (#1717, s99pre R8: one
+            // 200 ms voiced frame for "Nine."). The peer counts decoded
+            // speech before its playback gate, so no duck causes this.
+            if matches_text(&text.to_lowercase()) {
+                let evidence = s99_evidence(live)?;
+                record_metric(
+                    evidence,
+                    evidence.current_channel()?,
+                    "S99",
+                    "provider_truncated_answer",
+                    format!("fixture={fixture} answer={text:?} audio={audio:?}"),
+                )?;
+            }
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
                 exchange,
                 matched: false,
@@ -3191,12 +3231,6 @@ async fn s99_exchange(
     }
 }
 
-/// Let the assistant finish whatever it is saying before the next question,
-/// as a person would: queued context the provider voices after the user
-/// stops speaking must not be mistaken for the reply to the next question.
-/// Owned thinking-append attempts that are causal tail: every attempt minus
-/// the fragments of the channels' late summaries (the summary is context
-/// data and legitimately names the historical facts it summarizes).
 /// Every owned thinking append after each channel's first (the late
 /// summary), reassembled from its wire fragments. Fragment boundaries fall at
 /// byte offsets that move with the transcript text, so content checks run on
@@ -3227,6 +3261,9 @@ fn s99_resends_current_answer(append: &str) -> bool {
     })
 }
 
+/// Let the assistant finish whatever it is saying before the next question,
+/// as a person would: queued context the provider voices after the user
+/// stops speaking must not be mistaken for the reply to the next question.
 async fn s99_wait_for_assistant_quiet(
     live: &mut PublicLiveHarness,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3652,13 +3689,17 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     })
     .catch_unwind()
     .await;
+    // The current channel's lag-rule input, recorded whether the body passed,
+    // failed or panicked: a failing run must be classifiable as
+    // provider-degraded or valid. Before `settle_scenario_body`, which
+    // resumes a panic and never returns for it (#1765).
+    let result = evidence::record_before_resuming(result, async {
+        if let Err(error) = live.peer.record_timeline().await {
+            eprintln!("S99: the browser timeline could not be recorded: {error}");
+        }
+    })
+    .await;
     let result = settle_scenario_body(&mut live, result).await;
-    // The current channel's lag-rule input, recorded whether the body passed
-    // or failed: a failing run must be classifiable as provider-degraded or
-    // valid.
-    if let Err(error) = live.peer.record_timeline().await {
-        eprintln!("S99: the browser timeline could not be recorded: {error}");
-    }
     let browser_flush = live.peer.stop_evidence().await;
     let outcome = if result.is_ok() && browser_flush.is_ok() {
         evidence.stage(EvidenceStage::Finished)?;
@@ -10240,7 +10281,8 @@ fn s101_is_number(word: &str) -> bool {
 }
 
 /// The references to a job a sentence can make: its marker file (as the
-/// recognizer renders it) or its ordinal.
+/// recognizer renders it), its ordinal, or its sleep duration (job 1 sleeps
+/// 25 s, job 2 sleeps 20 s).
 fn s101_job_refs(job: S101Job) -> &'static [&'static [&'static str]] {
     match job {
         S101Job::Job1 => &[
@@ -10250,6 +10292,10 @@ fn s101_job_refs(job: S101Job) -> &'static [&'static [&'static str]] {
             &["first", "one"],
             &["first", "job"],
             &["first", "slow", "job"],
+            &["25", "second"],
+            &["25", "seconds"],
+            &["twenty", "five", "second"],
+            &["twenty", "five", "seconds"],
         ],
         S101Job::Job2 => &[
             &["marker2"],
@@ -10258,9 +10304,26 @@ fn s101_job_refs(job: S101Job) -> &'static [&'static [&'static str]] {
             &["second", "one"],
             &["second", "job"],
             &["second", "slow", "job"],
+            &["20", "second"],
+            &["20", "seconds"],
+            &["twenty", "second"],
+            &["twenty", "seconds"],
         ],
         S101Job::Quick => &[],
     }
+}
+
+/// A count that can precede "second(s)" as a duration ("25 second",
+/// "twenty-five second").
+fn s101_is_duration_count(word: &str) -> bool {
+    s101_is_number(word) || ["twenty", "thirty", "forty", "fifty", "sixty"].contains(&word)
+}
+
+/// Whether `reference` matched at `index` is the ordinal "second" used as the
+/// unit of a duration: "The 25 second one just finished" names the 25-second
+/// job (job 1), not the second job (#1713, BB 510ea321).
+fn s101_ordinal_is_a_duration(tokens: &[&str], index: usize, reference: &[&str]) -> bool {
+    reference.first() == Some(&"second") && index > 0 && s101_is_duration_count(tokens[index - 1])
 }
 
 /// File counts `text` states in the quick question's answer shape:
@@ -10538,9 +10601,9 @@ fn s101_premature_outcome_claims(lines: &[provider_recording::Line], channel: u3
             for job in [S101Job::Job1, S101Job::Job2] {
                 let reference = s101_job_refs(job).iter().find_map(|reference| {
                     (0..tokens.len()).find_map(|index| {
-                        tokens[index..]
-                            .starts_with(reference)
-                            .then(|| index + reference.len() - 1)
+                        (tokens[index..].starts_with(reference)
+                            && !s101_ordinal_is_a_duration(&tokens, index, reference))
+                        .then(|| index + reference.len() - 1)
                     })
                 });
                 if let Some(reference) = reference {
@@ -13351,6 +13414,108 @@ mod config_tests {
         lines.push(ack(4, "meerkat-thinking-7-1"));
         assert!(super::thinking_tokens(&lines, 1)[0].acknowledged);
         assert!(super::thinking_tokens(&lines, 2).is_empty());
+    }
+
+    /// Two slow jobs as S101 starts them (job 1 sleeps 25 s, job 2 sleeps
+    /// 20 s); job 1's result arrives at 5000 ms, job 2's at 9000 ms. `spoken`
+    /// is the voice's output in between.
+    fn s101_two_job_lines(spoken: &[(u64, &str)]) -> Vec<super::provider_recording::Line> {
+        let mut seq = 0;
+        let mut line = |elapsed_ms: u64, entry: super::provider_recording::Entry| {
+            seq += 1;
+            super::provider_recording::Line {
+                seq,
+                channel_ordinal: 1,
+                elapsed_ms,
+                entry,
+            }
+        };
+        let created = |id: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.delegation.created", "delegation": {"id": id}}),
+        };
+        let append = |id: &str, content: &str| super::provider_recording::Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.commentary.append", "delegation_id": id, "content": content}),
+        };
+        let delta = |text: &str| super::provider_recording::Entry::ServerFrame {
+            raw: serde_json::json!({"type": "session.output_transcript.delta", "delta": text}),
+        };
+        let mut lines = vec![
+            line(1000, created("j1")),
+            line(
+                1100,
+                append(
+                    "j1",
+                    "Started voice request: \"Start a slow job: sleep twenty-five seconds, then create marker one dot txt\".",
+                ),
+            ),
+            line(2000, created("j2")),
+            line(
+                2100,
+                append(
+                    "j2",
+                    "Started voice request: \"Hand the executor a second slow job: sleep twenty seconds and create marker two dot txt\".",
+                ),
+            ),
+            line(
+                5000,
+                append(
+                    "j1",
+                    "Finished voice request: \"Start a slow job ...\". The result follows.",
+                ),
+            ),
+        ];
+        for (at, text) in spoken {
+            lines.push(line(*at, delta(text)));
+        }
+        lines.push(line(
+            9000,
+            append(
+                "j2",
+                "Finished voice request: \"Hand the executor ...\". The result follows.",
+            ),
+        ));
+        lines
+    }
+
+    /// "The 25 second one just finished." after job 1's result names job 1,
+    /// the 25-second job: "second" is the duration's unit, not job 2's
+    /// ordinal (#1713, BB 510ea321: flagged as job 2 at 46573 ms).
+    #[test]
+    fn s101_a_duration_named_job_is_not_the_second_job() {
+        let lines = s101_two_job_lines(&[(5300, " The 25 second one just finished.")]);
+        assert!(
+            super::s101_premature_outcome_claims(&lines, 1).is_empty(),
+            "{:#?}",
+            super::s101_premature_outcome_claims(&lines, 1)
+        );
+        let lines = s101_two_job_lines(&[(5300, " The twenty-five second job is done.")]);
+        assert!(super::s101_premature_outcome_claims(&lines, 1).is_empty());
+    }
+
+    /// Job 2 named by its 20-second duration before its result is a premature
+    /// claim about job 2.
+    #[test]
+    fn s101_the_twenty_second_job_done_early_is_a_job2_claim() {
+        let lines = s101_two_job_lines(&[(5600, " The 20 second one just finished.")]);
+        let claims = super::s101_premature_outcome_claims(&lines, 1);
+        assert_eq!(claims.len(), 1, "{claims:#?}");
+        assert!(
+            claims[0].contains("declared Job2 complete at 5600"),
+            "{claims:#?}"
+        );
+    }
+
+    /// The ordinal still names job 2: "The second one just finished." before
+    /// job 2's result is a premature claim, as before.
+    #[test]
+    fn s101_the_second_one_done_early_is_still_a_job2_claim() {
+        let lines = s101_two_job_lines(&[(5800, " The second one just finished.")]);
+        let claims = super::s101_premature_outcome_claims(&lines, 1);
+        assert_eq!(claims.len(), 1, "{claims:#?}");
+        assert!(
+            claims[0].contains("declared Job2 complete at 5800"),
+            "{claims:#?}"
+        );
     }
 
     /// A job declared complete before the provider learned it was is a

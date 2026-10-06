@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
-# If machine-related files changed, run codegen + verify
+# If machine-related files changed, run codegen + verify.
+#
+#   --codegen-only  machine-codegen and protocol-codegen under the clean-tree
+#                   contract: the local machine/protocol drift check for the
+#                   exact pushed refs (pre-push hook machine-codegen-drift,
+#                   which the dispatcher refuses to SKIP)
+#   --verify-only   the canonical TLC lane (pre-push hook
+#                   machine-codegen-verify)
+#   (no flag)       both, in that order
 set -euo pipefail
+
+run_codegen=1
+run_verify=1
+case "${1:-}" in
+    --codegen-only) run_verify=0 ;;
+    --verify-only) run_codegen=0 ;;
+    "") ;;
+    *)
+        echo "usage: pre-push-machines.sh [--codegen-only|--verify-only]" >&2
+        exit 2
+        ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -48,7 +68,8 @@ case "$classifier_status" in
         ;;
 esac
 
-echo "Machine files changed, running codegen + verify..."
+if [[ "$run_codegen" -eq 1 ]]; then
+echo "Machine files changed, running codegen (drift check)..."
 "$CARGO" xtask machine-codegen --all
 if ! worktree_status="$("$GIT_BIN" status --porcelain=v1 --untracked-files=all)"; then
     echo "Failed to determine exact-tree cleanliness after machine codegen." >&2
@@ -73,8 +94,12 @@ if [[ -n "$worktree_status" ]]; then
     "$GIT_BIN" status --short --untracked-files=all >&2
     exit 1
 fi
+fi
+if [[ "$run_verify" -eq 1 ]]; then
+echo "Machine files changed, running the canonical TLC lane..."
 # Route verification through the canonical TLC lane: it owns the documented
 # over-budget composition skips (meerkat_mob_seam / adaptive_mob_bundle full
 # sweeps) and the bounded adaptive witness proof. A bare `machine-verify --all`
 # runs the full mob-seam ci.cfg sweep, which does not fit a pre-push budget.
 "$MAKE_BIN" -C "$ROOT" machine-verify
+fi

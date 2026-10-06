@@ -342,6 +342,11 @@ Failed in:
                 "crates/meerkat/src/session_runtime/live_orchestration.rs:41",
                 ("LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS",),
             ),
+            "struct_with_pub_fields_changed_type": (
+                "struct meerkat_contracts::wire::LoginCancelParams became enum in file "
+                "crates/meerkat-contracts/src/wire/connection.rs:346",
+                ("LoginCancelParams",),
+            ),
         }
         for lint_id, (item, expected) in cases.items():
             with self.subTest(lint_id=lint_id):
@@ -399,6 +404,56 @@ Failed in:
         self.assertEqual(len(errors), 1)
         self.assertIn("`set_callback_channel`", errors[0])
         self.assertIn("`### Deprecated`", errors[0])
+
+    def test_struct_became_enum_must_be_declared(self) -> None:
+        item = "struct meerkat_contracts::wire::LoginCancelParams became enum"
+        symbols, structural = gate.extract_symbols("struct_with_pub_fields_changed_type", item)
+        self.assertTrue(structural)
+        parsed = gate.ReportParse(
+            findings=[
+                gate.Finding(
+                    "struct_with_pub_fields_changed_type",
+                    "meerkat-contracts",
+                    item,
+                    symbols,
+                    structural,
+                )
+            ]
+        )
+        self.assertEqual(gate.check_recognized(parsed), [])
+
+        def section(body: str) -> "gate.Section":
+            return gate.Section("## [Unreleased]", None, "", body)
+
+        undeclared = section("\n### Breaking\n\n- `WireLoginCancelled` changed.\n")
+        errors = gate.check_named(parsed, undeclared)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("LoginCancelParams", errors[0])
+
+        declared = section(
+            "\n### Breaking\n\n- `LoginCancelParams` changes from a struct to a target union.\n"
+        )
+        self.assertEqual(gate.check_named(parsed, declared), [])
+
+        # A different message shape for the same lint is still unreadable and
+        # fails closed, like any unknown lint.
+        changed = "struct meerkat_contracts::wire::LoginCancelParams turned into something"
+        symbols, structural = gate.extract_symbols("struct_with_pub_fields_changed_type", changed)
+        self.assertFalse(structural)
+        unreadable = gate.ReportParse(
+            findings=[
+                gate.Finding(
+                    "struct_with_pub_fields_changed_type",
+                    "meerkat-contracts",
+                    changed,
+                    symbols,
+                    structural,
+                )
+            ]
+        )
+        errors = gate.check_recognized(unreadable)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("[struct_with_pub_fields_changed_type]", errors[0])
 
     def test_real_breaks_still_require_breaking(self) -> None:
         item = "trait meerkat_core::SessionStore"

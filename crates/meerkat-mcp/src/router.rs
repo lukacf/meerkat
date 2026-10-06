@@ -993,18 +993,62 @@ struct ServerEntry {
 
 struct InflightCallGuard<'a> {
     active_calls: &'a AtomicUsize,
+    owner: &'a SurfaceOwner,
+    surface_id: SurfaceId,
+    progress: &'a tokio::sync::watch::Sender<u64>,
+    finished: bool,
 }
 
 impl<'a> InflightCallGuard<'a> {
-    fn new(active_calls: &'a AtomicUsize) -> Self {
+    fn new(
+        active_calls: &'a AtomicUsize,
+        owner: &'a SurfaceOwner,
+        surface_id: SurfaceId,
+        progress: &'a tokio::sync::watch::Sender<u64>,
+    ) -> Self {
         active_calls.fetch_add(1, Ordering::AcqRel);
-        Self { active_calls }
+        Self {
+            active_calls,
+            owner,
+            surface_id,
+            progress,
+            finished: false,
+        }
+    }
+
+    fn finish(mut self) -> Result<(), McpError> {
+        self.finished = true;
+        self.owner
+            .apply(ExternalToolSurfaceInput::CallFinished {
+                surface_id: self.surface_id.clone(),
+            })
+            .map_err(|error| McpError::ServerUnavailable {
+                server: self.surface_id.to_string(),
+                state: format!("Surface owner rejected CallFinished: {error}"),
+            })?;
+        Ok(())
     }
 }
 
 impl Drop for InflightCallGuard<'_> {
     fn drop(&mut self) {
+        if !self.finished {
+            // Cancellation cannot skip the canonical lifetime transition.
+            // There is no result channel during Drop; retain a fixed diagnostic
+            // if the native owner refuses this cleanup obligation.
+            if self
+                .owner
+                .apply(ExternalToolSurfaceInput::CallFinished {
+                    surface_id: self.surface_id.clone(),
+                })
+                .is_err()
+            {
+                tracing::error!("surface owner rejected cancelled MCP CallFinished");
+            }
+        }
         self.active_calls.fetch_sub(1, Ordering::AcqRel);
+        self.progress
+            .send_modify(|seen| *seen = seen.wrapping_add(1));
     }
 }
 
@@ -1068,6 +1112,7 @@ pub struct McpRouter {
     mcp_auth_mode: McpAuthMode,
     mcp_auth_resolver: Option<Arc<dyn McpAuthResolver>>,
     client_service_factory: Option<Arc<dyn crate::McpClientServiceFactory>>,
+    call_context_provider: Option<Arc<dyn crate::McpCallContextProvider>>,
     /// Bumped whenever the router makes progress a waiter could be blocked
     /// on: a tool call finishing (a draining server's in-flight count drops)
     /// or a connect attempt delivering its result. [`McpProgressWait`]
@@ -1145,6 +1190,7 @@ impl McpRouter {
             mcp_auth_mode: McpAuthMode::Stored,
             mcp_auth_resolver: None,
             client_service_factory: None,
+            call_context_provider: None,
             progress: Arc::new(tokio::sync::watch::Sender::new(0)),
             connect_attempts_spawned: 0,
             connect_results_delivered: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1258,6 +1304,15 @@ impl McpRouter {
         factory: Arc<dyn crate::McpClientServiceFactory>,
     ) -> Self {
         self.client_service_factory = Some(factory);
+        self
+    }
+
+    /// Install trusted per-call preparation for exact connected destinations.
+    pub fn with_call_context_provider(
+        mut self,
+        provider: Arc<dyn crate::McpCallContextProvider>,
+    ) -> Self {
+        self.call_context_provider = Some(provider);
         self
     }
 
@@ -2486,21 +2541,44 @@ impl McpRouter {
         Ok(delta)
     }
 
-    /// Call a tool by name, returning multimodal content blocks.
+    /// Call a tool by name, retaining the historical content-only error API.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let snapshot = Arc::clone(&self.projection);
-        let route = snapshot
-            .tool_routes
-            .get(name)
-            .cloned()
-            .ok_or_else(|| McpError::ToolNotFound(name.to_string()))?;
-        let server_name = &route.server_name;
+        let raw = serde_json::value::to_raw_value(args)
+            .map_err(|_| McpError::Serialization("invalid MCP arguments".into()))?;
+        self.call_tool_with_context(
+            ToolCallView {
+                id: "",
+                name,
+                args: &raw,
+            },
+            args,
+            &meerkat_core::ToolDispatchContext::default(),
+            |result| crate::protocol::convert_tool_result(result, name),
+        )
+        .await
+    }
 
+    async fn call_tool_with_context<T>(
+        &self,
+        call: ToolCallView<'_>,
+        args: &Value,
+        context: &meerkat_core::ToolDispatchContext,
+        project: impl FnOnce(rmcp::model::CallToolResult) -> Result<T, McpError>,
+    ) -> Result<T, McpError> {
+        let route = self
+            .projection
+            .tool_routes
+            .get(call.name)
+            .ok_or_else(|| McpError::ToolNotFound(call.name.to_string()))?;
+        let server_name = &route.server_name;
         let entry = self
             .servers
             .get(server_name)
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
-
+        let conn = entry
+            .connection
+            .as_ref()
+            .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
         let sid = SurfaceId::from(server_name.as_str());
         match self
             .surface_owner
@@ -2517,40 +2595,65 @@ impl McpRouter {
                     }
                 }
             }
-            Err(e) => {
+            Err(error) => {
                 return Err(McpError::ServerUnavailable {
                     server: server_name.clone(),
-                    state: e.to_string(),
+                    state: error.to_string(),
                 });
             }
         }
-
-        let conn = entry
-            .connection
-            .as_ref()
-            .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
-
-        let _guard = InflightCallGuard::new(&entry.active_calls);
-        let result = conn.call_tool(&route.raw_operation, args).await;
-
-        // Fail closed (matching CallStarted): a rejected CallFinished is
-        // authoritative divergence, not a benign no-op. Surface the tool
-        // result only when the surface owner accepts the finish.
-        let finished = self
-            .surface_owner
-            .apply(ExternalToolSurfaceInput::CallFinished {
-                surface_id: sid.clone(),
-            });
-        // A draining server may now have no call in flight.
-        self.progress
-            .send_modify(|seen| *seen = seen.wrapping_add(1));
-        if let Err(error) = finished {
-            return Err(McpError::ServerUnavailable {
-                server: server_name.clone(),
-                state: format!("Surface owner rejected CallFinished: {error}"),
-            });
+        let lifetime = InflightCallGuard::new(
+            &entry.active_calls,
+            &self.surface_owner,
+            sid,
+            &self.progress,
+        );
+        let result = async {
+            let origin = meerkat_core::WireCallOrigin::Unavailable;
+            let preparation = match &self.call_context_provider {
+                Some(provider) => {
+                    provider
+                        .prepare(
+                            crate::McpCallTarget {
+                                config: conn.config(),
+                                connection_id: conn.connection_id(),
+                                raw_operation: &route.raw_operation,
+                                origin: &origin,
+                            },
+                            call,
+                            context,
+                        )
+                        .await?
+                }
+                None => None,
+            };
+            // The guard remains owned by this future until transport and
+            // conversion finish, and drops immediately if the future is cancelled.
+            let (metadata, _lease) = match preparation {
+                Some(prepared) => {
+                    let mut metadata = prepared.metadata;
+                    if metadata.contains_key(meerkat_core::CALL_ORIGIN_META_KEY)
+                        || metadata.contains_key("progressToken")
+                    {
+                        return Err(McpError::CallContext(crate::McpCallContextError::Denied));
+                    }
+                    metadata.insert(
+                        meerkat_core::CALL_ORIGIN_META_KEY.to_string(),
+                        serde_json::to_value(origin)
+                            .map_err(|_| crate::McpCallContextError::Unavailable)?,
+                    );
+                    (Some(metadata), Some(prepared.guard))
+                }
+                None => (None, None),
+            };
+            let result = conn
+                .call_tool_result(&route.raw_operation, args, metadata)
+                .await?;
+            project(result)
         }
-
+        .await;
+        // Refuse a result whose canonical completion was rejected.
+        lifetime.finish()?;
         result
     }
 
@@ -2689,26 +2792,61 @@ impl AgentToolDispatcher for McpRouter {
         self.pending_sources_snapshot().into()
     }
 
+    fn tool_mutation_class(&self, tool_name: &str) -> meerkat_core::ToolMutationClass {
+        let Some(route) = self.projection.tool_routes.get(tool_name) else {
+            return meerkat_core::ToolMutationClass::Unknown;
+        };
+        let Some(connection) = self
+            .servers
+            .get(&route.server_name)
+            .and_then(|entry| entry.connection.as_ref())
+        else {
+            return meerkat_core::ToolMutationClass::Unknown;
+        };
+        self.call_context_provider
+            .as_ref()
+            .map_or(meerkat_core::ToolMutationClass::Unknown, |provider| {
+                provider.tool_mutation_class(connection.config(), &route.raw_operation)
+            })
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
-        // K1: external dispatch goes through the typed tool-argument
-        // contract — malformed / non-object args fail closed instead of
-        // being wrapped into a `Value::String` and forwarded.
+        self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
+        // The adapter holds the router read guard here. Recheck the exact
+        // live destination after any asynchronous outer consequence decision.
+        if context.read_only_execution_required()
+            && self.tool_mutation_class(call.name) != meerkat_core::ToolMutationClass::ReadOnly
+        {
+            return Err(ToolError::access_denied(call.name));
+        }
         let args = meerkat_core::ToolCallArguments::from_raw_json(call.args)
             .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
-        let blocks = self
-            .call_tool(call.name, args.as_value())
+        let result = self
+            .call_tool_with_context(call, args.as_value(), context, |result| {
+                let (blocks, is_error) = crate::protocol::project_tool_result(result, call.name)?;
+                Ok(ToolResult::with_blocks(
+                    call.id.to_string(),
+                    blocks,
+                    is_error,
+                ))
+            })
             .await
-            .map_err(|e| match e {
+            .map_err(|error| match error {
                 McpError::ToolNotFound(name) => ToolError::NotFound { name },
-                other => ToolError::ExecutionFailed {
-                    message: other.to_string(),
-                },
+                other => ToolError::execution_failed(other.to_string()),
             })?;
-
-        Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
+        Ok(result.into())
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
@@ -4386,3 +4524,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "call_context_tests.rs"]
+mod call_context_tests;

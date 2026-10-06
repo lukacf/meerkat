@@ -11113,6 +11113,20 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn load_retained_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<meerkat_core::PersistedSessionMetadataView>,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_retained_session_metadata(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -14679,6 +14693,20 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         session_id: &SessionId,
     ) -> Result<bool, meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::session_known_to_archive_authority(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn load_retained_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<meerkat_core::PersistedSessionMetadataView>,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_retained_session_metadata(
             &self.inner,
             session_id,
         )
@@ -27884,6 +27912,156 @@ default_model = "gpt-5.4"
             Err(meerkat_core::service::SessionError::Agent(_))
         ));
         assert!(events.next().now_or_never().is_none());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn run_mob_session_service_retained_metadata_preserves_unsupported() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .shell(false);
+        let inner = Arc::new(build_cli_service(factory, Config::default(), None));
+        let wrapper = RunMobSessionService::new(Arc::clone(&inner));
+        let created = wrapper
+            .create_session(boundary_discard_wrapper_request())
+            .await
+            .unwrap();
+        for session_id in [created.session_id, SessionId::new()] {
+            let expected = meerkat_mob::MobSessionService::load_retained_session_metadata(
+                inner.as_ref(),
+                &session_id,
+            )
+            .await
+            .unwrap_err();
+            let actual = meerkat_mob::MobSessionService::load_retained_session_metadata(
+                &wrapper,
+                &session_id,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(actual, SessionError::Unsupported(_)));
+            assert_eq!(actual.to_string(), expected.to_string());
+        }
+    }
+
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[tokio::test]
+    async fn mob_cli_session_service_retained_metadata_matches_persistent_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = sqlite_session_store(&temp);
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(store)
+            .builtins(false)
+            .shell(false);
+        let (inner, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+        );
+        let wrapper = MobCliSessionService::new(Arc::clone(&inner));
+        for archived in [false, true] {
+            let mut session = Session::new();
+            if archived {
+                session
+                    .set_lifecycle_terminal(meerkat_core::SessionLifecycleTerminal::Archived)
+                    .unwrap();
+            }
+            runtime_store
+                .commit_session_snapshot(
+                    &meerkat_runtime::LogicalRuntimeId::for_session(session.id()),
+                    meerkat_runtime::SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let expected = meerkat_mob::MobSessionService::load_retained_session_metadata(
+                inner.as_ref(),
+                session.id(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let actual = meerkat_mob::MobSessionService::load_retained_session_metadata(
+                &wrapper,
+                session.id(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(actual.session_id, expected.session_id);
+            assert_eq!(actual.lifecycle_terminal, expected.lifecycle_terminal);
+            assert_eq!(
+                serde_json::to_value(actual.session_metadata).unwrap(),
+                serde_json::to_value(expected.session_metadata).unwrap()
+            );
+            if archived {
+                assert!(
+                    meerkat_mob::MobSessionService::load_persisted_session_metadata(
+                        &wrapper,
+                        session.id(),
+                    )
+                    .await
+                    .unwrap()
+                    .is_none(),
+                    "retained observation must not change ordinary archived visibility"
+                );
+            }
+
+            let mut corrupt = serde_json::to_value(&session).unwrap();
+            corrupt["metadata"][meerkat_core::session::SESSION_METADATA_KEY] =
+                serde_json::json!("invalid-typed-session-metadata");
+            runtime_store
+                .commit_session_snapshot(
+                    &meerkat_runtime::LogicalRuntimeId::for_session(session.id()),
+                    meerkat_runtime::SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&corrupt).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let expected_error = meerkat_mob::MobSessionService::load_retained_session_metadata(
+                inner.as_ref(),
+                session.id(),
+            )
+            .await
+            .unwrap_err();
+            let actual_error = meerkat_mob::MobSessionService::load_retained_session_metadata(
+                &wrapper,
+                session.id(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                std::mem::discriminant(&actual_error),
+                std::mem::discriminant(&expected_error)
+            );
+            assert_eq!(actual_error.to_string(), expected_error.to_string());
+        }
+        let absent = SessionId::new();
+        for service in [
+            inner.as_ref() as &dyn meerkat_mob::MobSessionService,
+            &wrapper,
+        ] {
+            assert!(
+                service
+                    .load_retained_session_metadata(&absent)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[cfg(feature = "mob")]

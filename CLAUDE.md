@@ -506,11 +506,11 @@ Installed via `make install-hooks`. Two stages:
 - Trailing whitespace, end-of-file, YAML/TOML validation, merge conflict check, large file check
 - `repo-cargo fmt --all -- --check`
 - `scripts/pre-push-clippy.sh` (clippy on changed crates only with `--all-targets`; falls back to full workspace when root `Cargo.toml`/`Cargo.lock` changes)
-- `scripts/pre-push-machines.sh` (machine codegen drift verify)
+- `scripts/pre-push-machines.sh`, as two hooks behind the machine-authority classifier and the exact pushed refs: `machine-codegen-drift` (`--codegen-only`: machine and protocol codegen under the clean-tree contract, the only local drift check; the dispatcher refuses `SKIP=machine-codegen-drift`) and `machine-codegen-verify` (`--verify-only`: the canonical TLC lane)
 - `scripts/pre-push-audit-generated-headers.sh`
 - `scripts/pre-push-bridge-no-responsestatus.sh` (thin wrapper over `xtask bridge-classifier`)
 - `scripts/pre-push-bazel-locks.sh` (generated BUILD freshness, offline MODULE.bazel.lock recorded-input check, `bb mod deps --lockfile_mode=error` when the pinned CLI is present; `--require-bb` makes that last gate mandatory and the release preflight passes it)
-- `scripts/test-lock-consistency-gate.sh`, `scripts/test-bazel-module-lock-gate.sh`, `scripts/test-crate-enumeration-gate.sh`, `scripts/test-release-doctor-workflow-contract.sh` (contract tests: each new release-infra gate must still fail on the defect it was written for; the last one also proves the release doctor's `release.yml` assertions survive rewording)
+- `scripts/test-lock-consistency-gate.sh`, `scripts/test-bazel-module-lock-gate.sh`, `scripts/test-crate-enumeration-gate.sh`, `scripts/test-crate-license-files-gate.sh`, `scripts/test-release-doctor-workflow-contract.sh` (contract tests: each new release-infra gate must still fail on the defect it was written for; the last one also proves the release doctor's `release.yml` assertions survive rewording)
 - `scripts/pre-push-unit.sh` (deterministic Cargo/nextest gate: when fresh execution is needed, runs workspace unit, integration-fast, HeadCanonical cold-restart, and `e2e-fast` lanes; serializes identical source evidence and retries a timed-out lane once. `MEERKAT_BUILDBUDDY` does not switch this hook's backend)
 - `scripts/pre-push-prune-lanes.sh` (runs from the dispatcher only after a PASSED gate: keeps at most `MEERKAT_PRE_PUSH_KEEP_LANES` (default 2) `pre-push-<hash>` hook worktrees and Cargo target lanes per repo, never touching the current lane, a lane whose dispatcher lock is live, a lane referenced by any live process, a lane with any file activity inside `MEERKAT_PRE_PUSH_LANE_IDLE_SECS` (default 21600), or any non-lane name; logs one `kept:`/`pruned:` line per lane with its reason; `MEERKAT_PRE_PUSH_KEEP_LANES=all` disables it)
 
@@ -541,7 +541,8 @@ qualified. This changes scheduling, not required coverage or hook behavior.
 
 Only deduplicate an inventory actually covered by the selected push backend,
 paths, test targets and features. The Cargo push lint hook uses
-`agent-gate --committed --clippy-only`; its governance and generated-contract
+`agent-gate --committed --clippy-only --machine-drift-by-hook`; its governance
+(drift is left to `machine-codegen-drift`) and generated-contract
 ratchets still run. Its path base is `CARGO_AGENT_BASE` or `origin/main` (then
 `main`/HEAD), which can differ from the dispatcher's remote-ref range. Check that
 the committed selection includes the intended delta. The deterministic push

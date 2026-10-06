@@ -498,6 +498,15 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
         Arc::clone(&self.tools)
     }
 
+    fn tool_mutation_class(&self, tool_name: &str) -> meerkat_core::ToolMutationClass {
+        match tool_name {
+            // Loading changes session visibility only, not the underlying tool's
+            // execution authority or any external state.
+            SEARCH_TOOL_NAME | LOAD_TOOL_NAME => meerkat_core::ToolMutationClass::ReadOnly,
+            _ => meerkat_core::ToolMutationClass::Unknown,
+        }
+    }
+
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: true,
@@ -930,6 +939,167 @@ mod tests {
         .expect("generated standalone visibility owner should initialize");
         ToolScope::new_with_visibility_owner(tools, HashSet::new(), deferred_tool_names, owner)
             .expect("generated visibility test owner should accept catalog authority")
+    }
+
+    #[tokio::test]
+    async fn read_only_gate_allows_catalog_discovery_and_load_without_authorizing_mutation() {
+        use meerkat_core::ops::ToolAccessPolicy;
+        use meerkat_core::{
+            DynamicToolComposite, ExecutionPolicyGatedDispatcher, ToolExecutionPolicy,
+            ToolMutationClass,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DeclaredSessionDispatcher {
+            catalog: ExactCatalogDispatcher,
+            calls: AtomicUsize,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for DeclaredSessionDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                self.catalog.tools()
+            }
+
+            fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+                self.catalog.tool_catalog_capabilities()
+            }
+
+            fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+                self.catalog.tool_catalog()
+            }
+
+            fn tool_mutation_class(&self, name: &str) -> ToolMutationClass {
+                match name {
+                    "workspace_read" => ToolMutationClass::ReadOnly,
+                    "workspace_apply" => ToolMutationClass::Mutating,
+                    _ => ToolMutationClass::Unknown,
+                }
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
+                    call.id.to_string(),
+                    "session operation executed".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        let tools: Arc<[Arc<ToolDef>]> = vec![
+            session_tool("workspace_read", "Read a workspace"),
+            session_tool("workspace_apply", "Change a workspace"),
+        ]
+        .into();
+        let session = Arc::new(DeclaredSessionDispatcher {
+            catalog: ExactCatalogDispatcher {
+                tools: Arc::clone(&tools),
+                catalog: tools
+                    .iter()
+                    .map(|tool| {
+                        ToolCatalogEntry::session_deferred(
+                            Arc::clone(tool),
+                            true,
+                            callback_provenance("test"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                pending_sources: Arc::from([]),
+                may_require_control_plane: false,
+            },
+            calls: AtomicUsize::new(0),
+        });
+        let scope = generated_visibility_scope(
+            Arc::clone(&tools),
+            tools.iter().map(|tool| tool.name.clone()).collect(),
+        );
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(scope.clone());
+        let control = Arc::new(CatalogControlDispatcher::new(
+            session.clone(),
+            visibility_provider,
+        ));
+        for name in ["workspace_read", "workspace_apply", "unknown"] {
+            assert_eq!(
+                control.tool_mutation_class(name),
+                ToolMutationClass::Unknown
+            );
+        }
+        let composed: Arc<dyn AgentToolDispatcher> =
+            Arc::new(DynamicToolComposite::new(vec![control, session.clone()]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            composed,
+            ToolExecutionPolicy::resolve(ToolAccessPolicy::ReadOnly).unwrap(),
+        );
+
+        let search = gated
+            .dispatch(search_call(SEARCH_TOOL_NAME, json!({"query": "workspace"})))
+            .await
+            .expect("read-only agents must be able to discover deferred tools");
+        assert!(!search.result.is_error);
+        assert!(search.session_effects.is_empty());
+        let found: SearchResponse = serde_json::from_str(&search.result.text_content()).unwrap();
+        assert!(found.catalog_exact);
+        assert_eq!(found.total_matches, 2);
+        assert!(found.results.iter().all(|tool| !tool.currently_callable));
+        assert!(scope.visible_tool_names().unwrap().is_empty());
+
+        let loaded = gated
+            .dispatch_with_context(
+                search_call(
+                    LOAD_TOOL_NAME,
+                    json!({"names": ["workspace_read", "workspace_apply"]}),
+                ),
+                &meerkat_core::ToolDispatchContext::default(),
+            )
+            .await
+            .expect("catalog load is a permitted session visibility operation");
+        assert!(!loaded.result.is_error);
+        let response: LoadResponse = serde_json::from_str(&loaded.result.text_content()).unwrap();
+        assert!(response.catalog_exact);
+        assert_eq!(
+            response.accepted_names.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["workspace_read".to_string(), "workspace_apply".to_string()])
+        );
+        assert!(response.noop_names.is_empty());
+        let [SessionEffect::RequestDeferredTools { authorities }] =
+            loaded.session_effects.as_slice()
+        else {
+            panic!("expected exactly one deferred-load effect");
+        };
+        assert_eq!(authorities.len(), 2);
+        scope
+            .add_requested_deferred_authorities(authorities)
+            .unwrap();
+        assert!(scope.visible_tool_names().unwrap().is_empty());
+        scope.apply_staged(Arc::clone(&tools)).unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            tools.iter().map(|tool| tool.name.clone()).collect()
+        );
+
+        gated
+            .dispatch(search_call("workspace_read", json!({})))
+            .await
+            .expect("the loaded read remains executable");
+        let error = gated
+            .dispatch(search_call("workspace_apply", json!({})))
+            .await
+            .expect_err("loading a mutating tool must not authorize its execution");
+        assert_eq!(error, ToolError::access_denied("workspace_apply"));
+        assert_eq!(session.calls.load(Ordering::SeqCst), 1);
+
+        session
+            .dispatch(search_call("workspace_apply", json!({})))
+            .await
+            .expect("the ungated fixture can execute the same mutating call");
+        assert_eq!(session.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -147,9 +147,22 @@ repos:
   # On push: machine file codegen + verify
   - repo: local
     hooks:
+      # The only local machine/protocol drift check: machine-codegen and
+      # protocol-codegen under the clean-tree contract, for the exact pushed
+      # refs and the machine-authority classifier CI uses. The pre-push
+      # dispatcher refuses SKIP=machine-codegen-drift; the clippy hook's
+      # governance gate leaves drift to this hook (--machine-drift-by-hook).
+      - id: machine-codegen-drift
+        name: machine + protocol codegen drift (changed files)
+        entry: scripts/pre-push-machines.sh --codegen-only
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      # The canonical TLC lane (make machine-verify).
       - id: machine-codegen-verify
-        name: machine codegen + verify (changed files)
-        entry: scripts/pre-push-machines.sh
+        name: machine verify, canonical TLC lane (changed files)
+        entry: scripts/pre-push-machines.sh --verify-only
         language: script
         pass_filenames: false
         always_run: true
@@ -245,6 +258,14 @@ repos:
       - id: crate-enumeration-gate-contract
         name: release gate names crates missing from any required enumeration
         entry: scripts/test-crate-enumeration-gate.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: crate-license-files-gate-contract
+        name: license gate names release crates that package no license files
+        entry: scripts/test-crate-license-files-gate.sh
         language: script
         pass_filenames: false
         always_run: true

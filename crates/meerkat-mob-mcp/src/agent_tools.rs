@@ -495,6 +495,49 @@ impl AgentMobToolSurface {
         }
     }
 
+    /// Capture the authenticated source's immutable creation facts, including
+    /// when it delegates into another mob. Arguments never select the source.
+    async fn capture_creation_source(
+        state: Arc<MobMcpState>,
+        owner_bridge_session_id: SessionId,
+    ) -> meerkat_mob::MemberCreationSourceWitness {
+        Self::try_capture_creation_source(&state, &owner_bridge_session_id)
+            .await
+            .unwrap_or_else(|_| meerkat_mob::MemberCreationSourceWitness::unavailable())
+    }
+
+    async fn try_capture_creation_source(
+        state: &MobMcpState,
+        owner_bridge_session_id: &SessionId,
+    ) -> Result<meerkat_mob::MemberCreationSourceWitness, MobError> {
+        // A nonpersistent service may derive this read through the current
+        // session task, which is waiting for this tool. It has no durable
+        // source authority to capture, so do not enter that read at all.
+        if !state.session_service().supports_persistent_sessions() {
+            return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
+        }
+        let view = state
+            .session_service()
+            .load_persisted_session_metadata(owner_bridge_session_id)
+            .await?;
+        let Some(binding) = view.as_ref().and_then(|view| view.mob_member_binding()) else {
+            return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
+        };
+        let source = state
+            .handle_for(&MobId::from(binding.mob_id.as_str()))
+            .await?;
+        match source
+            .capture_member_creation_source(owner_bridge_session_id)
+            .await
+        {
+            Ok(witness) => Ok(witness),
+            Err(meerkat_mob::MemberCreationError::Unavailable(_)) => {
+                Ok(meerkat_mob::MemberCreationSourceWitness::unavailable())
+            }
+            Err(error) => Err(MobError::Internal(error.to_string())),
+        }
+    }
+
     /// The member this surface's session is bound to, when it belongs to
     /// `mob_id`. Resolved from the session binding, never from arguments.
     async fn caller_identity_in_mob(
@@ -1027,6 +1070,14 @@ impl AgentMobToolSurface {
         };
         let mut request = DelegationExecutionRequest::new(identity.clone(), args.task, result_spec);
         let mut member = DelegationMemberOptions::default();
+        let source_state = Arc::clone(&self.state);
+        let source_session = self.owner_bridge_session_id.clone();
+        member.creation_source = Some(
+            meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+                Self::capture_creation_source(source_state, source_session).await
+            })
+            .await,
+        );
         member.placement = lower_wire_placement(args.placement);
         member.additional_instructions = args.additional_instructions.map(|value| vec![value]);
         member.inherited_tool_filter = resolved.inherited_tool_filter;
@@ -1772,10 +1823,17 @@ impl AgentMobToolSurface {
         // worker-stack budget).
         let handle = handle.clone();
         let owner_bridge_session_id = self.owner_bridge_session_id.clone();
+        let source_state = Arc::clone(&self.state);
         Box::pin(meerkat_runtime::stack_relief::relieve_caller_stack(
             move || async move {
+                let source =
+                    Self::capture_creation_source(source_state, owner_bridge_session_id.clone())
+                        .await;
                 handle
-                    .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id)
+                    .spawn_spec_with_generated_owner_context(
+                        spec.with_creation_source(source),
+                        owner_bridge_session_id,
+                    )
                     .await
             },
         ))
@@ -6700,6 +6758,7 @@ mod tests {
     #[tokio::test]
     async fn test_mob_spawn_member_auto_wire_parent_uses_bound_owner_session() {
         let state = MobMcpState::new_in_memory();
+        assert!(!state.session_service().supports_persistent_sessions());
         let mob_id = state
             .mob_create_definition(sample_definition("spawn-auto-wire-parent"))
             .await
@@ -6761,6 +6820,16 @@ mod tests {
         assert!(
             child.wired_to.contains(&parent_identity),
             "auto_wire_parent must wire the spawned member to the bound spawning member"
+        );
+        let creation = handle
+            .member_creation_for_session(child.bridge_session_id().expect("child session"))
+            .await
+            .expect("read child creation")
+            .expect("child creation event");
+        assert_eq!(
+            creation.creation.provenance,
+            meerkat_mob::MemberCreationProvenance::Unproven,
+            "nonpersistent caller metadata must not become an independent host root"
         );
     }
 

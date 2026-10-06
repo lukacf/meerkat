@@ -3048,6 +3048,16 @@ mod orchestrator {
         /// meanwhile) opens without it; the generation keeps running and the
         /// preparation job adopts it, delivering the summary after the first
         /// user turn on the channel.
+        ///
+        /// A stale-retained reopen (its retained summary still matches, but
+        /// the rows committed since exceed the startup bounds) waits for the
+        /// generation's own outcome instead, whatever the bound, zero
+        /// included; the policy's summarizer timeout ends that wait. A ready
+        /// summary seeds at creation, directly or through the retained path
+        /// with the rows after its prefix; one that still cannot seed fails
+        /// the open with `StaleSnapshot`; a failed generation opens with
+        /// nothing to deliver. Such a reopen never receives a late summary
+        /// (#1784).
         #[cfg(feature = "openai-live")]
         #[allow(clippy::too_many_arguments)]
         pub(crate) async fn pre_open_concurrent_summary(

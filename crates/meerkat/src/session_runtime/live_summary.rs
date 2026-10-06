@@ -75,6 +75,11 @@ pub enum LiveContextBootstrapMode {
 /// open under the 5 s time-to-talk budget while still catching most cold
 /// generations. Configurable per policy with
 /// [`LiveContextSummaryPolicy::with_pre_open_bound`].
+///
+/// A stale-retained reopen does not use this bound: when the rows committed
+/// since its still-matching retained summary exceed the startup bounds, the
+/// reopen waits for its fresh summary's own outcome, which the policy's
+/// summarizer timeout ends, and seeds it at creation (#1784).
 pub const LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND: Duration = Duration::from_millis(2500);
 
 /// Native lane that carries a summary which was not ready at open, once the
@@ -163,7 +168,10 @@ impl LiveContextSummaryPolicy {
     /// without it (see [`LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND`]). Zero means
     /// never wait: the summary is always delivered once the conversation has
     /// started (the user speaks, or a typed row the channel will voice is
-    /// queued).
+    /// queued). A stale-retained reopen is the exception at any bound, zero
+    /// included: it waits for its fresh summary's own outcome, up to the
+    /// summarizer timeout, and seeds it at creation instead of delivering it
+    /// late (#1784).
     #[must_use]
     pub const fn with_pre_open_bound(mut self, bound: Duration) -> Self {
         self.pre_open_bound = bound;

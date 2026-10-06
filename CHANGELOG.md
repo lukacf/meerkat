@@ -259,21 +259,26 @@ them.
   Landing there, it made gpt-live answer inside the utterance (0.65 s in) in
   10 of 26 runs, against 0 of 30 when it landed earlier. An answer that ended
   before the user did was never followed by a reply (haul_e7 timeouts, about
-  1 in 28 runs, #1784). Such a reopen now waits for its fresh summary's own
-  outcome and seeds it at creation in the startup `session.input`, the
-  carrier seeded reopens already use. A summary is never appended into an
-  open reopened channel: a seeded reopen stages no preparation lease, so the
-  generated bootstrap guard refuses one. Rows committed while the summary is
-  generated ride verbatim after it through the retained path. A reopen that
-  still cannot seed fails typed (`LiveContextSummaryError::StaleSnapshot`;
-  RPC `live/open` answers the retryable `SESSION_BUSY`, -32002) for the
-  client to retry, and a failed generation opens with nothing to deliver.
-  First opens with no retained summary are unchanged. The trade:
-  reopens after a lot of new history can connect slightly later, in
-  exchange for no unprompted speech and correct recall. Measured on S106
-  (20 such reopens), open request to connected had a median of 4.2 s
-  (4.4 s before) and a maximum of 5.9 s (4.7 s before), because the open
-  now waits for the summary's own outcome instead of a fixed 2.5 s. Two measured
+  1 in 28 runs, #1784). Such a stale-retained reopen now waits for its fresh
+  summary's own outcome and seeds it at creation in the startup
+  `session.input`, the carrier seeded reopens already use. Its summary is
+  never appended into its open channel: a seeded reopen stages no
+  preparation lease, so the generated bootstrap guard refuses one. Rows
+  committed while the summary is generated ride verbatim after it through
+  the retained path. A reopen that still cannot seed fails typed
+  (`LiveContextSummaryError::StaleSnapshot`; RPC `live/open` answers the
+  retryable `SESSION_BUSY`, -32002) for the client to retry, and a failed
+  generation opens with nothing to deliver. The wait does not use the
+  pre-open bound: the policy's summarizer timeout ends it, so hosts that
+  set a zero bound (`with_pre_open_bound`, "never wait") now wait on such
+  reopens too. First opens, and reopens without a usable retained summary
+  (for example after a host restart, an eviction or a transcript rewrite),
+  are unchanged and can still receive the summary as a late append. The
+  trade: stale-retained reopens can connect slightly later, in exchange
+  for no unprompted speech and correct recall. Measured on S106 (20 such
+  reopens), open request to connected had a median of 4.2 s (4.4 s before)
+  and a maximum of 5.9 s (4.7 s before), because the open now waits for the
+  summary's own outcome instead of a fixed 2.5 s. Two measured
   alternatives were rejected: holding the summary behind the user's turn
   (the model answered without it) and sending it as soon as it was ready
   (spoken unprompted, 1 in 4 open-time appends).

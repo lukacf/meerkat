@@ -763,9 +763,15 @@ unprompted. Where the user has said something different aloud since, the later s
 /// (`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`): framed override-first and ending
 /// on the correction, gpt-live-1 dropped the whole typed update, answering the
 /// pre-typed favourite flower when only the code word was corrected aloud
-/// (Turbo S S99, #1629).
+/// (Turbo S S99, #1629). The row waits behind a late summary that was
+/// snapshotted before it was typed, so the summary still states the value the
+/// row replaced as current; framed only against the later speech, gpt-live-1
+/// kept the summary's value (S99 "Cobalt and daffodil", 6 in 182 runs since
+/// 2026-10-04, #1800). The framing therefore also ranks the row above any
+/// summary.
 pub const LIVE_SUPERSEDED_TYPED_PREFIX: &str = "From the text chat, typed before the spoken turns you have \
-already heard in this call and delivered late (context data). It stays the current source for everything that the \
+already heard in this call and delivered late (context data). It is newer than any conversation history summary \
+you have, and replaces the summary's value wherever they differ. It stays the current source for everything that the \
 later speech below does not change. Where they conflict, the later speech wins, so never restate a value it replaced \
 as current.";
 
@@ -9569,6 +9575,16 @@ mod tests {
             "the typed row's standing comes before the override (#1629)"
         );
         assert!(framing.contains("Where they conflict, the later speech wins"));
+        // The row was typed after the late summary's snapshot, so it outranks
+        // the summary's stale "current" values (S99 daffodil, #1800).
+        assert!(framing.contains(
+            "It is newer than any conversation history summary you have, and replaces the summary's value wherever they differ"
+        ));
+        assert!(
+            framing.find("newer than any conversation history summary")
+                < framing.find("later speech wins"),
+            "the row's standing over the summary comes before the speech override"
+        );
         // The open-request clause is the runtime's, for typed user input
         // only (a typed reply is never a request, #1629).
         assert!(!framing.contains("needs a response"));

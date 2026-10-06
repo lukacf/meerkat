@@ -203,11 +203,18 @@ export interface CreateProfileParams extends BindingIdParams {
   secret: string;
 }
 
+/** Configured account binding of an MCP server that names no account. */
+export type WireMcpAccountSelection = 'discover' | 'unverified';
+
+/** Whether an MCP credential proves an account; `unverified` never has `account_id`. */
+export type WireMcpAccountVerification = 'verified' | 'unverified' | 'legacy';
+
 /** MCP server addressed by auth/login/* and auth/status/get. */
 export interface WireMcpAuthTarget {
   server_name: string;
   server_url: string;
   oauth_account?: string | null;
+  oauth_account_selection?: WireMcpAccountSelection | null;
 }
 
 export interface ProviderLoginStartParams extends BindingIdParams {
@@ -358,6 +365,7 @@ export interface WireProviderLoginReady extends WireBindingIdentity {
 export interface WireMcpLoginReady {
   mcp: WireMcpAuthTarget;
   account_id?: string | null;
+  account_verification: WireMcpAccountVerification;
   expires_at?: string | null;
   has_refresh_token: boolean;
   scopes: string[];
@@ -384,6 +392,7 @@ export interface WireMcpAuthAttempt {
 export interface WireMcpAuthStatus {
   mcp: WireMcpAuthTarget;
   phase: WireMcpAuthPhase;
+  account_verification: WireMcpAccountVerification;
   expires_at?: string | null;
   account_id?: string | null;
   attempt?: WireMcpAuthAttempt | null;
@@ -742,11 +751,31 @@ export function parseWireAuthProfileCleared(
   return value as WireAuthProfileCleared;
 }
 
+export function parseWireMcpAccountVerification(
+  value: unknown,
+  path = 'account_verification',
+): WireMcpAccountVerification {
+  parseLiteral(value, ['verified', 'unverified', 'legacy'], path, 'MCP account verification');
+  return value as WireMcpAccountVerification;
+}
+
 export function parseWireMcpAuthTarget(value: unknown, path = 'mcp'): WireMcpAuthTarget {
   const record = expectRecord(value, path);
   expectString(record.server_name, `${path}.server_name`);
   expectString(record.server_url, `${path}.server_url`);
   optionalString(record, 'oauth_account', `${path}.oauth_account`);
+  if (
+    hasOwn(record, 'oauth_account_selection') &&
+    record.oauth_account_selection !== null &&
+    record.oauth_account_selection !== undefined
+  ) {
+    parseLiteral(
+      record.oauth_account_selection,
+      ['discover', 'unverified'],
+      `${path}.oauth_account_selection`,
+      'MCP account selection',
+    );
+  }
   return value as WireMcpAuthTarget;
 }
 
@@ -788,6 +817,7 @@ export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireL
   }
   parseWireMcpAuthTarget(record.mcp, `${path}.mcp`);
   optionalString(record, 'account_id', `${path}.account_id`);
+  parseWireMcpAccountVerification(record.account_verification, `${path}.account_verification`);
   optionalString(record, 'expires_at', `${path}.expires_at`);
   expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);
   expectStringArray(record.scopes, `${path}.scopes`);
@@ -832,6 +862,7 @@ export function parseWireMcpAuthStatus(value: unknown, path = 'mcp_auth_status')
     `${path}.phase`,
     'MCP auth phase',
   );
+  parseWireMcpAccountVerification(record.account_verification, `${path}.account_verification`);
   optionalString(record, 'expires_at', `${path}.expires_at`);
   optionalString(record, 'account_id', `${path}.account_id`);
   if (hasOwn(record, 'attempt') && record.attempt !== null && record.attempt !== undefined) {

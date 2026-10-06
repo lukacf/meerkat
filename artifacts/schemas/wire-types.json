@@ -140789,14 +140789,32 @@
         ],
         "type": "object"
       },
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {
@@ -141905,6 +141923,23 @@
         ],
         "type": "object"
       },
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
+      "WireMcpAccountVerification": {
+        "description": "Whether an MCP server's credential proves an account. `verified`: a\nknown or discovered account was verified by the account strategy.\n`unverified`: the host opted into resource-bound access; no account is\nverified and `account_id` is always absent. `legacy`: the server has no\naccount selection.",
+        "enum": [
+          "verified",
+          "unverified",
+          "legacy"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthAttempt": {
         "description": "A login attempt pending for an MCP server: a non-secret reference and\nits expiry, never the authorize URL or state. The reference names the\nattempt for `auth/login/cancel` and grants no flow access.",
         "properties": {
@@ -141962,6 +141997,10 @@
               "null"
             ]
           },
+          "account_verification": {
+            "$ref": "#/$defs/WireMcpAccountVerification",
+            "description": "How the server's credential relates to an account. Host UI must say\n\"account not verified\" for `unverified`."
+          },
           "attempt": {
             "anyOf": [
               {
@@ -141988,18 +142027,29 @@
         },
         "required": [
           "mcp",
-          "phase"
+          "phase",
+          "account_verification"
         ],
         "type": "object"
       },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {
@@ -158541,14 +158591,32 @@
         ],
         "type": "object"
       },
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {
@@ -158697,14 +158765,41 @@
         ],
         "type": "object"
       },
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
+      "WireMcpAccountVerification": {
+        "description": "Whether an MCP server's credential proves an account. `verified`: a\nknown or discovered account was verified by the account strategy.\n`unverified`: the host opted into resource-bound access; no account is\nverified and `account_id` is always absent. `legacy`: the server has no\naccount selection.",
+        "enum": [
+          "verified",
+          "unverified",
+          "legacy"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {
@@ -158729,12 +158824,16 @@
               "null"
             ]
           },
+          "account_verification": {
+            "$ref": "#/$defs/WireMcpAccountVerification"
+          },
           "mcp": {
             "$ref": "#/$defs/WireMcpAuthTarget"
           }
         },
         "required": [
-          "mcp"
+          "mcp",
+          "account_verification"
         ],
         "type": "object"
       },
@@ -158889,14 +158988,32 @@
         ],
         "type": "object"
       },
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {
@@ -158993,6 +159110,27 @@
     "title": "WireLoginStart",
     "type": "object"
   },
+  "WireMcpAccountSelection": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+    "enum": [
+      "discover",
+      "unverified"
+    ],
+    "title": "WireMcpAccountSelection",
+    "type": "string"
+  },
+  "WireMcpAccountVerification": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whether an MCP server's credential proves an account. `verified`: a\nknown or discovered account was verified by the account strategy.\n`unverified`: the host opted into resource-bound access; no account is\nverified and `account_id` is always absent. `legacy`: the server has no\naccount selection.",
+    "enum": [
+      "verified",
+      "unverified",
+      "legacy"
+    ],
+    "title": "WireMcpAccountVerification",
+    "type": "string"
+  },
   "WireMcpAuthAttempt": {
     "$defs": {
       "WireMcpAuthAttemptPhase": {
@@ -159030,6 +159168,23 @@
   },
   "WireMcpAuthStatus": {
     "$defs": {
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
+      "WireMcpAccountVerification": {
+        "description": "Whether an MCP server's credential proves an account. `verified`: a\nknown or discovered account was verified by the account strategy.\n`unverified`: the host opted into resource-bound access; no account is\nverified and `account_id` is always absent. `legacy`: the server has no\naccount selection.",
+        "enum": [
+          "verified",
+          "unverified",
+          "legacy"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthAttempt": {
         "description": "A login attempt pending for an MCP server: a non-secret reference and\nits expiry, never the authorize URL or state. The reference names the\nattempt for `auth/login/cancel` and grants no flow access.",
         "properties": {
@@ -159080,12 +159235,22 @@
       },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {
@@ -159110,6 +159275,10 @@
           "string",
           "null"
         ]
+      },
+      "account_verification": {
+        "$ref": "#/$defs/WireMcpAccountVerification",
+        "description": "How the server's credential relates to an account. Host UI must say\n\"account not verified\" for `unverified`."
       },
       "attempt": {
         "anyOf": [
@@ -159137,20 +159306,41 @@
     },
     "required": [
       "mcp",
-      "phase"
+      "phase",
+      "account_verification"
     ],
     "title": "WireMcpAuthStatus",
     "type": "object"
   },
   "WireMcpAuthTarget": {
+    "$defs": {
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+    "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
     "properties": {
       "oauth_account": {
         "type": [
           "string",
           "null"
+        ]
+      },
+      "oauth_account_selection": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMcpAccountSelection"
+          },
+          {
+            "type": "null"
+          }
         ]
       },
       "server_name": {
@@ -159169,14 +159359,32 @@
   },
   "WireMcpLoggedOut": {
     "$defs": {
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {

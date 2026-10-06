@@ -173,6 +173,7 @@ export interface McpStdioConfig {
 export interface McpHttpConfig {
   headers?: Record<string, string>;
   oauth_account?: string | null;
+  oauth_account_selection?: unknown | null;
   transport?: McpHttpTransport | null;
   url: string;
 }
@@ -414,6 +415,7 @@ export type ConfigSetParams = Record<string, unknown>;
 
 export interface WireMcpAuthTarget {
   oauth_account?: string | null;
+  oauth_account_selection?: "discover" | "unverified" | null;
   server_name: string;
   server_url: string;
 }
@@ -695,6 +697,7 @@ export interface WireAuthStatusResultAuthStatusDetail {
 
 export interface WireAuthStatusResultMcpAuthStatus {
   account_id?: string | null;
+  account_verification: "verified" | "unverified" | "legacy";
   attempt?: WireMcpAuthAttempt | null;
   expires_at?: string | null;
   mcp: WireMcpAuthTarget;
@@ -6234,6 +6237,7 @@ export interface WireAuthProfileCleared {
 
 export interface WireMcpAuthStatus {
   account_id?: string | null;
+  account_verification: "verified" | "unverified" | "legacy";
   attempt?: WireMcpAuthAttempt | null;
   expires_at?: string | null;
   mcp: WireMcpAuthTarget;
@@ -6282,6 +6286,7 @@ export interface WireLoginReadyMcpLoginReady {
   scopes: string[];
   state?: string | null;
   account_id?: string | null;
+  account_verification: "verified" | "unverified" | "legacy";
   mcp: WireMcpAuthTarget;
 }
 

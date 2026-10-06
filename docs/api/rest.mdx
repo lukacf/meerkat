@@ -1271,7 +1271,8 @@ binding-scoped `AuthBindingRef`.
 </ParamField>
 
 The same endpoints accept an MCP server target instead of a provider binding:
-`{"mcp": {"server_name", "server_url", "oauth_account"}, ...}`, or a connector
+`{"mcp": {"server_name", "server_url", "oauth_account", "oauth_account_selection"}, ...}`
+(the last two only name the configured selection), or a connector
 target, `{"connector": {"slot", "issuer", "client", "resource", "scopes",
 "strategy_id", "account_selection"}, ...}`. See
 [Host-driven OAuth](/api/mcp#host-driven-oauth) and

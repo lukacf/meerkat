@@ -252,10 +252,32 @@ typed `AuthorizationRequired` status (`McpError::AuthorizationRequired`,
 `McpRouter::servers_awaiting_authorization`), and the host decides when to
 ask its user.
 
-- **Account selection.** Interactive login requires `oauth_account` on the
-  server entry. The default account strategy is OpenID Connect UserInfo: it
+- **Account selection.** Interactive login requires an account selection on
+  the server entry, set only in host configuration:
+  - `oauth_account = "<subject>"`: the login must prove that account.
+  - `oauth_account_selection = "discover"`: the first login binds the
+    account the strategy verifies, and publishes only into an empty
+    credential slot. A later login reconnects only that same account with
+    the same issuer, client, resource and strategy; anything else needs
+    `auth/logout` first.
+  - `oauth_account_selection = "unverified"`: an explicit opt-in for servers
+    that cannot prove an account. The credential is bound to the resource,
+    issuer and client, but no account is verified or reported: `account_id`
+    is always absent and status reports `account_verification: "unverified"`
+    (host UI should say "account not verified"). No account strategy runs,
+    and a re-login over an existing credential needs `auth/logout` first.
+
+  The two keys conflict. Each selection has its own credential slot: changing
+  it never reuses or migrates another selection's credential, and a failed
+  verification never falls back to `unverified` or to an unselected
+  credential. A selected server must use streamable HTTP without a static
+  `Authorization` header and a host OAuth resolver. Mob portable profiles
+  cannot carry `oauth_account_selection` and refuse it. The default account
+  strategy is OpenID Connect UserInfo: it
   requests `openid`, calls the issuer's `userinfo_endpoint` with the new
-  access token and requires `sub` to equal `oauth_account`. Hosts whose
+  access token and reports `sub`, which must equal `oauth_account` when one
+  is named. A refresh of a verified credential observes the subject again
+  and refuses a different one. Hosts whose
   servers prove the account another way supply their own
   `McpOAuthAccountStrategy`. Start checks first that the account can be
   proven: for the default strategy, the issuer's OpenID Connect discovery
@@ -284,7 +306,8 @@ ask its user.
   it against the admitted attempt, exchanges the code and persists the
   credential. `mcp_status` reports the attempt pending for a server by a
   non-secret reference, which `mcp_login_cancel_by_attempt_ref` cancels, and
-  `mcp_logout` removes the server's stored credential.
+  `mcp_logout` retires any pending attempt and removes the server's stored
+  credential, so a callback admitted before the logout cannot store one.
   `AgentFactory::mcp_auth_resolver` (or
   `AgentBuildConfig::mcp_auth_resolver`) connects agents to those
   credentials. Runtime-backed RPC, REST and MCP-server hosts install this
@@ -310,15 +333,20 @@ ask its user.
   and resource come from the admitted attempt, and nothing network-facing
   happens until `state` is proven. Cancel takes `{mcp, state}`. A joined start
   returns the pending attempt's URL and state, because wire callers are
-  host-privileged by contract. While an attempt is pending, `auth/status/get`
+  host-privileged by contract. A join reuses the pending attempt only if this
+  host process admitted it after its account check; otherwise the attempt is
+  retired and a fresh one started. While an attempt is pending, `auth/status/get`
   reports it as `attempt: {ref, phase: "pending", expires_at}`. The `ref` is
   not secret and grants nothing: a host that no longer holds the state (for
   example after its own restart) cancels with `{mcp, attempt_ref}`. RPC
-  `auth/logout` with `{mcp}` removes the server's stored credential (nothing
-  is revoked at the provider). The server must be
-  configured (project or user `mcp.toml` of the host): `server_url` must equal
-  its configured URL and `oauth_account`, if given, its configured account.
-  Anything else is refused before any network request.
+  `auth/logout` with `{mcp}` retires any pending attempt and removes the
+  server's stored credential (nothing is revoked at the provider). Status and
+  completion report `account_verification` (`verified`, `unverified` or
+  `legacy`). The server must be configured (project or user `mcp.toml` of the
+  host): `server_url` must equal its configured URL, and `oauth_account` or
+  `oauth_account_selection`, if given, the configured value; they never
+  select or change the mode. Anything else is refused before any network
+  request.
 
 <Warning>
 The authorize URL and `state`, and the callback's `code` and `state`, let

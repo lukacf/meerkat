@@ -595,8 +595,12 @@ rkat mcp get filesystem --scope project
 Omit `--scope` on `list` or `get` to search all configured scopes.
 
 HTTP OAuth is discovered when connecting, not stored in `.rkat/mcp.toml`.
-Interactive login requires the server's `oauth_account` (the account the login
-must prove; the OpenID Connect `sub` for the default strategy).
+Interactive login requires an account selection on the server entry: its
+`oauth_account` (the account the login must prove; the OpenID Connect `sub`
+for the default strategy), or `oauth_account_selection = "discover"` (bind
+the account verified at the first login) or `"unverified"` (an explicit
+opt-in for servers that cannot prove an account; no account is verified).
+Set these in `mcp.toml`; `rkat mcp get` shows them.
 Use `rkat mcp login <NAME>` to open the browser flow ahead of time, or
 `rkat run "..." --mcp-auth interactive` to allow a TTY run to authenticate
 when an HTTP MCP server first requires it. The CLI owns the loopback callback

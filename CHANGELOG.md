@@ -144,6 +144,38 @@ them.
   requires the scopes named by the server's `401` challenge (its `scope`),
   or else its resource metadata's `scopes_supported`; a completion that
   grants fewer is refused (see Added).
+- MCP OAuth account selection modes (see Added) change these Rust types:
+  - `McpHttpConfig` gains `oauth_account_selection:
+    Option<McpOAuthAccountSelection>` (`Discover` or `Unverified`).
+  - `AccountSelection` gains `Unverified` (wire form
+    `{"mode": "unverified"}`); `OAuthBrowserFlowCompletion` gains
+    `UnverifiedResource(UnverifiedResourceGrant)`.
+  - `McpOAuthCeremonyContext` gains `account: &AccountSelection`, which an
+    `McpOAuthAccountStrategy::descriptor` binds instead of reading the
+    target's expected account.
+  - `McpOAuthError` gains `DisconnectRequired` and `CredentialSlot`; a
+    credential slot refusal at an MCP commit is `CredentialSlot` instead of
+    `AuthLifecycle`.
+  - `McpOAuthLoginComplete` gains `account_verification`, and
+    `HostMcpAuthStatus` gains `account_verification:
+    Option<AccountVerification>`.
+  - `WireMcpAuthTarget` gains `oauth_account_selection`,
+    `WireMcpLoginReady` and `WireMcpAuthStatus` gain the required
+    `account_verification: WireMcpAccountVerification`.
+- Behaviour-only (not measured by the gate), MCP OAuth account binding:
+  - A Known (`oauth_account`) login over an occupied credential slot reuses
+    the slot's registered client and must match its issuer, resource and
+    strategy. A Known credential stored before account bindings were
+    recorded cannot be replaced by a login: disconnect it first
+    (`DisconnectRequired`).
+  - A refresh of a Known credential observes the refreshed token's subject
+    through the account strategy and refuses a different one; an authority
+    without that strategy cannot refresh it.
+  - MCP logout also retires the attempt pending for the target, even when no
+    credential is stored.
+  - A start joins a pending attempt only if this process admitted it after
+    its strategy preflight; another pending attempt is retired and a fresh
+    one admitted.
 
 
 ### Added
@@ -299,6 +331,23 @@ them.
     remove a target's stored credential and release its lifecycle (nothing
     is revoked at the provider); RPC `auth/logout` accepts `{mcp}` and
     returns `{mcp, cleared}`.
+  - Account selection modes, set only by host configuration
+    (`oauth_account_selection` in `mcp.toml`). `discover` binds the account
+    the strategy verifies at the first login, publishes only into an empty
+    credential slot, and reconnects only that account in the same context.
+    `unverified` is an explicit opt-in for servers that cannot prove an
+    account: a resource-bound credential (issuer, client, resource) with no
+    account, reported as `account_verification: "unverified"` and never
+    filled from labels or token claims; it runs no account strategy, and a
+    re-login over it needs a disconnect. Each mode has its own credential
+    slot. The wire target names the configured mode and never selects it;
+    status and completion report `account_verification`
+    (`verified`, `unverified` or `legacy`). Mob portable profiles refuse a
+    server with an account selection mode.
+  - The MCP credential slot now enforces the connector race controls: a
+    Discover or unverified commit publishes only into a still-empty slot,
+    and a Known commit replaces only the same verified account with the same
+    issuer, client, resource and strategy.
   - `OAuthBrowserActionRef::as_str`.
   - SDKs: Python `auth_mcp_login_cancel_by_attempt_ref` and
     `auth_mcp_logout`, TypeScript `authMcpLogout`, and web `Auth.mcpLogout`;

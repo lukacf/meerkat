@@ -220,9 +220,8 @@ export const ARCHIVED_UNIT_LANES = [{ package: "meerkat-mob", partitions: 2 }];
 //   - every other Bazel library or binary feature set it has (production
 //     variants that strip `test-support`, the surface feature variants);
 //   - the `$(CARGO) check` rows of the Make feature-matrix targets below.
-// The rows follow the clippy shards (one feature-check job per shard), whose
-// packing is already sized for a pull-request lane; a shard's rows share its
-// compiled dependencies.
+// The rows follow the clippy shards, whose packing is already sized for a
+// pull-request lane; each shard gives a Bazel-set job and a matrix job.
 // Feature names come from the generated BUILD.bazel (kept fresh by the
 // bazel-locks-freshness gate) and the Makefile, and are validated against
 // cargo metadata, so a renamed feature fails the plan.
@@ -331,13 +330,17 @@ function featureChecks(shards, byName) {
   const changedNames = shards.flatMap((shard) => shard.packages);
   const sets = new Map(changedNames.map((name) => [name, parseBazelFeatureSets(byName.get(name))]));
   const makeRows = parseMakeFeatureMatrix(byName);
-  return shards.map((shard) => {
+  // Each shard gives two jobs that run in parallel: its Bazel test-set check
+  // (one invocation over the shard, 534-796 s cold on #1763's workspace run)
+  // and its other rows (variants and Make matrix rows, up to ~1000 s cold).
+  // In one job they reached 1568 s, over the pull-request lane budget.
+  return shards.flatMap((shard) => {
     const pkgs = shard.packages.map((name) => byName.get(name));
+    const bazel = bazelTestRow(pkgs, sets);
     const commands = [];
     const add = (args) => {
       if (args && !commands.includes(args)) commands.push(args);
     };
-    add(bazelTestRow(pkgs, sets));
     for (const pkg of pkgs) {
       for (const variant of sets.get(pkg.name).variants) {
         add([
@@ -352,8 +355,11 @@ function featureChecks(shards, byName) {
         if (row.package === pkg.name) add(row.args);
       }
     }
-    return { name: shard.name, packages: shard.packages, commands };
-  }).filter((job) => job.commands.length > 0);
+    return [
+      { name: `${shard.name} bazel set`, packages: shard.packages, commands: bazel ? [bazel] : [] },
+      { name: `${shard.name} matrix`, packages: shard.packages, commands },
+    ].filter((job) => job.commands.length > 0);
+  });
 }
 
 function estimatedMinutes(cost) {

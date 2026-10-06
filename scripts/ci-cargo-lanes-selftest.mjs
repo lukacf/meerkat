@@ -666,14 +666,21 @@ for (const path of [
   }
 }
 
-// Feature-combination checks (#1687): one feature-check job per clippy shard
-// checks the shard's packages under their Bazel test feature set, their other
-// Bazel library/binary sets and their Make feature-matrix rows.
+// Feature-combination checks (#1687): each clippy shard gives a Bazel-set job
+// (its packages under their Bazel test feature set) and a matrix job (their
+// other Bazel library/binary sets and their Make feature-matrix rows).
 {
   const rows = (plan) => plan.feature_check_jobs.flatMap((job) => job.commands);
   // #1595: meerkat-mob-mcp's lib tests under Bazel's `openai-live` alone.
   const mobMcp = planFor(["crates/meerkat-mob-mcp/src/lib.rs"]);
-  assert.equal(mobMcp.feature_check_jobs.length, mobMcp.shards.length, "one feature-check job per clippy shard");
+  assert.deepEqual(
+    mobMcp.feature_check_jobs.map((job) => job.name),
+    mobMcp.shards.flatMap((shard) => [`${shard.name} bazel set`, `${shard.name} matrix`]).filter((name) =>
+      mobMcp.feature_check_jobs.some((job) => job.name === name),
+    ),
+  );
+  assert.equal(mobMcp.feature_check_jobs[0].name, `${mobMcp.shards[0].name} bazel set`);
+  assert.equal(mobMcp.feature_check_jobs[0].commands.length, 1, "the Bazel-set job holds only the Bazel row");
   assert.equal(
     rows(mobMcp)[0],
     "-p meerkat-mob-mcp --no-default-features --features meerkat-mob-mcp/openai-live --lib --bins --tests",
@@ -698,9 +705,11 @@ for (const path of [
   // A workspace plan checks every package, shard by shard, and runs every
   // Make feature-matrix check row with the shard that holds its package.
   const workspace = planFor(["Cargo.toml"]);
-  assert.ok(workspace.feature_check_jobs.length <= workspace.shards.length);
+  assert.ok(workspace.feature_check_jobs.length <= 2 * workspace.shards.length);
   for (const job of workspace.feature_check_jobs) {
-    const shard = workspace.shards.find((candidate) => candidate.name === job.name);
+    const shard = workspace.shards.find(
+      (candidate) => job.name === `${candidate.name} bazel set` || job.name === `${candidate.name} matrix`,
+    );
     assert.ok(shard, `feature-check job ${job.name} follows a clippy shard`);
     for (const row of job.commands) {
       for (const [, name] of row.matchAll(/-p (\S+)/g)) {
@@ -709,7 +718,9 @@ for (const path of [
     }
   }
   const bazelChecked = new Set(
-    workspace.feature_check_jobs.flatMap((job) => [...job.commands[0].matchAll(/-p (\S+)/g)].map((match) => match[1])),
+    workspace.feature_check_jobs
+      .filter((job) => job.name.endsWith(" bazel set"))
+      .flatMap((job) => [...job.commands[0].matchAll(/-p (\S+)/g)].map((match) => match[1])),
   );
   for (const name of ["meerkat", "meerkat-mob", "meerkat-mob-mcp", "rkat", "meerkat-core"]) {
     assert.ok(bazelChecked.has(name), `the workspace plan checks ${name} under its Bazel test set`);

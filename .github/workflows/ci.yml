@@ -30,7 +30,7 @@ name: CI
 #                     main pushes alike
 #   closure-check   - cargo check (lib and bin targets) over the
 #                     reverse-dependency closure of the changed packages
-#   feature-check   - (xN, one per clippy shard) compile-only checks of the
+#   feature-check   - (xN, two per clippy shard) compile-only checks of the
 #                     shard's packages under their Bazel feature sets (tests
 #                     included) and the `make test-minimal` /
 #                     `test-feature-matrix-lib` check rows
@@ -1158,7 +1158,8 @@ jobs:
     #   - the `$(CARGO) check` rows of `make test-minimal` and
     #     `make test-feature-matrix-lib` (#1558 broke `meerkat-mob
     #     --no-default-features`).
-    # One job per clippy shard, over that shard's packages.
+    # Two jobs per clippy shard, over that shard's packages: the Bazel test-set
+    # check, and the other rows (one job reached 1568 s cold on #1763).
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.feature_check_count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30

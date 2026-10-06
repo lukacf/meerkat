@@ -393,7 +393,7 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   crate's integration tests.
 - `closure-check`: `cargo check --all-features` (lib and bin targets) over
   the reverse-dependency closure of the changed packages.
-- `feature-check` (one job per clippy shard): compile-only checks of the
+- `feature-check` (two jobs per clippy shard, Bazel set and matrix): compile-only checks of the
   shard's packages under the feature sets the Bazel graph builds them with
   (`--no-default-features` plus exactly the set their generated
   `BUILD.bazel` gives their tests, `--lib --bins --tests`; then each other

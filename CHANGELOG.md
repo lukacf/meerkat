@@ -376,7 +376,7 @@ them.
 - Pull-request CI now runs the checks that only the nightly Bazel graph and
   feature matrix ran before, so feature-combination breaks are caught before
   merge rather than at the release tag (#1687, #1108):
-  - A new `feature-check` lane (one job per clippy shard) compiles each
+  - A new `feature-check` lane (two jobs per clippy shard) compiles each
     changed package with the exact feature set its generated `BUILD.bazel`
     gives its tests (`--no-default-features`, `--lib --bins --tests`) and
     with its other Bazel library and binary sets, and runs the

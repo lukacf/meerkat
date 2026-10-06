@@ -381,7 +381,9 @@ pub const UNVERIFIED_RESOURCE_STRATEGY_ID: &str = "unverified-resource-v1";
 /// their own strategy.
 #[derive(Clone)]
 pub struct OidcUserInfoAccountStrategy {
-    http: Client,
+    /// A build failure is kept: the strategy then cannot verify anything,
+    /// and never falls back to a client that follows redirects.
+    http: Result<Client, CredentialHttpClientUnavailable>,
     required_scopes: std::collections::BTreeSet<String>,
 }
 
@@ -395,19 +397,23 @@ impl OidcUserInfoAccountStrategy {
     /// The bearer token is only ever sent to the validated issuer's
     /// `userinfo_endpoint`, so this client follows no redirects.
     pub fn new() -> Self {
-        Self::with_http(
-            Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
-        )
+        Self {
+            http: no_redirect_client(),
+            required_scopes: std::collections::BTreeSet::new(),
+        }
     }
 
     pub fn with_http(http: Client) -> Self {
         Self {
-            http,
+            http: Ok(http),
             required_scopes: std::collections::BTreeSet::new(),
         }
+    }
+
+    fn http(&self) -> Result<&Client, ConnectorOAuthRefusal> {
+        self.http
+            .as_ref()
+            .map_err(|_| ConnectorOAuthRefusal::VerificationUnavailable)
     }
 
     /// Additional scopes the MCP resource requires, requested alongside
@@ -481,7 +487,7 @@ impl OidcUserInfoAccountStrategy {
             issuer.trim_end_matches('/')
         );
         let configuration: OpenIdConfiguration = self
-            .http
+            .http()?
             .get(&configuration_url)
             .send()
             .await
@@ -517,7 +523,7 @@ impl OidcUserInfoAccountStrategy {
         let facts = descriptor.parameters();
         let userinfo_url = self.userinfo_endpoint(&facts.issuer).await?;
         let userinfo: OidcUserInfo = self
-            .http
+            .http()?
             .get(userinfo_url)
             .bearer_auth(&tokens.access_token)
             .send()
@@ -890,6 +896,10 @@ pub enum McpOAuthError {
     DisconnectRequired { server_name: String },
     /// The credential slot refused the commit inside its exclusive
     /// mutation (for example a racing occupant of a Discover slot).
+    /// The redirect-free credential HTTP client could not be built, so no
+    /// OAuth request is sent.
+    #[error(transparent)]
+    HttpClientUnavailable(CredentialHttpClientUnavailable),
     #[error("MCP OAuth credential slot for '{server_name}' refused the login: {refusal}")]
     CredentialSlot {
         server_name: String,
@@ -922,6 +932,7 @@ impl McpOAuthError {
             | Self::RefreshFailed { .. }
             | Self::TokenStore(_)
             | Self::MissingStoredMetadata { .. }
+            | Self::HttpClientUnavailable(_)
             | Self::AuthLifecycle { .. } => false,
         }
     }
@@ -929,7 +940,9 @@ impl McpOAuthError {
 
 #[derive(Clone)]
 pub struct McpOAuthAuthority {
-    http: Client,
+    /// Follows no redirects. A build failure is kept, and every network
+    /// step fails with it; nothing falls back to a permissive client.
+    http: Result<Client, CredentialHttpClientUnavailable>,
     /// Token vault plus same-key refresh serialization authority.
     provider_auth_persistence: ProviderAuthPersistence,
     /// Generated `AuthMachine` lease handle that owns the credential
@@ -951,7 +964,12 @@ impl McpOAuthAuthority {
         provider_auth_persistence: ProviderAuthPersistence,
         auth_lease: GeneratedAuthLeaseHandle,
     ) -> Self {
-        Self::with_http(provider_auth_persistence, no_redirect_client(), auth_lease)
+        Self {
+            http: no_redirect_client(),
+            provider_auth_persistence,
+            auth_lease,
+            interactive: None,
+        }
     }
 
     /// `http` must not follow redirects (reqwest `redirect::Policy::none()`);
@@ -962,11 +980,18 @@ impl McpOAuthAuthority {
         auth_lease: GeneratedAuthLeaseHandle,
     ) -> Self {
         Self {
-            http,
+            http: Ok(http),
             provider_auth_persistence,
             auth_lease,
             interactive: None,
         }
+    }
+
+    /// The redirect-free HTTP client, or the typed build failure.
+    fn http(&self) -> Result<&Client, McpOAuthError> {
+        self.http
+            .as_ref()
+            .map_err(|error| McpOAuthError::HttpClientUnavailable(*error))
     }
 
     pub fn with_interactive_strategy(
@@ -1437,7 +1462,7 @@ impl McpOAuthAuthority {
             redirect_uri: record.redirect_uri.clone(),
         };
         let token = exchange_authorization_code_with_state(
-            &self.http,
+            self.http()?,
             &mcp_oauth_endpoints(&discovery, &client),
             &code,
             &record.pkce_verifier,
@@ -1795,6 +1820,11 @@ impl McpOAuthAuthority {
         target: &McpServerIdentity,
         key: &TokenKey,
     ) -> Result<PersistedTokens, RefreshError> {
+        // Before any lifecycle transition: without a redirect-free client no
+        // refresh begins.
+        let http = self
+            .http()
+            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
         let lease_key = target
             .lease_key()
             .map_err(|error| RefreshError::Refresh(error.to_string()))?;
@@ -1873,7 +1903,7 @@ impl McpOAuthAuthority {
             extra_headers: Vec::new(),
         };
         let refreshed = match exchange_refresh_token(
-            &self.http,
+            http,
             &endpoints,
             &refresh_token,
             metadata.client.client_secret.as_deref(),
@@ -2207,7 +2237,7 @@ impl McpOAuthAuthority {
             }
         };
         let resource: ProtectedResourceMetadata = self
-            .http
+            .http()?
             .get(resource_metadata_url.clone())
             .send()
             .await
@@ -2280,7 +2310,7 @@ impl McpOAuthAuthority {
         require_https_or_loopback(target, &auth_server, "authorization server issuer")?;
         let mut found = None;
         for candidate in authorization_server_metadata_urls(&auth_server)? {
-            let response = self.http.get(&candidate).send().await.map_err(|error| {
+            let response = self.http()?.get(&candidate).send().await.map_err(|error| {
                 McpOAuthError::DiscoveryFailed {
                     server_name: target.server_name().to_string(),
                     reason: error.to_string(),
@@ -2383,7 +2413,7 @@ impl McpOAuthAuthority {
         target: &McpServerIdentity,
     ) -> Result<String, McpOAuthError> {
         for candidate in protected_resource_well_known_candidates(target.server_url())? {
-            let response = self.http.get(&candidate).send().await;
+            let response = self.http()?.get(&candidate).send().await;
             if let Ok(response) = response
                 && response.status().is_success()
             {
@@ -2414,7 +2444,7 @@ impl McpOAuthAuthority {
             "token_endpoint_auth_method": "none",
         });
         let wire: DynamicClientRegistrationResponse = self
-            .http
+            .http()?
             .post(&discovery.registration_endpoint)
             .json(&body)
             .send()
@@ -2628,12 +2658,19 @@ async fn acquire_admission_lock(binding_slug: String) -> tokio::sync::OwnedMutex
     lock.lock_owned().await
 }
 
-/// HTTP client for MCP OAuth endpoints: follows no redirects.
-pub(crate) fn no_redirect_client() -> Client {
+/// The redirect-free HTTP client for credential endpoints could not be
+/// built. Nothing falls back to a client that follows redirects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the redirect-free credential HTTP client could not be built")]
+pub struct CredentialHttpClientUnavailable;
+
+/// HTTP client for MCP and connector OAuth endpoints: follows no redirects.
+/// A build failure is returned, never replaced by a default client.
+pub(crate) fn no_redirect_client() -> Result<Client, CredentialHttpClientUnavailable> {
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_default()
+        .map_err(|_| CredentialHttpClientUnavailable)
 }
 
 pub(crate) trait RefuseRedirect {
@@ -3165,6 +3202,22 @@ struct AdmittedMcpCredential {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_failed_client_build_is_typed_and_never_a_permissive_default() {
+        let strategy = OidcUserInfoAccountStrategy {
+            http: Err(CredentialHttpClientUnavailable),
+            required_scopes: BTreeSet::new(),
+        };
+        // No request is sent with some other client: the strategy refuses.
+        assert_eq!(
+            strategy.preflight("http://127.0.0.1:1").await,
+            Err(ConnectorOAuthRefusal::VerificationUnavailable)
+        );
+        let error = McpOAuthError::HttpClientUnavailable(CredentialHttpClientUnavailable);
+        assert!(!error.is_refusal(), "a host fault, not a refused request");
+        assert!(no_redirect_client().is_ok());
+    }
 
     #[test]
     fn stored_mcp_oauth_client_debug_redacts_client_secret() {

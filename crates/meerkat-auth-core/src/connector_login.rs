@@ -252,6 +252,9 @@ pub enum ConnectorLoginError {
     TokenStore(String),
     #[error("connector OAuth credential lifecycle error: {0}")]
     AuthLifecycle(String),
+    /// The redirect-free credential HTTP client could not be built.
+    #[error(transparent)]
+    HttpClientUnavailable(#[from] crate::mcp_oauth::CredentialHttpClientUnavailable),
 }
 
 impl ConnectorLoginError {
@@ -269,6 +272,7 @@ impl ConnectorLoginError {
             | Self::TokenExchangeFailed
             | Self::RefreshFailed(_)
             | Self::TokenStore(_)
+            | Self::HttpClientUnavailable(_)
             | Self::AuthLifecycle(_) => false,
         }
     }
@@ -329,7 +333,7 @@ impl ConnectorOAuthAuthority {
         flows: Arc<dyn OAuthFlowAuthority>,
         strategies: ConnectorStrategies,
     ) -> Result<Self, ConnectorLoginError> {
-        Self::with_http(persistence, flows, strategies, no_redirect_client())
+        Self::with_http(persistence, flows, strategies, no_redirect_client()?)
     }
 
     /// `http` must not follow redirects.

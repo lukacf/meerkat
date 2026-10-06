@@ -153,9 +153,10 @@ them.
   - `McpOAuthCeremonyContext` gains `account: &AccountSelection`, which an
     `McpOAuthAccountStrategy::descriptor` binds instead of reading the
     target's expected account.
-  - `McpOAuthError` gains `DisconnectRequired` and `CredentialSlot`; a
-    credential slot refusal at an MCP commit is `CredentialSlot` instead of
-    `AuthLifecycle`.
+  - `McpOAuthError` gains `DisconnectRequired`, `CredentialSlot` and
+    `HttpClientUnavailable(CredentialHttpClientUnavailable)`; a credential
+    slot refusal at an MCP commit is `CredentialSlot` instead of
+    `AuthLifecycle`. `ConnectorLoginError` gains `HttpClientUnavailable`.
   - `McpOAuthLoginComplete` gains `account_verification`, and
     `HostMcpAuthStatus` gains `account_verification:
     Option<AccountVerification>`.
@@ -173,6 +174,12 @@ them.
     without that strategy cannot refresh it.
   - MCP logout also retires the attempt pending for the target, even when no
     credential is stored.
+  - The MCP OAuth authority, the connector login owner and the OpenID
+    Connect UserInfo strategy no longer fall back to a default HTTP client,
+    which follows redirects, when their redirect-free client fails to
+    build. The build failure is kept: their requests fail with
+    `HttpClientUnavailable` (the strategy refuses with
+    `VerificationUnavailable`), and `ConnectorOAuthAuthority::new` returns it.
   - A start joins a pending attempt only if this process admitted it after
     its strategy preflight; another pending attempt is retired and a fresh
     one admitted.

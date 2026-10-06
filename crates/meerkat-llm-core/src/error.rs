@@ -608,6 +608,11 @@ impl LlmError {
         message: String,
         headers: &reqwest::header::HeaderMap,
     ) -> Self {
+        // A redirect is terminal, so it needs nothing from the headers: its
+        // refusal is decided before any header (such as Retry-After) is read.
+        if (300..=399).contains(&status) {
+            return Self::redirect_refused(status);
+        }
         let retry_after_ms = headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
@@ -1033,6 +1038,11 @@ mod tests {
             reqwest::header::HeaderValue::from_static(
                 "https://elsewhere.example/v1?token=location-secret",
             ),
+        );
+        // An out-of-range Retry-After is never read for a redirect.
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("18446744073709551615"),
         );
         for status in [301, 302, 303, 307, 308] {
             let error = LlmError::from_http_response(status, "body-secret".to_string(), &headers);

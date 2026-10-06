@@ -117,32 +117,57 @@ collect_changed_paths() {
   fi
 
   local base
-  base="$(resolve_base)"
+  # The dispatcher validates an exact pushed tree. An implicit committed gate
+  # must compare that update, not replay accepted changes since origin/main.
+  # Explicit CLI/environment bases retain their existing override precedence.
+  if [[ "${scope}" == committed && -z "${base_ref}" &&
+        ( -n "${PRE_COMMIT_FROM_REF:-}" || -n "${PRE_COMMIT_TO_REF:-}" ) ]]; then
+    local pushed_head actual_head pushed_base empty_tree zero_oid
+    if [[ -z "${PRE_COMMIT_FROM_REF:-}" || -z "${PRE_COMMIT_TO_REF:-}" ]]; then
+      echo "error: committed push selection requires both exact push refs" >&2
+      return 2
+    fi
+    pushed_head="$(git rev-parse --verify --end-of-options "${PRE_COMMIT_TO_REF}^{commit}")" || return 2
+    actual_head="$(git rev-parse HEAD)" || return 2
+    if [[ "${pushed_head}" != "${actual_head}" ]]; then
+      echo "error: committed push head must equal checked-out HEAD" >&2
+      return 2
+    fi
+    empty_tree="$(git hash-object -t tree /dev/null)" || return 2
+    zero_oid="${actual_head//?/0}"
+    if [[ "${PRE_COMMIT_FROM_REF}" == "${zero_oid}" || "${PRE_COMMIT_FROM_REF}" == "${empty_tree}" ]]; then
+      # A branch with no supplied comparison commit must cover its entire tree.
+      pushed_base="${empty_tree}"
+    else
+      pushed_base="$(git rev-parse --verify --end-of-options "${PRE_COMMIT_FROM_REF}^{commit}")" || return 2
+    fi
+    git diff --no-renames --name-only --diff-filter=ACMRDT "${pushed_base}" "${pushed_head}" -- || return "$?"
+    return
+  fi
+  base="$(resolve_base)" || return "$?"
   case "${scope}" in
     all|committed)
-      if git merge-base "${base}" HEAD >/dev/null 2>&1; then
-        local merge_base
-        merge_base="$(git merge-base "${base}" HEAD)"
-        git diff --name-only --diff-filter=ACMR "${merge_base}..HEAD" --
-      fi
+      local merge_base
+      merge_base="$(git merge-base "${base}" HEAD)" || return "$?"
+      git diff --no-renames --name-only --diff-filter=ACMRDT "${merge_base}..HEAD" -- || return "$?"
       ;;
   esac
   case "${scope}" in
     all|working-tree)
-      git diff --name-only --diff-filter=ACMR --
-      git ls-files --others --exclude-standard
+      git diff --no-renames --name-only --diff-filter=ACMRDT -- || return "$?"
+      git ls-files --others --exclude-standard || return "$?"
       ;;
   esac
   case "${scope}" in
     all|staged)
-      git diff --cached --name-only --diff-filter=ACMR --
+      git diff --cached --no-renames --name-only --diff-filter=ACMRDT -- || return "$?"
       ;;
   esac
 }
 
 is_rust_relevant_path() {
   case "$1" in
-    *.rs|Cargo.toml|Cargo.lock|.cargo/config.toml|.config/nextest.toml|scripts/repo-cargo|scripts/agent-gate|scripts/cargo-*|scripts/rust-lane-doctor|scripts/test-rct.sh|Makefile)
+    *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|.cargo/config.toml|.config/nextest.toml|scripts/repo-cargo|scripts/agent-gate|scripts/cargo-*|scripts/rust-lane-doctor|scripts/test-rct.sh|Makefile)
       return 0
       ;;
     *)
@@ -247,9 +272,12 @@ embedded_input_package_for_path() {
 }
 
 changed=()
+# Capture collection status in the main shell; process substitution would turn
+# a failed Git diff into an empty-path success.
+changed_paths="$(collect_changed_paths)"
 while IFS= read -r path; do
   changed+=("${path}")
-done < <(collect_changed_paths | awk 'NF' | sort -u)
+done < <(printf '%s\n' "${changed_paths}" | awk 'NF' | sort -u)
 
 relevant=()
 governance=()
@@ -261,7 +289,8 @@ if [[ "${#changed[@]}" -gt 0 ]]; then
   for path in "${changed[@]}"; do
     if is_rust_relevant_path "${path}"; then
       relevant+=("${path}")
-      if is_global_path "${path}"; then
+      if is_global_path "${path}" || [[ "${path}" == */Cargo.toml && ! -f "${path}" ]]; then
+        # A removed crate manifest cannot be mapped through current metadata.
         global=1
       fi
     fi

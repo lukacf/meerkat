@@ -175,4 +175,159 @@ if [[ "$(cat "$CALL_LOG")" != "agent-gate --committed --clippy-only --machine-dr
   exit 1
 fi
 
+
+# The real committed Cargo selector must use the dispatcher's exact push range,
+# rather than replaying previously accepted Web SDK edits since origin/main.
+mkdir -p "$TEST_ROOT/scripts" "$TEST_ROOT/crates/meerkat-runtime/src" "$TEST_ROOT/sdks/web/src"
+cp "$REPO_ROOT/scripts/cargo-agent-gate" "$TEST_ROOT/scripts/cargo-agent-gate"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TEST_ROOT/scripts/machine-authority-changed"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TEST_ROOT/scripts/generated-contract-ratchet-changed"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/scripts/rust-embedded-inputs.mjs"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/scripts/cargo-exact-tests.mjs"
+printf '[package]\nname = "meerkat-runtime"\nversion = "1.2.3"\n' > "$TEST_ROOT/crates/meerkat-runtime/Cargo.toml"
+printf 'pub fn retained() {}\n' > "$TEST_ROOT/crates/meerkat-runtime/src/lib.rs"
+printf 'export const old = 1;\n' > "$TEST_ROOT/sdks/web/src/runtime.ts"
+chmod +x "$TEST_ROOT/scripts/"*
+git -C "$TEST_ROOT" add .
+git -C "$TEST_ROOT" commit -qm gate-fixture
+range_base="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+git -C "$TEST_ROOT" update-ref refs/remotes/origin/main "$range_base"
+printf 'export const already_accepted = 2;\n' > "$TEST_ROOT/sdks/web/src/runtime.ts"
+git -C "$TEST_ROOT" add .
+git -C "$TEST_ROOT" commit -qm previously-accepted-web
+range_parent="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+printf 'pub fn successor_runtime_change() {}\n' > "$TEST_ROOT/crates/meerkat-runtime/src/lib.rs"
+git -C "$TEST_ROOT" add .
+git -C "$TEST_ROOT" commit -qm runtime-only-successor
+range_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+empty_tree="$(git -C "$TEST_ROOT" hash-object -t tree /dev/null)"
+FAKE_METADATA="$HARNESS_ROOT/metadata-only-cargo"
+cat > "$FAKE_METADATA" <<'EOF_METADATA'
+#!/usr/bin/env bash
+if [[ "$1" == metadata ]]; then
+  printf '{"packages":[{"name":"meerkat-runtime","manifest_path":"%s/crates/meerkat-runtime/Cargo.toml"}]}\n' "$MEERKAT_GATE_FIXTURE_ROOT"
+  exit 0
+fi
+echo "unexpected Cargo execution: $*" >&2
+exit 99
+EOF_METADATA
+chmod +x "$FAKE_METADATA"
+range_failures=0
+assert_range_gate() {
+  local label="$1" expected="$2" from="$3" to="$4" mode="$5"
+  shift 5
+  local output status=0
+  output="$(
+    cd "$TEST_ROOT"
+    unset CARGO_AGENT_BASE PRE_COMMIT_FROM_REF PRE_COMMIT_TO_REF
+    export CARGO="$FAKE_METADATA"
+    export MEERKAT_GATE_FIXTURE_ROOT="$(git rev-parse --show-toplevel)"
+    export PRE_COMMIT_FROM_REF="$from" PRE_COMMIT_TO_REF="$to"
+    if [[ "$mode" == hook ]]; then
+      ROOT="$TEST_ROOT" \
+        RELEASE_PROJECTION_ONLY="$REPO_ROOT/scripts/release-projection-only.mjs" \
+        AGENT_GATE="$TEST_ROOT/scripts/cargo-agent-gate" \
+        "$REPO_ROOT/scripts/pre-push-clippy.sh" --dry-run "$@"
+    elif [[ "$mode" == env-override ]]; then
+      CARGO_AGENT_BASE="$range_base" ./scripts/cargo-agent-gate --committed --clippy-only --dry-run "$@"
+    elif [[ "$mode" == diff-error ]]; then
+      PATH="$HARNESS_ROOT:$PATH" MEERKAT_GATE_REAL_GIT="$REAL_GIT" ./scripts/cargo-agent-gate --committed --clippy-only --dry-run "$@"
+    else
+      ./scripts/cargo-agent-gate --committed --clippy-only --dry-run "$@"
+    fi
+  )" || status=$?
+  local passed=0
+  case "$expected" in
+    runtime-only)
+      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq -- 'clippy -p meerkat-runtime' \
+        && ! printf '%s' "$output" | grep -Eq 'test-sdk-web|wasm-check|fast --no-run|nextest run'; then
+        passed=1
+      fi
+      ;;
+    full-history)
+      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq 'DRY-RUN make test-sdk-web' \
+        && printf '%s' "$output" | grep -Fq -- 'clippy -p meerkat-runtime'; then
+        passed=1
+      fi
+      ;;
+    whole-tree)
+      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq 'DRY-RUN make test-sdk-web' \
+        && printf '%s' "$output" | grep -Fq -- 'clippy --workspace'; then
+        passed=1
+      fi
+      ;;
+    workspace-only)
+      if [[ "$status" -eq 0 ]] && printf '%s' "$output" | grep -Fq -- 'clippy --workspace' \
+        && ! printf '%s' "$output" | grep -Fq 'test-sdk-web'; then
+        passed=1
+      fi
+      ;;
+    reject)
+      if [[ "$status" -ne 0 ]] && ! printf '%s' "$output" | grep -Fq 'DRY-RUN'; then
+        passed=1
+      fi
+      ;;
+  esac
+  if [[ "$passed" -eq 1 ]]; then
+    printf 'PASS committed range: %s\n' "$label"
+  else
+    printf 'FAIL committed range: %s (exit=%s; expected=%s)\n%s\n' "$label" "$status" "$expected" "$output" >&2
+    range_failures=$((range_failures + 1))
+  fi
+}
+assert_range_gate exact-push-parent runtime-only "$range_parent" "$range_head" hook
+assert_range_gate zero-oid-new-branch whole-tree 0000000000000000000000000000000000000000 "$range_head" direct
+assert_range_gate empty-tree-new-branch whole-tree "$empty_tree" "$range_head" direct
+assert_range_gate explicit-base-override full-history "$range_parent" "$range_head" direct --base "$range_base"
+assert_range_gate environment-base-override full-history "$range_parent" "$range_head" env-override
+assert_range_gate mismatched-push-head reject "$range_parent" "$range_parent" direct
+assert_range_gate missing-push-base reject '' "$range_head" direct
+assert_range_gate missing-push-head reject "$range_parent" '' direct
+assert_range_gate unusable-push-base reject deadbeef "$range_head" direct
+assert_range_gate ordinary-committed-fallback full-history '' '' direct
+assert_range_gate short-zero-invalid-base reject 0 "$range_head" direct
+# Removal and cross-classification rename must keep the removed owner's gate.
+git -C "$TEST_ROOT" rm -q crates/meerkat-runtime/src/lib.rs
+git -C "$TEST_ROOT" commit -qm deleted-runtime-source
+deleted_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+assert_range_gate deleted-runtime-source runtime-only "$range_head" "$deleted_head" direct
+git -C "$TEST_ROOT" checkout -q --detach "$range_head"
+git -C "$TEST_ROOT" rm -q Cargo.lock
+git -C "$TEST_ROOT" commit -qm deleted-global-input
+deleted_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+assert_range_gate deleted-global-input workspace-only "$range_head" "$deleted_head" direct
+git -C "$TEST_ROOT" checkout -q --detach "$range_head"
+git -C "$TEST_ROOT" rm -qr crates/meerkat-runtime
+git -C "$TEST_ROOT" commit -qm deleted-crate-manifest
+deleted_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+assert_range_gate deleted-crate-manifest workspace-only "$range_head" "$deleted_head" direct
+git -C "$TEST_ROOT" checkout -q --detach "$range_head"
+git -C "$TEST_ROOT" mv crates/meerkat-runtime/src/lib.rs crates/meerkat-runtime/src/notes.txt
+git -C "$TEST_ROOT" commit -qm rust-renamed-to-text
+renamed_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+assert_range_gate rust-renamed-to-text runtime-only "$range_head" "$renamed_head" direct
+git -C "$TEST_ROOT" checkout -q --detach "$range_head"
+rm "$TEST_ROOT/crates/meerkat-runtime/src/lib.rs"
+ln -s ../../../README.md "$TEST_ROOT/crates/meerkat-runtime/src/lib.rs"
+git -C "$TEST_ROOT" add .
+git -C "$TEST_ROOT" commit -qm rust-file-became-symlink
+type_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+assert_range_gate rust-file-type-change runtime-only "$range_head" "$type_head" direct
+git -C "$TEST_ROOT" checkout -q --detach "$range_head"
+REAL_GIT="$(command -v git)"
+cat > "$HARNESS_ROOT/git" <<'EOF_GIT'
+#!/usr/bin/env bash
+if [[ "$1" == diff ]]; then
+  echo "forced changed-path diff failure" >&2
+  exit 7
+fi
+exec "$MEERKAT_GATE_REAL_GIT" "$@"
+EOF_GIT
+chmod +x "$HARNESS_ROOT/git"
+assert_range_gate changed-path-diff-error reject "$range_parent" "$range_head" diff-error
+if [[ "$range_failures" -ne 0 ]]; then
+  echo "$range_failures committed-range contract failures" >&2
+  exit 1
+fi
+
 echo "release projection pre-push seams hold"

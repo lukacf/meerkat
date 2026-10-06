@@ -122,6 +122,14 @@ them.
   error on process-restart restore now fails only that member's restore,
   with the error as its restore failure reason; the rest of the mob comes
   up. It used to fail the whole mob resume (#1701).
+- Behaviour-only (not measured by the gate), MCP per-request credentials
+  (see Fixed):
+  - A Streamable HTTP MCP connection with an `McpAuthResolver` reads its
+    bearer through `stored_bearer_token` on every request instead of once at
+    connect. A custom resolver whose `interactive_login` returns a token must
+    commit it, so that `stored_bearer_token` returns it from then on.
+  - A `401` without a `WWW-Authenticate` header on a Streamable HTTP request
+    is the typed auth-required failure instead of a generic refused response.
 
 
 ### Added
@@ -436,6 +444,13 @@ them.
   `make check-crate-license-files` fails CI and release validation when a
   release crate's `cargo package --list` lacks either file. The release
   packaging check also verifies both files in every built `.crate` archive.
+- An OAuth-protected Streamable HTTP MCP connection kept the bearer it read
+  at connect, so a long task failed once the access token expired even
+  after the credential owner refreshed it, and a `401` on a tool call was an
+  untyped tool failure. The connection now resolves its bearer through the
+  `McpAuthResolver` on every request. A request without a usable credential
+  is refused before it is sent, and one the server refuses with `401` fails
+  with the typed `McpError::AuthorizationRequired`; neither is replayed.
 
 ### Testing
 

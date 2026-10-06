@@ -258,6 +258,13 @@ ask its user.
   access token and requires `sub` to equal `oauth_account`. Hosts whose
   servers prove the account another way supply their own
   `McpOAuthAccountStrategy`.
+- **Credentials per request.** An established connection reads its bearer
+  from the credential owner on every request, so a refreshed credential is
+  used without reconnecting. A request without a usable credential is refused
+  before it is sent, and a request the server refuses with `401` fails with
+  the typed `AuthorizationRequired` status. Neither is replayed. A custom
+  `McpAuthResolver` must commit the credential its `interactive_login`
+  returns, so that `stored_bearer_token` returns it from then on.
 - **Embedding hosts** use `HostAuthService::mcp_login_start` and
   `mcp_login_complete` (and `mcp_login_cancel` on timeout). Start admits the
   attempt through the runtime OAuth flow owner (PKCE and one-time state) and

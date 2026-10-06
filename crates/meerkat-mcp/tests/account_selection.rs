@@ -129,9 +129,11 @@ enum Login {
     Mismatch,
 }
 
+/// Models the credential owner: a completed login commits its token, which
+/// every later per-request read returns.
 struct Resolver {
     trace: Trace,
-    stored: Stored,
+    stored: Mutex<Stored>,
     login: Login,
 }
 
@@ -145,7 +147,8 @@ impl McpAuthResolver for Resolver {
             .lock()
             .unwrap()
             .push(Event::Stored(target.clone()));
-        match self.stored {
+        let stored = *self.stored.lock().unwrap();
+        match stored {
             Stored::Missing => Ok(None),
             Stored::Token => Ok(Some(TOKEN.into())),
             Stored::Mismatch => Err(ConnectorOAuthRefusal::AccountMismatch.into()),
@@ -175,7 +178,10 @@ impl McpAuthResolver for Resolver {
             .unwrap()
             .push(Event::Login(target.clone(), challenge.map(str::to_string)));
         match self.login {
-            Login::Token => Ok(TOKEN.into()),
+            Login::Token => {
+                *self.stored.lock().unwrap() = Stored::Token;
+                Ok(TOKEN.into())
+            }
             Login::Mismatch => Err(ConnectorOAuthRefusal::AccountMismatch.into()),
         }
     }
@@ -204,7 +210,7 @@ async fn observe(
     let resolver = resolver_script.map(|(stored, login)| {
         Arc::new(Resolver {
             trace: trace.clone(),
-            stored,
+            stored: Mutex::new(stored),
             login,
         }) as Arc<dyn McpAuthResolver>
     });
@@ -385,7 +391,9 @@ async fn selected_interactive_login_precedes_first_mcp_request() {
         [
             Event::Factory(config),
             Event::Stored(target.clone()),
-            Event::Login(target, None),
+            Event::Login(target.clone(), None),
+            // The request reads the committed credential.
+            Event::Stored(target),
             Event::Http(Some(format!("Bearer {TOKEN}"))),
         ]
     );
@@ -408,6 +416,8 @@ async fn selected_stored_token_keeps_exact_selection_and_bearer() {
         events,
         [
             Event::Factory(config),
+            Event::Stored(target.clone()),
+            // The request reads its bearer through the resolver.
             Event::Stored(target),
             Event::Http(Some(format!("Bearer {TOKEN}"))),
         ]
@@ -496,7 +506,8 @@ async fn selected_reauth_required_allows_login_before_first_mcp_request() {
         [
             Event::Factory(config),
             Event::Stored(target.clone()),
-            Event::Login(target, None),
+            Event::Login(target.clone(), None),
+            Event::Stored(target),
             Event::Http(Some(format!("Bearer {TOKEN}"))),
         ]
     );

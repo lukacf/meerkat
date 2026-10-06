@@ -1528,7 +1528,8 @@ pub async fn complete_login(
 pub use meerkat_contracts::wire::LoginCancelParams as LoginCancelBody;
 
 /// Retire the pending attempt admitted under `state` for a configured MCP
-/// server or a connector slot. Local only; an unknown state is refused.
+/// server or a connector slot, or the MCP attempt named by its non-secret
+/// `attempt_ref`. Local only; an unknown state or reference is refused.
 pub async fn cancel_login(
     State(state): State<AppState>,
     Json(body): Json<LoginCancelBody>,
@@ -1548,6 +1549,21 @@ pub async fn cancel_login(
             };
             host_auth_service(&state)
                 .mcp_login_cancel_by_state(&target, &body.state)
+                .map(|()| WireLoginCancelledTarget::Mcp(WireMcpLoginTarget { mcp: body.mcp }))
+        }
+        LoginCancelBody::McpAttempt(body) => {
+            let target = match meerkat::resolve_configured_mcp_target(
+                &body.mcp,
+                state.context_root.as_deref(),
+                state.user_config_root.as_deref(),
+            )
+            .await
+            {
+                Ok(target) => target,
+                Err(error) => return host_auth_error_response(error),
+            };
+            host_auth_service(&state)
+                .mcp_login_cancel_by_attempt_ref(&target, &body.attempt_ref)
                 .map(|()| WireLoginCancelledTarget::Mcp(WireMcpLoginTarget { mcp: body.mcp }))
         }
         LoginCancelBody::Connector(body) => meerkat::connector_slot_from_wire(&body.connector)
@@ -3142,6 +3158,51 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["cancelled"], true);
+
+        // Cancel by the attempt's non-secret reference; a forged one is refused.
+        let (status, start) = rest_json(
+            start_login(
+                State(state.clone()),
+                Json(LoginStartBody {
+                    target: WireLoginTarget::Mcp(WireMcpLoginTarget { mcp: mcp.clone() }),
+                    redirect_uri: "http://127.0.0.1:1/mcp/oauth/callback".to_string(),
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{start}");
+        let (_, attempt_state, secrets) = admit(&start);
+        canaries.extend(secrets);
+        let cancel_by_ref = |attempt_ref: String| {
+            cancel_login(
+                State(state.clone()),
+                Json(LoginCancelBody::McpAttempt(
+                    meerkat_contracts::wire::McpLoginCancelAttemptParams {
+                        mcp: mcp.clone(),
+                        attempt_ref,
+                    },
+                )),
+            )
+        };
+        let (status, _) = rest_json(
+            cancel_by_ref("oauth-action:0000".to_string())
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK, "a forged reference is refused");
+        let attempt_ref =
+            meerkat_providers::connector_oauth::OAuthBrowserActionRef::project(&attempt_state);
+        let (status, cancelled) = rest_json(
+            cancel_by_ref(attempt_ref.as_str().to_owned())
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cancelled}");
         assert_eq!(cancelled["cancelled"], true);
 
         // Error path, then success, both through the host's loopback.

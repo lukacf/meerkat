@@ -4,6 +4,7 @@
 //! dynamic client registration, PKCE loopback flow, token persistence, and
 //! refresh for MCP resources.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use crate::auth_store::{
 };
 use crate::connector_oauth::{
     ConnectorAccountObservation, ConnectorOAuthDescriptor, ConnectorOAuthRefusal,
+    OAuthBrowserActionRef,
 };
 use crate::oauth_flow::{OAuthBrowserFlowIdentity, OAuthFlowAuthority, OAuthFlowError};
 use crate::{BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow};
@@ -245,6 +247,15 @@ pub trait McpOAuthAccountStrategy: Send + Sync {
         descriptor: &ConnectorOAuthDescriptor,
         tokens: &OAuthTokenResult,
     ) -> Result<ConnectorAccountObservation, ConnectorOAuthRefusal>;
+
+    /// Check that this strategy can verify an account at `issuer`. It runs
+    /// when an attempt starts, after discovery and before client
+    /// registration or any human consent, so an issuer that cannot supply
+    /// the strategy's evidence is refused before the human signs in.
+    /// Default: nothing to check.
+    async fn preflight(&self, _issuer: &str) -> Result<(), ConnectorOAuthRefusal> {
+        Ok(())
+    }
 }
 
 /// Stable strategy identifier bound into OIDC UserInfo descriptors.
@@ -346,22 +357,23 @@ impl McpOAuthAccountStrategy for OidcUserInfoAccountStrategy {
     ) -> Result<ConnectorAccountObservation, ConnectorOAuthRefusal> {
         self.observe_userinfo(descriptor, tokens).await
     }
+
+    /// The issuer must publish an OpenID Connect UserInfo endpoint this
+    /// strategy can use; the bearer is never sent anywhere else.
+    async fn preflight(&self, issuer: &str) -> Result<(), ConnectorOAuthRefusal> {
+        self.userinfo_endpoint(issuer).await.map(|_| ())
+    }
 }
 
 impl OidcUserInfoAccountStrategy {
-    /// The issuer's UserInfo `sub` for `tokens`' access token, with the
-    /// granted scopes of the token response (the requested scopes when the
-    /// response omits `scope`).
-    pub async fn observe_userinfo(
-        &self,
-        descriptor: &ConnectorOAuthDescriptor,
-        tokens: &OAuthTokenResult,
-    ) -> Result<ConnectorAccountObservation, ConnectorOAuthRefusal> {
+    /// The issuer's UserInfo endpoint: discovered from its OpenID Connect
+    /// configuration, whose `issuer` must equal the admitted issuer, and
+    /// served over https (or loopback).
+    async fn userinfo_endpoint(&self, issuer: &str) -> Result<reqwest::Url, ConnectorOAuthRefusal> {
         let unavailable = |_| ConnectorOAuthRefusal::VerificationUnavailable;
-        let facts = descriptor.parameters();
         let configuration_url = format!(
             "{}/.well-known/openid-configuration",
-            facts.issuer.trim_end_matches('/')
+            issuer.trim_end_matches('/')
         );
         let configuration: OpenIdConfiguration = self
             .http
@@ -374,7 +386,7 @@ impl OidcUserInfoAccountStrategy {
             .json()
             .await
             .map_err(unavailable)?;
-        if configuration.issuer != facts.issuer {
+        if configuration.issuer != issuer {
             return Err(ConnectorOAuthRefusal::VerificationUnavailable);
         }
         let userinfo_endpoint = configuration
@@ -385,6 +397,20 @@ impl OidcUserInfoAccountStrategy {
         if userinfo_url.scheme() != "https" && !is_loopback_url(&userinfo_url) {
             return Err(ConnectorOAuthRefusal::VerificationUnavailable);
         }
+        Ok(userinfo_url)
+    }
+
+    /// The issuer's UserInfo `sub` for `tokens`' access token, with the
+    /// granted scopes of the token response (the requested scopes when the
+    /// response omits `scope`).
+    pub async fn observe_userinfo(
+        &self,
+        descriptor: &ConnectorOAuthDescriptor,
+        tokens: &OAuthTokenResult,
+    ) -> Result<ConnectorAccountObservation, ConnectorOAuthRefusal> {
+        let unavailable = |_| ConnectorOAuthRefusal::VerificationUnavailable;
+        let facts = descriptor.parameters();
+        let userinfo_url = self.userinfo_endpoint(&facts.issuer).await?;
         let userinfo: OidcUserInfo = self
             .http
             .get(userinfo_url)
@@ -680,6 +706,20 @@ struct AuthorizationServerEndpoints {
     authorization_endpoint: String,
     token_endpoint: String,
     registration_endpoint: String,
+    /// The server advertises `offline_access` in its `scopes_supported`.
+    offline_access: bool,
+}
+
+/// An attempt pending for an MCP target, as a host may observe it: a
+/// non-secret reference and its expiry. It carries no authorize URL, state,
+/// code or verifier, so it is safe for host status projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpOAuthPendingAttempt {
+    /// Non-secret reference to the attempt: a digest of its state. Cancel
+    /// takes it in place of the state.
+    pub attempt_ref: OAuthBrowserActionRef,
+    /// When the admitted attempt expires.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// Secret-free result of a completed MCP OAuth login.
@@ -927,9 +967,11 @@ impl McpOAuthAuthority {
     /// loopback redirect URI here, opens the returned authorize URL in a
     /// browser context that no agent-drivable tool can observe or control, and
     /// feeds the callback to [`Self::login_complete`]. This method performs
-    /// discovery, dynamic client registration and the account strategy's
-    /// descriptor, then admits PKCE/state through the AuthMachine-owned flow
-    /// authority. It opens no listener and launches no browser.
+    /// discovery, the account strategy's preflight (before any client
+    /// registration or browser), dynamic client registration and the
+    /// strategy's descriptor, extended with the resource's scopes, then
+    /// admits PKCE/state through the AuthMachine-owned flow authority. It
+    /// opens no listener and launches no browser.
     ///
     /// Start-or-join is serialized per target: while an attempt is pending
     /// for the target, its projection is returned with
@@ -965,20 +1007,26 @@ impl McpOAuthAuthority {
                 return Ok(joined);
             }
         }
-        let mut discovery = self
+        let (mut discovery, requested) = self
             .discover(target, www_authenticate, redirect_uri)
             .await?;
+        // Before client registration and before the human is asked to
+        // consent: an issuer the strategy cannot verify is refused here.
+        strategy.preflight(&discovery.authorization_server).await?;
         let client = self
             .register_client(target, &discovery, redirect_uri)
             .await?;
-        let descriptor = strategy.descriptor(
-            target,
-            &McpOAuthCeremonyContext {
-                issuer: &discovery.authorization_server,
-                client: &client.client_id,
-                resource: &discovery.resource,
-                redirect_uri,
-            },
+        let descriptor = require_resource_scopes(
+            strategy.descriptor(
+                target,
+                &McpOAuthCeremonyContext {
+                    issuer: &discovery.authorization_server,
+                    client: &client.client_id,
+                    resource: &discovery.resource,
+                    redirect_uri,
+                },
+            )?,
+            &requested.resource_scopes,
         )?;
         let facts = descriptor.parameters();
         if facts.expected_account.known() != Some(expected_account) {
@@ -1005,7 +1053,7 @@ impl McpOAuthAuthority {
             )
             .map_err(McpOAuthError::Flow)?;
         let expires_at = std::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
-        let authorize_url = mcp_oauth_endpoints(&discovery, &client)
+        let authorize_url = authorize_endpoints(&discovery, &client, requested.offline_access)
             .authorize_url_with_pkce(&pkce.challenge, &state);
         Ok(McpOAuthLoginStart {
             target: target.clone(),
@@ -1049,6 +1097,7 @@ impl McpOAuthAuthority {
         let endpoints = self
             .discover_authorization_server(target, &facts.issuer)
             .await?;
+        let offline_access = endpoints.offline_access;
         let discovery = completion_discovery(target, facts, endpoints)?;
         let client = StoredMcpOAuthClient {
             client_id: facts.client.clone(),
@@ -1057,8 +1106,10 @@ impl McpOAuthAuthority {
             redirect_uri: record.redirect_uri.clone(),
         };
         let challenge = PkceChallenge::s256_for_verifier(&record.pkce_verifier);
-        let authorize_url =
-            mcp_oauth_endpoints(&discovery, &client).authorize_url_with_pkce(&challenge, state);
+        // The admitted descriptor carries the resource scopes; the joined
+        // projection requests exactly what the original start requested.
+        let authorize_url = authorize_endpoints(&discovery, &client, offline_access)
+            .authorize_url_with_pkce(&challenge, state);
         Ok(Some(McpOAuthLoginStart {
             target: target.clone(),
             authorize_url,
@@ -1170,7 +1221,7 @@ impl McpOAuthAuthority {
                 ConnectorOAuthRefusal::DescriptorMismatch,
             ));
         }
-        let descriptor = strategy.descriptor(
+        let strategy_descriptor = strategy.descriptor(
             target,
             &McpOAuthCeremonyContext {
                 issuer: &facts.issuer,
@@ -1179,11 +1230,14 @@ impl McpOAuthAuthority {
                 redirect_uri: &facts.redirect_uri,
             },
         )?;
-        if descriptor != **connector {
+        if !admitted_extends_strategy_descriptor(connector, &strategy_descriptor) {
             return Err(McpOAuthError::Verification(
                 ConnectorOAuthRefusal::DescriptorMismatch,
             ));
         }
+        // The admitted descriptor is the authority: the strategy's facts plus
+        // the resource scopes selected when the attempt started.
+        let descriptor: &ConnectorOAuthDescriptor = connector;
         let endpoints = self
             .discover_authorization_server(target, &facts.issuer)
             .await?;
@@ -1208,7 +1262,7 @@ impl McpOAuthAuthority {
             reason: "authorization-code exchange failed".into(),
         })?;
         let evidence = descriptor
-            .verify_account(strategy.observe_account(&descriptor, &token).await?, &token)?;
+            .verify_account(strategy.observe_account(descriptor, &token).await?, &token)?;
         let mut persisted =
             persisted_tokens_from_result(&token, &discovery, &client, target, Utc::now())?;
         persisted.account_id = Some(evidence.account().to_owned());
@@ -1292,6 +1346,96 @@ impl McpOAuthAuthority {
                 &record.redirect_uri,
             )
             .map_err(McpOAuthError::Flow)
+    }
+
+    /// The attempt pending for `target`, if any, without its secrets.
+    ///
+    /// Read-only and local: it admits, extends, consumes and retires
+    /// nothing, and performs no network I/O. A host uses it to find an
+    /// attempt it no longer holds, for example after its own restart, when
+    /// the flow owner restored an attempt whose callback listener is gone.
+    /// Only the selected account's attempt for this exact resource is
+    /// reported; an unselected target has none.
+    pub fn pending_attempt(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Result<Option<McpOAuthPendingAttempt>, McpOAuthError> {
+        if target.expected_account().is_none() {
+            return Ok(None);
+        }
+        let (authority, _) = self
+            .interactive
+            .as_ref()
+            .ok_or(ConnectorOAuthRefusal::VerificationUnavailable)?;
+        let credential_identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref()?.into();
+        let Some((state, record)) = authority
+            .pending_connector_browser_attempt(&credential_identity)
+            .map_err(McpOAuthError::Flow)?
+        else {
+            return Ok(None);
+        };
+        if !pending_attempt_matches(target, &record) {
+            return Ok(None);
+        }
+        let remaining = MCP_INTERACTIVE_LOGIN_TIMEOUT.saturating_sub(record.created_at.elapsed());
+        let remaining =
+            chrono::TimeDelta::from_std(remaining).unwrap_or_else(|_| chrono::TimeDelta::zero());
+        let now = Utc::now();
+        Ok(Some(McpOAuthPendingAttempt {
+            attempt_ref: OAuthBrowserActionRef::project(&state),
+            expires_at: now.checked_add_signed(remaining).unwrap_or(now),
+        }))
+    }
+
+    /// Typed cancel by the non-secret reference a [`Self::pending_attempt`]
+    /// read reported, for a host that no longer holds the attempt's state:
+    /// retire the attempt pending for `target` under that reference. Local
+    /// only; an unknown or stale reference is refused.
+    pub fn cancel_attempt_by_ref(
+        &self,
+        target: &McpServerIdentity,
+        attempt_ref: &str,
+    ) -> Result<(), McpOAuthError> {
+        let (authority, _) = self
+            .interactive
+            .as_ref()
+            .ok_or(ConnectorOAuthRefusal::VerificationUnavailable)?;
+        let credential_identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref()?.into();
+        let (state, record) = authority
+            .pending_connector_browser_attempt(&credential_identity)
+            .map_err(McpOAuthError::Flow)?
+            .ok_or(McpOAuthError::Flow(OAuthFlowError::Missing))?;
+        if OAuthBrowserActionRef::project(&state).as_str() != attempt_ref
+            || !pending_attempt_matches(target, &record)
+        {
+            return Err(McpOAuthError::Flow(OAuthFlowError::Missing));
+        }
+        authority
+            .expire(
+                &state,
+                &credential_identity,
+                record.provider,
+                &record.redirect_uri,
+            )
+            .map_err(McpOAuthError::Flow)
+    }
+
+    /// Disconnect `target`: remove its stored credential and release the
+    /// credential lifecycle, through the same coordinated mutation that
+    /// guards refresh and login commits. A pending attempt is unaffected,
+    /// and nothing is revoked at the provider.
+    pub async fn logout(&self, target: &McpServerIdentity) -> Result<(), McpOAuthError> {
+        let credential_identity: meerkat_core::AuthCredentialIdentity =
+            target.auth_binding_ref()?.into();
+        meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+            self.provider_auth_persistence.clone(),
+            self.auth_lease.clone(),
+            credential_identity,
+        )
+        .await
+        .map_err(|error| map_coordinated_login_error(target, error))
     }
 
     /// Load one durable MCP credential through its marker, AuthMachine
@@ -1742,7 +1886,7 @@ impl McpOAuthAuthority {
         target: &McpServerIdentity,
         www_authenticate: Option<&str>,
         _redirect_uri: &str,
-    ) -> Result<StoredMcpOAuthDiscovery, McpOAuthError> {
+    ) -> Result<(StoredMcpOAuthDiscovery, RequestedScopes), McpOAuthError> {
         require_https_or_loopback(target, target.server_url(), "MCP protected resource")?;
         let resource_metadata_url = match www_authenticate.and_then(resource_metadata_from_header) {
             Some(value) => absolutize_url(target.server_url(), &value).map_err(|error| {
@@ -1797,20 +1941,29 @@ impl McpOAuthAuthority {
         let endpoints = self
             .discover_authorization_server(target, &auth_server)
             .await?;
-        Ok(StoredMcpOAuthDiscovery {
-            resource: resource.resource,
-            resource_metadata_url,
-            authorization_server: auth_server,
-            authorization_metadata_url: endpoints.authorization_metadata_url,
-            authorization_endpoint: endpoints.authorization_endpoint,
-            token_endpoint: endpoints.token_endpoint,
-            registration_endpoint: endpoints.registration_endpoint,
-            scopes: Vec::new(),
-        })
+        let requested = RequestedScopes {
+            resource_scopes: select_resource_scopes(www_authenticate, &resource.scopes_supported),
+            offline_access: endpoints.offline_access,
+        };
+        Ok((
+            StoredMcpOAuthDiscovery {
+                resource: resource.resource,
+                resource_metadata_url,
+                authorization_server: auth_server,
+                authorization_metadata_url: endpoints.authorization_metadata_url,
+                authorization_endpoint: endpoints.authorization_endpoint,
+                token_endpoint: endpoints.token_endpoint,
+                registration_endpoint: endpoints.registration_endpoint,
+                scopes: Vec::new(),
+            },
+            requested,
+        ))
     }
 
-    /// Fetch and validate the authorization-server metadata of `auth_server`
-    /// (RFC 8414): exact issuer match, PKCE S256, and https (or loopback)
+    /// Fetch and validate the authorization-server metadata of `auth_server`:
+    /// RFC 8414, then OpenID Connect discovery when the RFC 8414 document is
+    /// absent (see [`authorization_server_metadata_urls`]). The first document
+    /// found must have the exact issuer, PKCE S256, and https (or loopback)
     /// endpoints. Redirects are refused.
     async fn discover_authorization_server(
         &self,
@@ -1819,16 +1972,33 @@ impl McpOAuthAuthority {
     ) -> Result<AuthorizationServerEndpoints, McpOAuthError> {
         let auth_server = auth_server.to_owned();
         require_https_or_loopback(target, &auth_server, "authorization server issuer")?;
-        let authorization_metadata_url = authorization_server_metadata_url(&auth_server)?;
-        let auth: AuthorizationServerMetadata = self
-            .http
-            .get(&authorization_metadata_url)
-            .send()
-            .await
-            .map_err(|error| McpOAuthError::DiscoveryFailed {
+        let mut found = None;
+        for candidate in authorization_server_metadata_urls(&auth_server)? {
+            let response = self.http.get(&candidate).send().await.map_err(|error| {
+                McpOAuthError::DiscoveryFailed {
+                    server_name: target.server_name().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            // Only an absent document moves on to the next well-known URI;
+            // any other refusal fails closed.
+            if matches!(
+                response.status(),
+                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+            ) {
+                continue;
+            }
+            found = Some((candidate, response));
+            break;
+        }
+        let Some((authorization_metadata_url, response)) = found else {
+            return Err(McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
-                reason: error.to_string(),
-            })?
+                reason: "no authorization server metadata (RFC 8414 or OpenID Connect discovery)"
+                    .to_string(),
+            });
+        };
+        let auth: AuthorizationServerMetadata = response
             .error_for_status_refusing_redirects()
             .map_err(|error| McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
@@ -1889,11 +2059,16 @@ impl McpOAuthAuthority {
         require_https_or_loopback(target, &authorization_endpoint, "authorization endpoint")?;
         require_https_or_loopback(target, &token_endpoint, "token endpoint")?;
         require_https_or_loopback(target, &registration_endpoint, "registration endpoint")?;
+        let offline_access = auth
+            .scopes_supported
+            .iter()
+            .any(|scope| scope == OFFLINE_ACCESS_SCOPE);
         Ok(AuthorizationServerEndpoints {
             authorization_metadata_url,
             authorization_endpoint,
             token_endpoint,
             registration_endpoint,
+            offline_access,
         })
     }
 
@@ -1921,8 +2096,12 @@ impl McpOAuthAuthority {
         discovery: &StoredMcpOAuthDiscovery,
         redirect_uri: &str,
     ) -> Result<StoredMcpOAuthClient, McpOAuthError> {
+        // MCP authorization requires the application type. Every redirect
+        // admitted here is a loopback redirect (RFC 8252), i.e. a native
+        // client; OIDC servers default an omitted type to `web`.
         let body = serde_json::json!({
             "client_name": CLIENT_NAME,
+            "application_type": "native",
             "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -2097,6 +2276,108 @@ fn mcp_oauth_endpoints(
         refresh_scopes: discovery.scopes.clone(),
         extra_headers: Vec::new(),
     }
+}
+
+/// What one attempt asks the authorization server for, beyond the account
+/// strategy's own evidence scopes (MCP authorization, "Scope Selection
+/// Strategy").
+struct RequestedScopes {
+    /// The resource's scopes, required in the grant.
+    resource_scopes: BTreeSet<String>,
+    /// The authorization server advertises `offline_access`: requested so it
+    /// can issue a refresh token, never required.
+    offline_access: bool,
+}
+
+/// The `offline_access` scope (OpenID Connect Core 1.0, section 11).
+const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
+
+/// The resource's scopes for one attempt: the `scope` of the 401 challenge
+/// when the caller observed one, else the resource metadata's
+/// `scopes_supported`. `offline_access` is never a resource scope.
+fn select_resource_scopes(
+    www_authenticate: Option<&str>,
+    scopes_supported: &[String],
+) -> BTreeSet<String> {
+    let challenged: BTreeSet<String> = www_authenticate
+        .and_then(|header| auth_param(header, "scope"))
+        .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default();
+    let selected = if challenged.is_empty() {
+        scopes_supported.iter().cloned().collect()
+    } else {
+        challenged
+    };
+    selected
+        .into_iter()
+        .filter(|scope| scope != OFFLINE_ACCESS_SCOPE)
+        .collect()
+}
+
+/// The strategy's descriptor with the resource's scopes added to its
+/// required scopes. Every other fact is unchanged.
+fn require_resource_scopes(
+    descriptor: ConnectorOAuthDescriptor,
+    resource_scopes: &BTreeSet<String>,
+) -> Result<ConnectorOAuthDescriptor, McpOAuthError> {
+    if resource_scopes.is_subset(&descriptor.parameters().scopes) {
+        return Ok(descriptor);
+    }
+    let mut parameters = crate::connector_oauth::ConnectorOAuthParameters::from(descriptor);
+    parameters.scopes.extend(resource_scopes.iter().cloned());
+    Ok(parameters.try_into()?)
+}
+
+/// Whether `admitted` is `strategy` plus resource scopes: the descriptor
+/// [`require_resource_scopes`] admitted for this strategy. Completion cannot
+/// re-derive the resource scopes (it fetches no resource metadata), so the
+/// admitted descriptor carries them and may only be stricter.
+fn admitted_extends_strategy_descriptor(
+    admitted: &ConnectorOAuthDescriptor,
+    strategy: &ConnectorOAuthDescriptor,
+) -> bool {
+    let (admitted, strategy) = (admitted.parameters(), strategy.parameters());
+    admitted.issuer == strategy.issuer
+        && admitted.client == strategy.client
+        && admitted.resource == strategy.resource
+        && admitted.redirect_uri == strategy.redirect_uri
+        && admitted.expected_account == strategy.expected_account
+        && admitted.strategy_id == strategy.strategy_id
+        && strategy.scopes.is_subset(&admitted.scopes)
+}
+
+/// Authorize-request endpoints: the attempt's required scopes, plus
+/// `offline_access` when the authorization server advertises it.
+fn authorize_endpoints(
+    discovery: &StoredMcpOAuthDiscovery,
+    client: &StoredMcpOAuthClient,
+    offline_access: bool,
+) -> OAuthEndpoints {
+    let mut endpoints = mcp_oauth_endpoints(discovery, client);
+    if offline_access
+        && !endpoints
+            .scopes
+            .iter()
+            .any(|scope| scope == OFFLINE_ACCESS_SCOPE)
+    {
+        endpoints.scopes.push(OFFLINE_ACCESS_SCOPE.to_owned());
+    }
+    endpoints
+}
+
+/// Whether a pending connector attempt belongs to `target`: its descriptor
+/// names the target's resource and selected account.
+fn pending_attempt_matches(
+    target: &McpServerIdentity,
+    record: &crate::oauth_flow::OAuthFlowRecord,
+) -> bool {
+    let OAuthBrowserFlowIdentity::Connector { connector } = &record.provider else {
+        return false;
+    };
+    let facts = connector.parameters();
+    target.expected_account().is_some()
+        && facts.expected_account.known() == target.expected_account()
+        && facts.resource == target.server_url()
 }
 
 fn persisted_tokens_from_result(
@@ -2283,7 +2564,11 @@ fn protected_resource_well_known_candidates(
     Ok(candidates)
 }
 
-fn authorization_server_metadata_url(server: &str) -> Result<String, McpOAuthError> {
+/// Well-known authorization-server metadata URIs of `server`, in the order
+/// MCP authorization (2026-07-28) requires: RFC 8414 with path insertion,
+/// OpenID Connect discovery with path insertion, then with path appending;
+/// for an issuer without a path, RFC 8414 then OpenID Connect discovery.
+fn authorization_server_metadata_urls(server: &str) -> Result<Vec<String>, McpOAuthError> {
     let url = reqwest::Url::parse(server).map_err(|error| McpOAuthError::DiscoveryFailed {
         server_name: "unknown".to_string(),
         reason: error.to_string(),
@@ -2291,11 +2576,16 @@ fn authorization_server_metadata_url(server: &str) -> Result<String, McpOAuthErr
     let origin = url.origin().ascii_serialization();
     let path = url.path().trim_matches('/');
     if path.is_empty() {
-        Ok(format!("{origin}/.well-known/oauth-authorization-server"))
+        Ok(vec![
+            format!("{origin}/.well-known/oauth-authorization-server"),
+            format!("{origin}/.well-known/openid-configuration"),
+        ])
     } else {
-        Ok(format!(
-            "{origin}/.well-known/oauth-authorization-server/{path}"
-        ))
+        Ok(vec![
+            format!("{origin}/.well-known/oauth-authorization-server/{path}"),
+            format!("{origin}/.well-known/openid-configuration/{path}"),
+            format!("{origin}/{path}/.well-known/openid-configuration"),
+        ])
     }
 }
 
@@ -2328,6 +2618,8 @@ pub(crate) fn is_loopback_url(url: &reqwest::Url) -> bool {
 struct ProtectedResourceMetadata {
     resource: String,
     authorization_servers: Vec<String>,
+    #[serde(default)]
+    scopes_supported: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2339,6 +2631,8 @@ struct AuthorizationServerMetadata {
     token_endpoint: String,
     #[serde(default)]
     registration_endpoint: Option<String>,
+    #[serde(default)]
+    scopes_supported: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2513,6 +2807,44 @@ mod tests {
             other.token_key().unwrap().binding().unwrap().as_str(),
             token_key.binding().unwrap().as_str()
         );
+    }
+
+    #[test]
+    fn authorization_server_metadata_tries_rfc8414_then_openid_connect_discovery() {
+        assert_eq!(
+            authorization_server_metadata_urls("https://auth.example.test").unwrap(),
+            vec![
+                "https://auth.example.test/.well-known/oauth-authorization-server",
+                "https://auth.example.test/.well-known/openid-configuration",
+            ]
+        );
+        assert_eq!(
+            authorization_server_metadata_urls("https://auth.example.test/tenant1/").unwrap(),
+            vec![
+                "https://auth.example.test/.well-known/oauth-authorization-server/tenant1",
+                "https://auth.example.test/.well-known/openid-configuration/tenant1",
+                "https://auth.example.test/tenant1/.well-known/openid-configuration",
+            ]
+        );
+    }
+
+    #[test]
+    fn resource_scopes_prefer_the_challenge_and_never_require_offline_access() {
+        let supported = vec![
+            "mcp.read".to_owned(),
+            "offline_access".to_owned(),
+            "mcp.admin".to_owned(),
+        ];
+        let challenge = r#"Bearer error="insufficient_scope", scope="mcp.write offline_access", resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource""#;
+        assert_eq!(
+            select_resource_scopes(Some(challenge), &supported),
+            BTreeSet::from(["mcp.write".to_owned()])
+        );
+        assert_eq!(
+            select_resource_scopes(Some(r#"Bearer resource_metadata="/prm""#), &supported),
+            BTreeSet::from(["mcp.admin".to_owned(), "mcp.read".to_owned()])
+        );
+        assert_eq!(select_resource_scopes(None, &[]), BTreeSet::new());
     }
 
     #[test]

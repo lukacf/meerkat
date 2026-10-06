@@ -56,8 +56,8 @@ use meerkat_providers::connector_login::{
 use meerkat_providers::connector_oauth::{AccountSelection, ScopeEvidence};
 use meerkat_providers::mcp_oauth::{
     McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback, McpOAuthError,
-    McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin, McpServerIdentity,
-    OidcUserInfoAccountStrategy,
+    McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingAttempt,
+    McpServerIdentity, OidcUserInfoAccountStrategy,
 };
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_resolution,
@@ -155,6 +155,9 @@ pub struct HostMcpAuthStatus {
     pub phase: HostMcpAuthPhase,
     pub expires_at: Option<DateTime<Utc>>,
     pub account_id: Option<String>,
+    /// The login attempt pending for the target, if any: a non-secret
+    /// reference and its expiry, never its authorize URL or state.
+    pub attempt: Option<McpOAuthPendingAttempt>,
 }
 
 impl HostMcpAuthStatus {
@@ -173,6 +176,14 @@ impl HostMcpAuthStatus {
             },
             expires_at: self.expires_at.map(|at| at.to_rfc3339()),
             account_id: self.account_id.clone(),
+            attempt: self
+                .attempt
+                .as_ref()
+                .map(|attempt| meerkat_contracts::WireMcpAuthAttempt {
+                    attempt_ref: attempt.attempt_ref.as_str().to_owned(),
+                    phase: meerkat_contracts::WireMcpAuthAttemptPhase::Pending,
+                    expires_at: attempt.expires_at.to_rfc3339(),
+                }),
         }
     }
 }
@@ -643,8 +654,29 @@ impl HostAuthService {
         Ok(self.mcp_oauth_authority()?.cancel_attempt(target, state)?)
     }
 
+    /// Typed cancel by the non-secret `attempt_ref` that [`Self::mcp_status`]
+    /// reports, for hosts that no longer hold the attempt's state (for
+    /// example after a host restart): retire that attempt for `target`.
+    pub fn mcp_login_cancel_by_attempt_ref(
+        &self,
+        target: &McpServerIdentity,
+        attempt_ref: &str,
+    ) -> Result<(), HostAuthError> {
+        Ok(self
+            .mcp_oauth_authority()?
+            .cancel_attempt_by_ref(target, attempt_ref)?)
+    }
+
+    /// Disconnect one MCP target: remove its stored credential and release
+    /// the credential lifecycle. A pending attempt is unaffected, and nothing
+    /// is revoked at the provider.
+    pub async fn mcp_logout(&self, target: &McpServerIdentity) -> Result<(), HostAuthError> {
+        Ok(self.mcp_oauth_authority()?.logout(target).await?)
+    }
+
     /// Secret-free authorization status of one MCP target, projected from
-    /// its durable credential. It performs no refresh and no network I/O.
+    /// its durable credential and its pending attempt. It performs no
+    /// refresh and no network I/O.
     pub async fn mcp_status(
         &self,
         target: &McpServerIdentity,
@@ -661,12 +693,22 @@ impl HostAuthService {
                         .expected_account()
                         .is_none_or(|account| tokens.account_id.as_deref() == Some(account))
             });
+        let attempt = match self.mcp_oauth_authority() {
+            Ok(authority) => authority.pending_attempt(target)?,
+            // Without an AuthMachine-owned flow owner no attempt can have
+            // been admitted, so none is pending.
+            Err(HostAuthError::McpOAuth(McpOAuthError::Verification(
+                meerkat_providers::connector_oauth::ConnectorOAuthRefusal::VerificationUnavailable,
+            ))) => None,
+            Err(error) => return Err(error),
+        };
         let Some(tokens) = stored else {
             return Ok(HostMcpAuthStatus {
                 target: target.clone(),
                 phase: HostMcpAuthPhase::AuthorizationRequired,
                 expires_at: None,
                 account_id: None,
+                attempt,
             });
         };
         let expired = tokens.expires_at.is_some_and(|at| at <= Utc::now());
@@ -680,6 +722,7 @@ impl HostAuthService {
             phase,
             expires_at: tokens.expires_at,
             account_id: tokens.account_id,
+            attempt,
         })
     }
 

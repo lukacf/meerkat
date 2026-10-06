@@ -340,6 +340,7 @@ import type {
   WireAuthStatusDetail as RpcWireAuthStatusDetail,
   WireAuthStatusResultConnectorAuthStatus as RpcWireAuthStatusResultConnectorAuthStatus,
   WireAuthStatusResultMcpAuthStatus as RpcWireAuthStatusResultMcpAuthStatus,
+  WireAuthLogoutResultMcpLoggedOut as RpcWireAuthLogoutResultMcpLoggedOut,
   WireConnectorSlot as RpcWireConnectorSlot,
   WireMcpAuthTarget as RpcWireMcpAuthTarget,
   WireDeviceStart as RpcWireDeviceStart,
@@ -4506,14 +4507,18 @@ export class MeerkatClient {
 
   /**
    * Retire a pending MCP (`{ mcp, state }`) or connector
-   * (`{ connector: slot, state }`) OAuth attempt by its `state`.
+   * (`{ connector: slot, state }`) OAuth attempt by its `state`, or an MCP
+   * attempt by the non-secret `attempt.ref` that `authMcpStatus` reports
+   * (`{ mcp, attempt_ref }`).
    */
   async authLoginCancel(params: RpcLoginCancelParams): Promise<RpcWireLoginCancelled> {
     return this.request("auth/login/cancel", params);
   }
 
   /**
-   * Authorization status of an MCP server target via `auth/status/get`.
+   * Authorization status of an MCP server target via `auth/status/get`. A
+   * pending login attempt is reported as `attempt` (a non-secret reference
+   * and its expiry, never the authorize URL or state).
    */
   async authMcpStatus(
     mcp: RpcWireMcpAuthTarget,
@@ -4574,6 +4579,23 @@ export class MeerkatClient {
     };
     if (profileId !== undefined) params.profile_id = profileId;
     return this.request("auth/status/get", params);
+  }
+
+  /**
+   * Remove an MCP server target's stored credential via `auth/logout`.
+   * Nothing is revoked at the provider; a pending attempt is unaffected.
+   */
+  async authMcpLogout(
+    mcp: RpcWireMcpAuthTarget,
+  ): Promise<RpcWireAuthLogoutResultMcpLoggedOut> {
+    const result = await this.request("auth/logout", { mcp });
+    if (!("mcp" in result) || !("cleared" in result)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "auth/logout returned a binding result for an MCP target",
+      );
+    }
+    return result as RpcWireAuthLogoutResultMcpLoggedOut;
   }
 
   async authLogout(

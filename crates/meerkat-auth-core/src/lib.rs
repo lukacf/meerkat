@@ -67,7 +67,8 @@ pub use mcp_oauth::{
     MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpAuthMode, McpOAuthAccountStrategy,
     McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback, McpOAuthCeremonyContext,
     McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart,
-    McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpServerIdentity, OidcUserInfoAccountStrategy,
+    McpOAuthLoopbackBegin, McpOAuthPendingAttempt, McpOAuthPendingLogin, McpServerIdentity,
+    OidcUserInfoAccountStrategy,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_core::auth::{

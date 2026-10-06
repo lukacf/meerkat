@@ -640,6 +640,10 @@ impl OAuthBrowserActionRef {
             Sha256::digest(state.as_bytes())
         ))
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[cfg(test)]

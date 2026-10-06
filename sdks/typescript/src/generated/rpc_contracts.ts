@@ -17,6 +17,7 @@ import type {
   ArtifactRecord,
   AttentionListRequest,
   AttentionListResult,
+  AuthLogoutParams,
   AuthStatusParams,
   BindingIdParams,
   BlobGetParams,
@@ -258,6 +259,7 @@ import type {
   ToolsRegisterResult,
   UpdateScheduleParams,
   UpdateSystemPromptParams,
+  WireAuthLogoutResult,
   WireAuthProfileCleared,
   WireAuthProfileCreated,
   WireAuthProfileDetail,
@@ -528,8 +530,8 @@ export interface RpcMethodContracts {
     result: (WireAuthStatusResult) & Record<string, unknown>;
   };
   "auth/logout": {
-    params: BindingIdParams;
-    result: (WireAuthProfileCleared) & Record<string, unknown>;
+    params: AuthLogoutParams;
+    result: (WireAuthLogoutResult) & Record<string, unknown>;
   };
   "realm/list": {
     params: Record<string, never>;

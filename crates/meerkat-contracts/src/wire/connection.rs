@@ -338,21 +338,26 @@ impl std::fmt::Debug for LoginCompleteParams {
 
 /// Request payload for `auth/login/cancel`: retire the pending attempt
 /// admitted under `state` for a configured MCP server (`{"mcp": {...}}`) or
-/// a connector slot (`{"connector": {...}}`).
+/// a connector slot (`{"connector": {...}}`), or the MCP attempt named by
+/// the non-secret `attempt_ref` that `auth/status/get` reports
+/// (`{"mcp": {...}, "attempt_ref": ...}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(transform = untagged_target_one_of))]
 pub enum LoginCancelParams {
     Mcp(McpLoginCancelParams),
+    McpAttempt(McpLoginCancelAttemptParams),
     Connector(ConnectorLoginCancelParams),
 }
 
 impl LoginCancelParams {
-    pub fn state(&self) -> &str {
+    /// The attempt's `state`, when the cancel names the attempt by it.
+    pub fn state(&self) -> Option<&str> {
         match self {
-            Self::Mcp(params) => &params.state,
-            Self::Connector(params) => &params.state,
+            Self::Mcp(params) => Some(&params.state),
+            Self::McpAttempt(_) => None,
+            Self::Connector(params) => Some(&params.state),
         }
     }
 }
@@ -373,6 +378,17 @@ impl std::fmt::Debug for McpLoginCancelParams {
             .field("state", &"<redacted>")
             .finish()
     }
+}
+
+/// MCP arm of [`LoginCancelParams`] that names the attempt by the
+/// `attempt_ref` from `auth/status/get`, for a host that no longer holds the
+/// attempt's state. The reference is not secret and grants no flow access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct McpLoginCancelAttemptParams {
+    pub mcp: WireMcpAuthTarget,
+    pub attempt_ref: String,
 }
 
 /// Connector arm of [`LoginCancelParams`]. `Debug` redacts `state`.
@@ -423,6 +439,17 @@ pub enum AuthStatusParams {
     Binding(BindingIdParams),
     Mcp(WireMcpLoginTarget),
     Connector(WireConnectorSlotTarget),
+}
+
+/// Request payload for `auth/logout`: a provider binding (the original flat
+/// fields) or an MCP server (`{"mcp": {...}}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(transform = untagged_target_one_of))]
+pub enum AuthLogoutParams {
+    Binding(BindingIdParams),
+    Mcp(WireMcpLoginTarget),
 }
 
 /// Request payload for `auth/login/device_start`.
@@ -994,6 +1021,50 @@ pub struct WireMcpAuthStatus {
     pub expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// The login attempt pending for this server, if any. Absent when none
+    /// is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<WireMcpAuthAttempt>,
+}
+
+/// Phase of a login attempt reported by `auth/status/get`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMcpAuthAttemptPhase {
+    /// Admitted and awaiting the browser callback.
+    Pending,
+}
+
+/// A login attempt pending for an MCP server: a non-secret reference and
+/// its expiry, never the authorize URL or state. The reference names the
+/// attempt for `auth/login/cancel` and grants no flow access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMcpAuthAttempt {
+    #[serde(rename = "ref")]
+    pub attempt_ref: String,
+    pub phase: WireMcpAuthAttemptPhase,
+    /// RFC 3339 expiry of the attempt.
+    pub expires_at: String,
+}
+
+/// `auth/logout` success body for an MCP server target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMcpLoggedOut {
+    pub mcp: WireMcpAuthTarget,
+    pub cleared: bool,
+}
+
+/// `auth/logout` result: a provider binding or an MCP server target.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(transform = untagged_target_one_of))]
+pub enum WireAuthLogoutResult {
+    Binding(WireAuthProfileCleared),
+    Mcp(WireMcpLoggedOut),
 }
 
 /// `auth/status/get` result: a provider binding status or an MCP status.
@@ -1067,6 +1138,85 @@ impl<'de> Deserialize<'de> for AuthStatusParams {
     }
 }
 
+/// `auth/logout` params: selected by the presence of `mcp`, like
+/// [`AuthStatusParams`]. A case-variant `mcp` key is refused so a misspelled
+/// MCP target cannot fall back to a binding logout.
+impl<'de> Deserialize<'de> for AuthLogoutParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let Some(object) = value.as_object() else {
+            return Err(D::Error::custom("auth/logout params must be an object"));
+        };
+        if object.contains_key("mcp") {
+            return serde_json::from_value(value)
+                .map(Self::Mcp)
+                .map_err(D::Error::custom);
+        }
+        if let Some(misspelled) = object.keys().find(|key| key.eq_ignore_ascii_case("mcp")) {
+            return Err(D::Error::custom(format!(
+                "unknown field `{misspelled}`, expected `mcp`"
+            )));
+        }
+        serde_json::from_value(value)
+            .map(Self::Binding)
+            .map_err(D::Error::custom)
+    }
+}
+
+/// `auth/logout` result: an `mcp` member selects the MCP arm.
+impl<'de> Deserialize<'de> for WireAuthLogoutResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value
+            .as_object()
+            .is_some_and(|object| object.contains_key("mcp"))
+        {
+            serde_json::from_value(value).map(Self::Mcp)
+        } else {
+            serde_json::from_value(value).map(Self::Binding)
+        }
+        .map_err(D::Error::custom)
+    }
+}
+
+/// `auth/login/cancel` params: an `mcp` target names its attempt by
+/// `attempt_ref` or by `state` (never both: each arm refuses the other's
+/// member), a `connector` slot by `state`.
+impl<'de> Deserialize<'de> for LoginCancelParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let has = |member: &str| {
+            value
+                .as_object()
+                .is_some_and(|object| object.contains_key(member))
+        };
+        if has("mcp") && has("attempt_ref") {
+            serde_json::from_value(value).map(Self::McpAttempt)
+        } else if has("mcp") {
+            serde_json::from_value(value).map(Self::Mcp)
+        } else if has("connector") {
+            serde_json::from_value(value).map(Self::Connector)
+        } else {
+            Err(serde_json::Error::custom(
+                "expected an `mcp` or a `connector` target",
+            ))
+        }
+        .map_err(D::Error::custom)
+    }
+}
+
 /// Select a flattened target arm by its member: `mcp`, then `connector`,
 /// anything else the provider/binding arm (when the type has one).
 macro_rules! target_by_member {
@@ -1126,7 +1276,6 @@ target_by_member!(WireLoginTarget, Mcp, Connector, Provider);
 target_by_member!(WireLoginStartTarget, Mcp, Connector, Provider);
 target_by_member!(WireLoginReadyTarget, Mcp, Connector, Provider);
 target_by_member!(WireAuthStatusResult, Mcp, Connector, Binding);
-target_by_member!(LoginCancelParams, Mcp, Connector);
 target_by_member!(WireLoginCancelledTarget, Mcp, Connector);
 
 #[cfg(test)]

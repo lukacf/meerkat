@@ -257,7 +257,19 @@ ask its user.
   requests `openid`, calls the issuer's `userinfo_endpoint` with the new
   access token and requires `sub` to equal `oauth_account`. Hosts whose
   servers prove the account another way supply their own
-  `McpOAuthAccountStrategy`.
+  `McpOAuthAccountStrategy`. Start checks first that the account can be
+  proven: for the default strategy, the issuer's OpenID Connect discovery
+  must name the exact issuer and an https (or loopback) `userinfo_endpoint`.
+  An issuer that cannot is refused before client registration and before any
+  browser opens.
+- **Discovery, registration and scopes.** The authorization server's metadata
+  is read from RFC 8414 discovery, falling back to OpenID Connect discovery.
+  Dynamic client registration declares `application_type: "native"`. The
+  attempt requires the scopes the server's `401` challenge names (its
+  `scope`), or else the resource metadata's `scopes_supported`, in addition
+  to the account strategy's own; the completion is refused unless all of them
+  are granted. `offline_access` is requested, never required, when the
+  authorization server advertises it.
 - **Credentials per request.** An established connection reads its bearer
   from the credential owner on every request, so a refreshed credential is
   used without reconnecting. A request without a usable credential is refused
@@ -270,7 +282,10 @@ ask its user.
   attempt through the runtime OAuth flow owner (PKCE and one-time state) and
   returns the authorize URL; complete takes the loopback callback, verifies
   it against the admitted attempt, exchanges the code and persists the
-  credential. `AgentFactory::mcp_auth_resolver` (or
+  credential. `mcp_status` reports the attempt pending for a server by a
+  non-secret reference, which `mcp_login_cancel_by_attempt_ref` cancels, and
+  `mcp_logout` removes the server's stored credential.
+  `AgentFactory::mcp_auth_resolver` (or
   `AgentBuildConfig::mcp_auth_resolver`) connects agents to those
   credentials. Runtime-backed RPC, REST and MCP-server hosts install this
   resolver by default, including for live `mcp/add` servers.
@@ -295,7 +310,12 @@ ask its user.
   and resource come from the admitted attempt, and nothing network-facing
   happens until `state` is proven. Cancel takes `{mcp, state}`. A joined start
   returns the pending attempt's URL and state, because wire callers are
-  host-privileged by contract. The server must be
+  host-privileged by contract. While an attempt is pending, `auth/status/get`
+  reports it as `attempt: {ref, phase: "pending", expires_at}`. The `ref` is
+  not secret and grants nothing: a host that no longer holds the state (for
+  example after its own restart) cancels with `{mcp, attempt_ref}`. RPC
+  `auth/logout` with `{mcp}` removes the server's stored credential (nothing
+  is revoked at the provider). The server must be
   configured (project or user `mcp.toml` of the host): `server_url` must equal
   its configured URL and `oauth_account`, if given, its configured account.
   Anything else is refused before any network request.

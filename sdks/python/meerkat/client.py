@@ -1039,6 +1039,26 @@ class MeerkatClient:
             },
         )
 
+    async def auth_mcp_login_cancel_by_attempt_ref(
+        self,
+        server_name: str,
+        server_url: str,
+        attempt_ref: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire a pending MCP OAuth attempt by the non-secret `attempt.ref`
+        that `auth_mcp_status` reports, via `auth/login/cancel`. For a host
+        that no longer holds the attempt's `state`, for example after a
+        restart."""
+        return await self._request(
+            "auth/login/cancel",
+            {
+                "mcp": _mcp_auth_target(server_name, server_url, oauth_account),
+                "attempt_ref": attempt_ref,
+            },
+        )
+
     async def auth_mcp_status(
         self,
         server_name: str,
@@ -1048,9 +1068,26 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         """Authorization status of an MCP server via `auth/status/get`:
         `{mcp, phase: "authorized" | "reauth_required" |
-        "authorization_required", ...}`."""
+        "authorization_required", ...}`. A pending login attempt is reported
+        as `attempt: {ref, phase: "pending", expires_at}`; the reference is
+        not secret and carries no authorize URL or state."""
         return await self._request(
             "auth/status/get",
+            {"mcp": _mcp_auth_target(server_name, server_url, oauth_account)},
+        )
+
+    async def auth_mcp_logout(
+        self,
+        server_name: str,
+        server_url: str,
+        *,
+        oauth_account: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove an MCP server's stored credential via `auth/logout`:
+        `{mcp, cleared}`. Nothing is revoked at the provider, and a pending
+        login attempt is unaffected."""
+        return await self._request(
+            "auth/logout",
             {"mcp": _mcp_auth_target(server_name, server_url, oauth_account)},
         )
 

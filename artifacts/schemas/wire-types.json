@@ -140721,6 +140721,126 @@
     ],
     "title": "WireAuthError"
   },
+  "WireAuthLogoutResult": {
+    "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
+      "WireAuthProfileCleared": {
+        "description": "`DELETE /auth/bindings/{binding_id}` /\n`POST /auth/bindings/{binding_id}/logout` success body.",
+        "properties": {
+          "auth_binding": {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "cleared": {
+            "type": "boolean"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_binding",
+          "profile_id",
+          "cleared"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      },
+      "WireMcpLoggedOut": {
+        "description": "`auth/logout` success body for an MCP server target.",
+        "properties": {
+          "cleared": {
+            "type": "boolean"
+          },
+          "mcp": {
+            "$ref": "#/$defs/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp",
+          "cleared"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/logout` result: a provider binding or an MCP server target.",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/WireAuthProfileCleared"
+      },
+      {
+        "$ref": "#/$defs/WireMcpLoggedOut"
+      }
+    ],
+    "title": "WireAuthLogoutResult"
+  },
   "WireAuthProfile": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected; callers that inspect profile metadata use\nthe server-side `auth.profile.get` RPC or the\n`GET /auth/bindings/{binding_id}` REST path; both return typed redacted\nshapes. `source_kind` is a\ndiscriminator for the credential-source variant.",
@@ -141785,6 +141905,37 @@
         ],
         "type": "object"
       },
+      "WireMcpAuthAttempt": {
+        "description": "A login attempt pending for an MCP server: a non-secret reference and\nits expiry, never the authorize URL or state. The reference names the\nattempt for `auth/login/cancel` and grants no flow access.",
+        "properties": {
+          "expires_at": {
+            "description": "RFC 3339 expiry of the attempt.",
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireMcpAuthAttemptPhase"
+          },
+          "ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "phase",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthAttemptPhase": {
+        "description": "Phase of a login attempt reported by `auth/status/get`.",
+        "oneOf": [
+          {
+            "const": "pending",
+            "description": "Admitted and awaiting the browser callback.",
+            "type": "string"
+          }
+        ]
+      },
       "WireMcpAuthPhase": {
         "description": "Secret-free authorization phase of an MCP server target.",
         "oneOf": [
@@ -141810,6 +141961,17 @@
               "string",
               "null"
             ]
+          },
+          "attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMcpAuthAttempt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The login attempt pending for this server, if any. Absent when none\nis pending."
           },
           "expires_at": {
             "type": [
@@ -158831,8 +158993,74 @@
     "title": "WireLoginStart",
     "type": "object"
   },
+  "WireMcpAuthAttempt": {
+    "$defs": {
+      "WireMcpAuthAttemptPhase": {
+        "description": "Phase of a login attempt reported by `auth/status/get`.",
+        "oneOf": [
+          {
+            "const": "pending",
+            "description": "Admitted and awaiting the browser callback.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A login attempt pending for an MCP server: a non-secret reference and\nits expiry, never the authorize URL or state. The reference names the\nattempt for `auth/login/cancel` and grants no flow access.",
+    "properties": {
+      "expires_at": {
+        "description": "RFC 3339 expiry of the attempt.",
+        "type": "string"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireMcpAuthAttemptPhase"
+      },
+      "ref": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "ref",
+      "phase",
+      "expires_at"
+    ],
+    "title": "WireMcpAuthAttempt",
+    "type": "object"
+  },
   "WireMcpAuthStatus": {
     "$defs": {
+      "WireMcpAuthAttempt": {
+        "description": "A login attempt pending for an MCP server: a non-secret reference and\nits expiry, never the authorize URL or state. The reference names the\nattempt for `auth/login/cancel` and grants no flow access.",
+        "properties": {
+          "expires_at": {
+            "description": "RFC 3339 expiry of the attempt.",
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireMcpAuthAttemptPhase"
+          },
+          "ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "phase",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "WireMcpAuthAttemptPhase": {
+        "description": "Phase of a login attempt reported by `auth/status/get`.",
+        "oneOf": [
+          {
+            "const": "pending",
+            "description": "Admitted and awaiting the browser callback.",
+            "type": "string"
+          }
+        ]
+      },
       "WireMcpAuthPhase": {
         "description": "Secret-free authorization phase of an MCP server target.",
         "oneOf": [
@@ -158883,6 +159111,17 @@
           "null"
         ]
       },
+      "attempt": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMcpAuthAttempt"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The login attempt pending for this server, if any. Absent when none\nis pending."
+      },
       "expires_at": {
         "type": [
           "string",
@@ -158926,6 +159165,49 @@
       "server_url"
     ],
     "title": "WireMcpAuthTarget",
+    "type": "object"
+  },
+  "WireMcpLoggedOut": {
+    "$defs": {
+      "WireMcpAuthTarget": {
+        "additionalProperties": false,
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "properties": {
+          "oauth_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_name",
+          "server_url"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`auth/logout` success body for an MCP server target.",
+    "properties": {
+      "cleared": {
+        "type": "boolean"
+      },
+      "mcp": {
+        "$ref": "#/$defs/WireMcpAuthTarget"
+      }
+    },
+    "required": [
+      "mcp",
+      "cleared"
+    ],
+    "title": "WireMcpLoggedOut",
     "type": "object"
   },
   "WireMemberHealthClass": {

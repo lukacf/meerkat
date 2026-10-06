@@ -11,6 +11,7 @@ use meerkat_auth_core::auth_store::{
 };
 use meerkat_auth_core::connector_oauth::{
     ConnectorAccountObservation, ConnectorOAuthDescriptor, ConnectorOAuthRefusal,
+    OAuthBrowserActionRef,
 };
 use meerkat_auth_core::mcp_oauth::{
     MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthAccountStrategy,
@@ -18,6 +19,7 @@ use meerkat_auth_core::mcp_oauth::{
     McpOAuthError, McpOAuthLoginDisposition, McpOAuthLoginStart, McpOAuthLoopbackBegin,
     McpServerIdentity,
 };
+use meerkat_auth_core::oauth_flow::OAuthFlowError;
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 use meerkat_core::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, GeneratedAuthLeaseHandle};
 use meerkat_runtime::handles::RuntimeOAuthFlowHandle;
@@ -3334,11 +3336,20 @@ async fn restored_attempt_completes_once_after_flow_owner_restart() {
 
     let reopened: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
     let after = native_over(&reopened);
+    assert_eq!(
+        after
+            .pending_attempt(&target)
+            .unwrap()
+            .expect("the restored attempt is reported")
+            .attempt_ref,
+        OAuthBrowserActionRef::project(&start.state)
+    );
     let complete = after
         .login_complete(&target, split_callback(&start, &start.state))
         .await
         .expect("the restored attempt commits");
     assert_eq!(complete.account_id.as_deref(), Some("fixture-account-42"));
+    assert_eq!(after.pending_attempt(&target).unwrap(), None);
     assert_eq!(state.token_requests.lock().len(), 1);
     assert!(matches!(
         after
@@ -3890,4 +3901,212 @@ async fn wire_style_cancel_by_state_retires_the_attempt() {
     ));
     authority.cancel_attempt(&target, &start.state).unwrap();
     assert_attempt_retired(&authority, &target, &start).await;
+}
+
+// --- Attempt read, cancel by reference and logout ----------------------------
+
+#[tokio::test]
+async fn pending_attempt_is_a_secret_free_projection_of_the_selected_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "attempt-read");
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let requests = state.request_paths.lock().len();
+    let attempt = authority
+        .pending_attempt(&target)
+        .unwrap()
+        .expect("the admitted attempt is reported");
+    assert_eq!(
+        attempt.attempt_ref,
+        OAuthBrowserActionRef::project(&start.state)
+    );
+    let timeout = chrono::Duration::from_std(MCP_INTERACTIVE_LOGIN_TIMEOUT).unwrap();
+    assert!(attempt.expires_at > Utc::now());
+    assert!(attempt.expires_at <= Utc::now() + timeout);
+    let rendered = format!("{attempt:?}");
+    for secret in [&start.state, &start.authorize_url] {
+        assert!(!rendered.contains(secret.as_str()), "{rendered}");
+    }
+    assert_eq!(
+        state.request_paths.lock().len(),
+        requests,
+        "the read performs no network I/O"
+    );
+
+    // Only the selected account's attempt is reported for its target.
+    let unselected = McpServerIdentity::from_server_config("attempt-read", format!("{base}/mcp"));
+    assert_eq!(authority.pending_attempt(&unselected).unwrap(), None);
+    let other_account =
+        McpServerIdentity::from_server_config("attempt-read", format!("{base}/mcp"))
+            .with_expected_account("another-account")
+            .unwrap();
+    assert_eq!(authority.pending_attempt(&other_account).unwrap(), None);
+
+    // The read retires nothing: the attempt still completes, then is gone.
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("the read attempt completes");
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+}
+
+#[tokio::test]
+async fn cancel_by_attempt_ref_retires_only_the_referenced_attempt() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "cancel-by-ref");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    let attempt_ref = authority
+        .pending_attempt(&target)
+        .unwrap()
+        .unwrap()
+        .attempt_ref;
+
+    // A forged reference, the state itself, and another account's target
+    // are all refused without touching the attempt.
+    let other_account =
+        McpServerIdentity::from_server_config("cancel-by-ref", format!("{base}/mcp"))
+            .with_expected_account("another-account")
+            .unwrap();
+    for (refused_target, refused_ref) in [
+        (&target, "oauth-action:0000"),
+        (&target, start.state.as_str()),
+        (&other_account, attempt_ref.as_str()),
+    ] {
+        assert!(matches!(
+            authority.cancel_attempt_by_ref(refused_target, refused_ref),
+            Err(McpOAuthError::Flow(OAuthFlowError::Missing))
+        ));
+    }
+    assert!(authority.pending_attempt(&target).unwrap().is_some());
+
+    authority
+        .cancel_attempt_by_ref(&target, attempt_ref.as_str())
+        .unwrap();
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+    assert_attempt_retired(&authority, &target, &start).await;
+    assert!(
+        state.token_requests.lock().is_empty(),
+        "a cancelled attempt never reaches the token endpoint"
+    );
+    assert!(matches!(
+        authority.cancel_attempt_by_ref(&target, attempt_ref.as_str()),
+        Err(McpOAuthError::Flow(OAuthFlowError::Missing))
+    ));
+}
+
+#[tokio::test]
+async fn restored_attempt_is_cancellable_by_reference_after_flow_owner_restart() {
+    use meerkat_runtime::store::{RuntimeStore, sqlite::SqliteRuntimeStore};
+
+    let (base, state) = spawn_oauth_fixture().await;
+    let persistence = ProviderAuthPersistence::new(
+        Arc::new(EphemeralTokenStore::new()),
+        Arc::new(InMemoryCoordinator::new()),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.sqlite");
+    let target = split_target(&base, "restart-cancel");
+    let native_over = |store: &Arc<dyn RuntimeStore>| {
+        let owner = test_auth_lease();
+        let flows = Arc::new(
+            RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+                MCP_INTERACTIVE_LOGIN_TIMEOUT,
+                owner.lifecycle,
+                store,
+            ),
+        );
+        McpOAuthAuthority::with_http(persistence.clone(), no_redirect_client(), owner.generated)
+            .with_interactive_strategy(flows, Arc::new(FixtureAccountStrategy))
+            .unwrap()
+    };
+
+    let start = {
+        let store: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+        native_over(&store)
+            .login_start(&target, SPLIT_REDIRECT, None)
+            .await
+            .unwrap()
+        // The host restarts here: it holds neither the state nor a listener.
+    };
+
+    let reopened: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+    let after = native_over(&reopened);
+    let attempt = after
+        .pending_attempt(&target)
+        .unwrap()
+        .expect("the restored attempt is reported");
+    after
+        .cancel_attempt_by_ref(&target, attempt.attempt_ref.as_str())
+        .unwrap();
+    assert_eq!(after.pending_attempt(&target).unwrap(), None);
+    assert!(matches!(
+        after
+            .login_complete(&target, split_callback(&start, &start.state))
+            .await,
+        Err(McpOAuthError::Flow(_))
+    ));
+    assert!(state.token_requests.lock().is_empty());
+
+    // The cancel is durable: a further restart restores no attempt.
+    let again: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+    assert_eq!(native_over(&again).pending_attempt(&target).unwrap(), None);
+}
+
+#[tokio::test]
+async fn logout_clears_the_credential_and_releases_its_lifecycle() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = split_authority(&state, store.clone());
+    let target = split_target(&base, "logout");
+    let start = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .unwrap();
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+
+    authority.logout(&target).await.unwrap();
+    assert!(
+        store
+            .load(&target.token_key().unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let snapshot = authority.auth_lease.snapshot(&target.lease_key().unwrap());
+    assert!(
+        !snapshot.credential_present
+            || snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Released),
+        "the lifecycle is released"
+    );
+    assert_eq!(authority.stored_bearer_token(&target).await.unwrap(), None);
+    // Logout is idempotent, revokes nothing at the provider, and a fresh
+    // login after it is admitted as a new attempt.
+    authority.logout(&target).await.unwrap();
+    let token_requests = state.token_requests.lock().len();
+    assert_eq!(token_requests, 1, "logout makes no token-endpoint call");
+    let next = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    assert_eq!(next.disposition, McpOAuthLoginDisposition::Started);
 }

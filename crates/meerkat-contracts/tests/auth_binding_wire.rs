@@ -564,7 +564,7 @@ mod mcp_login_target {
         }))
         .unwrap();
         assert!(matches!(connector, LoginCancelParams::Connector(_)));
-        assert_eq!(connector.state(), "state-canary");
+        assert_eq!(connector.state(), Some("state-canary"));
         assert!(!format!("{connector:?}").contains("state-canary"));
         assert!(serde_json::from_value::<LoginCancelParams>(json!({"state": "s"})).is_err());
         let cancelled = meerkat_contracts::WireLoginCancelled {
@@ -603,5 +603,139 @@ mod mcp_login_target {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn cancel_by_attempt_ref_is_its_own_arm_and_never_mixes_with_state() {
+        let mcp = json!({"server_name": "glean", "server_url": "https://glean.example/mcp"});
+        let cancel: LoginCancelParams = serde_json::from_value(json!({
+            "mcp": mcp,
+            "attempt_ref": "oauth-action:00ff",
+        }))
+        .unwrap();
+        let LoginCancelParams::McpAttempt(params) = &cancel else {
+            panic!("an attempt_ref selects the attempt-reference arm, got {cancel:?}");
+        };
+        assert_eq!(params.attempt_ref, "oauth-action:00ff");
+        assert_eq!(cancel.state(), None);
+        assert_eq!(
+            serde_json::to_value(&cancel).unwrap(),
+            json!({"mcp": mcp, "attempt_ref": "oauth-action:00ff"})
+        );
+        assert!(
+            serde_json::from_value::<LoginCancelParams>(json!({
+                "mcp": mcp,
+                "attempt_ref": "oauth-action:00ff",
+                "state": "s",
+            }))
+            .is_err(),
+            "a cancel names its attempt by reference or by state, never both"
+        );
+        assert!(
+            serde_json::from_value::<LoginCancelParams>(json!({
+                "connector": {"realm_id": "tenant-a", "slot_id": "drive-work"},
+                "attempt_ref": "oauth-action:00ff",
+            }))
+            .is_err(),
+            "a connector slot cancels by state only"
+        );
+    }
+
+    #[test]
+    fn mcp_status_reports_a_pending_attempt_by_reference_only() {
+        let status = meerkat_contracts::WireMcpAuthStatus {
+            mcp: WireMcpAuthTarget {
+                server_name: "glean".into(),
+                server_url: "https://glean.example/mcp".into(),
+                oauth_account: Some("subject-7".into()),
+            },
+            phase: meerkat_contracts::WireMcpAuthPhase::AuthorizationRequired,
+            expires_at: None,
+            account_id: None,
+            attempt: Some(meerkat_contracts::WireMcpAuthAttempt {
+                attempt_ref: "oauth-action:00ff".into(),
+                phase: meerkat_contracts::WireMcpAuthAttemptPhase::Pending,
+                expires_at: "2026-10-06T18:00:00+00:00".into(),
+            }),
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            value["attempt"],
+            json!({
+                "ref": "oauth-action:00ff",
+                "phase": "pending",
+                "expires_at": "2026-10-06T18:00:00+00:00",
+            })
+        );
+        let parsed: meerkat_contracts::WireMcpAuthStatus = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.attempt, status.attempt);
+
+        let without = meerkat_contracts::WireMcpAuthStatus {
+            attempt: None,
+            ..status
+        };
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("attempt")
+                .is_none(),
+            "no attempt member when none is pending"
+        );
+    }
+
+    #[test]
+    fn logout_params_select_a_binding_or_an_mcp_server() {
+        use meerkat_contracts::AuthLogoutParams;
+        let binding: AuthLogoutParams = serde_json::from_value(json!({
+            "realm_id": "dev",
+            "binding_id": "default_openai",
+        }))
+        .unwrap();
+        assert!(matches!(binding, AuthLogoutParams::Binding(_)));
+        assert_eq!(
+            serde_json::to_value(&binding).unwrap(),
+            json!({"realm_id": "dev", "binding_id": "default_openai"}),
+            "the binding logout keeps its flat shape"
+        );
+        let mcp: AuthLogoutParams = serde_json::from_value(json!({
+            "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+        }))
+        .unwrap();
+        assert!(matches!(mcp, AuthLogoutParams::Mcp(_)));
+        for refused in [
+            json!({"MCP": {"server_name": "glean", "server_url": "https://glean.example/mcp"}}),
+            json!({
+                "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+                "realm_id": "dev",
+            }),
+            json!("glean"),
+        ] {
+            assert!(
+                serde_json::from_value::<AuthLogoutParams>(refused.clone()).is_err(),
+                "{refused} must not parse"
+            );
+        }
+
+        let result =
+            meerkat_contracts::WireAuthLogoutResult::Mcp(meerkat_contracts::WireMcpLoggedOut {
+                mcp: WireMcpAuthTarget {
+                    server_name: "glean".into(),
+                    server_url: "https://glean.example/mcp".into(),
+                    oauth_account: None,
+                },
+                cleared: true,
+            });
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "mcp": {"server_name": "glean", "server_url": "https://glean.example/mcp"},
+                "cleared": true,
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<meerkat_contracts::WireAuthLogoutResult>(value).unwrap(),
+            meerkat_contracts::WireAuthLogoutResult::Mcp(_)
+        ));
     }
 }

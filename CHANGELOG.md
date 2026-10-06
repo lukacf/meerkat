@@ -130,6 +130,20 @@ them.
     commit it, so that `stored_bearer_token` returns it from then on.
   - A `401` without a `WWW-Authenticate` header on a Streamable HTTP request
     is the typed auth-required failure instead of a generic refused response.
+- MCP OAuth attempt status, cancel by reference and logout (see Added)
+  change these Rust types:
+  - `LoginCancelParams` gains `McpAttempt(McpLoginCancelAttemptParams)`, and
+    `LoginCancelParams::state` returns `Option<&str>` (`None` for a cancel by
+    reference).
+  - `WireMcpAuthStatus` gains `attempt: Option<WireMcpAuthAttempt>`, and
+    `HostMcpAuthStatus` gains `attempt: Option<McpOAuthPendingAttempt>`.
+  - The `auth/logout` contract is `AuthLogoutParams` (`Binding` or `Mcp`)
+    with result `WireAuthLogoutResult` (`Binding` or `Mcp`). The JSON of a
+    binding logout request and its result is unchanged.
+- Behaviour-only (not measured by the gate): an MCP OAuth login attempt also
+  requires the scopes named by the server's `401` challenge (its `scope`),
+  or else its resource metadata's `scopes_supported`; a completion that
+  grants fewer is refused (see Added).
 
 
 ### Added
@@ -257,6 +271,38 @@ them.
     separate fields.
   - New Python `auth_connector_*` methods and TypeScript
     `authConnectorStatus`.
+- MCP OAuth for the ordinary-host default sign-in path:
+  - Start-time preflight. `McpOAuthAccountStrategy::preflight` (provided;
+    the default accepts) runs at login start, before client registration and
+    before any browser. The OpenID Connect UserInfo strategy uses it to
+    require the issuer's discovery to name the exact issuer and an https (or
+    loopback) `userinfo_endpoint`, so an issuer that cannot prove the account
+    is refused before the user consents.
+  - Spec conformance (MCP authorization 2026-07-28): dynamic client
+    registration sends `application_type: "native"`; the attempt requires
+    the `401` challenge's `scope`, or else the resource metadata's
+    `scopes_supported`, and requests `offline_access` (never required) when
+    the authorization server advertises it; authorization server metadata
+    falls back from RFC 8414 to OpenID Connect discovery (path insertion,
+    then path appending).
+  - Attempt status and cancel by reference (#1808, item 4 subset).
+    `McpOAuthAuthority::pending_attempt` reads the attempt pending for a
+    target as `McpOAuthPendingAttempt { attempt_ref, expires_at }` (no URL or
+    state; read-only, no network), and `cancel_attempt_by_ref` retires it by
+    that reference, also after a flow-owner restart.
+    `HostAuthService::mcp_status` reports it and
+    `HostAuthService::mcp_login_cancel_by_attempt_ref` cancels by it. On the
+    wire, `auth/status/get` with an MCP target reports
+    `attempt: {ref, phase: "pending", expires_at}`, and `auth/login/cancel`
+    accepts `{mcp, attempt_ref}`.
+  - MCP logout. `McpOAuthAuthority::logout` and `HostAuthService::mcp_logout`
+    remove a target's stored credential and release its lifecycle (nothing
+    is revoked at the provider); RPC `auth/logout` accepts `{mcp}` and
+    returns `{mcp, cleared}`.
+  - `OAuthBrowserActionRef::as_str`.
+  - SDKs: Python `auth_mcp_login_cancel_by_attempt_ref` and
+    `auth_mcp_logout`, TypeScript `authMcpLogout`, and web `Auth.mcpLogout`;
+    the web `loginCancel` accepts `{mcp, attempt_ref}`.
 
 ### Fixed
 

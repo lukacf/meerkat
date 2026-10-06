@@ -10796,10 +10796,13 @@
         "type": "object"
       },
       "LoginCancelParams": {
-        "description": "Request payload for `auth/login/cancel`: retire the pending attempt\nadmitted under `state` for a configured MCP server (`{\"mcp\": {...}}`) or\na connector slot (`{\"connector\": {...}}`).",
+        "description": "Request payload for `auth/login/cancel`: retire the pending attempt\nadmitted under `state` for a configured MCP server (`{\"mcp\": {...}}`) or\na connector slot (`{\"connector\": {...}}`), or the MCP attempt named by\nthe non-secret `attempt_ref` that `auth/status/get` reports\n(`{\"mcp\": {...}, \"attempt_ref\": ...}`).",
         "oneOf": [
           {
             "$ref": "#/components/schemas/McpLoginCancelParams"
+          },
+          {
+            "$ref": "#/components/schemas/McpLoginCancelAttemptParams"
           },
           {
             "$ref": "#/components/schemas/ConnectorLoginCancelParams"
@@ -11080,6 +11083,23 @@
           "reload"
         ],
         "type": "string"
+      },
+      "McpLoginCancelAttemptParams": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`LoginCancelParams`] that names the attempt by the\n`attempt_ref` from `auth/status/get`, for a host that no longer holds the\nattempt's state. The reference is not secret and grants no flow access.",
+        "properties": {
+          "attempt_ref": {
+            "type": "string"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp",
+          "attempt_ref"
+        ],
+        "type": "object"
       },
       "McpLoginCancelParams": {
         "additionalProperties": false,
@@ -19874,7 +19894,6 @@
           "profile_id",
           "cleared"
         ],
-        "title": "WireAuthProfileCleared",
         "type": "object"
       },
       "WireAuthProfileCreated": {
@@ -25945,7 +25964,7 @@
             "description": "Error response"
           }
         },
-        "summary": "Retire a pending MCP or connector OAuth attempt by its state"
+        "summary": "Retire a pending MCP or connector OAuth attempt by its state, or an MCP attempt by its attempt_ref"
       }
     },
     "/auth/login/complete": {

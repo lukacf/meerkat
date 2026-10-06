@@ -380,3 +380,44 @@ test('backend profiles carry an optional typed prompt_cache_applicable', () => {
     /prompt_cache_applicable/,
   );
 });
+
+test('MCP attempt status, cancel by reference and logout keep their shapes', async () => {
+  const mcp = { server_name: 'glean', server_url: 'https://glean.example/mcp' };
+  const calls = [];
+  const replies = [
+    {
+      mcp,
+      phase: 'authorization_required',
+      attempt: { ref: 'oauth-action:00ff', phase: 'pending', expires_at: '2026-10-06T18:00:00Z' },
+    },
+    { mcp, cancelled: true },
+    { mcp, cleared: true },
+  ];
+  const auth = new Auth({
+    async request(method, params) {
+      calls.push({ method, params });
+      return replies.shift();
+    },
+  });
+
+  const status = await auth.mcpStatus(mcp);
+  assert.equal(status.attempt.ref, 'oauth-action:00ff');
+  await auth.loginCancel({ mcp, attempt_ref: status.attempt.ref });
+  assert.deepEqual(await auth.mcpLogout(mcp), { mcp, cleared: true });
+  assert.deepEqual(calls, [
+    { method: 'auth/status/get', params: { mcp } },
+    { method: 'auth/login/cancel', params: { mcp, attempt_ref: 'oauth-action:00ff' } },
+    { method: 'auth/logout', params: { mcp } },
+  ]);
+
+  await assert.rejects(
+    () => auth.loginCancel({ mcp, attempt_ref: 'oauth-action:00ff', state: 's' }),
+    /either state or attempt_ref/,
+  );
+  const malformed = new Auth({
+    async request() {
+      return { mcp, phase: 'authorization_required', attempt: { ref: 'r', phase: 'done', expires_at: 'x' } };
+    },
+  });
+  await assert.rejects(() => malformed.mcpStatus(mcp), /attempt\.phase/);
+});

@@ -37,16 +37,6 @@ them.
 
 ### Breaking
 
-- Mob member creation-source capture (see Fixed) changes these Rust types:
-  - `MemberCreationError` gains `Absent(MemberCreationAbsence)`. A source
-    with no creation facts by design (an ownerless call, a non-durable
-    service, a session that is no mob member, a member created before
-    creation tokens) is now `Absent`, and `Unavailable` only reports a
-    fault.
-  - New `MemberCreationAbsence` and `CreationSourceCapture`.
-  - `SessionAgentBuilder` gains `build_agent_taking_tools`, with a default
-    that calls `build_agent`, so existing builders keep working.
-
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
   (behavior-only break). Typed MCP dispatch preserves `isError` as a failed
@@ -277,14 +267,15 @@ them.
   ownerless.
 - Session creation now moves the request's external tools into the agent
   instead of copying them, so ops-capable external tools are actually bound
-  to the session.
+  to the session. `SessionAgentBuilder` gains `build_agent_taking_tools`; its
+  default calls `build_agent`, so existing builders keep working.
 - A shared ops-capable tool dispatcher that cannot be bound to its session
   now fails the agent build with a named shared-ownership error, instead of
   running silently unbound.
 - A failed read of a spawning member's creation facts is now reported as a
   capture fault in an error-level trace with its cause, separate from a
-  source that legitimately has no facts. Spawning still succeeds and the
-  child is recorded as unproven, as before.
+  source that legitimately has no facts (`MemberCreationError::Absent`).
+  Spawning still succeeds and the child is recorded as unproven, as before.
 - Durable job deliveries now reach sessions on every surface (#1497). Only
   RPC applied runtime inbox rows, on a 1 s timer backing off to 60 s, so on
   the CLI, REST and MCP server subscription notifications, events and

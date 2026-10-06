@@ -190,23 +190,25 @@ async fn e2e_fast_operator_spawns_from_an_mcp_wrapped_member_record_the_parent_a
         .expect("the probe turn completes")
         .expect("the probe turn succeeds");
 
-    let observed = observed.lock().unwrap();
-    let tools = observed
-        .probe_tools
-        .as_ref()
-        .expect("the probe turn reached the model");
-    assert!(
-        tools.contains(MCP_TOOL),
-        "the member's surface carries the MCP source's tool: {tools:?}"
-    );
-    assert!(tools.contains("spawn_member") && tools.contains("spawn_many_members"));
-    let results = observed
-        .results
-        .as_ref()
-        .expect("the probe turn saw both spawn results");
-    for call in ["call-spawn", "call-spawn-many"] {
-        let text = &results[call];
-        assert!(!text.contains("\"error\""), "{call} succeeds: {text}");
+    {
+        let observed = observed.lock().unwrap();
+        let tools = observed
+            .probe_tools
+            .as_ref()
+            .expect("the probe turn reached the model");
+        assert!(
+            tools.contains(MCP_TOOL),
+            "the member's surface carries the MCP source's tool: {tools:?}"
+        );
+        assert!(tools.contains("spawn_member") && tools.contains("spawn_many_members"));
+        let results = observed
+            .results
+            .as_ref()
+            .expect("the probe turn saw both spawn results");
+        for call in ["call-spawn", "call-spawn-many"] {
+            let text = &results[call];
+            assert!(!text.contains("\"error\""), "{call} succeeds: {text}");
+        }
     }
 
     for child in [SINGLE, BATCH] {

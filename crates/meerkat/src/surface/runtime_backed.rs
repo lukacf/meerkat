@@ -142,6 +142,12 @@ pub fn build_runtime_backed_service_with_capacities_and_default_reconfigure_host
             config_state_path,
             Arc::new(std::sync::RwLock::new(builder.default_llm_client.clone())),
         );
+    #[cfg(not(target_arch = "wasm32"))]
+    let delivery_owner = persistence.runtime_delivery_owner();
+    #[cfg(not(target_arch = "wasm32"))]
+    let delivery_realm = persistence
+        .manifest()
+        .map(|manifest| manifest.realm.to_string());
     let (service, adapter) = build_runtime_backed_service_with_capacities(
         builder,
         active_session_capacity,
@@ -149,6 +155,15 @@ pub fn build_runtime_backed_service_with_capacities_and_default_reconfigure_host
         persistence,
     );
     let service = Arc::new(service);
+    // Every surface built through this composition applies durable job
+    // deliveries; a surface that silently does not is a defect, not a mode.
+    #[cfg(not(target_arch = "wasm32"))]
+    super::runtime_delivery::arm_default_runtime_delivery(
+        delivery_owner,
+        &service,
+        &adapter,
+        delivery_realm,
+    );
     blueprint.install(
         &adapter,
         Arc::clone(&service)

@@ -691,6 +691,13 @@ pub enum AgentError {
     #[error("no pending boundary for resume")]
     NoPendingBoundary,
 
+    /// An external control append (not the running turn's own) was refused
+    /// because a callback tool batch awaits its results: appending now would
+    /// detach the batch from the assistant tool-use tail it resolves. The
+    /// session surface reports it as a retryable busy.
+    #[error("control append refused while a callback tool batch awaits its results")]
+    ControlAppendBlockedByCallbackBatch,
+
     /// The session agent does not support durable-snapshot synchronization
     /// (the default `SessionAgent::sync_session_from_durable_snapshot`
     /// capability). Consumers treat this as "skip live sync", distinct from a

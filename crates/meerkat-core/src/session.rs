@@ -4300,6 +4300,12 @@ pub enum SystemMessageAppendError {
         existing_text: String,
         existing_source: Option<String>,
     },
+    /// The transcript ends in an assistant tool-use batch awaiting callback
+    /// results; any message appended now would detach that batch from its
+    /// results. Retry once the batch is resolved.
+    CallbackBatchPending,
+    /// The durable callback batch record could not be read.
+    CallbackBatchUnreadable(String),
 }
 
 impl std::fmt::Display for SystemMessageAppendError {
@@ -4310,6 +4316,13 @@ impl std::fmt::Display for SystemMessageAppendError {
                     f,
                     "System-message append conflict for idempotency key `{key}`"
                 )
+            }
+            Self::CallbackBatchPending => write!(
+                f,
+                "System-message append refused while a callback tool batch awaits its results"
+            ),
+            Self::CallbackBatchUnreadable(error) => {
+                write!(f, "callback tool batch record is unreadable: {error}")
             }
         }
     }
@@ -5791,6 +5804,32 @@ impl Session {
     /// The ordered transcript is the singular durable owner. Idempotency is
     /// checked only for this explicit control operation; ordinary turn and
     /// resume paths never scan the transcript.
+    /// [`Self::append_system_message_idempotent`] for an external control
+    /// append (a host or a delivery owner, not the running turn): refused with
+    /// [`SystemMessageAppendError::CallbackBatchPending`] while a callback tool
+    /// batch awaits its results, because the append would detach the batch
+    /// from the assistant tool-use tail it resolves.
+    pub fn append_system_message_control_idempotent(
+        &mut self,
+        content: impl Into<String>,
+        source: Option<String>,
+        idempotency_key: Option<String>,
+        created_at: crate::types::MessageTimestamp,
+    ) -> Result<crate::service::AppendSystemContextStatus, SystemMessageAppendError> {
+        match self.callback_tool_batch_state() {
+            Ok(Some(CallbackToolBatchState::Pending { .. })) => {
+                return Err(SystemMessageAppendError::CallbackBatchPending);
+            }
+            Ok(Some(CallbackToolBatchState::Applied { .. }) | None) => {}
+            Err(error) => {
+                return Err(SystemMessageAppendError::CallbackBatchUnreadable(
+                    error.to_string(),
+                ));
+            }
+        }
+        self.append_system_message_idempotent(content, source, idempotency_key, created_at)
+    }
+
     pub fn append_system_message_idempotent(
         &mut self,
         content: impl Into<String>,
@@ -11131,6 +11170,64 @@ mod tests {
             compact.last_commit().expect("rewrite commit").revision
         );
         validate_transcript_history_state(&compact).expect("compacted history remains valid");
+    }
+
+    /// An external control append while a callback tool batch awaits its
+    /// results is refused without touching the transcript, so the batch stays
+    /// attached to its assistant tool-use tail; the running turn's own append
+    /// path is not gated.
+    #[test]
+    fn control_append_is_refused_while_a_callback_batch_is_pending() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "callback-1".to_string(),
+                name: "host_tool".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string())
+                    .expect("valid tool args"),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        )));
+        session
+            .stage_pending_callback_tool_batch(PendingCallbackToolBatch {
+                run_id: crate::lifecycle::RunId::new(),
+                tool_use_order: vec!["callback-1".to_string()],
+                pending_tool_use_ids: vec!["callback-1".to_string()],
+                completed_results: Vec::new(),
+                session_effects: Vec::new(),
+                async_ops: Vec::new(),
+            })
+            .expect("stage callback batch");
+        let messages_before = session.messages().len();
+
+        let refused = session.append_system_message_control_idempotent(
+            "Detached job finished",
+            Some("detached_job:job-1".to_string()),
+            Some("job:job-1:1:origin".to_string()),
+            crate::types::message_timestamp_now(),
+        );
+        assert_eq!(refused, Err(SystemMessageAppendError::CallbackBatchPending));
+        assert_eq!(session.messages().len(), messages_before);
+        assert!(
+            session
+                .pending_callback_tool_batch()
+                .expect("batch still valid")
+                .is_some(),
+            "the pending batch stays attached to its tool-use tail"
+        );
+
+        let mut idle = Session::new();
+        assert_eq!(
+            idle.append_system_message_control_idempotent(
+                "Detached job finished",
+                None,
+                Some("job:job-1:1:origin".to_string()),
+                crate::types::message_timestamp_now(),
+            ),
+            Ok(crate::service::AppendSystemContextStatus::Applied)
+        );
     }
 
     #[test]

@@ -26,7 +26,11 @@ mod live_projection;
 mod request_execution;
 #[cfg(feature = "session-store")]
 mod runtime_backed;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+mod runtime_delivery;
 pub use meerkat_runtime::run_stop_wire::{parse_wire_run_id, wire_run_stop_receipt};
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use runtime_delivery::{SessionServiceDeliveryHost, SessionServiceDeliverySink};
 #[cfg(feature = "session-store")]
 mod runtime_schedule_host;
 mod schedule_host;

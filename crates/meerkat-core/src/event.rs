@@ -545,7 +545,8 @@ impl From<&AgentError> for AgentErrorClass {
             // Capability-unsupported sync; classified like the config-class it
             // was previously represented as (a `ConfigError`).
             AgentError::DurableSnapshotSyncUnsupported
-            | AgentError::ModelFallbackResumeHeld { .. } => Self::Config,
+            | AgentError::ModelFallbackResumeHeld { .. }
+            | AgentError::ControlAppendBlockedByCallbackBatch => Self::Config,
         }
     }
 }

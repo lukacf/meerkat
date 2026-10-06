@@ -2187,8 +2187,9 @@ pub struct SessionRuntime {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     job_store: Arc<dyn meerkat::DetachedJobStore>,
     runtime_delivery_inbox: meerkat_runtime::RuntimeDeliveryInbox,
-    job_delivery_driver_armed: std::sync::atomic::AtomicBool,
-    job_delivery_drain_lock: Mutex<()>,
+    /// The library delivery owner over `job_store` and
+    /// `runtime_delivery_inbox`, once armed.
+    runtime_delivery_owner: std::sync::Mutex<Option<meerkat::RuntimeDeliveryOwnerHandle>>,
     monitor_job_managers: Mutex<HashMap<SessionId, Arc<meerkat_tools::builtin::shell::JobManager>>>,
     schedule_service: ScheduleService,
     workgraph_store: Arc<dyn meerkat::WorkGraphStore>,
@@ -2311,158 +2312,41 @@ struct SessionRuntimeJobDeliverySink {
     runtime: Arc<SessionRuntime>,
 }
 
-/// Result of one durable job delivery drain pass across the realm.
-///
-/// `failures` are rows or sessions that stayed pending this pass (nothing is
-/// discarded; each retries on a later pass). The delivery driver uses the
-/// progress/failure split to decide between base cadence and backoff.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct JobDeliveryDrainSummary {
-    /// Outbox entries handed to runtime inboxes and acknowledged.
-    pub projected: usize,
-    /// Runtime inbox deliveries applied to their sinks and acknowledged.
-    pub applied: usize,
-    /// Human-readable descriptions of rows/sessions left pending this pass.
-    pub failures: Vec<String>,
+/// Delivery host for the library owner: applies a session's deliveries
+/// through this runtime, closing job-await operations where the session has
+/// an ops lifecycle registry.
+struct SessionRuntimeDeliveryHost {
+    runtime: std::sync::Weak<SessionRuntime>,
+    realm_id: String,
 }
 
-/// Retry cadence for the durable job delivery driver.
-///
-/// A drain that keeps failing without progress must not retry at full
-/// cadence forever: the delay doubles per such pass and caps at
-/// [`Self::MAX_DELAY`], and it resets to [`Self::BASE_DELAY`] as soon as a
-/// pass is clean or moves deliveries. This bounds the idle burn of a
-/// persistently poisoned delivery row while keeping healthy delivery
-/// latency at the base cadence. The policy is a separate type so both
-/// halves of that contract — growth/cap AND reset — stay unit-testable;
-/// fixed-cadence retry loops with no backoff (and backoffs that stopped
-/// resetting) have shipped as idle-burn/latency defects before.
-#[derive(Debug)]
-struct JobDeliveryDriverBackoff {
-    delay: std::time::Duration,
-}
-
-impl JobDeliveryDriverBackoff {
-    const BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-    const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
-
-    fn new() -> Self {
-        Self {
-            delay: Self::BASE_DELAY,
-        }
-    }
-
-    /// Record one drain pass outcome and return the delay to sleep before
-    /// the next pass. A pass is at base cadence when it is clean (no
-    /// failures) or made progress (projected or applied anything); a failing
-    /// no-progress pass — including a drain-level error — doubles the delay.
-    fn observe_drain(
-        &mut self,
-        outcome: &Result<JobDeliveryDrainSummary, String>,
-    ) -> std::time::Duration {
-        let clean_or_progressing = match outcome {
-            Ok(summary) => {
-                summary.failures.is_empty() || summary.projected > 0 || summary.applied > 0
-            }
-            Err(_) => false,
-        };
-        self.delay = if clean_or_progressing {
-            Self::BASE_DELAY
-        } else {
-            Self::MAX_DELAY.min(self.delay.saturating_mul(2))
-        };
-        self.delay
-    }
-}
-
-#[cfg(test)]
-mod job_delivery_driver_backoff_tests {
-    use super::{JobDeliveryDrainSummary, JobDeliveryDriverBackoff};
-
-    fn failing_no_progress() -> Result<JobDeliveryDrainSummary, String> {
-        Ok(JobDeliveryDrainSummary {
-            projected: 0,
-            applied: 0,
-            failures: vec!["delivery d1 (sequence 3) for session s is blocked: poisoned".into()],
-        })
-    }
-
-    fn seconds_over(
-        backoff: &mut JobDeliveryDriverBackoff,
-        outcome: &Result<JobDeliveryDrainSummary, String>,
-        passes: usize,
-    ) -> Vec<u64> {
-        (0..passes)
-            .map(|_| backoff.observe_drain(outcome).as_secs())
-            .collect()
-    }
-
-    #[test]
-    fn repeated_failing_no_progress_passes_grow_the_delay_and_cap_at_max() {
-        let mut backoff = JobDeliveryDriverBackoff::new();
-        assert_eq!(
-            seconds_over(&mut backoff, &failing_no_progress(), 8),
-            vec![2, 4, 8, 16, 32, 60, 60, 60],
-            "a persistently failing no-progress drain must double its retry \
-             delay and cap at 60s — a fixed-cadence retry loop is an \
-             idle-burn defect"
-        );
-    }
-
-    #[test]
-    fn drain_level_errors_grow_the_delay_like_failing_passes() {
-        let mut backoff = JobDeliveryDriverBackoff::new();
-        let error: Result<JobDeliveryDrainSummary, String> =
-            Err("durable job delivery requires an active realm".into());
-        assert_eq!(
-            seconds_over(&mut backoff, &error, 7),
-            vec![2, 4, 8, 16, 32, 60, 60],
-            "drain-level errors must back off exactly like failing passes"
-        );
-    }
-
-    #[test]
-    fn a_clean_pass_resets_to_base_cadence_and_growth_restarts_from_base() {
-        let mut backoff = JobDeliveryDriverBackoff::new();
-        seconds_over(&mut backoff, &failing_no_progress(), 6);
-        let clean: Result<JobDeliveryDrainSummary, String> = Ok(JobDeliveryDrainSummary::default());
-        assert_eq!(
-            backoff.observe_drain(&clean).as_secs(),
-            1,
-            "a clean pass must reset to the 1s base cadence — a driver stuck \
-             at 60s still 'works' while delivery latency silently degrades"
-        );
-        assert_eq!(
-            seconds_over(&mut backoff, &failing_no_progress(), 2),
-            vec![2, 4],
-            "growth after a reset must restart from the base, not resume \
-             from the pre-reset delay"
-        );
-    }
-
-    #[test]
-    fn a_failing_pass_that_still_makes_progress_keeps_base_cadence() {
-        for progressing in [
-            Ok(JobDeliveryDrainSummary {
-                projected: 0,
-                applied: 3,
-                failures: vec!["one poisoned row".into()],
-            }),
-            Ok(JobDeliveryDrainSummary {
-                projected: 2,
-                applied: 0,
-                failures: vec!["one poisoned row".into()],
-            }),
-        ] {
-            let mut backoff = JobDeliveryDriverBackoff::new();
-            seconds_over(&mut backoff, &failing_no_progress(), 6);
-            assert_eq!(
-                backoff.observe_drain(&progressing).as_secs(),
-                1,
-                "a pass that moves deliveries must run at base cadence even \
-                 if a poisoned row remains: {progressing:?}"
-            );
-        }
+#[async_trait::async_trait]
+impl meerkat::RuntimeDeliveryHost for SessionRuntimeDeliveryHost {
+    async fn delivery_sink(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat::JobDeliverySink>> {
+        let runtime = self.runtime.upgrade()?;
+        let base: Arc<dyn meerkat::JobDeliverySink> = Arc::new(SessionRuntimeJobDeliverySink {
+            runtime: Arc::clone(&runtime),
+        });
+        Some(
+            match runtime
+                .runtime_adapter
+                .ops_lifecycle_registry(session_id)
+                .await
+            {
+                Some(operations) => Arc::new(meerkat::JobAwaitDeliverySink::new(
+                    meerkat::JobAwaitCoordinator::new(
+                        self.realm_id.clone(),
+                        runtime.detached_job_service(),
+                        operations,
+                    ),
+                    base,
+                )),
+                None => base,
+            },
+        )
     }
 }
 
@@ -2484,21 +2368,20 @@ impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
                 delivery_sequence,
                 subscription,
                 content,
-            } => {
-                let mut request = AppendSystemContextRequest::from_text(render_job_delivery_text(
-                    &job_id, &content,
-                ));
-                request.source = Some(format!("detached_job:{job_id}"));
-                request.idempotency_key = Some(format!(
-                    "job:{job_id}:{delivery_sequence}:{}",
-                    subscription.subscription_id()
-                ));
-                self.runtime
-                    .append_system_context(subscription.session_id(), request)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.message)
-            }
+            } => self
+                .runtime
+                .append_system_context(
+                    subscription.session_id(),
+                    meerkat::job_delivery_notification_request(
+                        &job_id,
+                        delivery_sequence,
+                        &subscription,
+                        &content,
+                    ),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.message),
             JobDeliveryApplication::Event {
                 job_id,
                 delivery_sequence,
@@ -2507,65 +2390,28 @@ impl meerkat::JobDeliverySink for SessionRuntimeJobDeliverySink {
                 handling_mode,
                 content,
             } => {
-                let event_type = match &content {
-                    meerkat::JobDeliveryContent::Notification(_) => "job.notification",
-                    meerkat::JobDeliveryContent::Terminal(_) => "job.terminal",
-                };
-                let content_value = match &content {
-                    meerkat::JobDeliveryContent::Notification(notification) => {
-                        serde_json::json!({
-                            "kind": "notification",
-                            "notification": notification,
-                        })
-                    }
-                    meerkat::JobDeliveryContent::Terminal(result) => serde_json::json!({
-                        "kind": "terminal",
-                        "result": result,
-                    }),
-                };
-                let payload = serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "delivery_sequence": delivery_sequence,
-                    "content": content_value,
-                });
-                let correlation_id = uuid::Uuid::parse_str(interaction_lineage_id.as_str())
-                    .ok()
-                    .map(meerkat_runtime::CorrelationId::from_uuid);
+                // An event requests runtime work, so it is admitted through
+                // the waking path: an idle origin session starts a turn.
+                let session_id = subscription.session_id();
+                let input = meerkat::job_delivery_event_input(
+                    &job_id,
+                    delivery_sequence,
+                    &subscription,
+                    &interaction_lineage_id,
+                    handling_mode,
+                    &content,
+                );
                 self.runtime
-                    .accept_external_event_via_runtime_with_context(
-                        subscription.session_id(),
-                        event_type.to_string(),
-                        payload,
-                        None,
-                        ExternalEventRuntimeContext {
-                            handling_mode,
-                            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(format!(
-                                "job:{job_id}:{delivery_sequence}:{}",
-                                subscription.subscription_id()
-                            ))),
-                            correlation_id,
-                        },
-                    )
+                    .prepare_cold_attach(session_id)
+                    .await
+                    .map_err(|error| error.message)?;
+                let adapter = Arc::clone(&self.runtime.runtime_adapter);
+                self.runtime
+                    .accept_runtime_input_with_active_admission(&adapter, session_id, input)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.message)
             }
-        }
-    }
-}
-
-fn render_job_delivery_text(
-    job_id: &meerkat::JobId,
-    content: &meerkat::JobDeliveryContent,
-) -> String {
-    match content {
-        meerkat::JobDeliveryContent::Notification(notification) => format!(
-            "Detached job {job_id}: {}\n\n{}",
-            notification.title(),
-            notification.body()
-        ),
-        meerkat::JobDeliveryContent::Terminal(result) => {
-            format!("Detached job {job_id} reached terminal state: {result:?}")
         }
     }
 }
@@ -3099,8 +2945,7 @@ impl SessionRuntime {
             service,
             job_store,
             runtime_delivery_inbox,
-            job_delivery_driver_armed: std::sync::atomic::AtomicBool::new(false),
-            job_delivery_drain_lock: Mutex::new(()),
+            runtime_delivery_owner: std::sync::Mutex::new(None),
             monitor_job_managers: Mutex::new(HashMap::new()),
             schedule_service,
             workgraph_store,
@@ -3248,8 +3093,7 @@ impl SessionRuntime {
             service,
             job_store,
             runtime_delivery_inbox,
-            job_delivery_driver_armed: std::sync::atomic::AtomicBool::new(false),
-            job_delivery_drain_lock: Mutex::new(()),
+            runtime_delivery_owner: std::sync::Mutex::new(None),
             monitor_job_managers: Mutex::new(HashMap::new()),
             schedule_service,
             workgraph_store,
@@ -5374,127 +5218,54 @@ impl SessionRuntime {
         Ok(true)
     }
 
-    /// Start the mechanical job-outbox/runtime-inbox delivery driver once.
+    /// Arm the library delivery owner over this runtime's job store and
+    /// runtime delivery inbox, once.
     ///
-    /// The driver never claims work or changes job lifecycle. It only performs
-    /// the durable handoff and applies already-committed subscription effects.
-    pub fn arm_job_delivery_driver(self: &Arc<Self>) {
-        if self
-            .job_delivery_driver_armed
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_err()
-        {
+    /// The owner never claims work or changes job lifecycle. It performs the
+    /// durable outbox-to-inbox handoff and applies already-committed
+    /// subscription effects, woken by job outbox commits, runtime delivery
+    /// commits and attachment commits; there is no polling driver. A runtime
+    /// without a realm has no delivery owner.
+    pub fn arm_runtime_delivery_owner(self: &Arc<Self>) {
+        let mut slot = self
+            .runtime_delivery_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
             return;
         }
-        let runtime = Arc::downgrade(self);
-        tokio::spawn(async move {
-            let mut backoff = JobDeliveryDriverBackoff::new();
-            loop {
-                let Some(runtime) = runtime.upgrade() else {
-                    return;
-                };
-                let outcome = runtime.drain_job_deliveries().await;
-                match &outcome {
-                    Ok(summary) if !summary.failures.is_empty() => tracing::warn!(
-                        failures = ?summary.failures,
-                        "durable job delivery drain left rows pending"
-                    ),
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "durable job delivery drain failed");
-                    }
-                }
-                drop(runtime);
-                tokio::time::sleep(backoff.observe_drain(&outcome)).await;
-            }
+        let Some(realm_id) = self.realm_id() else {
+            tracing::warn!(
+                "durable job delivery requires an active realm; no delivery owner armed"
+            );
+            return;
+        };
+        let host = Arc::new(SessionRuntimeDeliveryHost {
+            runtime: Arc::downgrade(self),
+            realm_id: realm_id.to_string(),
         });
-    }
-
-    pub async fn drain_job_deliveries(self: &Arc<Self>) -> Result<JobDeliveryDrainSummary, String> {
-        let _guard = self.job_delivery_drain_lock.lock().await;
-        let mut summary = JobDeliveryDrainSummary::default();
-        let realm_id = self
-            .realm_id()
-            .ok_or_else(|| "durable job delivery requires an active realm".to_string())?;
-        let projector = meerkat::JobOutboxProjector::new_for_realm(
+        match meerkat::RuntimeDeliveryOwner::new(
             self.job_store.clone(),
             self.runtime_delivery_inbox.clone(),
-            realm_id.to_string(),
-        );
-        let projection = projector
-            .project_pending(256)
-            .await
-            .map_err(|error| error.to_string())?;
-        summary.projected = projection.projected.len();
-        for skipped in projection.skipped {
-            summary.failures.push(format!(
-                "projection of job {} delivery {} failed: {}",
-                skipped.job_id, skipped.delivery_sequence, skipped.error
-            ));
+        )
+        .with_attachment_commits(self.runtime_adapter.subscribe_attachment_commits())
+        .with_run_settlements(self.runtime_adapter.subscribe_run_settlements())
+        .arm(host)
+        {
+            Ok(handle) => *slot = Some(handle),
+            Err(error) => tracing::warn!(%error, "durable job delivery owner not armed"),
         }
+    }
 
-        // Visit exactly the runtimes the delivery authority reports as holding
-        // undrained rows for this realm's jobs. The previous job-row window
-        // (`list_all(10_000)`, ordered by job id) missed sessions whose jobs
-        // aged out of it while their inbox rows stayed pending forever.
-        // Subscriber fan-out happens inside each origin runtime's rows.
-        let sessions = projector
-            .sessions_with_pending_deliveries()
-            .await
-            .map_err(|error| error.to_string())?;
-        let base_sink: Arc<dyn meerkat::JobDeliverySink> =
-            Arc::new(SessionRuntimeJobDeliverySink {
-                runtime: Arc::clone(self),
-            });
-        for session_id in sessions {
-            let sink: Arc<dyn meerkat::JobDeliverySink> = match self
-                .runtime_adapter
-                .ops_lifecycle_registry(&session_id)
-                .await
-            {
-                Some(operations) => Arc::new(meerkat::JobAwaitDeliverySink::new(
-                    meerkat::JobAwaitCoordinator::new(
-                        realm_id.to_string(),
-                        self.detached_job_service(),
-                        operations,
-                    ),
-                    base_sink.clone(),
-                )),
-                None => base_sink.clone(),
-            };
-            let applier =
-                meerkat::JobRuntimeDeliveryApplier::new(self.runtime_delivery_inbox.clone(), sink);
-            // Fail SAFE per session: one session's poisoned or unreadable
-            // inbox must not head-of-line block every other session's
-            // delivery drain. Nothing is discarded — failed rows stay
-            // pending and retry on the next pass.
-            match applier
-                .apply_pending(
-                    &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
-                    256,
-                )
-                .await
-            {
-                Ok(drain) => {
-                    summary.applied += drain.applied.len();
-                    if let Some(blocked) = drain.blocked {
-                        summary.failures.push(format!(
-                            "delivery {} (sequence {}) for session {session_id} is blocked: {}",
-                            blocked.delivery_id, blocked.runtime_sequence, blocked.error
-                        ));
-                    }
-                }
-                Err(error) => summary.failures.push(format!(
-                    "delivery drain for session {session_id} failed: {error}"
-                )),
-            }
-        }
-        Ok(summary)
+    /// Observe the delivery owner's passes, once armed.
+    pub fn subscribe_job_delivery_passes(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<meerkat::RuntimeDeliveryPass>> {
+        self.runtime_delivery_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(meerkat::RuntimeDeliveryOwnerHandle::subscribe_passes)
     }
 
     /// Committed-but-undrained runtime deliveries across this host's store.
@@ -14706,6 +14477,70 @@ mod tests {
                 .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
+    }
+
+    /// An `Event` subscription delivery requests runtime work: applied to an
+    /// idle origin session it is admitted through the waking path and runs to
+    /// a terminal, instead of waiting queued behind some later unrelated turn.
+    #[tokio::test]
+    async fn job_event_delivery_wakes_an_idle_origin_session() {
+        use meerkat::JobDeliverySink as _;
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create_session");
+
+        let job_id = meerkat::JobId::new("job-event-wake").expect("job id");
+        let subscription = meerkat::JobSubscription::new(
+            meerkat::JobSubscriptionId::new("watcher").expect("subscription id"),
+            session_id.clone(),
+            meerkat::JobDeliveryKind::Event {
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+            },
+        );
+        let sink = SessionRuntimeJobDeliverySink {
+            runtime: Arc::clone(&runtime),
+        };
+        sink.apply(meerkat::JobDeliveryApplication::Event {
+            job_id: job_id.clone(),
+            delivery_sequence: 1,
+            subscription,
+            interaction_lineage_id: meerkat::InteractionLineageId::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            content: meerkat::JobDeliveryContent::Terminal(meerkat::JobTerminalResult::Succeeded {
+                result_ref: None,
+            }),
+        })
+        .await
+        .expect("event delivery applies");
+
+        let admitted = runtime
+            .runtime_adapter()
+            .input_state_by_idempotency_key(&session_id, &format!("job:{job_id}:1:watcher"))
+            .await
+            .expect("idempotency lookup")
+            .expect("the event input is admitted under its delivery key");
+        let wait = tokio::time::timeout(
+            TEST_ASYNC_WITNESS_TIMEOUT,
+            runtime
+                .runtime_adapter()
+                .wait_input_terminal_receipt(&session_id, &admitted.state.input_id),
+        )
+        .await
+        .expect("the woken session runs the event input to a terminal")
+        .expect("terminal receipt wait");
+        assert!(
+            matches!(
+                wait,
+                Some(meerkat_runtime::terminal_status::InputTerminalReceiptWait::Resolved(_))
+            ),
+            "the event input reached its terminal receipt: {wait:?}"
+        );
     }
 
     fn make_runtime_with_runtime_store(

@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::RwLock;
+use crate::tokio::sync::{RwLock, watch};
 #[cfg(not(target_arch = "wasm32"))]
-use ::tokio::sync::RwLock;
+use ::tokio::sync::{RwLock, watch};
 use async_trait::async_trait;
 use meerkat_core::SessionId;
 
@@ -67,6 +67,53 @@ pub struct StoredJob {
     pub terminal_result: Option<JobTerminalResult>,
     pub subscriptions: Vec<crate::JobSubscription>,
     pub outbox: Vec<JobOutboxEntry>,
+}
+
+/// In-process signal that a store commit carried a new job outbox entry.
+///
+/// The job service records a commit after the store accepts a replacement
+/// whose generated effects include `TerminalCommitted` or
+/// `NotificationCommitted`, so the delivery owner can project the outbox
+/// without polling. The value is a monotonically increasing generation.
+///
+/// Clones share one signal. A store hands out the signal it owns, and a
+/// wrapping store must return its inner store's signal, so every service
+/// over the same store reaches the same observers. The signal is in-process
+/// only: an entry committed by another process is found by reading the
+/// pending outbox ([`DetachedJobStore::list_pending_outbox`]).
+#[derive(Debug, Clone)]
+pub struct JobOutboxCommitSignal {
+    commits: Arc<watch::Sender<u64>>,
+}
+
+impl Default for JobOutboxCommitSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JobOutboxCommitSignal {
+    pub fn new() -> Self {
+        let (commits, _) = watch::channel(0);
+        Self {
+            commits: Arc::new(commits),
+        }
+    }
+
+    /// Observe outbox commits recorded through this signal or any clone.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.commits.subscribe()
+    }
+
+    /// Whether `other` is this signal (or a clone of it).
+    pub fn shares_signal_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.commits, &other.commits)
+    }
+
+    pub(crate) fn record_commit(&self) {
+        self.commits
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
 }
 
 #[doc(hidden)]
@@ -191,6 +238,13 @@ pub trait DetachedJobStore: Send + Sync {
     ) -> Result<Vec<StoredJob>, DetachedJobError>;
 
     fn is_persistent(&self) -> bool;
+
+    /// The outbox commit signal this store owns.
+    ///
+    /// There is no default: a store without a signal would leave every
+    /// in-process outbox entry undelivered until the next reconcile read. A
+    /// wrapping store returns its inner store's signal.
+    fn outbox_commit_signal(&self) -> JobOutboxCommitSignal;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -212,6 +266,7 @@ struct MemoryDetachedJobStoreState {
 #[derive(Debug, Clone, Default)]
 pub struct MemoryDetachedJobStore {
     inner: Arc<RwLock<MemoryDetachedJobStoreState>>,
+    outbox_commits: JobOutboxCommitSignal,
 }
 
 impl MemoryDetachedJobStore {
@@ -259,6 +314,7 @@ impl MemoryDetachedJobStore {
                 submission_index: snapshot.submission_index,
                 predicate_deliveries: snapshot.predicate_deliveries,
             })),
+            outbox_commits: JobOutboxCommitSignal::new(),
         })
     }
 
@@ -523,6 +579,10 @@ impl DetachedJobStore for MemoryDetachedJobStore {
     fn is_persistent(&self) -> bool {
         false
     }
+
+    fn outbox_commit_signal(&self) -> JobOutboxCommitSignal {
+        self.outbox_commits.clone()
+    }
 }
 
 pub(crate) fn next_revision(current: u64) -> Result<u64, DetachedJobError> {
@@ -544,7 +604,7 @@ pub(crate) fn validate_job_replacement(
         });
     }
     if current.spec.submission_key != replacement.spec.submission_key
-        || !current.spec.equivalent_submission(&replacement.spec)
+        || !current.spec.same_admission(&replacement.spec)
     {
         return Err(DetachedJobError::Store(
             "compare-and-swap cannot change the submitted job specification".into(),

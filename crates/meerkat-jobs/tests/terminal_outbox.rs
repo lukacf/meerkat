@@ -5,9 +5,9 @@ use std::sync::Arc;
 use meerkat_core::SessionId;
 use meerkat_jobs::{
     AttemptClaim, AttemptWriteAuthority, CanonicalArgumentsHash, DetachedJobService,
-    ExecutionIntentId, InteractionLineageId, JobFailureCode, JobOutboxPayload, JobResultRef,
-    JobSpec, JobSubmissionKey, JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore,
-    RestartClass, RunnerHandleRef, RunnerIdentity, ToolIdentity, WorkerId,
+    DetachedJobStore, ExecutionIntentId, InteractionLineageId, JobFailureCode, JobOutboxPayload,
+    JobResultRef, JobSpec, JobSubmissionKey, JobTerminalKind, JobTerminalResult,
+    MemoryDetachedJobStore, RestartClass, RunnerHandleRef, RunnerIdentity, ToolIdentity, WorkerId,
 };
 
 fn spec(key: &str, restart_class: RestartClass) -> JobSpec {
@@ -254,4 +254,147 @@ async fn runtime_delivery_composition_acknowledges_with_the_production_outbox_ke
             "{ack} must return the runtime delivery key to the job unchanged"
         );
     }
+}
+
+/// The outbox commit signal advances exactly when a commit carries a new
+/// outbox entry: the realization of the routed `TerminalCommitted` and
+/// `NotificationCommitted` dispositions. Submit, claim, and the delivery
+/// acknowledgement leave it alone, so a delivery owner wakes only for work.
+#[tokio::test]
+async fn outbox_commit_signal_advances_only_for_committed_outbox_entries() {
+    let store = Arc::new(MemoryDetachedJobStore::new());
+    let service = DetachedJobService::new(store.clone());
+    let mut commits = store.outbox_commit_signal().subscribe();
+    let job = service
+        .submit(spec("signal-outbox", RestartClass::Adoptable))
+        .await
+        .expect("submit")
+        .job_id;
+    let claim = service
+        .claim_attempt(
+            &job,
+            AttemptClaim::new(
+                WorkerId::new("worker-a").expect("worker"),
+                100,
+                1_000,
+                RunnerHandleRef::new("runner:live").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    assert!(
+        !commits.has_changed().expect("signal open"),
+        "submit and claim carry no outbox entry"
+    );
+
+    let notified = service
+        .emit_notification(
+            &job,
+            AttemptWriteAuthority::from(&claim),
+            200,
+            meerkat_jobs::JobNotification::new(
+                "progress",
+                "progress:1",
+                "Progress",
+                "Halfway there",
+            )
+            .expect("notification"),
+        )
+        .await
+        .expect("emit notification");
+    assert!(commits.has_changed().expect("signal open"));
+    assert_eq!(*commits.borrow_and_update(), 1);
+
+    let replayed = service
+        .emit_notification(
+            &job,
+            AttemptWriteAuthority::from(&claim),
+            210,
+            meerkat_jobs::JobNotification::new(
+                "progress",
+                "progress:1",
+                "Progress",
+                "Halfway there",
+            )
+            .expect("notification"),
+        )
+        .await
+        .expect("replay notification");
+    assert!(replayed.deduplicated);
+    assert!(
+        !commits.has_changed().expect("signal open"),
+        "a suppressed replay commits no new outbox entry"
+    );
+
+    let completed = service
+        .complete_attempt(&job, AttemptWriteAuthority::from(&claim), 900, None)
+        .await
+        .expect("complete");
+    assert!(commits.has_changed().expect("signal open"));
+    assert_eq!(*commits.borrow_and_update(), 2);
+
+    let terminal = completed
+        .outbox
+        .iter()
+        .find(|entry| matches!(entry.payload, JobOutboxPayload::Terminal(_)))
+        .expect("terminal outbox entry");
+    service
+        .mark_delivery_applied(&job, notified.delivery_sequence)
+        .await
+        .expect("ack notification");
+    service
+        .mark_delivery_applied(&job, terminal.delivery_sequence)
+        .await
+        .expect("ack terminal");
+    assert!(
+        !commits.has_changed().expect("signal open"),
+        "acknowledgements commit no new outbox entry"
+    );
+}
+
+/// Every service over one store, and every clone of the store, observes the
+/// same signal; a second store has its own.
+#[tokio::test]
+async fn outbox_commit_signal_is_owned_per_store_and_shared_by_its_services() {
+    let store = Arc::new(MemoryDetachedJobStore::new());
+    let clone = (*store).clone();
+    let other = MemoryDetachedJobStore::new();
+    assert!(
+        store
+            .outbox_commit_signal()
+            .shares_signal_with(&clone.outbox_commit_signal())
+    );
+    assert!(
+        !store
+            .outbox_commit_signal()
+            .shares_signal_with(&other.outbox_commit_signal())
+    );
+
+    let commits = store.outbox_commit_signal().subscribe();
+    let producer = DetachedJobService::new(Arc::new(clone));
+    let job = producer
+        .submit(spec("signal-shared", RestartClass::Adoptable))
+        .await
+        .expect("submit")
+        .job_id;
+    let claim = producer
+        .claim_attempt(
+            &job,
+            AttemptClaim::new(
+                WorkerId::new("worker-a").expect("worker"),
+                100,
+                1_000,
+                RunnerHandleRef::new("runner:live").expect("handle"),
+            ),
+        )
+        .await
+        .expect("claim");
+    producer
+        .complete_attempt(&job, AttemptWriteAuthority::from(&claim), 900, None)
+        .await
+        .expect("complete");
+    assert!(
+        commits.has_changed().expect("signal open"),
+        "a commit through another service over a clone of the store is observed"
+    );
 }

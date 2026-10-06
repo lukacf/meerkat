@@ -51126,3 +51126,36 @@ async fn a_provider_close_publishes_one_typed_live_channel_closed() {
     );
     assert!(!closes[0].3);
 }
+
+/// An executor attachment becoming serving advances the attachment-commit
+/// generation, and registering a session without an executor does not: the
+/// delivery owner retries rows for not-yet-attached sessions on this signal.
+#[tokio::test]
+async fn attachment_commit_generation_advances_when_an_executor_attachment_serves() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let mut attachments = adapter.subscribe_attachment_commits();
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session without executor");
+    assert!(
+        !attachments.has_changed().expect("signal open"),
+        "a registration without an executor attaches nothing"
+    );
+
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await
+        .expect("attach executor");
+    assert!(attachments.has_changed().expect("signal open"));
+    assert_eq!(*attachments.borrow_and_update(), 1);
+
+    let other = SessionId::new();
+    adapter
+        .register_session_with_executor(other, Box::new(RuntimeParityNoopExecutor))
+        .await
+        .expect("register with executor");
+    assert!(attachments.has_changed().expect("signal open"));
+    assert_eq!(*attachments.borrow_and_update(), 2);
+}

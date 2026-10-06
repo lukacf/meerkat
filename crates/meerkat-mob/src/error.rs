@@ -798,6 +798,11 @@ pub enum MobError {
     #[error("supervisor escalation: {0}")]
     SupervisorEscalation(String),
 
+    /// A spawn carried `SpawnMemberSpec::resume_provider_params` but does not
+    /// resume a durable session (a fresh, policy or remote spawn).
+    #[error("'{identity}' carries resume provider params but does not resume a durable session")]
+    ResumeProviderParamsRequireResume { identity: AgentIdentity },
+
     /// Operation is not supported for the member's runtime mode.
     #[error("unsupported for runtime mode {mode}: {reason}")]
     UnsupportedForMode {

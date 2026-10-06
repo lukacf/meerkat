@@ -528,6 +528,88 @@ async fn exercise_stock_persistent(
     let prior_audit = stored_audit(&before_finish);
     assert!(live_audit.starts_with(&prior_audit));
 
+    // Exercise the real default Event sink while the second model response is
+    // held. Job lineage is not native ingress authority. This covers the sink
+    // and admission boundary, not inbox retry/acknowledgement ownership.
+    {
+        use meerkat::JobDeliverySink;
+
+        let document_before_delivery = store
+            .load_committed_whole_blob_snapshot(&runtime)
+            .await
+            .unwrap()
+            .unwrap();
+        let job_id = meerkat::JobId::new("stock-governed-event").unwrap();
+        let subscription = meerkat::JobSubscription::new(
+            meerkat::JobSubscriptionId::new("unauthenticated-event").unwrap(),
+            session_id.clone(),
+            meerkat::JobDeliveryKind::Event {
+                handling_mode: meerkat_core::HandlingMode::Queue,
+            },
+        );
+        let delivery_key = format!("job:{job_id}:1:unauthenticated-event");
+        let sink =
+            meerkat::surface::SessionServiceDeliverySink::new(service.clone(), machine.clone());
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            sink.apply(meerkat::JobDeliveryApplication::Event {
+                job_id,
+                delivery_sequence: 1,
+                subscription,
+                interaction_lineage_id: meerkat::InteractionLineageId::new(),
+                handling_mode: meerkat_core::HandlingMode::Queue,
+                content: meerkat::JobDeliveryContent::Terminal(
+                    meerkat::JobTerminalResult::Succeeded { result_ref: None },
+                ),
+            }),
+        )
+        .await
+        .expect("missing ingress is rejected without waiting for the held turn")
+        .expect_err("the default Event producer cannot mint governed authority");
+        assert_eq!(
+            error,
+            meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                reason: "native work authority association is unavailable or mismatched".into(),
+            }
+            .to_string(),
+        );
+        assert!(
+            machine
+                .input_state_by_idempotency_key(&session_id, &delivery_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let rows = store.load_input_states_strict(&runtime).await.unwrap();
+        assert_eq!(rows.len(), 1, "the delivery creates no durable input");
+        assert_eq!(serde_json::to_value(&rows[0]).unwrap(), frozen_before);
+        assert_eq!(
+            serde_json::to_value(machine.input_state(&session_id, &input_id).await.unwrap())
+                .unwrap(),
+            serde_json::to_value(Some(&live)).unwrap(),
+            "failed delivery does not alter the admitted original or its audit",
+        );
+        let document_after_delivery = store
+            .load_committed_whole_blob_snapshot(&runtime)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            document_after_delivery.bytes(),
+            document_before_delivery.bytes()
+        );
+        assert_eq!(
+            document_after_delivery.authority(),
+            document_before_delivery.authority(),
+        );
+        assert_eq!(*server.receiver.bodies.lock().unwrap(), bodies);
+        assert_eq!(
+            server.receiver.authorized_requests.load(Ordering::SeqCst),
+            2
+        );
+        assert_eq!(*tools.0.lock().unwrap(), ["read_record"]);
+    }
+
     server.receiver.finish.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(20), completion.wait())
         .await

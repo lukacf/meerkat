@@ -248,8 +248,11 @@ impl TurnFailureSourceKind {
             AgentError::NoPendingBoundary => Self::NoPendingBoundary,
             // Capability-unsupported sync; classified like the config-class it
             // was previously represented as (a `ConfigError`).
+            // A control-append refusal (never a turn failure) keeps the
+            // config class its previous `ConfigError` representation had.
             AgentError::DurableSnapshotSyncUnsupported
-            | AgentError::ModelFallbackResumeHeld { .. } => Self::ConfigError,
+            | AgentError::ModelFallbackResumeHeld { .. }
+            | AgentError::ControlAppendBlockedByCallbackBatch => Self::ConfigError,
         })
     }
 

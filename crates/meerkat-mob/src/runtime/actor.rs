@@ -18527,11 +18527,23 @@ impl ExplicitResumePreparationContext {
             // recovery request instead of an after-the-fact build tweak.
             // A fork-derived member's request is its own durable records, not
             // customized, like its first build (see `fork_build`).
+            // What the bound session holds, read once, for the customizer's
+            // resume view (an ordinary member only).
+            let restore_view =
+                if entry.fork_source.is_none() && self.spawn_member_customizer.is_some() {
+                    super::fork_build::load_resumed_member_view(
+                        self.session_service.as_ref(),
+                        &session_id,
+                    )
+                    .await?
+                } else {
+                    super::handle::ResumedMemberView::new(session_id.clone(), None)
+                };
             let mut restore_spec = super::fork_build::rebuild_resume_spec(
                 &self.definition.id,
                 self.spawn_member_customizer.as_ref(),
                 &entry,
-                &session_id,
+                &restore_view,
             )?;
             if restore_spec.identity != entry.agent_identity {
                 return Err(MobError::Internal(format!(
@@ -18710,6 +18722,22 @@ impl ExplicitResumePreparationContext {
             } = &mut restore_spec.launch_mode
             {
                 *bridge_session_id = replacement_session_id.clone();
+            }
+            // The rebuild now runs on the successor: ask the customizer again
+            // with what it holds.
+            if entry.fork_source.is_none() && self.spawn_member_customizer.is_some() {
+                let successor_view = super::fork_build::load_resumed_member_view(
+                    self.session_service.as_ref(),
+                    &replacement_session_id,
+                )
+                .await?;
+                restore_spec.resume_provider_params =
+                    super::fork_build::successor_resume_provider_params(
+                        &self.definition.id,
+                        self.spawn_member_customizer.as_ref(),
+                        &entry,
+                        &successor_view,
+                    )?;
             }
             // Publish an endpoint from a live successor only when this exact
             // provisioner is allowed to reuse that attachment. If preparation
@@ -19018,6 +19046,10 @@ impl MobActor {
                     if let Some(model) = entry.effective_model_override.as_ref() {
                         profile.model.clone_from(model);
                     }
+                    super::fork_build::apply_resume_provider_params(
+                        &mut profile,
+                        work.rebuild.restore_spec.resume_provider_params.as_ref(),
+                    );
                     Box::new(profile)
                 });
                 Ok(ExplicitResumeLiveObservation::DurablePresent { profile })
@@ -29763,6 +29795,14 @@ impl MobActor {
         // The placed path must not reserve the local provisioning poll frame.
         boxed_arm_future(move || async move {
         let allow_reserved_flow_identity = spawn_source.allows_reserved_flow_identity();
+        if spec.resume_provider_params.is_some()
+            && !matches!(spec.launch_mode, crate::launch::MemberLaunchMode::Resume { .. })
+        {
+            let error = MobError::ResumeProviderParamsRequireResume {
+                identity: spec.identity.clone(),
+            };
+            reject_spawn_before_custody!("resume_provider_params", error);
+        }
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,
             identity,
@@ -29802,6 +29842,7 @@ impl MobActor {
             fork_overlay,
             // Refused above: fork seating consumes its inheritance first.
             fork_build_inheritance: _,
+            resume_provider_params,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -29876,6 +29917,10 @@ impl MobActor {
             if let Some(model) = model_override {
                 profile.model = model;
             }
+            super::fork_build::apply_resume_provider_params(
+                &mut profile,
+                resume_provider_params.as_ref(),
+            );
             super::spec_compiler::apply_tool_category_overrides(
                 &mut profile,
                 tool_category_overrides,
@@ -31795,6 +31840,11 @@ impl MobActor {
                 return Err((reply_tx, $error))
             };
         }
+        if spec.resume_provider_params.is_some() {
+            fail!(MobError::ResumeProviderParamsRequireResume {
+                identity: spec.identity.clone(),
+            });
+        }
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,
             identity,
@@ -31836,6 +31886,7 @@ impl MobActor {
             fork_source: _,
             fork_overlay: _,
             fork_build_inheritance: _,
+            resume_provider_params: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -33260,6 +33311,11 @@ impl MobActor {
         // post-authority profile/runtime/capability material before
         // provisioning.
 
+        if member_spec.resume_provider_params.is_some() {
+            return Err(MobError::ResumeProviderParamsRequireResume {
+                identity: member_spec.identity.clone(),
+            });
+        }
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,
             identity: _,
@@ -33296,6 +33352,7 @@ impl MobActor {
             fork_source: _,
             fork_overlay: _,
             fork_build_inheritance: _,
+            resume_provider_params: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {

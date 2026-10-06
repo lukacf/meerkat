@@ -1353,7 +1353,7 @@ impl MethodRouter {
         // Ensure the runtime's notification sink is up-to-date so that
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
-        runtime.arm_job_delivery_driver();
+        runtime.arm_runtime_delivery_owner();
         Ok(Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,

@@ -864,6 +864,10 @@ impl DetachedJobStore for HidingJobStore {
     fn is_persistent(&self) -> bool {
         self.inner.is_persistent()
     }
+
+    fn outbox_commit_signal(&self) -> meerkat::JobOutboxCommitSignal {
+        self.inner.outbox_commit_signal()
+    }
 }
 
 /// Regression: an outbox row that cannot be mapped to its job must not abort

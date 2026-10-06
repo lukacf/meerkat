@@ -67,13 +67,89 @@ them.
 
   The JSON of MCP cancel requests and results is unchanged.
 
+- Durable job delivery through the library owner (#1497; see Added and
+  Fixed) changes these Rust types:
+  - `DetachedJobStore` gains the required `outbox_commit_signal()`; a store
+    returns the `JobOutboxCommitSignal` it owns and a wrapping store returns
+    its inner store's.
+  - `SqliteDetachedJobStore` (which now owns its `JobOutboxCommitSignal`) is
+    no longer `UnwindSafe` or `RefUnwindSafe`.
+  - `JobSpec` gains `terminal_application: JobTerminalApplication`
+    (`JobSpec::new` sets `Subscribers`). It is fixed at admission: a replay
+    under the same submission key returns the original job with its original
+    value, and no compare-and-swap can rewrite it.
+  - `PreparedJobDelivery` gains `producer_applied`.
+  - `SystemMessageAppendError` gains `CallbackBatchPending` and
+    `CallbackBatchUnreadable`.
+  - meerkat-rpc removes `SessionRuntime::arm_job_delivery_driver`,
+    `SessionRuntime::drain_job_deliveries` and `JobDeliveryDrainSummary`;
+    `SessionRuntime::arm_runtime_delivery_owner` and
+    `SessionRuntime::subscribe_job_delivery_passes` replace them.
+  - Behaviour-only: an `Event` job subscription delivery now wakes an idle
+    origin session instead of waiting queued for an unrelated turn, and the
+    CLI, REST and MCP server now apply job deliveries.
+  - Behaviour-only: a host `append_system_context` while the session's
+    callback tool batch awaits its results is now refused as a retryable
+    `SessionError::Busy` (RPC `SESSION_BUSY`) instead of being appended.
+    Retry it after the callback results are staged and the run resumes. The
+    live session agent reports it as the new
+    `AgentError::ControlAppendBlockedByCallbackBatch`.
+
 - `meerkat_contracts::WireBackendProfile` gains the pub field
   `prompt_cache_applicable: Option<bool>` (#1781; see Added). Code that
   builds a `WireBackendProfile` with a struct literal must set it; the wire
   form is unchanged for existing fields and the new field is omitted when
   `None`.
+- Resume-time spawn customization (#1701; see Added): `MobError` gains
+  `ResumeProviderParamsRequireResume`, and `SpawnMemberSpec` gains
+  `resume_provider_params`.
+- Behaviour-only (not measured by the gate): `MobMcpState` classifies a
+  restored mob as a child mob before its members are restored, not after
+  (#1701), so a restored child mob's members are no longer brought back
+  outside the child application tool policy. On a managed host (a tool
+  consequence policy registry is installed) with no child policy, the mob
+  still restores, but each member of a child mob is left unrestored with a
+  typed restore failure (`MobError::MemberRestoreFailed`) whose reason says
+  why (the host runs a tool-policy registry and no child application tool
+  policy is configured) and names the fixes
+  (`MobMcpState::with_child_application_tool_policy`, the MobKit
+  `child_application_tool_policy` init parameter, or an explicit
+  `ApplicationToolPolicyBinding::Unmanaged`). Calls into such a member
+  return that refusal, and spawns into the child mob are refused as before.
+  To recover, set the child policy and restart the host: the next start
+  with the policy restores the refused members on their own sessions (a
+  restore failure is re-derived on each start, never persisted). Host-created
+  mobs are unaffected.
+- Behaviour-only (not measured by the gate): a `SpawnMemberCustomizer`
+  error on process-restart restore now fails only that member's restore,
+  with the error as its restore failure reason; the rest of the mob comes
+  up. It used to fail the whole mob resume (#1701).
+
 
 ### Added
+
+- Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
+  runtime delivery inbox's exclusive delivery ownership
+  (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is
+  `RuntimeDeliveryOwnerAlreadyArmed`), runs one reconcile pass over the
+  pending job outbox and every runtime with backlog, then projects and
+  applies only on typed wakes:
+  - a job outbox commit (`JobOutboxCommitSignal`, recorded by
+    `DetachedJobService` for every commit carrying `TerminalCommitted` or
+    `NotificationCommitted`);
+  - a runtime delivery commit, draining exactly the committed runtimes;
+  - an attachment commit or a run settlement
+    (`MeerkatMachine::subscribe_attachment_commits`,
+    `subscribe_run_settlements`), retrying sessions that refused a delivery.
+
+  There is no polling driver and no retry timer: a row whose application
+  fails stays pending until a wake names its session or the owner is armed
+  again. Hosts apply deliveries through a `RuntimeDeliveryHost`; every pass is
+  observable as a `RuntimeDeliveryPass`. `PersistenceBundle::runtime_delivery_owner`
+  wires a bundle, and the hosted composition
+  (`build_runtime_backed_service_with_default_reconfigure_host`) arms it with
+  `SessionServiceDeliveryHost` for every surface built through it. Mob realm
+  rows drain on the same owner.
 
 - Hosts can see whether Meerkat's OpenAI prompt-cache fields apply on a
   backend: `WireBackendProfile.prompt_cache_applicable` (in a realm's
@@ -92,6 +168,29 @@ them.
 - `ChildMcpServers` supplies host-attested public descriptors to inline child and
   delegate profiles. Protected connection credentials stay in host composition;
   conflicting persisted descriptors refuse without replacement.
+- Resume-time spawn customization (#1701):
+  - `SpawnMemberCustomizer::customize_resume` (defaulted to
+    `customize_spawn`) is asked for every customized resume rebuild
+    (process-restart restore and `MobHandle::resume`) with a
+    `ResumedMemberView`: the bound session and its persisted
+    `SessionLlmIdentity`, read once per rebuild. A failed read fails that
+    member's restore, with the typed session error as its diagnostic, and
+    fails an explicit resume with that `MobError::SessionError`.
+  - `SpawnMemberSpec::resume_provider_params` sets a resume rebuild's
+    provider params over the durable ones (persisted as a `ProviderParams`
+    resume override), so a host can migrate one knob, for example
+    `prompt_cache_enabled`, and keep the rest. A fresh spawn refuses it
+    with `MobError::ResumeProviderParamsRequireResume`.
+  - When a restore or explicit resume moves a member to a successor session,
+    the customizer is asked again with the successor's view.
+  - `SpawnMemberCustomizerChain` composes customizers in order and stops at
+    the first error.
+  - `MobMcpState::with_child_spawn_member_customizer` installs a host
+    customizer on every mob the state creates or restores. In a child mob it
+    runs before the child application tool policy, which has the last word.
+  - The `SpawnMemberCustomizer` docs list the spawns it is asked for and the
+    ones it never is (identity reconcile, persisted fork resume and
+    fork-derived members, whose rebuilds repeat their first build).
 
 - `MobSessionService::load_retained_session_metadata` returns the latest
   committed metadata of an exact retained session, including archived sessions,
@@ -161,6 +260,25 @@ them.
   coordinated credential mutation path with an atomic mode check, preserving
   foreign-mode credentials and the existing rollback behavior.
 
+- Durable job deliveries now reach sessions on every surface (#1497). Only
+  RPC applied runtime inbox rows, on a 1 s timer backing off to 60 s, so on
+  the CLI, REST and MCP server subscription notifications, events and
+  job-await closures never arrived. RPC's timer driver is replaced by the
+  library delivery owner, and the other surfaces arm the same owner.
+- A job `Event` delivery wakes an idle origin session (#1497). It was
+  admitted without a wake, so it waited queued until some unrelated turn.
+- A detached shell job no longer gets a duplicate "reached terminal state"
+  System message (#1497). The shell applies its own terminal and then
+  acknowledged the delivery row, which a delivery owner could apply first.
+  Jobs whose producer applies the terminal (`JobTerminalApplication::Producer`)
+  now commit that row already acknowledged in one inbox compare-and-swap
+  (`RuntimeDeliveryInbox::submit_acknowledged`).
+- An ordinary System-message append (a host `append_system_context` or a job
+  notification) while a callback tool batch awaits its results no longer
+  wedges the session (#1497). It was pushed after the assistant tool-use tail,
+  so the batch could never resolve; it is now refused as a retryable busy
+  (`Session::append_system_message_control_idempotent`) without touching the
+  transcript.
 - A host's console observation path no longer overflows a 2 MiB debug worker
   stack. `MobMcpState::mob_handles_snapshot` and every mob verb that calls
   `ensure_restored` built the persistent-restore future inline, and the

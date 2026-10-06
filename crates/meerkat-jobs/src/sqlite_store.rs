@@ -64,6 +64,8 @@ struct PersistedJobSpec {
     canonical_arguments_hash: CanonicalArgumentsHash,
     credential_context_refs: Vec<PersistedCredentialContextRef>,
     submission_key: JobSubmissionKey,
+    #[serde(default)]
+    terminal_application: crate::JobTerminalApplication,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -422,11 +424,19 @@ fn probe_settled_phase(encoded: &[u8]) -> bool {
 #[derive(Debug, Clone)]
 pub struct SqliteDetachedJobStore {
     path: PathBuf,
+    outbox_commits: crate::JobOutboxCommitSignal,
 }
 
 impl SqliteDetachedJobStore {
+    /// Open the store at `path`.
+    ///
+    /// Each opened instance owns its own outbox commit signal; a process
+    /// should open one instance per file and share clones of it.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, DetachedJobError> {
-        let store = Self { path: path.into() };
+        let store = Self {
+            path: path.into(),
+            outbox_commits: crate::JobOutboxCommitSignal::new(),
+        };
         store.with_connection(|_| Ok(()))?;
         Ok(store)
     }
@@ -532,7 +542,7 @@ impl DetachedJobStore for SqliteDetachedJobStore {
                 });
             }
             if current.spec.submission_key != replacement.spec.submission_key
-                || !current.spec.equivalent_submission(&replacement.spec)
+                || !current.spec.same_admission(&replacement.spec)
             {
                 return Err(DetachedJobError::Store(
                     "compare-and-swap cannot change the submitted job specification".into(),
@@ -887,6 +897,10 @@ impl DetachedJobStore for SqliteDetachedJobStore {
     fn is_persistent(&self) -> bool {
         true
     }
+
+    fn outbox_commit_signal(&self) -> crate::JobOutboxCommitSignal {
+        self.outbox_commits.clone()
+    }
 }
 
 fn select_by_id(conn: &Connection, job_id: &JobId) -> Result<Option<StoredJob>, DetachedJobError> {
@@ -1150,6 +1164,7 @@ impl From<&JobSpec> for PersistedJobSpec {
                 .map(PersistedCredentialContextRef::from)
                 .collect(),
             submission_key: spec.submission_key.clone(),
+            terminal_application: spec.terminal_application,
         }
     }
 }
@@ -1173,6 +1188,7 @@ impl From<PersistedJobSpec> for JobSpec {
                 .map(ToolCredentialContextRef::from)
                 .collect(),
             submission_key: spec.submission_key,
+            terminal_application: spec.terminal_application,
         }
     }
 }
@@ -1428,6 +1444,37 @@ impl TryFrom<PersistedJobOutboxEntry> for JobOutboxEntry {
 mod tests {
     use super::{JOBS_DOMAIN, PersistedPhase};
     use crate::machines::detached_job::DetachedJobPhase;
+
+    /// A job spec persisted before `terminal_application` existed reads as
+    /// `Subscribers`, the behaviour every such job had.
+    #[test]
+    fn a_spec_persisted_without_terminal_application_reads_as_subscribers() {
+        let spec = crate::JobSpec::new(
+            "realm-a",
+            meerkat_core::SessionId::new(),
+            crate::ExecutionIntentId::new(),
+            crate::InteractionLineageId::new(),
+            crate::ToolIdentity::new("scan", "v1").expect("tool"),
+            crate::RunnerIdentity::new("runner.scan", "v1").expect("runner"),
+            crate::RestartClass::Adoptable,
+            crate::CanonicalArgumentsHash::new("sha256:args").expect("hash"),
+            crate::JobSubmissionKey::new("legacy-spec").expect("key"),
+        )
+        .with_terminal_application(crate::JobTerminalApplication::Producer);
+        let mut legacy = serde_json::to_value(super::PersistedJobSpec::from(&spec))
+            .expect("encode persisted spec");
+        legacy
+            .as_object_mut()
+            .expect("persisted spec is an object")
+            .remove("terminal_application")
+            .expect("current persisted specs carry the field");
+        let decoded: super::PersistedJobSpec =
+            serde_json::from_value(legacy).expect("decode a legacy persisted spec");
+        assert_eq!(
+            crate::JobSpec::from(decoded).terminal_application,
+            crate::JobTerminalApplication::Subscribers
+        );
+    }
 
     #[test]
     fn revision_encoding_round_trips_the_full_u64_domain() {

@@ -1310,6 +1310,19 @@ pub enum RuntimeSessionUnregisterAdmission {
     Pending(RuntimeSessionUnregisterObserver),
 }
 
+/// The wait a caller dispatched on after starting or joining an owned
+/// unregister teardown saga, reported to a test that armed
+/// [`MeerkatMachine::test_witness_next_unregister_wait`].
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnregisterTeardownWaitWitness {
+    /// Bounded by the ordinary caller grace: a saga still running when it
+    /// elapses is answered with typed `UnregisterInProgress`.
+    CallerGrace,
+    /// Awaits the saga's terminal result.
+    UntilTerminal,
+}
+
 /// Whether one session's runtime registration can serve, as a single typed
 /// fact read from one registration entry.
 ///
@@ -9219,6 +9232,11 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// One-shot witness armed by a test: the next caller that waits on an
+    /// unregister teardown saga reports the wait it dispatched on.
+    #[cfg(feature = "test-support")]
+    test_unregister_wait_witness:
+        StdMutex<Option<crate::tokio::sync::oneshot::Sender<UnregisterTeardownWaitWitness>>>,
     /// This machine's user-interrupt acknowledgement bound. Tests scope it
     /// per machine: a short bound would make every success-path interrupt
     /// race the process-global cleanup dispatcher that all in-process tests
@@ -10870,6 +10888,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "test-support")]
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
+                test_unregister_wait_witness: StdMutex::new(None),
+                #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
@@ -11041,6 +11061,8 @@ impl MeerkatMachine {
                 test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
                 #[cfg(feature = "test-support")]
                 test_unregister_saga_hold: StdMutex::new(None),
+                #[cfg(feature = "test-support")]
+                test_unregister_wait_witness: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]

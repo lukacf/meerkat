@@ -254,6 +254,20 @@ them.
 
 ### Fixed
 
+- A failed actor materialization's rollback joins its registration's
+  unregister saga until terminal. It waited with the ordinary 2 s caller
+  grace, so under heavy host load it answered `UnregisterInProgress` and
+  its mob callers reported cleanup as failed: a member spawn whose build
+  failed typed (for example a profile deny entry in no tool vocabulary)
+  returned an opaque "cleanup also failed" internal error, and a host
+  materialize whose create result named another session fail-stopped the
+  mob host until restart. The rollback compensates a registration its own
+  materialization created, which is the case
+  `unregister_current_session_registration_until_terminal` documents. With
+  the turn-finalization boundary held, the join comes after the claim's
+  provisional post-stop cleanup has completed under that boundary, so the
+  join adds no wait on it.
+
 - Connector credential status and bearer reads reuse their held lifecycle
   guard when restoring a committed credential into a fresh runtime owner.
   Cold reads no longer wait on their own guard. Connector logout uses the

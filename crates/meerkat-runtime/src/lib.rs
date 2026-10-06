@@ -573,6 +573,8 @@ pub use input_state::{
 pub use meerkat_core::types::HandlingMode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_machine::ProviderAuthRuntimeAuthority;
+#[cfg(feature = "test-support")]
+pub use meerkat_machine::UnregisterTeardownWaitWitness;
 pub use meerkat_machine::{
     AdmittedWork, ArchivedSessionActorMaterializationAuthorization,
     AuthorizedArchivedResumeCommitLease, CommittedRuntimeExecutorAttachmentPublicationLease,

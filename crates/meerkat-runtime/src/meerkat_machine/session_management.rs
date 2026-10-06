@@ -3691,12 +3691,26 @@ impl MeerkatMachine {
             drop(gate_guard);
             #[cfg(feature = "live")]
             drop(live_lifecycle_lease);
-            self.join_or_start_unregister_teardown(
+            // This rollback compensates a registration its own materialization
+            // created, and callers act on that registration being gone: a
+            // typed build failure is reported only once cleanup is proven.
+            // Join the owned saga until terminal. The ordinary caller grace
+            // would answer a saga still running under load with
+            // `UnregisterInProgress`, which callers must treat as unproven
+            // cleanup. With B held, the claim's provisional post-stop cleanup
+            // completed above under B, and its completion bit makes the
+            // saga's ordinary cleanup return before it takes its cleanup gate
+            // or B, so this join adds no wait on B.
+            self.join_or_start_unregister_teardown_with_admission(
                 session_id,
                 expected_epoch,
                 UnregisterTeardownCaller::Explicit,
+                UnregisterTeardownAdmission::AnyCurrentRegistration,
+                None,
+                UnregisterTeardownWait::UntilTerminal,
             )
-            .await?;
+            .await?
+            .require_completed()?;
             return Ok(true);
         }
 
@@ -8179,6 +8193,9 @@ impl MeerkatMachine {
             }
         };
 
+        #[cfg(feature = "test-support")]
+        self.report_unregister_wait_test_witness(&wait);
+
         if wait == UnregisterTeardownWait::ReturnObserver {
             let registration = expected_registration.cloned().ok_or_else(|| {
                 RuntimeDriverError::Internal(format!(
@@ -10759,6 +10776,50 @@ Ok::<(), RuntimeDriverError>(())
             .test_unregister_caller_wait_grace
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(grace);
+    }
+
+    /// Witness the wait the next caller dispatches on once it has started or
+    /// joined an unregister teardown saga and is about to wait on it. The
+    /// report is sent at the dispatch itself, before any waiting, so a test
+    /// holding the saga with [`Self::test_hold_next_unregister_saga`] proves
+    /// which wait the caller took without relying on scheduling.
+    #[cfg(feature = "test-support")]
+    pub fn test_witness_next_unregister_wait(
+        &self,
+    ) -> crate::tokio::sync::oneshot::Receiver<super::UnregisterTeardownWaitWitness> {
+        let (witness_tx, witness_rx) = crate::tokio::sync::oneshot::channel();
+        let replaced = self
+            .test_unregister_wait_witness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(witness_tx);
+        assert!(
+            replaced.is_none(),
+            "unregister wait test witness already armed"
+        );
+        witness_rx
+    }
+
+    #[cfg(feature = "test-support")]
+    fn report_unregister_wait_test_witness(&self, wait: &UnregisterTeardownWait) {
+        let witness = match wait {
+            UnregisterTeardownWait::CallerGrace(_) => {
+                super::UnregisterTeardownWaitWitness::CallerGrace
+            }
+            UnregisterTeardownWait::UntilTerminal => {
+                super::UnregisterTeardownWaitWitness::UntilTerminal
+            }
+            // An observer return does not wait at all.
+            UnregisterTeardownWait::ReturnObserver => return,
+        };
+        let witness_tx = self
+            .test_unregister_wait_witness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(witness_tx) = witness_tx {
+            let _ = witness_tx.send(witness);
+        }
     }
 
     /// The deadline for a plain unregister caller's bounded wait.

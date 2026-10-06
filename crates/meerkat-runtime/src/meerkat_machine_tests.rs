@@ -48503,6 +48503,57 @@ mod prepared_materialization_transactions {
             .expect("clean exact prepared attachment");
     }
 
+    /// A failed materialization's rollback that finds its registration's
+    /// unregister saga already started by another caller joins that saga until
+    /// terminal, exactly like a rollback that starts it: the other caller's
+    /// bounded grace has already answered in progress, so only the rollback's
+    /// own wait can prove the registration gone. The saga is held until the
+    /// rollback has dispatched its wait, and the machine witnesses which wait
+    /// that was, so no scheduling decides the outcome.
+    #[tokio::test]
+    async fn prepared_rollback_joins_an_already_started_unregister_until_terminal() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let mut prepared = machine
+            .prepare_session_materialization(session_id.clone())
+            .await
+            .expect("unique preparation");
+        let (saga_entered, release_saga) = machine.test_hold_next_unregister_saga();
+        machine.test_set_unregister_caller_wait_grace(Duration::ZERO);
+        let started = machine.unregister_session(&session_id).await;
+        assert!(
+            matches!(
+                started,
+                Err(RuntimeDriverError::UnregisterInProgress { .. })
+            ),
+            "the plain unregister answers its held saga in progress: {started:?}"
+        );
+        saga_entered
+            .await
+            .expect("the plain unregister started the saga");
+
+        let rollback_wait = machine.test_witness_next_unregister_wait();
+        let release_after_dispatch = async {
+            let wait = rollback_wait
+                .await
+                .expect("the rollback dispatched its wait on the started saga");
+            let _ = release_saga.send(());
+            wait
+        };
+        let (rolled_back, rollback_wait) =
+            tokio::join!(prepared.rollback_now(), release_after_dispatch);
+        assert_eq!(
+            rollback_wait,
+            crate::UnregisterTeardownWaitWitness::UntilTerminal,
+            "the rollback joins the already-started saga until terminal"
+        );
+        assert!(
+            rolled_back.expect("the joined saga completes the rollback"),
+            "the rollback owned the registration it rolled back"
+        );
+        assert!(!machine.contains_session(&session_id).await);
+    }
+
     #[tokio::test]
     async fn boundary_owned_factory_startup_failure_hands_off_wedged_exact_cleanup() {
         struct RejectStartupBoundaryReacquireHandle {

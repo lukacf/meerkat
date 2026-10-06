@@ -47426,14 +47426,20 @@ impl MobActor {
             let plan = trust_cleanup_plan_by_member
                 .remove(&entry.agent_identity)
                 .unwrap_or_else(RetireTrustCleanupPlan::empty);
-            self.dispose_local_member_after_destroy_admission(entry, plan, &mut report)
-                .await?;
+            // Keep nested disposal futures out of this destroy coordinator's
+            // debug stack frame while retaining inline polling and drop.
+            boxed_arm_future(|| {
+                self.dispose_local_member_after_destroy_admission(entry, plan, &mut report)
+            })
+            .await?;
         }
-        self.destroy_remote_members_for_destroy(
-            remote_entries,
-            &mut trust_cleanup_plan_by_member,
-            &mut report,
-        )
+        boxed_arm_future(|| {
+            self.destroy_remote_members_for_destroy(
+                remote_entries,
+                &mut trust_cleanup_plan_by_member,
+                &mut report,
+            )
+        })
         .await;
         if report.remote_cleanup_deadline_exceeded
             || !report.orphaned_remote_members.is_empty()

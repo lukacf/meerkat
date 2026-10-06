@@ -153,6 +153,17 @@ them.
 
 ### Fixed
 
+- A host's console observation path no longer overflows a 2 MiB debug worker
+  stack. `MobMcpState::mob_handles_snapshot` and every mob verb that calls
+  `ensure_restored` built the persistent-restore future inline, and the
+  council-recovery, fork re-link and forked-participant sweeps handed their
+  futures by value to `tokio::spawn`. At opt-level 0 each of those reserved
+  its full size in the caller's frame, even on paths that never ran it; the
+  restore future grew with the child-mob builder options added since 0.8.51,
+  and the frames reached about 420 KiB on that path. They are now built in
+  their own frames (`stack_relief::box_in_own_frame`), the path runs in
+  under 32 KiB, and a 128 KiB debug-stack regression test guards it.
+
 - OpenAI: prompt-cache fields reach only a backend that has admitted them
   (#1669). The public OpenAI API admits them; the ChatGPT backend and Azure
   OpenAI do not, but two paths sent them there anyway:
@@ -318,6 +329,14 @@ them.
   `CARGO_TARGET_DIR`, as CI sets, still wins. A forced rebuild after a first
   build now finishes the Rust part in under a second; wasm-opt and
   packaging still run.
+- `cargo xtask protocol-codegen` and `machine-codegen` write a generated
+  artifact only when its bytes change. Before, both rewrote every artifact on
+  every run, and the pre-push machine hook runs both. A byte-identical
+  rewrite of `crates/meerkat-core/src/generated/session_document.rs` bumped
+  its mtime, which Cargo tracks, so a retry that only touched TLA or docs
+  rebuilt meerkat-core and everything downstream. Generation and drift
+  checks are unchanged. A rerun on an unchanged tree now writes nothing (51
+  protocol artifacts reported `unchanged`).
 - The Rust changed-path selector no longer treats the per-crate license
   symlinks (`crates/*/LICENSE-MIT`, `LICENSE-APACHE`) as embedded compile
   inputs. Since those links landed, the repo-root license files mapped to

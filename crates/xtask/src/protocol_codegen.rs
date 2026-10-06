@@ -13,11 +13,12 @@ use meerkat_machine_schema::{
     canonical_machine_schemas, catalog::dsl,
 };
 
+use crate::generated_files::{GeneratedWrite, write_if_changed};
 use crate::public_contracts::repo_root;
 
 /// One artifact emitted by protocol codegen: the committed destination and the
 /// rustfmt-normalized source that belongs there.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GeneratedProtocolFile {
     /// Absolute path of the committed artifact.
     pub path: std::path::PathBuf,
@@ -163,16 +164,7 @@ pub fn protocol_emission_set() -> Result<Vec<GeneratedProtocolFile>> {
 /// for each declared `EffectHandoffProtocol`, plus the terminal surface mapping.
 pub fn run_protocol_codegen() -> Result<()> {
     let emitted = protocol_emission_set()?;
-
-    for file in &emitted {
-        if let Some(parent) = file.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create dir {}", parent.display()))?;
-        }
-        fs::write(&file.path, &file.contents)
-            .with_context(|| format!("write {}", file.path.display()))?;
-        println!("  generated: {}", file.path.display());
-    }
+    write_protocol_files(&emitted)?;
 
     if emitted.is_empty() {
         println!("protocol-codegen: no artifacts declared - nothing to generate");
@@ -183,6 +175,18 @@ pub fn run_protocol_codegen() -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// Write each emitted artifact, skipping files whose bytes already match so an
+/// unchanged artifact keeps its mtime (see [`crate::generated_files`]).
+pub fn write_protocol_files(emitted: &[GeneratedProtocolFile]) -> Result<()> {
+    for file in emitted {
+        match write_if_changed(&file.path, file.contents.as_bytes())? {
+            GeneratedWrite::Written => println!("  generated: {}", file.path.display()),
+            GeneratedWrite::Unchanged => println!("  unchanged: {}", file.path.display()),
+        }
+    }
     Ok(())
 }
 
@@ -8449,4 +8453,82 @@ fn to_snake_case(s: &str) -> String {
         result.push(c.to_ascii_lowercase());
     }
     result
+}
+
+#[cfg(test)]
+mod write_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::{GeneratedProtocolFile, protocol_emission_set, write_protocol_files};
+    use std::fs::{self, File};
+    use std::time::{Duration, SystemTime};
+
+    /// Running the protocol writer twice on unchanged input leaves every
+    /// artifact's mtime alone; a changed artifact is still written.
+    #[test]
+    fn rerunning_on_unchanged_input_keeps_mtimes_and_changed_input_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let relocated: Vec<GeneratedProtocolFile> = protocol_emission_set()
+            .expect("protocol emission set")
+            .into_iter()
+            .enumerate()
+            .map(|(index, file)| GeneratedProtocolFile {
+                path: dir
+                    .path()
+                    .join(format!("{index}"))
+                    .join(file.path.file_name().expect("artifact file name")),
+                contents: file.contents,
+            })
+            .collect();
+        assert!(
+            !relocated.is_empty(),
+            "the catalog declares protocol artifacts"
+        );
+
+        write_protocol_files(&relocated).expect("first run");
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        for file in &relocated {
+            File::options()
+                .write(true)
+                .open(&file.path)
+                .and_then(|handle| handle.set_modified(old))
+                .expect("set an old mtime");
+        }
+
+        write_protocol_files(&relocated).expect("second run");
+        for file in &relocated {
+            assert_eq!(
+                fs::metadata(&file.path)
+                    .and_then(|m| m.modified())
+                    .expect("mtime"),
+                old,
+                "unchanged artifact {} was rewritten",
+                file.path.display()
+            );
+        }
+
+        let mut changed = relocated.clone();
+        changed[0].contents.push_str("\n// changed\n");
+        write_protocol_files(&changed).expect("third run");
+        assert_eq!(
+            fs::read_to_string(&changed[0].path).expect("read"),
+            changed[0].contents
+        );
+        assert_ne!(
+            fs::metadata(&changed[0].path)
+                .and_then(|m| m.modified())
+                .expect("mtime"),
+            old,
+            "a changed artifact must be written"
+        );
+        for file in &relocated[1..] {
+            assert_eq!(
+                fs::metadata(&file.path)
+                    .and_then(|m| m.modified())
+                    .expect("mtime"),
+                old,
+                "an unchanged sibling of a changed artifact was rewritten"
+            );
+        }
+    }
 }

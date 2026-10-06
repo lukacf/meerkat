@@ -854,13 +854,15 @@ fn experimental_live_channel_open_error_response(
             format!("failed to build session config: {projection_error}"),
         ),
         // A reopen whose fresh summary went stale again during the open
-        // (#1784) is a conflict to retry against current state, like a stale
-        // cursor: retried, the reopen seeds from the retained summary.
+        // (#1784) is a retryable conflict, as a busy close settlement is:
+        // retried, the reopen seeds from the retained summary. Not
+        // STALE_CURSOR, whose contract is an event-cursor overrun that
+        // carries the current watermark.
         ExperimentalLiveChannelOpenError::Summary(
             summary_error @ meerkat::session_runtime::live_summary::LiveContextSummaryError::StaleSnapshot,
         ) => RpcResponse::error(
             id,
-            meerkat_contracts::ErrorCode::StaleCursor.jsonrpc_code(),
+            error::SESSION_BUSY,
             format!("live context summary went stale during the open; retry: {summary_error}"),
         ),
         ExperimentalLiveChannelOpenError::Summary(summary_error) => RpcResponse::error(
@@ -3312,11 +3314,13 @@ mod tests {
     }
 
     /// #1784: a reopen whose fresh summary went stale again during the open
-    /// is a retryable conflict (STALE_CURSOR), not an internal error; other
-    /// summary failures stay internal.
+    /// is a retryable conflict (SESSION_BUSY, as a busy close settlement is),
+    /// not an internal error, and not STALE_CURSOR, whose contract is an
+    /// event-cursor overrun carrying a watermark. Other summary failures stay
+    /// internal.
     #[cfg(feature = "openai-live")]
     #[test]
-    fn a_stale_reopen_summary_maps_to_the_retryable_stale_cursor_class() {
+    fn a_stale_reopen_summary_maps_to_the_retryable_session_busy_class() {
         use meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError;
         use meerkat::session_runtime::live_summary::LiveContextSummaryError;
         let stale = experimental_live_channel_open_error_response(
@@ -3325,7 +3329,7 @@ mod tests {
         );
         assert_eq!(
             stale.error.as_ref().map(|error| error.code),
-            Some(meerkat_contracts::ErrorCode::StaleCursor.jsonrpc_code())
+            Some(error::SESSION_BUSY)
         );
         let other = experimental_live_channel_open_error_response(
             None,

@@ -265,9 +265,10 @@ them.
   open reopened channel: a seeded reopen stages no preparation lease, so the
   generated bootstrap guard refuses one. Rows committed while the summary is
   generated ride verbatim after it through the retained path. A reopen that
-  still cannot seed fails typed (`LiveContextSummaryError::StaleSnapshot`)
-  for the client to retry, and a failed generation opens with nothing to
-  deliver. First opens with no retained summary are unchanged. The trade:
+  still cannot seed fails typed (`LiveContextSummaryError::StaleSnapshot`;
+  RPC `live/open` answers the retryable `SESSION_BUSY`, -32002) for the
+  client to retry, and a failed generation opens with nothing to deliver.
+  First opens with no retained summary are unchanged. The trade:
   reopens after a lot of new history can connect slightly later, in
   exchange for no unprompted speech and correct recall. Measured on S106
   (20 such reopens), open request to connected had a median of 4.2 s

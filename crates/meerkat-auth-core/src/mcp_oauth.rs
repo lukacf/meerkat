@@ -608,8 +608,8 @@ impl Drop for McpOAuthPendingLogin {
 /// This is a host-channel projection. It must never be placed in a tool
 /// result, transcript, agent event, elicitation result or ordinary log: the
 /// authorize URL and state let whoever follows them complete the attempt.
-/// The host opens `authorize_url` only in a browser context that no
-/// agent-drivable tool can observe or control. `Debug` redacts the secrets.
+/// The host opens `authorize_url` in the user's own browser, not in one an
+/// agent tool drives. `Debug` redacts the secrets.
 #[derive(Clone, PartialEq, Eq)]
 pub struct McpOAuthLoginStart {
     pub target: McpServerIdentity,
@@ -964,9 +964,9 @@ impl McpOAuthAuthority {
     ///
     /// The host owns the loopback listener and the browser: it binds the
     /// callback (for example with [`Self::begin_loopback_login`]), passes the
-    /// loopback redirect URI here, opens the returned authorize URL in a
-    /// browser context that no agent-drivable tool can observe or control, and
-    /// feeds the callback to [`Self::login_complete`]. This method performs
+    /// loopback redirect URI here, opens the returned authorize URL in the
+    /// user's own browser (not one an agent tool drives), and feeds the
+    /// callback to [`Self::login_complete`]. This method performs
     /// discovery, the account strategy's preflight (before any client
     /// registration or browser), dynamic client registration and the
     /// strategy's descriptor, extended with the resource's scopes, then

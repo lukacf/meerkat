@@ -11,22 +11,25 @@
 //! the typed `AuthorizationRequired` host status, and the host decides when
 //! to ask its user.
 //!
-//! # Host obligation: an unobservable browser context
+//! # Host obligation: keep the attempt out of agent channels
 //!
 //! The authorize URL and `state` returned by a login start, and the `code`
 //! and `state` delivered to the loopback callback, are bearer material for
 //! one attempt: whoever holds them can complete it. The host must:
 //!
-//! - open the authorize URL only in a browser context that no agent-drivable
-//!   tool can observe or control (not a browser, shell, screenshot, MCP or
-//!   computer-use tool available to any agent of this host);
 //! - bind the loopback callback itself and deliver `state`/`code` only to the
 //!   matching login complete call;
 //! - never place the authorize URL, `state`, `code` or callback data in a
 //!   tool result, transcript, agent event, elicitation result or log.
 //!
+//! The host opens the authorize URL in the user's own browser (the system
+//! browser by default). An ordinary host is supported: no agent-unreachable
+//! host is required. A host whose agents have a browser or computer-use tool
+//! should not open the URL in a browser such a tool drives.
+//!
 //! Login start, callback and completion types redact these values in `Debug`;
-//! completion projections are secret-free.
+//! completion projections are secret-free, and the attempt status carries
+//! only a non-secret reference.
 //!
 //! Wire callers (RPC, REST) are host-privileged by contract: a start that
 //! joins an attempt already pending for the same configured server returns
@@ -589,8 +592,8 @@ impl HostAuthService {
     }
 
     /// Admit one host-driven MCP OAuth attempt. The returned projection is
-    /// host-only (see the module docs): open its authorize URL in an
-    /// unobservable browser context and deliver the loopback callback to
+    /// host-only (see the module docs): open its authorize URL in the user's
+    /// browser and deliver the loopback callback to
     /// [`Self::mcp_login_complete`]. If an attempt is already pending for the
     /// target, its projection is returned with `disposition = Joined`; no
     /// second attempt is admitted.

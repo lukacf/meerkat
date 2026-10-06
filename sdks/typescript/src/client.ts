@@ -4488,9 +4488,9 @@ export class MeerkatClient {
    * slot, issuer, client, resource, scopes, strategy_id, account_selection },
    * redirect_uri }`). A connector `discover` login binds the provider-verified
    * account to the slot and publishes only into an empty slot.
-   * The authorize URL and state are host-channel data: open the URL only in
-   * a browser no agent tool can observe, and never pass these values to an
-   * agent, tool result, transcript or log.
+   * The authorize URL and state are host-channel data: open the URL in the
+   * user's own browser (not one an agent tool drives), and never pass these
+   * values to an agent, tool result, transcript or log.
    */
   async authLoginStart(params: RpcLoginStartParams): Promise<RpcWireLoginStart> {
     return this.request("auth/login/start", params);

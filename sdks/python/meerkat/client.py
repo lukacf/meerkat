@@ -984,9 +984,9 @@ class MeerkatClient:
         `disposition` is `"joined"` when an attempt was already pending for the
         server (its URL and state are returned; no second attempt exists).
         `redirect_uri` must be an http loopback URL you bind yourself. The
-        authorize URL and state are host-channel data: open the URL only in a
-        browser no agent tool can observe, and never pass these values to an
-        agent, tool result, transcript or log. Finish with
+        authorize URL and state are host-channel data: open the URL in the
+        user's own browser (not one an agent tool drives), and never pass these
+        values to an agent, tool result, transcript or log. Finish with
         `auth_mcp_login_complete`, or retire the attempt with
         `auth_mcp_login_cancel`.
         """

@@ -252,8 +252,9 @@ export class Auth {
   /**
    * Begin an OAuth browser flow for a provider binding or an MCP server
    * (`{ mcp, redirect_uri }`). The authorize URL and state are host-channel
-   * data: open the URL only in a browser context no agent tool can observe,
-   * and never pass these values to an agent, tool result, transcript or log.
+   * data: open the URL in the user's own browser (not one an agent tool
+   * drives), and never pass these values to an agent, tool result,
+   * transcript or log.
    */
   async loginStart(params: LoginStartParams): Promise<OAuthLoginStart> {
     const result = await this.transport.request<LoginStartParams, WireLoginStart>(

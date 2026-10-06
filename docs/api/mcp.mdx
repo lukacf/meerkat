@@ -322,10 +322,12 @@ ask its user.
 
 <Warning>
 The authorize URL and `state`, and the callback's `code` and `state`, let
-whoever holds them complete the attempt. A host must open the URL only in a
-browser context that no agent-drivable tool can observe or control, bind the
-loopback callback itself, and never put these values in a tool result,
-transcript, agent event, elicitation result or log.
+whoever holds them complete the attempt. A host must bind the loopback
+callback itself and never put these values in a tool result, transcript,
+agent event, elicitation result or log. It opens the URL in the user's own
+browser: an ordinary host is supported, and no agent-unreachable host is
+required. A host whose agents have a browser or computer-use tool should not
+open the URL in a browser such a tool drives.
 </Warning>
 
 ## Meerkat as an MCP server

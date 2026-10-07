@@ -1,6 +1,8 @@
-//! Acceptance pin for OB3's exact Meerkat 0.8.10 recovery-migration session.
+//! Acceptance pin for a Meerkat 0.8.10 recovery-migration session.
 //!
-//! The fixture contains one system message and no user/provider transcript.
+//! The fixture is a synthetic stand-in with the released envelope shape of a
+//! downstream deployment's recovery-migration session (see its provenance
+//! file). It contains one system message and no user/provider transcript.
 //! The explicit importer accepts it only under exact physical store authority;
 //! its retired `RecoveryMigration` + legacy authority-base stamp is stripped
 //! as untrusted metadata from the resulting domain Session.
@@ -16,7 +18,7 @@ use sha2::{Digest, Sha256};
 const FIXTURE: &[u8] = include_bytes!("fixtures/v0_8_10_ob3_recovery_migration_session.json");
 const PROVENANCE: &[u8] =
     include_bytes!("fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json");
-const FIXTURE_SHA256: &str = "43e49a7b216cf61f6ba8f289824c9d6e24a64a81d873f9eb4a09c5b3f6f0cd98";
+const FIXTURE_SHA256: &str = "7a3c2d45901a77f6fc9fca222ae0dc11a5a7a8163cc058e472c1626edfafb831";
 const RELEASED_RUNTIME_CHECKPOINT_PROVENANCE_KEY: &str = "session_runtime_checkpoint_provenance_v1";
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -46,7 +48,7 @@ fn released_stamp_key(metadata: &serde_json::Map<String, serde_json::Value>) -> 
 
 #[test]
 fn ob3_released_recovery_migration_runs_only_through_one_time_importer() {
-    assert_eq!(FIXTURE.len(), 52_693);
+    assert_eq!(FIXTURE.len(), 51_999);
     assert_eq!(sha256_hex(FIXTURE), FIXTURE_SHA256);
 
     let provenance: serde_json::Value =

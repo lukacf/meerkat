@@ -763,6 +763,9 @@ them.
 
 ### Testing
 
+- The released 0.8.10 recovery-migration test fixture is now a synthetic
+  stand-in with the same envelope shape, and the `meerkat-core` package no
+  longer ships it.
 - The xtask machine workflow test
   (`machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts`)
   now reserves its whole nextest lane in every profile, so no other test runs

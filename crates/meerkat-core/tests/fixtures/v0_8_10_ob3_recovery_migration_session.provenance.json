@@ -1,17 +1,18 @@
 {
   "schema_version": 1,
   "fixture": "v0_8_10_ob3_recovery_migration_session.json",
-  "bytes": 52693,
-  "sha256": "43e49a7b216cf61f6ba8f289824c9d6e24a64a81d873f9eb4a09c5b3f6f0cd98",
+  "synthetic": true,
+  "bytes": 51999,
+  "sha256": "7a3c2d45901a77f6fc9fca222ae0dc11a5a7a8163cc058e472c1626edfafb831",
   "producer": {
     "product": "meerkat",
     "version": "0.8.10",
-    "deployment": "ob3"
+    "deployment": "synthetic"
   },
   "delivery": {
     "classification": "authorized_system_only_session",
-    "authorization": "OB3 explicitly authorized copying this exact artifact into Meerkat fixtures",
-    "source_artifact_name": "ob3-recovery-migration-stamped-session-v0810.json"
+    "authorization": "Synthetic stand-in generated for this test; it contains no production content.",
+    "source_artifact_name": "synthetic-recovery-migration-session.json"
   },
   "expected": {
     "session_envelope_version": 2,

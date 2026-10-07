@@ -12,13 +12,13 @@ use serde_json::value::RawValue;
 
 use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
-    AuthStatusParams, BindingIdParams, CreateProfileParams, DeviceCompleteParams,
+    AuthLogoutParams, AuthStatusParams, BindingIdParams, CreateProfileParams, DeviceCompleteParams,
     DeviceStartParams, LoginCancelParams, LoginCompleteParams, LoginStartParams,
-    ProvisionApiKeyParams, RealmIdParams, WireAuthProfile, WireAuthStatusDetail,
-    WireAuthStatusResult, WireBackendProfile, WireBindingIdentity, WireConnectorLoginTarget,
-    WireConnectorSlotTarget, WireDeviceCompleteResult, WireLoginCancelled,
-    WireLoginCancelledTarget, WireLoginReady, WireLoginReadyTarget, WireLoginStart,
-    WireLoginStartTarget, WireLoginTarget, WireMcpLoginReady, WireMcpLoginStart,
+    ProvisionApiKeyParams, RealmIdParams, WireAuthLogoutResult, WireAuthProfile,
+    WireAuthStatusDetail, WireAuthStatusResult, WireBackendProfile, WireBindingIdentity,
+    WireConnectorLoginTarget, WireConnectorSlotTarget, WireDeviceCompleteResult,
+    WireLoginCancelled, WireLoginCancelledTarget, WireLoginReady, WireLoginReadyTarget,
+    WireLoginStart, WireLoginStartTarget, WireLoginTarget, WireMcpLoginReady, WireMcpLoginStart,
     WireMcpLoginTarget, WireProviderBinding, WireProviderLoginReady, WireProviderLoginStart,
     WireProvisionApiKeyResult, WireRealmConnectionSet,
 };
@@ -1667,6 +1667,7 @@ pub async fn handle_auth_login_complete(
                 mcp_server = %mcp.server_name,
                 action = "login_mcp_oauth_complete",
                 has_refresh_token = %completed.has_refresh_token,
+                account_verification = ?completed.account_verification,
                 "MCP OAuth login completed via RPC"
             );
             return RpcResponse::success(
@@ -1676,6 +1677,9 @@ pub async fn handle_auth_login_complete(
                     target: WireLoginReadyTarget::Mcp(WireMcpLoginReady {
                         mcp,
                         account_id: completed.account_id,
+                        account_verification: meerkat::mcp_account_verification_to_wire(Some(
+                            completed.account_verification,
+                        )),
                     }),
                     expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
                     has_refresh_token: completed.has_refresh_token,
@@ -1790,6 +1794,15 @@ pub async fn handle_auth_login_cancel(
             };
             service
                 .mcp_login_cancel_by_state(&target, &parsed.state)
+                .map(|()| WireLoginCancelledTarget::Mcp(WireMcpLoginTarget { mcp: parsed.mcp }))
+        }
+        LoginCancelParams::McpAttempt(parsed) => {
+            let target = match configured_mcp_target(runtime, &parsed.mcp).await {
+                Ok(target) => target,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            service
+                .mcp_login_cancel_by_attempt_ref(&target, &parsed.attempt_ref)
                 .map(|()| WireLoginCancelledTarget::Mcp(WireMcpLoginTarget { mcp: parsed.mcp }))
         }
         LoginCancelParams::Connector(parsed) => {
@@ -2279,9 +2292,38 @@ pub async fn handle_auth_logout(
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
 ) -> RpcResponse {
-    let parsed: BindingIdParams = match parse_params(params) {
+    let parsed: AuthLogoutParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
+    };
+    let parsed = match parsed {
+        AuthLogoutParams::Binding(parsed) => parsed,
+        AuthLogoutParams::Mcp(WireMcpLoginTarget { mcp }) => {
+            let target = match configured_mcp_target(runtime, &mcp).await {
+                Ok(target) => target,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            let service = match host_auth_service(runtime) {
+                Ok(service) => service,
+                Err(error_value) => return host_auth_error_response(id, error_value),
+            };
+            if let Err(error_value) = service.mcp_logout(&target).await {
+                return host_auth_error_response(id, error_value);
+            }
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                server_name = target.server_name(),
+                action = "logout",
+                "MCP server credential logged out via RPC"
+            );
+            return RpcResponse::success(
+                id,
+                WireAuthLogoutResult::Mcp(meerkat_contracts::WireMcpLoggedOut {
+                    mcp,
+                    cleared: true,
+                }),
+            );
+        }
     };
     let (auth_binding, binding, auth_profile) = match resolve_binding_identity(
         runtime,
@@ -2316,11 +2358,11 @@ pub async fn handle_auth_logout(
     );
     RpcResponse::success(
         id,
-        meerkat_contracts::WireAuthProfileCleared {
+        WireAuthLogoutResult::Binding(meerkat_contracts::WireAuthProfileCleared {
             identity: meerkat_contracts::WireBindingIdentity::from(&auth_binding),
             profile_id: auth_profile.id.clone(),
             cleared: true,
-        },
+        }),
     )
 }
 
@@ -3628,6 +3670,182 @@ mod tests {
                 "RPC logs leaked an OAuth secret canary"
             );
         }
+    }
+
+    /// The #1808 attempt read over RPC: `auth/status/get` reports a pending
+    /// MCP attempt by a non-secret reference only, `auth/login/cancel`
+    /// retires it by that reference, and `auth/logout` disconnects the
+    /// server's stored credential.
+    #[tokio::test]
+    async fn mcp_attempt_status_cancel_by_reference_and_logout_over_rpc() {
+        use meerkat::test_fixtures::mcp_oauth::{McpOAuthFixture, SUBJECT, follow_authorize_url};
+
+        let fixture = McpOAuthFixture::spawn().await.unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".rkat")).unwrap();
+        std::fs::write(
+            project.path().join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"attempts\"\nurl = \"{}\"\noauth_account = \"{SUBJECT}\"\n",
+                fixture.mcp_url()
+            ),
+        )
+        .unwrap();
+        let runtime = test_runtime();
+        runtime.set_skill_identity_roots(Some(project.path().to_path_buf()), None);
+        let mcp = serde_json::json!({
+            "server_name": "attempts",
+            "server_url": fixture.mcp_url(),
+            "oauth_account": SUBJECT,
+        });
+        let status = |id: i64| {
+            let mcp = mcp.clone();
+            let runtime = &runtime;
+            async move {
+                rpc_result(
+                    handle_auth_status_get(
+                        Some(RpcId::Num(id)),
+                        Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                        runtime,
+                    )
+                    .await,
+                )
+            }
+        };
+        let cancel = |id: i64, params: serde_json::Value| {
+            let runtime = &runtime;
+            async move {
+                handle_auth_login_cancel(
+                    Some(RpcId::Num(id)),
+                    Some(raw_params(params).as_ref()),
+                    runtime,
+                )
+                .await
+            }
+        };
+
+        let idle = status(1).await;
+        assert_eq!(idle["phase"], "authorization_required");
+        assert!(idle.get("attempt").is_none(), "no attempt is pending");
+
+        let start = rpc_result(
+            handle_auth_login_start(
+                Some(RpcId::Num(2)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "redirect_uri": "http://127.0.0.1:1/mcp/oauth/callback",
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        let state = start["state"].as_str().unwrap().to_owned();
+        let pending = status(3).await;
+        let attempt = &pending["attempt"];
+        assert_eq!(attempt["phase"], "pending");
+        let attempt_ref = attempt["ref"].as_str().unwrap().to_owned();
+        assert!(attempt_ref.starts_with("oauth-action:"), "{attempt_ref}");
+        assert!(attempt["expires_at"].as_str().is_some());
+        let rendered = pending.to_string();
+        for secret in [state.as_str(), start["authorize_url"].as_str().unwrap()] {
+            assert!(
+                !rendered.contains(secret),
+                "the status carries no attempt secret"
+            );
+        }
+
+        // A forged reference, or a reference mixed with the state, is refused.
+        let forged = cancel(
+            4,
+            serde_json::json!({ "mcp": mcp, "attempt_ref": "oauth-action:0000" }),
+        )
+        .await;
+        assert!(forged.error.is_some(), "a forged reference is refused");
+        let mixed = cancel(
+            5,
+            serde_json::json!({ "mcp": mcp, "attempt_ref": attempt_ref, "state": state }),
+        )
+        .await;
+        assert_eq!(
+            mixed.error.expect("mixed selectors").code,
+            error::INVALID_PARAMS
+        );
+        assert_eq!(status(6).await["attempt"]["ref"], attempt_ref.as_str());
+
+        let cancelled = rpc_result(
+            cancel(
+                7,
+                serde_json::json!({ "mcp": mcp, "attempt_ref": attempt_ref }),
+            )
+            .await,
+        );
+        assert_eq!(cancelled["cancelled"], true);
+        assert_eq!(cancelled["mcp"], mcp);
+        assert!(status(8).await.get("attempt").is_none());
+
+        // Log in through the host's loopback, then log out over the wire.
+        let binding =
+            meerkat_providers::auth_oauth::bind_loopback_callback(meerkat::MCP_OAUTH_CALLBACK_PATH)
+                .await
+                .unwrap();
+        let start = rpc_result(
+            handle_auth_login_start(
+                Some(RpcId::Num(9)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "redirect_uri": binding.redirect_url,
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        let callback = binding.expect_state(start["state"].as_str().unwrap().to_owned());
+        follow_authorize_url(start["authorize_url"].as_str().unwrap())
+            .await
+            .unwrap();
+        let outcome = callback
+            .wait(meerkat::MCP_INTERACTIVE_LOGIN_TIMEOUT)
+            .await
+            .unwrap();
+        rpc_result(
+            handle_auth_login_complete(
+                Some(RpcId::Num(10)),
+                Some(
+                    raw_params(serde_json::json!({
+                        "mcp": mcp,
+                        "code": outcome.code,
+                        "state": outcome.state,
+                        "redirect_uri": start["redirect_uri"],
+                    }))
+                    .as_ref(),
+                ),
+                &runtime,
+            )
+            .await,
+        );
+        let authorized = status(11).await;
+        assert_eq!(authorized["phase"], "authorized");
+        assert!(authorized.get("attempt").is_none());
+
+        let logged_out = rpc_result(
+            handle_auth_logout(
+                Some(RpcId::Num(12)),
+                Some(raw_params(serde_json::json!({ "mcp": mcp })).as_ref()),
+                &runtime,
+            )
+            .await,
+        );
+        assert_eq!(
+            logged_out,
+            serde_json::json!({ "mcp": mcp, "cleared": true })
+        );
+        assert_eq!(status(13).await["phase"], "authorization_required");
     }
 
     #[tokio::test]

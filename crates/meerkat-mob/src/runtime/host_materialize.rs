@@ -540,6 +540,7 @@ fn decompile_mcp_servers(
                             headers: HashMap::new(),
                             transport: *http_transport,
                             oauth_account: oauth_account.clone(),
+                            oauth_account_selection: None,
                         },
                     ),
                     tool_names: tool_names.clone(),

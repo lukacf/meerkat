@@ -550,6 +550,9 @@ async fn form_undeclared_host_capability_keeps_default_decline() {
     finish_test(result, errors);
 }
 
+/// Models the credential owner: the stored credential is stale until the
+/// interactive login commits a fresh one, which every later per-request read
+/// returns.
 #[derive(Default)]
 struct Resolver {
     targets: Mutex<Vec<McpServerIdentity>>,
@@ -562,7 +565,11 @@ impl McpAuthResolver for Resolver {
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
         self.targets.lock().unwrap().push(target.clone());
-        Ok(Some("stale-fixture-token".into()))
+        Ok(Some(if self.logins.load(Ordering::SeqCst) == 0 {
+            "stale-fixture-token".into()
+        } else {
+            "fresh-fixture-token".into()
+        }))
     }
     async fn interactive_login(
         &self,
@@ -610,16 +617,14 @@ async fn form_http_auth_retry_keeps_resolver_identity_and_selects_fresh_host() {
             [config.clone(), config.clone()]
         );
         assert_eq!(resolver.logins.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            *resolver.targets.lock().unwrap(),
-            vec![
-                McpServerIdentity::from_server_config(
-                    config.name.clone(),
-                    endpoint.as_ref().unwrap().url.clone()
-                );
-                2
-            ]
+        // Every read (per request) and the login use the exact identity.
+        let identity = McpServerIdentity::from_server_config(
+            config.name.clone(),
+            endpoint.as_ref().unwrap().url.clone(),
         );
+        let targets = resolver.targets.lock().unwrap().clone();
+        assert!(targets.len() > 2, "the bearer is read per request");
+        assert!(targets.iter().all(|target| *target == identity));
         assert_eq!(endpoint.as_ref().unwrap().rejected_auth(), 1);
     })
     .catch_unwind()

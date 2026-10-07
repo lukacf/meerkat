@@ -3,8 +3,8 @@
 //! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
 
 use meerkat_core::mcp_config::{
-    McpConfig, McpConfigMutationAuthority, McpScope, McpServerConfig, McpTransportConfig,
-    McpTransportKind,
+    McpConfig, McpConfigMutationAuthority, McpOAuthAccountSelection, McpScope, McpServerConfig,
+    McpTransportConfig, McpTransportKind,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -317,6 +317,7 @@ pub async fn list_servers(
                     "url": http.url,
                     "headers": http.headers,
                     "oauth_account": http.oauth_account,
+                    "oauth_account_selection": http.oauth_account_selection,
                     "scope": s.scope.to_string(),
                 }),
             })
@@ -400,7 +401,8 @@ pub async fn get_server(
                 },
                 "url": http.url,
                 "headers": http.headers,
-                    "oauth_account": http.oauth_account,
+                "oauth_account": http.oauth_account,
+                "oauth_account_selection": http.oauth_account_selection,
                 "scope": server.scope.to_string(),
             }),
         };
@@ -440,6 +442,15 @@ pub async fn get_server(
                 println!("URL:       {}", http.url);
                 if let Some(account) = &http.oauth_account {
                     println!("Account:   {account}");
+                }
+                match http.oauth_account_selection {
+                    Some(McpOAuthAccountSelection::Discover) => {
+                        println!("Account:   discovered at first login");
+                    }
+                    Some(McpOAuthAccountSelection::Unverified) => {
+                        println!("Account:   not verified (resource-bound access)");
+                    }
+                    None => {}
                 }
                 if !http.headers.is_empty() {
                     println!("Headers:");

@@ -124,6 +124,83 @@ them.
   error on process-restart restore now fails only that member's restore,
   with the error as its restore failure reason; the rest of the mob comes
   up. It used to fail the whole mob resume (#1701).
+- Behaviour-only (not measured by the gate), MCP per-request credentials
+  (see Fixed):
+  - A Streamable HTTP MCP connection with an `McpAuthResolver` reads its
+    bearer through `stored_bearer_token` on every request instead of once at
+    connect. A custom resolver whose `interactive_login` returns a token must
+    commit it, so that `stored_bearer_token` returns it from then on.
+  - A `401` without a `WWW-Authenticate` header on a Streamable HTTP request
+    is the typed auth-required failure instead of a generic refused response.
+- MCP OAuth attempt status, cancel by reference and logout (see Added)
+  change these Rust types:
+  - `LoginCancelParams` gains `McpAttempt(McpLoginCancelAttemptParams)`, and
+    `LoginCancelParams::state` returns `Option<&str>` (`None` for a cancel by
+    reference).
+  - `WireMcpAuthStatus` gains `attempt: Option<WireMcpAuthAttempt>`, and
+    `HostMcpAuthStatus` gains `attempt: Option<McpOAuthPendingAttempt>`.
+  - The `auth/logout` contract is `AuthLogoutParams` (`Binding` or `Mcp`)
+    with result `WireAuthLogoutResult` (`Binding` or `Mcp`). The JSON of a
+    binding logout request and its result is unchanged.
+- Behaviour-only (not measured by the gate): an MCP OAuth login attempt also
+  requires the scopes named by the server's `401` challenge (its `scope`),
+  or else its resource metadata's `scopes_supported`; a completion that
+  grants fewer is refused (see Added).
+- MCP OAuth account selection modes (see Added) change these Rust types:
+  - `McpHttpConfig` gains `oauth_account_selection:
+    Option<McpOAuthAccountSelection>` (`Discover` or `Unverified`).
+  - `AccountSelection` gains `Unverified` (wire form
+    `{"mode": "unverified"}`); `OAuthBrowserFlowCompletion` gains
+    `UnverifiedResource(UnverifiedResourceGrant)`.
+  - `McpOAuthCeremonyContext` gains `account: &AccountSelection`, which an
+    `McpOAuthAccountStrategy::descriptor` binds instead of reading the
+    target's expected account.
+  - `McpOAuthError` gains `DisconnectRequired`, `CredentialSlot` and
+    `HttpClientUnavailable(CredentialHttpClientUnavailable)`; a credential
+    slot refusal at an MCP commit is `CredentialSlot` instead of
+    `AuthLifecycle`. `ConnectorLoginError` gains `HttpClientUnavailable`.
+  - `McpOAuthLoginComplete` gains `account_verification`, and
+    `HostMcpAuthStatus` gains `account_verification:
+    Option<AccountVerification>`.
+  - `WireMcpAuthTarget` gains `oauth_account_selection`,
+    `WireMcpLoginReady` and `WireMcpAuthStatus` gain the required
+    `account_verification: WireMcpAccountVerification`.
+- Behaviour-only (not measured by the gate), MCP OAuth account binding:
+  - A Known (`oauth_account`) login over an occupied credential slot reuses
+    the slot's registered client with a new loopback port (RFC 8252
+    section 7.3) and must match its issuer, resource and strategy. A
+    provider that pins the redirect port, or a registration that needs any
+    other change, needs a disconnect and a fresh login; the account mode is
+    never weakened to recover. A Known credential stored before account
+    bindings were recorded keeps its previous stored-use behaviour, but a
+    new login over it is refused until it is disconnected
+    (`DisconnectRequired`); such old credentials have not acquired the new
+    binding checks.
+  - A refresh of a Known credential observes the refreshed token's subject
+    through the account strategy and refuses a different one; an authority
+    without that strategy cannot refresh it.
+  - MCP logout also retires the attempt pending for the target, even when no
+    credential is stored.
+  - The MCP OAuth authority, the connector login owner and the OpenID
+    Connect UserInfo strategy no longer fall back to a default HTTP client,
+    which follows redirects, when their redirect-free client fails to
+    build. The build failure is kept: the authority's login steps fail with
+    `HttpClientUnavailable`, and a refresh checks for it before any
+    refresh begins and surfaces it as `RefreshFailed` (an infrastructure
+    failure, not a refusal). `OidcUserInfoAccountStrategy::new` still
+    returns `Self` and keeps the failure internally, so the strategy refuses
+    with `VerificationUnavailable`. `ConnectorOAuthAuthority::new` returns
+    `ConnectorLoginError::HttpClientUnavailable`.
+  - A start joins a pending attempt only if this process admitted it after
+    its strategy preflight (the receipt is process-local); another pending
+    attempt is retired, a retirement failure is returned, and a fresh one is
+    admitted.
+  - The `meerkat_mcp_add` management tool refuses a server configuration
+    with `oauth_account` or `oauth_account_selection` (invalid params,
+    nothing staged); it used to accept `oauth_account`. A host may expose
+    that tool to an agent, so an account selection is set only through host
+    configuration: the project or user `mcp.toml`, or the host's RPC and
+    REST `mcp/add`.
 - Behaviour-only (not measured by the gate): native provider HTTP clients
   (`meerkat_llm_core::http::build_http_client_for_base_url`, used by the
   Anthropic, OpenAI, OpenAI-compatible and Gemini clients) no longer follow
@@ -266,6 +343,63 @@ them.
     separate fields.
   - New Python `auth_connector_*` methods and TypeScript
     `authConnectorStatus`.
+- MCP OAuth for the ordinary-host default sign-in path:
+  - Start-time preflight. `McpOAuthAccountStrategy::preflight` (provided;
+    the default accepts) runs at login start, before client registration and
+    before any browser. The OpenID Connect UserInfo strategy uses it to
+    require the issuer's discovery to name the exact issuer and an https (or
+    loopback) `userinfo_endpoint`, so an issuer that cannot prove the account
+    is refused before the user consents.
+  - Spec conformance (MCP authorization 2026-07-28): dynamic client
+    registration sends `application_type: "native"`; the attempt requires
+    the `401` challenge's `scope`, or else the resource metadata's
+    `scopes_supported`, and requests `offline_access` (never required) when
+    the authorization server advertises it; authorization server metadata
+    falls back from RFC 8414 to OpenID Connect discovery (path insertion,
+    then path appending).
+  - Attempt status and cancel by reference (#1808, item 4 subset).
+    `McpOAuthAuthority::pending_attempt` reads the attempt pending for a
+    target as `McpOAuthPendingAttempt { attempt_ref, expires_at }` (no URL or
+    state; read-only, no network), and `cancel_attempt_by_ref` retires it by
+    that reference, also after a flow-owner restart.
+    `HostAuthService::mcp_status` reports it and
+    `HostAuthService::mcp_login_cancel_by_attempt_ref` cancels by it. On the
+    wire, `auth/status/get` with an MCP target reports
+    `attempt: {ref, phase: "pending", expires_at}`, and `auth/login/cancel`
+    accepts `{mcp, attempt_ref}`.
+  - MCP logout. `McpOAuthAuthority::logout` and `HostAuthService::mcp_logout`
+    remove a target's stored credential and release its lifecycle (nothing
+    is revoked at the provider); RPC `auth/logout` accepts `{mcp}` and
+    returns `{mcp, cleared}`.
+  - Account selection modes, set only by host configuration
+    (`oauth_account_selection` in `mcp.toml`). `discover` binds the account
+    the strategy verifies at the first login, publishes only into an empty
+    credential slot, and reconnects only that account in the same context.
+    `unverified` is an explicit opt-in for servers that cannot prove an
+    account: a resource-bound credential (issuer, client, resource) with no
+    account, reported as `account_verification: "unverified"` and never
+    filled from labels or token claims; it runs no account strategy, and a
+    re-login over it needs a disconnect. Each mode has its own credential
+    slot. The wire target names the configured mode and never selects it;
+    status and completion report `account_verification`
+    (`verified`, `unverified` or `legacy`). Mob portable profiles refuse a
+    server with an account selection mode.
+    Limits of this release: MCP OAuth credentials are installation-scoped
+    (the host's token store), not realm-scoped, and realm identity and
+    binding-use admission are not yet applied to them. Whoever administers
+    host configuration (the files, or RPC and REST `mcp/add`) selects the
+    mode; there is no separate per-call administrator check. The login
+    audit records the account verification mode, not a local actor or
+    issuer. Portable and agent-managed surfaces refuse a mode rather than
+    carry it.
+  - The MCP credential slot now enforces the connector race controls: a
+    Discover or unverified commit publishes only into a still-empty slot,
+    and a Known commit replaces only the same verified account with the same
+    issuer, client, resource and strategy.
+  - `OAuthBrowserActionRef::as_str`.
+  - SDKs: Python `auth_mcp_login_cancel_by_attempt_ref` and
+    `auth_mcp_logout`, TypeScript `authMcpLogout`, and web `Auth.mcpLogout`;
+    the web `loginCancel` accepts `{mcp, attempt_ref}`.
 
 ### Fixed
 
@@ -550,6 +684,13 @@ them.
   check applies the same rule to every built `.crate` archive. Both derive
   the texts from `cargo metadata` (`scripts/crate-license-files.sh`) and
   fail closed on an expression they do not know.
+- An OAuth-protected Streamable HTTP MCP connection kept the bearer it read
+  at connect, so a long task failed once the access token expired even
+  after the credential owner refreshed it, and a `401` on a tool call was an
+  untyped tool failure. The connection now resolves its bearer through the
+  `McpAuthResolver` on every request. A request without a usable credential
+  is refused before it is sent, and one the server refuses with `401` fails
+  with the typed `McpError::AuthorizationRequired`; neither is replayed.
 
 ### Testing
 

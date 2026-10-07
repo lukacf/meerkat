@@ -285,6 +285,31 @@ enum WaitStep {
     RetirementFailed,
 }
 
+impl WaitStep {
+    fn into_result(self) -> CallbackResult {
+        match self {
+            Self::Delivered(result) => result,
+            Self::TimedOut => Err(OAuthError::Timeout),
+            Self::AlreadyDelivered => Err(OAuthError::CallbackParse(
+                "callback already delivered".into(),
+            )),
+            Self::PublisherClosed => Err(OAuthError::CallbackParse("receiver closed".into())),
+            Self::RetirementFailed => Err(CallbackRetirementFailed.into()),
+        }
+    }
+}
+
+/// How a deadline that has already passed ties with a callback that is ready
+/// when the wait starts.
+#[derive(Clone, Copy)]
+enum EntryTie {
+    /// `wait_until` and `wait_or_cancel`: the passed deadline wins.
+    DeadlineFirst,
+    /// The legacy `wait`: like `tokio::time::timeout`, the callback and drain
+    /// are polled once before the deadline is consulted.
+    PollFirst,
+}
+
 pub struct LoopbackHandle {
     pub redirect_url: String,
     server: CallbackServer,
@@ -325,9 +350,11 @@ impl LoopbackHandle {
     pub async fn wait(self, deadline: Duration) -> Result<LoopbackOutcome, OAuthError> {
         let deadline = tokio::time::Instant::now() + deadline;
         let mut handle = self;
-        let waited = handle.wait_until(deadline).await;
+        // Legacy tie: like `tokio::time::timeout`, poll once before the
+        // deadline is consulted, even at a zero window.
+        let waited = handle.wait_step(deadline, EntryTie::PollFirst).await;
         handle.server.join(true).await?;
-        waited
+        waited.into_result()
     }
 
     /// Borrowed, cancel-safe wait. Dropping this future loses nothing: the
@@ -345,22 +372,18 @@ impl LoopbackHandle {
     /// Ties: a deadline already passed on entry wins over a queued callback,
     /// which stays undelivered. Within one poll, a callback and drain that
     /// complete win over a deadline that expires in that same poll.
+    /// If the publisher retired without a result, no graceful drain is owed:
+    /// the drain is joined directly.
     pub async fn wait_until(
         &mut self,
         deadline: tokio::time::Instant,
     ) -> Result<LoopbackOutcome, OAuthError> {
-        match self.wait_step(deadline).await {
-            WaitStep::Delivered(result) => result,
-            WaitStep::TimedOut => Err(OAuthError::Timeout),
-            WaitStep::AlreadyDelivered => Err(OAuthError::CallbackParse(
-                "callback already delivered".into(),
-            )),
-            WaitStep::PublisherClosed => Err(OAuthError::CallbackParse("receiver closed".into())),
-            WaitStep::RetirementFailed => Err(CallbackRetirementFailed.into()),
-        }
+        self.wait_step(deadline, EntryTie::DeadlineFirst)
+            .await
+            .into_result()
     }
 
-    async fn wait_step(&mut self, deadline: tokio::time::Instant) -> WaitStep {
+    async fn wait_step(&mut self, deadline: tokio::time::Instant, tie: EntryTie) -> WaitStep {
         let LoopbackHandle {
             server,
             callback,
@@ -377,23 +400,37 @@ impl LoopbackHandle {
         }
         let deadline = window.map_or(deadline, |earliest| earliest.min(deadline));
         *window = Some(deadline);
-        let graceful = if tokio::time::Instant::now() >= deadline {
-            None
-        } else {
-            tokio::time::timeout_at(deadline, async {
-                callback.receive().await;
-                server.join(false).await
-            })
-            .await
-            .ok()
-        };
-        let Some(joined) = graceful else {
-            // The window ended first. Terminate accepted I/O and join the
-            // drain; a callback already taken stays retained, not delivered.
-            return match server.join(true).await {
-                Ok(()) => WaitStep::TimedOut,
-                Err(CallbackRetirementFailed) => WaitStep::RetirementFailed,
+        let graceful =
+            if matches!(tie, EntryTie::DeadlineFirst) && tokio::time::Instant::now() >= deadline {
+                None
+            } else {
+                tokio::time::timeout_at(deadline, async {
+                    callback.receive().await;
+                    if matches!(callback, CallbackSlot::Closed) {
+                        // No publisher remains, so no graceful drain is owed.
+                        return None;
+                    }
+                    Some(server.join(false).await)
+                })
+                .await
+                .ok()
             };
+        let joined = match graceful {
+            Some(Some(joined)) => joined,
+            Some(None) => {
+                return match server.join(true).await {
+                    Ok(()) => WaitStep::PublisherClosed,
+                    Err(CallbackRetirementFailed) => WaitStep::RetirementFailed,
+                };
+            }
+            None => {
+                // The window ended first. Terminate accepted I/O and join the
+                // drain; a callback already taken stays retained, not delivered.
+                return match server.join(true).await {
+                    Ok(()) => WaitStep::TimedOut,
+                    Err(CallbackRetirementFailed) => WaitStep::RetirementFailed,
+                };
+            }
         };
         if joined.is_err() {
             return WaitStep::RetirementFailed;
@@ -436,7 +473,7 @@ impl LoopbackHandle {
         let step = tokio::select! {
             biased;
             () = cancel => None,
-            step = handle.wait_step(deadline) => Some(step),
+            step = handle.wait_step(deadline, EntryTie::DeadlineFirst) => Some(step),
         };
         let closed = match handle.server.join(true).await {
             Ok(()) => LoopbackClosed {
@@ -1306,6 +1343,49 @@ mod ownership_tests {
             .wait_or_cancel(after(Duration::from_secs(5)), std::future::pending())
             .await;
         assert!(matches!(end, LoopbackWaitEnd::RetirementFailed), "{end:?}");
+    }
+
+    #[tokio::test]
+    async fn legacy_wait_keeps_its_tie_and_closed_publisher_behaviour() {
+        // Legacy tie: like `tokio::time::timeout`, an elapsed window still
+        // polls the queued callback once. Whether the drain also finishes in
+        // time depends on the timer, so only the receive is pinned here.
+        let mut legacy = run_loopback_callback("state".into(), "/callback")
+            .await
+            .unwrap();
+        assert_eq!(
+            send_callback(&legacy.redirect_url, "secret-code", "state").await,
+            StatusCode::OK
+        );
+        let step = legacy
+            .wait_step(tokio::time::Instant::now(), EntryTie::PollFirst)
+            .await;
+        assert!(matches!(
+            step,
+            WaitStep::Delivered(Ok(_)) | WaitStep::TimedOut
+        ));
+        assert!(!matches!(legacy.callback, CallbackSlot::Unreceived(_)));
+        // The borrowed rule: an elapsed window wins before any poll.
+        let mut borrowed = run_loopback_callback("state".into(), "/callback")
+            .await
+            .unwrap();
+        assert_eq!(
+            send_callback(&borrowed.redirect_url, "secret-code", "state").await,
+            StatusCode::OK
+        );
+        let step = borrowed
+            .wait_step(tokio::time::Instant::now(), EntryTie::DeadlineFirst)
+            .await;
+        assert!(matches!(step, WaitStep::TimedOut));
+        assert!(matches!(borrowed.callback, CallbackSlot::Unreceived(_)));
+        // A publisher that retires without a result is joined directly and
+        // reports its retirement, with no graceful phase in between.
+        let retirement = OAuthError::from(CallbackRetirementFailed).to_string();
+        let waited = failing_handle()
+            .wait(Duration::from_secs(300))
+            .await
+            .unwrap_err();
+        assert_eq!(waited.to_string(), retirement);
     }
 
     #[tokio::test]

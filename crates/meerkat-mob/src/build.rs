@@ -3957,8 +3957,8 @@ mod tests {
 
     #[test]
     fn test_resumed_metadata_accepts_ob3_generation_two_runtime_binding() {
-        let stable_member = "mk--person_cfederico_x2e_gomez_x40_king_x2e_com";
-        let legacy_runtime_member = "mk--rt_cperson_cfederico_x2e_gomez_x40_king_x2e_com_c2";
+        let stable_member = "mk--person_cjane_x2e_doe_x40_example_x2e_com";
+        let legacy_runtime_member = "mk--rt_cperson_cjane_x2e_doe_x40_example_x2e_com_c2";
         let canonical_binding = meerkat_core::MobMemberBinding {
             mob_id: "ob3".to_string(),
             role: "personal".to_string(),
@@ -4003,7 +4003,7 @@ mod tests {
             .expect("generation-two runtime binding proves the same durable identity");
         assert_eq!(
             config.comms_name.as_deref(),
-            Some("ob3/personal/mk--person_cfederico_x2e_gomez_x40_king_x2e_com")
+            Some("ob3/personal/mk--person_cjane_x2e_doe_x40_example_x2e_com")
         );
         assert_eq!(config.mob_member_binding, Some(canonical_binding));
         let labels = &config.peer_meta.expect("canonical peer metadata").labels;
@@ -4039,10 +4039,10 @@ mod tests {
 
     #[test]
     fn encoded_stable_identity_accepts_legacy_runtime_binding_at_any_generation() {
-        let stable_member = "mk--person_cfederico_x2e_gomez_x40_king_x2e_com";
+        let stable_member = "mk--person_cjane_x2e_doe_x40_example_x2e_com";
         for generation in [1_u64, 2, u64::MAX] {
             let legacy_member =
-                format!("mk--rt_cperson_cfederico_x2e_gomez_x40_king_x2e_com_c{generation}");
+                format!("mk--rt_cperson_cjane_x2e_doe_x40_example_x2e_com_c{generation}");
             assert!(
                 resumed_comms_name_matches_current_or_legacy(
                     &format!("ob3/personal/{stable_member}"),

@@ -47235,10 +47235,13 @@ impl MobActor {
     ) -> Result<super::handle::MobDestroyReport, super::handle::MobDestroyError> {
         use super::handle::{MobDestroyError, MobDestroyReport};
 
+        // Construct nested futures in their own frames: the debug coordinator
+        // otherwise reserves their combined stack space across every phase.
+        // Each boxed future is still awaited and dropped on this same task.
         let mut report = MobDestroyReport::default();
         // No destroy phase owns a bind. Keep this check on recovery too so a
         // corrupt post-MobDestroying bind cannot be mistaken for destroy work.
-        match self.current_pending_host_bind_anchors().await {
+        match boxed_arm_future(|| self.current_pending_host_bind_anchors()).await {
             Ok(anchors) if !anchors.is_empty() => {
                 for anchor in anchors {
                     report.push_error(format!(
@@ -47266,9 +47269,10 @@ impl MobActor {
         // exact-convergence diagnostic; this guard principally catches a
         // pre-destroy revoke anchor.
         if !self.destroy_admitted()
-            && let Err(error) = self
-                .require_host_authority_anchors_clear_for_action("begin destroy")
-                .await
+            && let Err(error) = boxed_arm_future(|| {
+                self.require_host_authority_anchors_clear_for_action("begin destroy")
+            })
+            .await
         {
             report.push_error(error.to_string());
             return Err(MobDestroyError::Incomplete { report });
@@ -47287,7 +47291,7 @@ impl MobActor {
                     MobDestroyError::from(error)
                 }
             })?;
-        self.ensure_flow_tracker_alignment("handle_destroy preflight")
+        boxed_arm_future(|| self.ensure_flow_tracker_alignment("handle_destroy preflight"))
             .await
             .map_err(|error| {
                 if self.destroy_admitted() {
@@ -47301,7 +47305,7 @@ impl MobActor {
                 }
             })?;
         let entries = {
-            let roster = self.roster.read().await;
+            let roster = boxed_arm_future(|| self.roster.read()).await;
             roster.list_all().cloned().collect::<Vec<_>>()
         };
         let mut trust_cleanup_plan_by_member: BTreeMap<AgentIdentity, RetireTrustCleanupPlan> =
@@ -47327,11 +47331,13 @@ impl MobActor {
                 }
             }
         }
-        if destroy_input_needed && let Err(error) = self.record_destroying_event().await {
+        if destroy_input_needed
+            && let Err(error) = boxed_arm_future(|| self.record_destroying_event()).await
+        {
             report.push_error(format!("destroy marker append failed: {error}"));
             return Err(MobDestroyError::Incomplete { report });
         }
-        self.fail_all_pending_spawns("mob is destroying")
+        boxed_arm_future(|| self.fail_all_pending_spawns("mob is destroying"))
             .await
             .map_err(|error| {
                 Self::incomplete_destroy_error(
@@ -47340,7 +47346,7 @@ impl MobActor {
                     error,
                 )
             })?;
-        self.cancel_pending_peer_deliveries("mob is destroying")
+        boxed_arm_future(|| self.cancel_pending_peer_deliveries("mob is destroying"))
             .await
             .map_err(|error| {
                 Self::incomplete_destroy_error(
@@ -47394,21 +47400,25 @@ impl MobActor {
                 }
             }
         }
-        self.cancel_all_flow_tasks().await.map_err(|error| {
-            Self::incomplete_destroy_error(
-                report.clone(),
-                "cancel flow tasks during destroy failed",
-                error,
-            )
-        })?;
-        if !self.pending_routed_effects.is_empty() {
-            self.flush_routed_effects().await.map_err(|error| {
+        boxed_arm_future(|| self.cancel_all_flow_tasks())
+            .await
+            .map_err(|error| {
                 Self::incomplete_destroy_error(
                     report.clone(),
-                    "destroy routed effect dispatch failed",
+                    "cancel flow tasks during destroy failed",
                     error,
                 )
             })?;
+        if !self.pending_routed_effects.is_empty() {
+            boxed_arm_future(|| self.flush_routed_effects())
+                .await
+                .map_err(|error| {
+                    Self::incomplete_destroy_error(
+                        report.clone(),
+                        "destroy routed effect dispatch failed",
+                        error,
+                    )
+                })?;
         }
         let released_remote_authorities = entries
             .iter()
@@ -47521,15 +47531,17 @@ impl MobActor {
             }
         }
         if destroy_input_needed {
-            self.require_placed_spawn_carriers_empty("destroy admission fence")
-                .await
-                .map_err(|error| {
-                    Self::incomplete_destroy_error(
-                        report.clone(),
-                        "placed carrier drain before destroy failed",
-                        error,
-                    )
-                })?;
+            boxed_arm_future(|| {
+                self.require_placed_spawn_carriers_empty("destroy admission fence")
+            })
+            .await
+            .map_err(|error| {
+                Self::incomplete_destroy_error(
+                    report.clone(),
+                    "placed carrier drain before destroy failed",
+                    error,
+                )
+            })?;
             self.apply_dsl_input(mob_dsl::MobMachineInput::Destroy, "destroy_input")
                 .map_err(|error| {
                     Self::incomplete_destroy_error(
@@ -47545,30 +47557,34 @@ impl MobActor {
                 report.push_error(error.to_string());
                 MobDestroyError::Incomplete { report }
             })?;
-        self.ensure_flow_tracker_alignment("handle_destroy completion")
+        boxed_arm_future(|| self.ensure_flow_tracker_alignment("handle_destroy completion"))
             .await
             .map_err(|error| {
                 let mut report = report.clone();
                 report.push_error(error.to_string());
                 MobDestroyError::Incomplete { report }
             })?;
-        if let Err(error) = self.cleanup_namespace().await {
+        if let Err(error) = boxed_arm_future(|| self.cleanup_namespace()).await {
             report.push_error(error.to_string());
             return Err(MobDestroyError::Incomplete { report });
         }
         report.namespace_cleaned = true;
-        self.require_placed_spawn_carriers_empty("destroy storage-finalizing fence")
-            .await
-            .map_err(|error| {
-                Self::incomplete_destroy_error(
-                    report.clone(),
-                    "placed carrier drain before storage finalization failed",
-                    error,
-                )
-            })?;
-        self.require_host_authority_anchors_clear_for_action(
-            "cross MobDestroyStorageFinalizing terminal boundary",
-        )
+        boxed_arm_future(|| {
+            self.require_placed_spawn_carriers_empty("destroy storage-finalizing fence")
+        })
+        .await
+        .map_err(|error| {
+            Self::incomplete_destroy_error(
+                report.clone(),
+                "placed carrier drain before storage finalization failed",
+                error,
+            )
+        })?;
+        boxed_arm_future(|| {
+            self.require_host_authority_anchors_clear_for_action(
+                "cross MobDestroyStorageFinalizing terminal boundary",
+            )
+        })
         .await
         .map_err(|error| {
             Self::incomplete_destroy_error(
@@ -47577,7 +47593,7 @@ impl MobActor {
                 error,
             )
         })?;
-        self.record_destroy_storage_finalizing_event()
+        boxed_arm_future(|| self.record_destroy_storage_finalizing_event())
             .await
             .map_err(|error| {
                 Self::incomplete_destroy_error(
@@ -47586,46 +47602,65 @@ impl MobActor {
                     error,
                 )
             })?;
-        let runtime_metadata_snapshot =
-            self.runtime_metadata_snapshot().await.map_err(|error| {
+        let runtime_metadata_snapshot = boxed_arm_future(|| self.runtime_metadata_snapshot())
+            .await
+            .map_err(|error| {
                 let mut report = report.clone();
                 report.push_error(error.to_string());
                 MobDestroyError::Incomplete { report }
             })?;
-        if let Err(error) = self
-            .runtime_metadata
-            .delete_external_binding_overlays(&self.definition.id)
-            .await
+        if let Err(error) = boxed_arm_future(|| {
+            self.runtime_metadata
+                .delete_external_binding_overlays(&self.definition.id)
+        })
+        .await
         {
-            return Err(self
-                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
-                .await);
+            return Err(boxed_arm_future(|| {
+                self.incomplete_after_metadata_scrub_error(
+                    report,
+                    &runtime_metadata_snapshot,
+                    error,
+                )
+            })
+            .await);
         }
         // Operator-grant rows are principal-keyed (not member/host-lifecycle
         // tied), so the destroy sweep is the ONLY cleaner (DEC-P5P-7 step 3;
         // no per-row revoke witness exists at destroy — the whole family is
         // scrubbed under the MobDestroyStorageFinalizing fence).
-        if let Err(error) = self
-            .runtime_metadata
-            .delete_mob_operator_grants(&self.definition.id)
-            .await
+        if let Err(error) = boxed_arm_future(|| {
+            self.runtime_metadata
+                .delete_mob_operator_grants(&self.definition.id)
+        })
+        .await
         {
-            return Err(self
-                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
-                .await);
+            return Err(boxed_arm_future(|| {
+                self.incomplete_after_metadata_scrub_error(
+                    report,
+                    &runtime_metadata_snapshot,
+                    error,
+                )
+            })
+            .await);
         }
         // Member-upcall request rows are generation-pinned and otherwise
         // retained without capacity eviction. Mob destroy is their sole
         // lifecycle scrub; the snapshot above makes a later destroy failure
         // retry-safe.
-        if let Err(error) = self
-            .runtime_metadata
-            .delete_member_operator_requests(&self.definition.id)
-            .await
+        if let Err(error) = boxed_arm_future(|| {
+            self.runtime_metadata
+                .delete_member_operator_requests(&self.definition.id)
+        })
+        .await
         {
-            return Err(self
-                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
-                .await);
+            return Err(boxed_arm_future(|| {
+                self.incomplete_after_metadata_scrub_error(
+                    report,
+                    &runtime_metadata_snapshot,
+                    error,
+                )
+            })
+            .await);
         }
         // Pump cursors are plain controller metadata keyed by mob/member.
         // Individual pump shutdown attempts an eager delete, but that path is
@@ -47634,14 +47669,20 @@ impl MobActor {
         // authoritative whole-mob scrub. This deletion is monotonic after all
         // members and pumps are terminal; a later destroy retry need not
         // restore cursors merely because another metadata family failed.
-        if let Err(error) = self
-            .runtime_metadata
-            .delete_member_event_cursors(&self.definition.id)
-            .await
+        if let Err(error) = boxed_arm_future(|| {
+            self.runtime_metadata
+                .delete_member_event_cursors(&self.definition.id)
+        })
+        .await
         {
-            return Err(self
-                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
-                .await);
+            return Err(boxed_arm_future(|| {
+                self.incomplete_after_metadata_scrub_error(
+                    report,
+                    &runtime_metadata_snapshot,
+                    error,
+                )
+            })
+            .await);
         }
         let supervisor_delete = match runtime_metadata_snapshot.supervisor.as_ref() {
             Some(supervisor) => Some(
@@ -47663,39 +47704,48 @@ impl MobActor {
             runtime_metadata_snapshot.supervisor.as_ref(),
             supervisor_delete,
         ) {
-            if let Err(error) = self
-                .runtime_metadata
-                .delete_supervisor_authority(&self.definition.id, supervisor, &prepared.authority)
-                .await
-                .and_then(|deleted| {
-                    if deleted {
-                        Ok(())
-                    } else {
-                        Err(crate::store::MobStoreError::CasConflict(format!(
-                            "supervisor authority changed while deleting metadata for mob '{}'",
-                            self.definition.id
-                        )))
-                    }
-                })
-            {
-                return Err(self
-                    .incomplete_after_metadata_scrub_error(
+            if let Err(error) = boxed_arm_future(|| {
+                self.runtime_metadata.delete_supervisor_authority(
+                    &self.definition.id,
+                    supervisor,
+                    &prepared.authority,
+                )
+            })
+            .await
+            .and_then(|deleted| {
+                if deleted {
+                    Ok(())
+                } else {
+                    Err(crate::store::MobStoreError::CasConflict(format!(
+                        "supervisor authority changed while deleting metadata for mob '{}'",
+                        self.definition.id
+                    )))
+                }
+            }) {
+                return Err(boxed_arm_future(|| {
+                    self.incomplete_after_metadata_scrub_error(
                         report,
                         &runtime_metadata_snapshot,
                         error,
                     )
-                    .await);
+                })
+                .await);
             }
             self.commit_prepared_dsl_transition(prepared.transition)?;
         }
         report.metadata_scrubbed = true;
-        if let Err(error) = self.events.clear().await {
-            return Err(self
-                .incomplete_after_metadata_scrub_error(report, &runtime_metadata_snapshot, error)
-                .await);
+        if let Err(error) = boxed_arm_future(|| self.events.clear()).await {
+            return Err(boxed_arm_future(|| {
+                self.incomplete_after_metadata_scrub_error(
+                    report,
+                    &runtime_metadata_snapshot,
+                    error,
+                )
+            })
+            .await);
         }
         report.events_cleared = true;
-        self.edge_locks.clear().await;
+        boxed_arm_future(|| self.edge_locks.clear()).await;
         if report.remote_cleanup_deadline_exceeded
             || !report.orphaned_remote_members.is_empty()
             || !report.errors.is_empty()

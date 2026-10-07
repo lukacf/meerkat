@@ -10701,6 +10701,79 @@ mod tests {
         );
     }
 
+    /// An inherited tool-visibility ceiling keeps the identity witnesses that
+    /// back it through a model-call boundary, so the session's committed
+    /// record still witnesses every inherited name and the session resumes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn inherited_ceiling_witnesses_survive_a_turn_and_the_session_resumes() {
+        let temp = tempfile::tempdir().expect("temp session store");
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
+            ["parent_shell".to_string()].into_iter().collect(),
+        );
+        let (ceiling, _) =
+            inherited_visibility_authority(inherited_filter.clone(), &["parent_shell"]);
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.initial_tool_visibility_state = Some(ceiling);
+        let mut agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("agent with an inherited ceiling");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("one turn".into()))
+            .await
+            .expect("one turn");
+
+        let state = agent
+            .session()
+            .try_tool_visibility_state()
+            .expect("parse visibility")
+            .expect("a committed visibility record");
+        assert_eq!(state.inherited_base_filter, inherited_filter);
+        assert!(
+            state
+                .filter_witnesses
+                .get("parent_shell")
+                .is_some_and(meerkat_core::ToolVisibilityWitness::has_identity_witness),
+            "the model-call boundary kept the inherited ceiling's witness: {:?}",
+            state.filter_witnesses
+        );
+
+        let resumed_session = agent.session().clone();
+        let resumed_runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = resumed_runtime
+            .prepare_bindings(resumed_session.id().clone())
+            .await
+            .expect("resume bindings");
+        let mut resume = AgentBuildConfig::new("claude-sonnet-4-5");
+        resume.provider = Some(Provider::Anthropic);
+        resume.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        resume.resume_session = Some(resumed_session);
+        resume.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        resume.override_builtins = ToolCategoryOverride::Disable;
+        let resumed = factory.build_agent(resume, &Config::default()).await;
+        assert!(
+            resumed.is_ok(),
+            "a session that ran a turn resumes with its inherited ceiling: {:?}",
+            resumed.err()
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn resumed_gpt_56_agent_with_empty_provider_params_sends_cache_defaults() {

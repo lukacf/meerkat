@@ -96,7 +96,7 @@ pub mod workgraph_flow;
 pub use member_creation::{
     CreationSourceCapture, MemberCreationAbsence, MemberCreationError, MemberCreationId,
     MemberCreationProvenance, MemberCreationRecord, MemberCreationSnapshot, MemberCreationSource,
-    MemberCreationSourceWitness,
+    MemberCreationSourceWitness, load_creation_source_metadata,
 };
 
 // Re-exports for convenience

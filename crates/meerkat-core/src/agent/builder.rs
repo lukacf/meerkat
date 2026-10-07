@@ -2214,6 +2214,71 @@ mod tests {
         );
     }
 
+    /// A handoff naming a tool the durable state already witnesses under a
+    /// different identity never reinterprets the retained witness: the
+    /// durable identity is kept, and the handoff does not admit that name.
+    #[tokio::test]
+    async fn resumed_builder_keeps_a_retained_witness_against_a_conflicting_handoff() {
+        let client = Arc::new(MockClient);
+        let retained = test_tool_with_provenance("kept", "original-source");
+        let tools = Arc::new(StaticTools::new(vec![Arc::clone(&retained)].into()));
+        let store = Arc::new(MockStore);
+        let retained_witness = crate::ToolVisibilityWitness {
+            last_seen_provenance: retained.provenance.clone(),
+        };
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState {
+                        inherited_base_filter: ToolFilter::Allow(
+                            ["kept".to_string()].into_iter().collect(),
+                        ),
+                        filter_witnesses: [(retained.name.clone(), retained_witness.clone())]
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .expect("visibility state should serialize");
+        let other_identity = test_tool_with_provenance("kept", "another-source");
+        let conflicting = InheritedToolVisibilityAuthority::from_generated_composition_authority(
+            ToolFilter::Allow(["kept".to_string()].into_iter().collect()),
+            [(
+                other_identity.name.clone(),
+                crate::ToolVisibilityWitness {
+                    last_seen_provenance: other_identity.provenance.clone(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_initial_tool_visibility_state(conflicting)
+            .build_inner(client, tools, store)
+            .await;
+
+        if let Err(error) = &result {
+            panic!("the resume builds: {error:?}");
+        }
+        let state = owner.visibility_state().unwrap();
+        assert_eq!(
+            state.filter_witnesses.get("kept"),
+            Some(&retained_witness),
+            "the retained identity is never overwritten"
+        );
+        assert_eq!(
+            state.inherited_base_filter,
+            ToolFilter::Allow(crate::types::ToolNameSet::new()),
+            "the conflicting handoff admits nothing"
+        );
+    }
+
     #[tokio::test]
     async fn runtime_backed_builder_does_not_seed_execution_kind() {
         let client = Arc::new(MockClient);

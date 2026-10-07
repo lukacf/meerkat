@@ -662,6 +662,7 @@ pub fn resolve_effective_turn_config(
         additional_instructions: build_state.additional_instructions.clone(),
         initial_metadata_entries: std::collections::BTreeMap::new(),
         initial_tool_filter: None,
+        initial_tool_visibility_state: None,
         // Effective call-level tool access policy is durable session truth:
         // carry it forward verbatim so a restricted session cannot escape its
         // gate by being recovered.

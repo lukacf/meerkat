@@ -122,7 +122,35 @@ them.
   error on process-restart restore now fails only that member's restore,
   with the error as its restore failure reason; the rest of the mob comes
   up. It used to fail the whole mob resume (#1701).
-
+- Behaviour-only (not measured by the gate): agent mob tooling
+  `{mode: "profile"}` (inline or realm profile, on `delegate` and on
+  `mob_spawn_member` with `tooling`) is now capped by the spawning agent's
+  visible tools. The profile still decides what the child mounts, but the
+  child can dispatch only tools its parent can see, narrowed further by any
+  `allow_overlay`/`deny_overlay`. The cap is captured at spawn and persists
+  with the child session, like `inherit_parent`. Before, a profile could
+  switch on a tool family the parent's profile left off without denying it
+  (for example `shell`), and the child could run it. An inline `tools.mcp`
+  left empty also exposed the whole host MCP surface. Profile tooling on an
+  `AgentMobToolSurface` without a parent tool scope (the `Standalone`
+  context `AgentMobToolSurface::new` selects) is now refused with
+  `ToolError::ExecutionFailed`, as `inherit_parent` and `minimal` already
+  were, because there is no parent ceiling to cap the child to. Before, it
+  spawned the child unrestricted. Role-based spawns and `mob_spawn_member`
+  without `tooling` are unchanged.
+- `meerkat_core::service::SessionBuildOptions` gains
+  `initial_tool_visibility_state: Option<InheritedToolVisibilityAuthority>`.
+  It is copied by `AgentBuildConfig::to_session_build_options` and
+  `apply_session_build_options`. A mob member's build reaches the session
+  service as a create request, and the service rebuilds the
+  `AgentBuildConfig` from it. The inherited tool-visibility ceiling a spawner
+  hands its child (`inherit_parent` and profile tooling) used to be dropped in
+  that round trip, so the child ran uncapped. `inherit_parent`, which opens
+  every profile category for the ceiling to narrow, then mounted every family
+  its host could back, bounded only by the parent's deny list and read-only
+  declaration. A ceiling handed to a resumed session now narrows the
+  session's durable inherited ceiling (`ToolFilter::narrowed_by`). It used
+  to replace it, so a broader new snapshot could widen a resumed child.
 
 ### Added
 

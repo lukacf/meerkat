@@ -924,6 +924,14 @@ pub struct SessionBuildOptions {
     /// build options so it survives deferred-session materialization, where the
     /// `AgentBuildConfig` is reconstructed from these options.
     pub initial_tool_filter: Option<crate::tool_scope::ToolFilter>,
+    /// Inherited tool-visibility ceiling a spawner hands its child (the
+    /// parent's visible tools, with provenance witnesses), installed as the
+    /// child session's inherited base filter at agent build.
+    ///
+    /// Rides the build options for the same reason as `initial_tool_filter`:
+    /// a mob member's `AgentBuildConfig` is reconstructed from these options,
+    /// and an authority dropped there would leave the child uncapped.
+    pub initial_tool_visibility_state: Option<crate::InheritedToolVisibilityAuthority>,
     /// Per-launch call-level tool access policy (existing
     /// [`crate::ops::ToolAccessPolicy`] vocabulary). Flows into
     /// `AgentBuildConfig.tool_access_policy`, where the factory resolves it
@@ -1738,6 +1746,7 @@ impl Default for SessionBuildOptions {
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
+            initial_tool_visibility_state: None,
             tool_access_policy: None,
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
@@ -1817,6 +1826,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
+            .field(
+                "initial_tool_visibility_state",
+                &self.initial_tool_visibility_state.is_some(),
+            )
             .field("tool_access_policy", &self.tool_access_policy)
             .field(
                 "tool_dispatch_admission",

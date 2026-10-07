@@ -32,6 +32,35 @@ impl ToolFilter {
             Self::Allow(names) | Self::Deny(names) => Some(names),
         }
     }
+
+    /// The filter admitting exactly the tools both `self` and `other` admit.
+    /// Never wider than either side; an empty allow-set stays deny-all.
+    #[must_use]
+    pub fn narrowed_by(&self, other: &ToolFilter) -> ToolFilter {
+        match (self, other) {
+            (Self::All, filter) | (filter, Self::All) => filter.clone(),
+            (Self::Allow(left), Self::Allow(right)) => Self::Allow(
+                left.iter()
+                    .filter(|name| right.contains(name.as_str()))
+                    .cloned()
+                    .collect(),
+            ),
+            (Self::Allow(allow), Self::Deny(deny)) | (Self::Deny(deny), Self::Allow(allow)) => {
+                Self::Allow(
+                    allow
+                        .iter()
+                        .filter(|name| !deny.contains(name.as_str()))
+                        .cloned()
+                        .collect(),
+                )
+            }
+            (Self::Deny(left), Self::Deny(right)) => {
+                let mut union = left.clone();
+                union.extend(right.iter().cloned());
+                Self::Deny(union)
+            }
+        }
+    }
 }
 
 /// Session metadata key storing the persisted external tool filter.
@@ -2818,6 +2847,40 @@ mod tests {
     use crate::types::{ToolDef, ToolName, ToolNameSet, ToolProvenance, ToolSourceKind};
     use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::sync::Arc;
+
+    fn name_set(list: &[&str]) -> ToolNameSet {
+        list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn narrowed_by_admits_only_what_both_filters_admit() {
+        let all = ToolFilter::All;
+        let allow = ToolFilter::Allow(name_set(&["a", "b"]));
+        let deny = ToolFilter::Deny(name_set(&["b", "c"]));
+        assert_eq!(all.narrowed_by(&allow), allow);
+        assert_eq!(allow.narrowed_by(&all), allow);
+        assert_eq!(
+            allow.narrowed_by(&ToolFilter::Allow(name_set(&["b", "c"]))),
+            ToolFilter::Allow(name_set(&["b"]))
+        );
+        assert_eq!(
+            allow.narrowed_by(&deny),
+            ToolFilter::Allow(name_set(&["a"]))
+        );
+        assert_eq!(
+            deny.narrowed_by(&allow),
+            ToolFilter::Allow(name_set(&["a"]))
+        );
+        assert_eq!(
+            deny.narrowed_by(&ToolFilter::Deny(name_set(&["d"]))),
+            ToolFilter::Deny(name_set(&["b", "c", "d"]))
+        );
+        // An empty allow-set is a deny-all ceiling, never "no restriction".
+        let deny_all = ToolFilter::Allow(name_set(&[]));
+        assert_eq!(deny_all.narrowed_by(&all), deny_all);
+        assert_eq!(all.narrowed_by(&deny_all), deny_all);
+        assert_eq!(deny_all.narrowed_by(&deny), deny_all);
+    }
 
     fn set(names: &[&str]) -> ToolNameSet {
         names.iter().map(|name| (*name).to_string()).collect()

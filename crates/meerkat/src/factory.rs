@@ -1065,6 +1065,7 @@ impl AgentBuildConfig {
         self.additional_instructions = build.additional_instructions.clone();
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
+        self.initial_tool_visibility_state = build.initial_tool_visibility_state.clone();
         self.tool_access_policy = build.tool_access_policy.clone();
         self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
@@ -1142,6 +1143,7 @@ impl AgentBuildConfig {
             additional_instructions: self.additional_instructions.clone(),
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
+            initial_tool_visibility_state: self.initial_tool_visibility_state.clone(),
             tool_access_policy: self.tool_access_policy.clone(),
             declared_tool_restriction: self.declared_tool_restriction.clone(),
             tool_dispatch_admission: self.tool_dispatch_admission.clone(),

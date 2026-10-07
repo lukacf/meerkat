@@ -2304,6 +2304,22 @@ mod tests {
             inherited_authority.witnesses(),
             "inherited mob filter witnesses should flow through canonical visibility state"
         );
+
+        // Every mob spawn hands the member's build to the session service as
+        // a create request, and the service rebuilds the config from it: the
+        // inherited ceiling must survive that round trip, or the member runs
+        // uncapped.
+        let request = to_create_session_request(
+            &config,
+            meerkat_core::types::ContentInput::Text(String::new()),
+        );
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        let rebuilt = meerkat::AgentBuildConfig::from_create_session_request(&request, event_tx);
+        assert_eq!(
+            rebuilt.initial_tool_visibility_state.as_ref(),
+            Some(&inherited_authority),
+            "the inherited ceiling survives the session create request"
+        );
     }
 
     #[tokio::test]

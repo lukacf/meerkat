@@ -12272,6 +12272,7 @@ async fn run_agent(
             },
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
+            initial_tool_visibility_state: None,
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,

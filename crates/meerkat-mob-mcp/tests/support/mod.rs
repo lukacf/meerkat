@@ -443,6 +443,41 @@ fn runtime_backed_service(
     (Arc::new(event_projection(service, &project_root)), runtime)
 }
 
+/// The production runtime-backed composition with the agent mob tools wired
+/// the way `wire_mob_tools` wires them, after `configure` has shaped the mob
+/// state: every member mounting the `mob` family gets the real agent mob
+/// tools with its own parent tool scope, so a member's model turn can
+/// `delegate` or `mob_spawn_member` exactly as in production.
+pub fn agent_mob_tools_state(
+    root: &std::path::Path,
+    client: Arc<dyn LlmClient>,
+    configure: impl FnOnce(MobMcpState) -> MobMcpState,
+) -> Arc<MobMcpState> {
+    let (builder, store, _project_root) = fixture_builder(root, client);
+    let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store;
+    let (service, runtime) = meerkat::surface::build_runtime_backed_service(
+        builder,
+        32,
+        meerkat::PersistenceBundle::new(
+            store_dyn,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        ),
+    );
+    let state = Arc::new(configure(MobMcpState::new_with_runtime_adapter(
+        Arc::new(service),
+        Some(runtime),
+        MobControlPrincipal::Owner,
+    )));
+    *mob_tools_slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+        meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
+    ));
+    state
+}
+
 impl CouncilFixture {
     /// Build a fixture with an explicitly rooted durable realm custody.
     pub fn new(script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static) -> Self {

@@ -4221,6 +4221,7 @@ async fn handle_meerkat_run(
                 additional_instructions: input.additional_instructions.clone(),
                 initial_metadata_entries: std::collections::BTreeMap::new(),
                 initial_tool_filter: None,
+                initial_tool_visibility_state: None,
                 shell_env: input.shell_env.clone(),
                 resume_override_mask: ResumeOverrideMask {
                     model: input.model.is_some(),
@@ -4666,6 +4667,7 @@ async fn handle_meerkat_resume(
             additional_instructions: input.additional_instructions.clone(),
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
+            initial_tool_visibility_state: None,
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: input.model.is_some(),

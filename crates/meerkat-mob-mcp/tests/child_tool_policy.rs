@@ -35,8 +35,12 @@ const ALLOWED: &str = "host_echo";
 /// call that actually reaches it.
 struct HostTools(Arc<Mutex<Vec<String>>>);
 
+/// [`HostTools`] whose definitions carry no provenance, so no parent can
+/// witness them for an inherited ceiling.
+struct UnprovenancedHostTools(Arc<Mutex<Vec<String>>>);
+
 #[async_trait::async_trait]
-impl AgentToolDispatcher for HostTools {
+impl AgentToolDispatcher for UnprovenancedHostTools {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         [DENIED, ALLOWED]
             .into_iter()
@@ -46,6 +50,40 @@ impl AgentToolDispatcher for HostTools {
                     "Ordinary host tool.",
                     json!({"type": "object", "properties": {}}),
                 ))
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.0.lock().unwrap().push(call.name.to_string());
+        Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
+            call.id.to_string(),
+            "{}".to_string(),
+            false,
+        )))
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for HostTools {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        [DENIED, ALLOWED]
+            .into_iter()
+            .map(|name| {
+                // Host tools carry their provenance, so a parent's visible
+                // set can witness them for a capped helper.
+                Arc::new(
+                    ToolDef::new(
+                        name,
+                        "Ordinary host tool.",
+                        json!({"type": "object", "properties": {}}),
+                    )
+                    .with_provenance(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: name.into(),
+                    }),
+                )
             })
             .collect::<Vec<_>>()
             .into()
@@ -632,19 +670,170 @@ async fn delegate(fixture: &CouncilFixture) -> (Result<ToolDispatchOutcome, Tool
     (outcome, session)
 }
 
+/// A member of a host-created mob delegates from its own model turn, over the
+/// production composition, with an explicit helper profile; the helper calls
+/// DENIED, then ALLOWED. Returns the delegate result the member saw and the
+/// host tools that ran.
+async fn delegate_from_a_member_turn(
+    tools: impl FnOnce(Arc<Mutex<Vec<String>>>) -> Arc<dyn AgentToolDispatcher>,
+) -> (String, Vec<String>) {
+    const HELPER_TASK: &str = "CHILD-POLICY-HELPER-TASK";
+    const DELEGATE: &str = "CHILD-POLICY-DELEGATE";
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let tools = tools(Arc::clone(&dispatched));
+    let delegated = Arc::new(Mutex::new(None::<String>));
+    let delegate_result = Arc::clone(&delegated);
+    let script = move |request: &LlmRequest| {
+        let results: Vec<_> = request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if last_user_text(request).contains(HELPER_TASK) {
+            // The helper calls DENIED, then ALLOWED, then answers.
+            return match results.len() {
+                0 => ScriptedTurn::ToolCall {
+                    id: "call-denied".to_string(),
+                    name: DENIED.to_string(),
+                    args: json!({}),
+                },
+                1 => ScriptedTurn::ToolCall {
+                    id: "call-allowed".to_string(),
+                    name: ALLOWED.to_string(),
+                    args: json!({}),
+                },
+                _ => ScriptedTurn::Text("done".to_string()),
+            };
+        }
+        if !last_user_text(request).contains(DELEGATE) {
+            return ScriptedTurn::Text("ok".to_string());
+        }
+        match results.first() {
+            None => ScriptedTurn::ToolCall {
+                id: "call-delegate".to_string(),
+                name: "delegate".to_string(),
+                args: json!({
+                    "task": HELPER_TASK,
+                    "member_id": "helper",
+                    "result_label": "helper_result",
+                    "max_text_bytes": 4096,
+                    "tooling": {
+                        "mode": "profile",
+                        "source": {
+                            "type": "inline",
+                            "model": "claude-sonnet-4-6",
+                            "tools": { "comms": true }
+                        }
+                    }
+                }),
+            },
+            Some(result) => {
+                *delegate_result.lock().unwrap() = Some(result.text_content());
+                ScriptedTurn::Text("delegated".to_string())
+            }
+        }
+    };
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = support::agent_mob_tools_state(
+        temp.path(),
+        Arc::new(support::ScriptedCouncilClient::new(script)),
+        |state| {
+            let provider: meerkat_mob::ExternalToolsProvider =
+                Arc::new(move || Some(Arc::clone(&tools)));
+            state
+                .with_external_tools_provider(Some(provider))
+                .with_tool_consequence_policy_registry(registry())
+                .with_child_application_tool_policy(host_policy())
+        },
+    );
+    let mob_id = MobId::from(format!("delegating-{}", uuid::Uuid::new_v4().simple()));
+    state
+        .mob_create_definition(delegating_definition(&mob_id))
+        .await
+        .expect("create the host mob");
+    state
+        .mob_spawn(
+            &mob_id,
+            "delegator".into(),
+            AgentIdentity::from("delegator"),
+            Some(MobRuntimeMode::TurnDriven),
+            None,
+            None,
+        )
+        .await
+        .expect("spawn the delegating member");
+    let handle = state.handle_for(&mob_id).await.expect("host mob handle");
+    let spec = BoundedResultSpec::new("turn", 4096).expect("bounded result spec");
+    let work = handle
+        .start_work_for_identity_bounded(
+            AgentIdentity::from("delegator"),
+            WorkSpec::new(
+                ContentInput::Text(DELEGATE.to_string()),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .expect("start a turn");
+    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+        .await
+        .expect("turn completes within the failure bound")
+        .expect("turn succeeds");
+    let delegated = delegated
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the delegator saw its delegate result");
+    let _ = state.mob_destroy(&mob_id).await;
+    let ran = dispatched.lock().unwrap().clone();
+    (delegated, ran)
+}
+
 /// Delegate helpers are child members: a helper runs under the host's child
 /// policy, not unmanaged.
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_helpers_run_under_the_host_child_policy() {
-    let (fixture, dispatched) = fixture(|state| {
-        state
-            .with_tool_consequence_policy_registry(registry())
-            .with_child_application_tool_policy(host_policy())
-    });
-    let (outcome, _session) = delegate(&fixture).await;
-    outcome.expect("delegate succeeds");
-    assert_eq!(*dispatched.lock().unwrap(), [ALLOWED]);
-    fixture.teardown().await;
+    let (delegated, ran) =
+        delegate_from_a_member_turn(|dispatched| Arc::new(HostTools(dispatched))).await;
+    assert!(
+        delegated.contains("\"status\":\"completed\""),
+        "delegate succeeds: {delegated}"
+    );
+    assert_eq!(ran, [ALLOWED]);
+}
+
+/// A helper is capped by its parent's visible tools, so a parent tool that
+/// cannot be witnessed leaves no ceiling to hand over. The delegate is
+/// refused locally before any helper exists, as a tool error the member's
+/// turn carries on from; it is never spawned unrestricted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegate_without_a_witnessable_parent_ceiling_is_refused_locally() {
+    let (delegated, ran) =
+        delegate_from_a_member_turn(|dispatched| Arc::new(UnprovenancedHostTools(dispatched)))
+            .await;
+    assert!(
+        delegated.contains("\"error\":\"execution_failed\"")
+            && delegated.contains("requires tool provenance witnesses"),
+        "the delegate is refused locally: {delegated}"
+    );
+    assert!(ran.is_empty(), "no helper ran a host tool: {ran:?}");
+}
+
+/// A host-created mob whose `delegator` profile mounts the agent mob tools.
+fn delegating_definition(mob_id: &MobId) -> meerkat_mob::MobDefinition {
+    let mut profile = support::participant_profile("delegating member");
+    profile.tools.mob = true;
+    let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+    definition.profiles.insert(
+        meerkat_mob::ProfileName::from("delegator"),
+        meerkat_mob::ProfileBinding::Inline(Box::new(profile)),
+    );
+    definition
 }
 
 #[tokio::test(flavor = "multi_thread")]

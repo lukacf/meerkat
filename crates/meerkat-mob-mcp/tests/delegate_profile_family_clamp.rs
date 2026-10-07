@@ -1,16 +1,17 @@
-//! A delegate helper's tool surface may not exceed its parent's: a family the
-//! parent's profile leaves off stays off for every helper the parent
-//! delegates to, whatever `tooling` the parent's model passes.
+//! A profile-sourced child's tools may not exceed its parent's: a family the
+//! parent's profile leaves off stays out of reach for every helper or member
+//! the parent spawns, whatever `tooling` the parent's model passes.
 //!
 //! The parent's profile restriction carries its `deny` names and `read_only`
-//! to the helper, but a family the profile merely disables is not a deny
+//! to the child, but a family the profile merely disables is not a deny
 //! entry. A model-supplied `tooling: {mode: "profile", source: inline}`
-//! replaces the helper's profile, so it must not switch such a family on.
+//! replaces the child's profile and so decides what the child mounts; the
+//! parent's visible tools cap what the child may dispatch.
 //!
 //! End to end over the production session service with the real agent mob
-//! tools: the parent member's own model turn calls `delegate`, and the
-//! helper's own model turn calls the family's tool, so each call reaches the
-//! calling session's outermost execution gate.
+//! tools: the parent member's own model turn calls `delegate` or
+//! `mob_spawn_member`, and the child's own model turn calls the family's
+//! tool, so each call reaches the calling session's outermost execution gate.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -23,8 +24,8 @@ use std::time::Duration;
 use meerkat_client::LlmRequest;
 use meerkat_core::{ContentInput, HandlingMode, Message};
 use meerkat_mob::{
-    AgentIdentity, MobBackendKind, MobControlPrincipal, MobDefinition, MobId, ProfileBinding,
-    ProfileName,
+    AgentIdentity, BoundedResultSpec, MobBackendKind, MobDefinition, MobId, ProfileBinding,
+    ProfileName, WorkOrigin, WorkSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
 use support::{ScriptedCouncilClient, ScriptedTurn, last_user_text, participant_profile};
@@ -32,9 +33,12 @@ use support::{ScriptedCouncilClient, ScriptedTurn, last_user_text, participant_p
 const DIRECT_PROBE: &str = "FAMILY-CLAMP-DIRECT-PROBE";
 const PROBE: &str = "FAMILY-CLAMP-PROBE";
 const HELPER_TASK: &str = "FAMILY-CLAMP-HELPER-TASK";
+const GRANDCHILD_TASK: &str = "FAMILY-CLAMP-GRANDCHILD-TASK";
+const WORKER_TASK: &str = "FAMILY-CLAMP-WORKER-TASK";
 
 /// A tool of a family the parent's profile leaves off, and the text its
 /// result carries only when the tool actually executed.
+#[derive(Clone)]
 struct FamilyProbe {
     /// The inline profile `tools` key that switches the family on.
     family: &'static str,
@@ -62,8 +66,8 @@ fn builtins_probe() -> FamilyProbe {
     }
 }
 
-/// One member whose profile mounts the agent mob tools (so it may delegate)
-/// and leaves every other family at its default: off, not denied.
+/// One member whose profile mounts the agent mob tools (so it may delegate
+/// and spawn) and leaves every other family at its default: off, not denied.
 fn parent_definition(mob_id: &MobId) -> MobDefinition {
     let mut profile = participant_profile("delegating parent");
     profile.tools.mob = true;
@@ -81,42 +85,36 @@ fn parent_definition(mob_id: &MobId) -> MobDefinition {
     definition
 }
 
-/// The production composition: a runtime-backed persistent service whose
-/// builder carries the agent mob tool factory (`wire_mob_tools`).
-fn wired_state(root: &std::path::Path, client: ScriptedCouncilClient) -> Arc<MobMcpState> {
-    let project_root = root.join("project-root");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    std::fs::write(project_root.join("AGENTS.md"), "# clamp fixture\n").expect("AGENTS.md");
-    let factory = meerkat::AgentFactory::new(root.join("factory-store"))
-        .user_config_root(root.join("user-config"))
-        .runtime_root(root.join("runtime-root"))
-        .project_root(project_root.clone())
-        .context_root(project_root)
-        .builtins(false)
-        .shell(false)
-        .comms(true);
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
-    builder.default_llm_client = Some(Arc::new(client));
-    let store = Arc::new(meerkat_store::JsonlStore::new(root.join("sessions-jsonl")));
-    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(store.clone())));
-    let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
-    let store_dyn: Arc<dyn meerkat::SessionStore> = store;
-    let (service, runtime) = meerkat::surface::build_runtime_backed_service(
-        builder,
-        32,
-        meerkat::PersistenceBundle::new(
-            store_dyn,
-            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
-            Arc::new(meerkat_store::MemoryBlobStore::default()),
-        ),
-    );
-    meerkat_mob_mcp::wire_mob_tools(
-        &mob_tools_slot,
-        Arc::new(service),
-        Some(runtime),
-        None,
-        MobControlPrincipal::Owner,
-    )
+/// The `tooling` argument of a profile-sourced spawn whose inline profile
+/// switches on `families` (plus comms, which every mob member needs).
+fn inline_tooling(families: &[&str]) -> serde_json::Value {
+    let mut tools = serde_json::Map::new();
+    tools.insert("comms".to_string(), true.into());
+    for family in families {
+        tools.insert((*family).to_string(), true.into());
+    }
+    serde_json::json!({
+        "mode": "profile",
+        "source": {
+            "type": "inline",
+            "model": "claude-haiku-4-5-20251001",
+            "tools": tools
+        }
+    })
+}
+
+fn delegate_call(id: &str, task: &str, member_id: &str, families: &[&str]) -> ScriptedTurn {
+    ScriptedTurn::ToolCall {
+        id: id.to_string(),
+        name: "delegate".to_string(),
+        args: serde_json::json!({
+            "task": task,
+            "member_id": member_id,
+            "result_label": "helper_result",
+            "max_text_bytes": 4096,
+            "tooling": inline_tooling(families),
+        }),
+    }
 }
 
 /// The tool-result text of each call in `messages`, keyed by call id.
@@ -134,171 +132,451 @@ fn tool_results(messages: &[Message]) -> BTreeMap<String, String> {
 
 type Seen = Arc<Mutex<Option<BTreeMap<String, String>>>>;
 
+/// The tool results each session saw at the end of its turn, if it got there.
 #[derive(Default, Clone)]
 struct Observed {
-    /// The parent's tool results at the end of its probe turn.
     parent: Seen,
-    /// The helper's tool results at the end of its delegated turn, if the
-    /// helper ran at all.
     helper: Seen,
+    grandchild: Seen,
+    /// One entry per worker turn.
+    worker: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    /// The tools the helper was offered on its first request.
+    helper_tools: Arc<Mutex<Option<Vec<String>>>>,
 }
 
-/// Both sessions share one scripted client. On its direct probe turn the
-/// parent calls the family's tool itself (the family is off for it, so the
-/// call is an unknown tool and ends that turn). On its probe turn it
-/// delegates with an inline profile that switches the family on, and the
-/// helper calls the tool.
+/// Call `tool` once, then record what came back and answer.
+fn probe_once(
+    results: BTreeMap<String, String>,
+    id: &str,
+    probe: &FamilyProbe,
+    record: impl FnOnce(BTreeMap<String, String>),
+) -> ScriptedTurn {
+    if results.contains_key(id) {
+        record(results);
+        ScriptedTurn::Text("probed".to_string())
+    } else {
+        ScriptedTurn::ToolCall {
+            id: id.to_string(),
+            name: probe.tool.to_string(),
+            args: probe.args.clone(),
+        }
+    }
+}
+
+/// Every session shares one scripted client; each turn is told apart by the
+/// task text it was given. `parent_spawn` makes the parent's probe-turn
+/// calls, given the results so far, ending with the one whose id is
+/// `call-spawn`.
 fn script(
     observed: Observed,
-    probe: &FamilyProbe,
+    probe: FamilyProbe,
+    parent_spawn: impl Fn(&BTreeMap<String, String>) -> ScriptedTurn + Send + Sync + 'static,
+    helper_turn: HelperTurn,
 ) -> impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static {
-    let family = probe.family;
-    let tool = probe.tool;
-    let args = probe.args.clone();
     move |request| {
         let user = last_user_text(request);
         let results = tool_results(&request.messages);
+        if user.contains(GRANDCHILD_TASK) {
+            let seen = Arc::clone(&observed.grandchild);
+            return probe_once(results, "call-grandchild-probe", &probe, |r| {
+                *seen.lock().unwrap() = Some(r);
+            });
+        }
         if user.contains(HELPER_TASK) {
-            if results.is_empty() {
-                return ScriptedTurn::ToolCall {
-                    id: "call-helper-probe".to_string(),
-                    name: tool.to_string(),
-                    args: args.clone(),
-                };
-            }
-            *observed.helper.lock().unwrap() = Some(results);
-            return ScriptedTurn::Text("helper done".to_string());
+            observed
+                .helper_tools
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| {
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.to_string())
+                        .collect()
+                });
+            let seen = Arc::clone(&observed.helper);
+            return match helper_turn {
+                HelperTurn::Probe => probe_once(results, "call-helper-probe", &probe, |r| {
+                    *seen.lock().unwrap() = Some(r);
+                }),
+                HelperTurn::DelegateFamily => {
+                    if results.contains_key("call-helper-delegate") {
+                        *seen.lock().unwrap() = Some(results);
+                        ScriptedTurn::Text("helper done".to_string())
+                    } else {
+                        delegate_call(
+                            "call-helper-delegate",
+                            GRANDCHILD_TASK,
+                            "grandchild",
+                            &[probe.family],
+                        )
+                    }
+                }
+            };
+        }
+        if user.contains(WORKER_TASK) {
+            let seen = Arc::clone(&observed.worker);
+            return probe_once(results, "call-worker-probe", &probe, |r| {
+                seen.lock().unwrap().push(r);
+            });
         }
         if user.contains(DIRECT_PROBE) {
             return ScriptedTurn::ToolCall {
                 id: "call-parent-probe".to_string(),
-                name: tool.to_string(),
-                args: args.clone(),
+                name: probe.tool.to_string(),
+                args: probe.args.clone(),
             };
         }
         if !user.contains(PROBE) {
             return ScriptedTurn::Text("ok".to_string());
         }
-        let mut helper_tools = serde_json::Map::new();
-        helper_tools.insert("comms".to_string(), true.into());
-        helper_tools.insert(family.to_string(), true.into());
-        if !results.contains_key("call-delegate") {
-            return ScriptedTurn::ToolCall {
-                id: "call-delegate".to_string(),
-                name: "delegate".to_string(),
-                args: serde_json::json!({
-                    "task": HELPER_TASK,
-                    "member_id": "helper",
-                    "result_label": "helper_result",
-                    "max_text_bytes": 4096,
-                    "tooling": {
-                        "mode": "profile",
-                        "source": {
-                            "type": "inline",
-                            "model": "claude-haiku-4-5-20251001",
-                            "tools": helper_tools
-                        }
-                    }
-                }),
-            };
+        if results.contains_key("call-spawn") {
+            *observed.parent.lock().unwrap() = Some(results);
+            return ScriptedTurn::Text("probed".to_string());
         }
-        *observed.parent.lock().unwrap() = Some(results);
-        ScriptedTurn::Text("probed".to_string())
+        parent_spawn(&results)
     }
 }
 
-async fn assert_helper_cannot_enable_parent_disabled_family(probe: FamilyProbe) {
-    let observed = Observed::default();
-    let temp = tempfile::tempdir().expect("temp dir");
-    let state = wired_state(
-        temp.path(),
-        ScriptedCouncilClient::new(script(observed.clone(), &probe)),
-    );
-    let mob_id = MobId::from(format!("clamp-{}", uuid::Uuid::new_v4().simple()));
-    state
-        .mob_create_definition(parent_definition(&mob_id))
-        .await
-        .expect("create the mob");
-    state
-        .mob_spawn(
-            &mob_id,
-            ProfileName::from("participant"),
-            AgentIdentity::from("parent"),
-            Some(meerkat_mob::MobRuntimeMode::TurnDriven),
-            Some(MobBackendKind::Session),
-            None,
-        )
-        .await
-        .expect("spawn the parent");
-    let parent_member = state
-        .handle_for(&mob_id)
-        .await
-        .expect("mob handle")
-        .member(&AgentIdentity::from("parent"))
-        .await
-        .expect("member handle");
-    let run_turn = |text: &'static str| {
-        let parent_member = parent_member.clone();
-        async move {
-            let turn = parent_member
-                .start_turn(
-                    ContentInput::Text(text.to_string()),
-                    HandlingMode::Queue,
-                    meerkat_mob::MemberTurnOptions::default(),
-                    None,
-                )
-                .await
-                .expect("turn admitted");
-            tokio::time::timeout(Duration::from_secs(120), turn.wait())
-                .await
-                .expect("the turn completes")
-        }
-    };
+#[derive(Clone, Copy)]
+enum HelperTurn {
+    /// The helper calls the family's tool itself.
+    Probe,
+    /// The helper delegates on, to a grandchild whose inline profile switches
+    /// the family on; the grandchild calls the tool.
+    DelegateFamily,
+}
 
-    // Precondition: the family is off for the parent itself, so its own
-    // call is an unknown tool.
-    let Err(direct) = run_turn(DIRECT_PROBE).await else {
-        panic!("the parent's own call to a tool of a family it leaves off fails its turn");
-    };
+/// A mob with one parent member, over the production composition.
+struct ParentMob {
+    state: Arc<MobMcpState>,
+    mob_id: MobId,
+    _temp: tempfile::TempDir,
+}
+
+impl ParentMob {
+    async fn new(
+        mob_id: MobId,
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+    ) -> Self {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = support::agent_mob_tools_state(
+            temp.path(),
+            Arc::new(ScriptedCouncilClient::new(script)),
+            |state| state,
+        );
+        state
+            .mob_create_definition(parent_definition(&mob_id))
+            .await
+            .expect("create the mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("participant"),
+                AgentIdentity::from("parent"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                Some(MobBackendKind::Session),
+                None,
+            )
+            .await
+            .expect("spawn the parent");
+        Self {
+            state,
+            mob_id,
+            _temp: temp,
+        }
+    }
+
+    async fn parent_turn(&self, text: &str) -> Result<(), meerkat_mob::MobError> {
+        let turn = self
+            .state
+            .handle_for(&self.mob_id)
+            .await
+            .expect("mob handle")
+            .member(&AgentIdentity::from("parent"))
+            .await
+            .expect("member handle")
+            .start_turn(
+                ContentInput::Text(text.to_string()),
+                HandlingMode::Queue,
+                meerkat_mob::MemberTurnOptions::default(),
+                None,
+            )
+            .await
+            .expect("turn admitted");
+        tokio::time::timeout(Duration::from_secs(120), turn.wait())
+            .await
+            .expect("the turn completes")
+            .map(|_| ())
+    }
+
+    /// Precondition: the family is off for the parent itself, so its own
+    /// call is an unknown tool (which ends that turn).
+    async fn assert_family_off_for_parent(&self, probe: &FamilyProbe) {
+        let Err(direct) = self.parent_turn(DIRECT_PROBE).await else {
+            panic!("the parent's own call to a tool of a family it leaves off fails its turn");
+        };
+        assert!(
+            format!("{direct:?}").contains(&format!("Tool not found: {}", probe.tool)),
+            "{} is not mounted for the parent: {direct:?}",
+            probe.tool
+        );
+    }
+
+    /// Run one worker turn and return how it failed.
+    async fn worker_turn(&self, mob_id: &MobId) -> String {
+        let handle = self.state.handle_for(mob_id).await.expect("mob handle");
+        let spec = BoundedResultSpec::new("turn", 4096).expect("bounded result spec");
+        let work = handle
+            .start_work_for_identity_bounded(
+                AgentIdentity::from("worker"),
+                WorkSpec::new(
+                    ContentInput::Text(WORKER_TASK.to_string()),
+                    WorkOrigin::Internal,
+                ),
+                HandlingMode::Queue,
+                spec.clone(),
+            )
+            .await
+            .expect("start a worker turn");
+        let Err(failure) = tokio::time::timeout(Duration::from_secs(120), work.wait_bounded(spec))
+            .await
+            .expect("the worker turn completes")
+        else {
+            panic!("the worker's turn ends on its refused call");
+        };
+        format!("{failure:?}")
+    }
+
+    async fn teardown(self) {
+        let _ = self.state.mob_destroy(&self.mob_id).await;
+    }
+}
+
+fn fresh_mob_id() -> MobId {
+    MobId::from(format!("clamp-{}", uuid::Uuid::new_v4().simple()))
+}
+
+fn seen(slot: &Seen, who: &str) -> BTreeMap<String, String> {
+    slot.lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| panic!("the {who} turn reached its final request"))
+}
+
+/// The child's call reached its dispatcher and was refused there: the tool
+/// is mounted (its profile switched the family on) but outside its ceiling,
+/// so it is hidden from the child, and calling a tool it was not offered
+/// ends the child's turn. `surfaced` is what the refusal surfaced as.
+fn assert_refused_at_dispatch(surfaced: &str, probe: &FamilyProbe, who: &str) {
     assert!(
-        format!("{direct:?}").contains(&format!("Tool not found: {}", probe.tool)),
-        "{} is not mounted for the parent: {direct:?}",
+        !surfaced.contains(probe.executed_marker),
+        "a {who} executed {} from the `{}` family its parent's profile leaves off, by naming \
+         the family in an inline tooling profile: {surfaced}",
+        probe.tool,
+        probe.family,
+    );
+    assert!(
+        surfaced.contains(&format!("Tool '{}' is not allowed by policy", probe.tool)),
+        "the {who}'s {} call is refused as outside its ceiling: {surfaced}",
         probe.tool
     );
+}
 
-    run_turn(PROBE)
+async fn assert_delegate_helper_is_capped(probe: FamilyProbe) {
+    let observed = Observed::default();
+    let family = probe.family;
+    let mob = ParentMob::new(
+        fresh_mob_id(),
+        script(
+            observed.clone(),
+            probe.clone(),
+            move |_| delegate_call("call-spawn", HELPER_TASK, "helper", &[family]),
+            HelperTurn::Probe,
+        ),
+    )
+    .await;
+    mob.assert_family_off_for_parent(&probe).await;
+    mob.parent_turn(PROBE)
         .await
-        .expect("a refused delegate or helper call does not fail the parent's turn");
+        .expect("a refused helper call does not fail the parent's turn");
 
-    let parent = observed
-        .parent
+    let parent = seen(&observed.parent, "parent's probe");
+    // The helper keeps what its parent can see (its comms tools) and is
+    // offered nothing of the family: capped, not closed.
+    let offered = observed
+        .helper_tools
         .lock()
         .unwrap()
         .clone()
-        .expect("the parent's probe turn reached its final request");
-    // A refused delegate is a correct outcome too: then the helper never ran.
-    let helper = observed.helper.lock().unwrap().clone();
-    if let Some(helper) = helper {
-        let helper_probe = &helper["call-helper-probe"];
-        assert!(
-            !helper_probe.contains(probe.executed_marker),
-            "a delegate helper executed {} from the `{}` family its parent's profile leaves \
-             off, by naming the family in an inline tooling profile: {helper_probe}\n\
-             delegate result: {}",
-            probe.tool,
-            probe.family,
-            parent["call-delegate"]
-        );
-    }
-    let _ = state.mob_destroy(&mob_id).await;
+        .expect("the helper made a request");
+    assert!(
+        offered.iter().any(|name| name == "send_message"),
+        "the helper keeps tools its parent can see: {offered:?}"
+    );
+    assert!(
+        !offered.iter().any(|name| name == probe.tool),
+        "the helper is not offered {}: {offered:?}",
+        probe.tool
+    );
+    // The helper's refused call ended its turn; the delegate reports it to
+    // the parent, whose own turn carries on.
+    assert!(observed.helper.lock().unwrap().is_none());
+    assert_refused_at_dispatch(&parent["call-spawn"], &probe, "delegate helper");
+    mob.teardown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inline_delegate_profile_cannot_enable_shell_the_parent_leaves_off() {
-    assert_helper_cannot_enable_parent_disabled_family(shell_probe()).await;
+    assert_delegate_helper_is_capped(shell_probe()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inline_delegate_profile_cannot_enable_builtins_the_parent_leaves_off() {
-    assert_helper_cannot_enable_parent_disabled_family(builtins_probe()).await;
+    assert_delegate_helper_is_capped(builtins_probe()).await;
+}
+
+/// The cap is transitive: a helper (itself profile-sourced) that delegates
+/// on with an inline profile switching the family on is capped by its own
+/// visible tools, which its parent's already capped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recursive_inline_delegate_profile_stays_within_the_root_parent() {
+    let probe = shell_probe();
+    let observed = Observed::default();
+    let mob = ParentMob::new(
+        fresh_mob_id(),
+        script(
+            observed.clone(),
+            probe.clone(),
+            // The helper may delegate (`mob`), but not run the family.
+            |_| delegate_call("call-spawn", HELPER_TASK, "helper", &["mob"]),
+            HelperTurn::DelegateFamily,
+        ),
+    )
+    .await;
+    mob.assert_family_off_for_parent(&probe).await;
+    mob.parent_turn(PROBE)
+        .await
+        .expect("a refused grandchild call does not fail the parent's turn");
+
+    // The grandchild's refused call ended its turn; the helper's delegate
+    // reports it, and the helper carries on to its final answer.
+    let helper = seen(&observed.helper, "helper");
+    assert!(observed.grandchild.lock().unwrap().is_none());
+    assert_refused_at_dispatch(&helper["call-helper-delegate"], &probe, "grandchild");
+    mob.teardown().await;
+}
+
+/// `mob_spawn_member` with profile tooling is capped the same way, for a
+/// durable member of a mob the parent created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_inline_spawn_member_profile_cannot_enable_shell_the_parent_leaves_off() {
+    let probe = shell_probe();
+    let observed = Observed::default();
+    let child_mob_id = fresh_mob_id();
+    let child = child_mob_id.to_string();
+    let mob = ParentMob::new(
+        fresh_mob_id(),
+        script(
+            observed.clone(),
+            probe.clone(),
+            move |results| {
+                if results.contains_key("call-create") {
+                    // The created mob is the parent's to manage, so it may
+                    // spawn there with explicit tooling.
+                    ScriptedTurn::ToolCall {
+                        id: "call-spawn".to_string(),
+                        name: "mob_spawn_member".to_string(),
+                        args: serde_json::json!({
+                            "mob_id": child,
+                            "profile": "worker",
+                            "member_id": "worker",
+                            "runtime_mode": "turn_driven",
+                            "tooling": inline_tooling(&["shell"]),
+                        }),
+                    }
+                } else {
+                    ScriptedTurn::ToolCall {
+                        id: "call-create".to_string(),
+                        name: "mob_create".to_string(),
+                        args: serde_json::json!({ "definition": {
+                            "id": child,
+                            "profiles": { "worker": {
+                                "model": "claude-haiku-4-5-20251001",
+                                "tools": { "comms": true }
+                            } }
+                        } }),
+                    }
+                }
+            },
+            HelperTurn::Probe,
+        ),
+    )
+    .await;
+    mob.assert_family_off_for_parent(&probe).await;
+    mob.parent_turn(PROBE)
+        .await
+        .expect("the parent's spawn turn");
+    let parent = seen(&observed.parent, "parent's probe");
+    for call in ["call-create", "call-spawn"] {
+        assert!(
+            !parent[call].contains("\"error\":\""),
+            "the parent's {call} succeeded: {}",
+            parent[call]
+        );
+    }
+
+    let failure = mob.worker_turn(&child_mob_id).await;
+    assert!(observed.worker.lock().unwrap().is_empty());
+    assert_refused_at_dispatch(&failure, &probe, "spawned member");
+    let _ = mob.state.mob_destroy(&child_mob_id).await;
+    mob.teardown().await;
+}
+
+/// The ordinary worker path is untouched: `mob_spawn_member` with a mob
+/// definition profile, `auto_wire_parent` and no `tooling` spawns the
+/// profile's member as before. It is a role-based spawn, not parent-owned
+/// inheritance, so no inherited ceiling is required or handed over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tooling_absent_spawn_member_spawns_the_definition_profile_as_before() {
+    let probe = shell_probe();
+    let observed = Observed::default();
+    let mob_id = fresh_mob_id();
+    let own_mob = mob_id.to_string();
+    let mob = ParentMob::new(
+        mob_id,
+        script(
+            observed.clone(),
+            probe,
+            move |_| ScriptedTurn::ToolCall {
+                id: "call-spawn".to_string(),
+                name: "mob_spawn_member".to_string(),
+                args: serde_json::json!({
+                    "mob_id": own_mob,
+                    "profile": "participant",
+                    "member_id": "worker",
+                    "auto_wire_parent": true,
+                }),
+            },
+            HelperTurn::Probe,
+        ),
+    )
+    .await;
+    mob.parent_turn(PROBE)
+        .await
+        .expect("the parent's spawn turn");
+    let parent = seen(&observed.parent, "parent's probe");
+    assert!(
+        !parent["call-spawn"].contains("\"error\":\""),
+        "the tooling-absent spawn succeeds: {}",
+        parent["call-spawn"]
+    );
+    mob.state
+        .handle_for(&mob.mob_id)
+        .await
+        .expect("mob handle")
+        .member(&AgentIdentity::from("worker"))
+        .await
+        .expect("the worker is a member of the mob");
+    mob.teardown().await;
 }

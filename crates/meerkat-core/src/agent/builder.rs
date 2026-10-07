@@ -569,6 +569,23 @@ impl AgentBuilder {
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
         let catalog_mode = select_tool_catalog_mode(tools.as_ref());
         let catalog_capabilities = tools.tool_catalog_capabilities();
+        // What this agent mounts, to fit a handed-off ceiling to it (below).
+        let mounted_tool_names: Option<std::collections::HashSet<String>> =
+            initial_visibility_authority.as_ref().map(|_| {
+                if catalog_capabilities.exact_catalog {
+                    tools
+                        .tool_catalog()
+                        .iter()
+                        .map(|entry| entry.tool.name.to_string())
+                        .collect()
+                } else {
+                    tools
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.name.to_string())
+                        .collect()
+                }
+            });
         let (control_tool_names, deferred_tool_names) = if catalog_capabilities.exact_catalog {
             let catalog = tools.tool_catalog();
             let control_names = catalog
@@ -850,8 +867,31 @@ impl AgentBuilder {
 
         let has_initial_visibility_state = initial_visibility_authority.is_some();
         if let Some(incoming) = initial_visibility_authority {
-            let incoming = incoming.into_initial_visibility_state();
-            visibility_state.inherited_base_filter = incoming.inherited_base_filter;
+            let mut incoming = incoming.into_initial_visibility_state();
+            // An allow-ceiling bounds only what this agent mounts: a name it
+            // never mounts can be neither listed nor called, and keeping it
+            // would leave a ceiling name the owner's authority catalog cannot
+            // witness. Dropping such names never widens the ceiling; tools
+            // that appear later outside it stay hidden.
+            if let (ToolFilter::Allow(names), Some(mounted)) =
+                (&incoming.inherited_base_filter, mounted_tool_names.as_ref())
+            {
+                let kept: crate::types::ToolNameSet = names
+                    .iter()
+                    .filter(|name| mounted.contains(name.as_str()))
+                    .cloned()
+                    .collect();
+                incoming
+                    .filter_witnesses
+                    .retain(|name, _| kept.contains(name.as_str()));
+                incoming.inherited_base_filter = ToolFilter::Allow(kept);
+            }
+            // A handed-off ceiling only narrows: on a resumed session it is
+            // composed with the durable inherited ceiling, so a broader new
+            // parent snapshot never replaces the original one.
+            visibility_state.inherited_base_filter = visibility_state
+                .inherited_base_filter
+                .narrowed_by(&incoming.inherited_base_filter);
             visibility_state
                 .filter_witnesses
                 .extend(incoming.filter_witnesses);
@@ -2114,6 +2154,63 @@ mod tests {
             owner.visibility_state().unwrap().inherited_base_filter,
             inherited_filter,
             "canonical inherited metadata should restore through the visibility owner"
+        );
+    }
+
+    /// A ceiling handed to a resumed session narrows its durable inherited
+    /// ceiling: a broader new parent snapshot never replaces it.
+    #[tokio::test]
+    async fn resumed_builder_narrows_the_durable_inherited_ceiling_with_a_handoff() {
+        let client = Arc::new(MockClient);
+        let kept = test_tool_with_provenance("kept", "kept");
+        let extra = test_tool_with_provenance("extra", "extra");
+        let tools = Arc::new(StaticTools::new(
+            vec![Arc::clone(&kept), Arc::clone(&extra)].into(),
+        ));
+        let store = Arc::new(MockStore);
+        let witness = |tool: &Arc<ToolDef>| {
+            (
+                tool.name.clone(),
+                crate::ToolVisibilityWitness {
+                    last_seen_provenance: tool.provenance.clone(),
+                },
+            )
+        };
+        let durable = ToolFilter::Allow(["kept".to_string()].into_iter().collect());
+        let mut session = Session::new();
+        session
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState {
+                        inherited_base_filter: durable.clone(),
+                        filter_witnesses: [witness(&kept)].into_iter().collect(),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .expect("visibility state should serialize");
+        let broader = InheritedToolVisibilityAuthority::from_generated_composition_authority(
+            ToolFilter::Allow(
+                ["kept".to_string(), "extra".to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+            [witness(&kept), witness(&extra)].into_iter().collect(),
+        );
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+        let result = AgentBuilder::new()
+            .resume_session(session)
+            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_initial_tool_visibility_state(broader)
+            .build_inner(client, tools, store)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            owner.visibility_state().unwrap().inherited_base_filter,
+            durable,
+            "the durable ceiling holds against a broader handoff"
         );
     }
 

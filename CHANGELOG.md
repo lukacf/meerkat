@@ -419,6 +419,7 @@ them.
 
 ### Fixed
 
+- Mob destruction no longer overflows normal 2 MiB worker stacks in debug builds when retiring session-backed children.
 - GPT Live: a typed row delivered late behind a history summary, together
   with newer speech that corrected part of it, is now framed as newer than the
   summary (#1800). The summary was snapshotted before the row was typed, so it

@@ -102,6 +102,22 @@ pub(crate) async fn list_all_tools(
     service: &Peer<RoleClient>,
     server_name: &str,
 ) -> Result<Vec<ToolDef>, McpError> {
+    list_all_tools_with(service, server_name, list_tools_failed).await
+}
+
+/// A failed `tools/list` request as a protocol error.
+pub(crate) fn list_tools_failed(error: &rmcp::ServiceError) -> McpError {
+    McpError::ProtocolError {
+        message: format!("Failed to list tools: {error}"),
+    }
+}
+
+/// [`list_all_tools`] with the caller's projection of a failed request.
+pub(crate) async fn list_all_tools_with(
+    service: &Peer<RoleClient>,
+    server_name: &str,
+    request_failed: impl Fn(&rmcp::ServiceError) -> McpError,
+) -> Result<Vec<ToolDef>, McpError> {
     const MAX_PAGES: usize = crate::McpConnection::MAX_TOOL_DISCOVERY_PAGES;
     const MAX_TOOLS: usize = crate::McpConnection::MAX_DISCOVERED_TOOLS;
     let mut request = None;
@@ -109,13 +125,10 @@ pub(crate) async fn list_all_tools(
     let mut tools = Vec::new();
     let mut pages = 0usize;
     loop {
-        let response =
-            service
-                .list_tools(request)
-                .await
-                .map_err(|error| McpError::ProtocolError {
-                    message: format!("Failed to list tools: {error}"),
-                })?;
+        let response = service
+            .list_tools(request)
+            .await
+            .map_err(|error| request_failed(&error))?;
         pages += 1;
         if tools.len().saturating_add(response.tools.len()) > MAX_TOOLS {
             return Err(McpError::ToolDiscoveryLimitExceeded {

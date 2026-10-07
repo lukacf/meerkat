@@ -10949,10 +10949,13 @@
         "type": "object"
       },
       "LoginCancelParams": {
-        "description": "Request payload for `auth/login/cancel`: retire the pending attempt\nadmitted under `state` for a configured MCP server (`{\"mcp\": {...}}`) or\na connector slot (`{\"connector\": {...}}`).",
+        "description": "Request payload for `auth/login/cancel`: retire the pending attempt\nadmitted under `state` for a configured MCP server (`{\"mcp\": {...}}`) or\na connector slot (`{\"connector\": {...}}`), or the MCP attempt named by\nthe non-secret `attempt_ref` that `auth/status/get` reports\n(`{\"mcp\": {...}, \"attempt_ref\": ...}`).",
         "oneOf": [
           {
             "$ref": "#/components/schemas/McpLoginCancelParams"
+          },
+          {
+            "$ref": "#/components/schemas/McpLoginCancelAttemptParams"
           },
           {
             "$ref": "#/components/schemas/ConnectorLoginCancelParams"
@@ -11147,6 +11150,17 @@
               "null"
             ]
           },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/McpOAuthAccountSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Account binding when no `oauth_account` is named: `discover` binds the\nprovider-verified account at the first login, `unverified` is an\nexplicit opt-in to resource-bound access with no account evidence.\nOnly host configuration sets it; it conflicts with `oauth_account`."
+          },
           "transport": {
             "anyOf": [
               {
@@ -11234,6 +11248,23 @@
         ],
         "type": "string"
       },
+      "McpLoginCancelAttemptParams": {
+        "additionalProperties": false,
+        "description": "MCP arm of [`LoginCancelParams`] that names the attempt by the\n`attempt_ref` from `auth/status/get`, for a host that no longer holds the\nattempt's state. The reference is not secret and grants no flow access.",
+        "properties": {
+          "attempt_ref": {
+            "type": "string"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/WireMcpAuthTarget"
+          }
+        },
+        "required": [
+          "mcp",
+          "attempt_ref"
+        ],
+        "type": "object"
+      },
       "McpLoginCancelParams": {
         "additionalProperties": false,
         "description": "MCP arm of [`LoginCancelParams`]. `Debug` redacts `state`.",
@@ -11250,6 +11281,21 @@
           "state"
         ],
         "type": "object"
+      },
+      "McpOAuthAccountSelection": {
+        "description": "Account binding of an OAuth-protected MCP server that names no account.",
+        "oneOf": [
+          {
+            "const": "discover",
+            "description": "Bind the account the provider verifies at the first login; later\nlogins must prove that same account.",
+            "type": "string"
+          },
+          {
+            "const": "unverified",
+            "description": "Resource-bound access without account evidence. The credential never\nestablishes, verifies or represents an account.",
+            "type": "string"
+          }
+        ]
       },
       "McpReloadParams": {
         "description": "Request payload for optional `mcp/reload`.",
@@ -20094,7 +20140,6 @@
           "profile_id",
           "cleared"
         ],
-        "title": "WireAuthProfileCleared",
         "type": "object"
       },
       "WireAuthProfileCreated": {
@@ -22281,14 +22326,41 @@
         "title": "WireLoginStart",
         "type": "object"
       },
+      "WireMcpAccountSelection": {
+        "description": "Configured account binding of an MCP server that names no account.\n`discover` binds the provider-verified account at the first login;\n`unverified` is resource-bound access with no account evidence.",
+        "enum": [
+          "discover",
+          "unverified"
+        ],
+        "type": "string"
+      },
+      "WireMcpAccountVerification": {
+        "description": "Whether an MCP server's credential proves an account. `verified`: a\nknown or discovered account was verified by the account strategy.\n`unverified`: the host opted into resource-bound access; no account is\nverified and `account_id` is always absent. `legacy`: the server has no\naccount selection.",
+        "enum": [
+          "verified",
+          "unverified",
+          "legacy"
+        ],
+        "type": "string"
+      },
       "WireMcpAuthTarget": {
         "additionalProperties": false,
-        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy). Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
+        "description": "OAuth-protected MCP server addressed by `auth/login/*` and\n`auth/status/get` instead of a provider binding.\n\n`server_name` and `server_url` identify the configured server;\n`oauth_account` is the selected account the login must prove (the OIDC\nsubject for the default account strategy), and `oauth_account_selection`\nthe configured `discover` or `unverified` mode. Both only name the host\nconfiguration: a value that differs from it is refused, and neither can\nselect or downgrade a mode. Login is host-driven: the\nauthorize URL and state are host-channel data and must never reach an\nagent, tool result, transcript or log.",
         "properties": {
           "oauth_account": {
             "type": [
               "string",
               "null"
+            ]
+          },
+          "oauth_account_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMcpAccountSelection"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "server_name": {
@@ -22321,12 +22393,16 @@
               "null"
             ]
           },
+          "account_verification": {
+            "$ref": "#/components/schemas/WireMcpAccountVerification"
+          },
           "mcp": {
             "$ref": "#/components/schemas/WireMcpAuthTarget"
           }
         },
         "required": [
-          "mcp"
+          "mcp",
+          "account_verification"
         ],
         "type": "object"
       },
@@ -26171,7 +26247,7 @@
             "description": "Error response"
           }
         },
-        "summary": "Retire a pending MCP or connector OAuth attempt by its state"
+        "summary": "Retire a pending MCP or connector OAuth attempt by its state, or an MCP attempt by its attempt_ref"
       }
     },
     "/auth/login/complete": {

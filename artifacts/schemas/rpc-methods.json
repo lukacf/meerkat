@@ -323,7 +323,7 @@
       "result_type": "WireLoginReady"
     },
     {
-      "description": "Retire a pending MCP or connector OAuth attempt by its state",
+      "description": "Retire a pending MCP or connector OAuth attempt by its state, or an MCP attempt by its attempt_ref",
       "name": "auth/login/cancel",
       "params_type": "LoginCancelParams",
       "result_type": "WireLoginCancelled"
@@ -353,10 +353,10 @@
       "result_type": "WireAuthStatusResult"
     },
     {
-      "description": "Revoke + remove persisted credentials",
+      "description": "Revoke + remove persisted credentials of a provider binding, or remove the stored credential of an MCP server target",
       "name": "auth/logout",
-      "params_type": "BindingIdParams",
-      "result_type": "WireAuthProfileCleared"
+      "params_type": "AuthLogoutParams",
+      "result_type": "WireAuthLogoutResult"
     },
     {
       "description": "List realms with binding summaries",

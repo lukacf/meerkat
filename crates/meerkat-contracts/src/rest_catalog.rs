@@ -670,7 +670,7 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             "/auth/login/cancel",
             vec![RestOperationDescriptor::with_json_request(
                 "post",
-                "Retire a pending MCP or connector OAuth attempt by its state",
+                "Retire a pending MCP or connector OAuth attempt by its state, or an MCP attempt by its attempt_ref",
                 "LoginCancelParams",
                 "WireLoginCancelled",
             )],

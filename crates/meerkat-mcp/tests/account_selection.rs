@@ -129,9 +129,11 @@ enum Login {
     Mismatch,
 }
 
+/// Models the credential owner: a completed login commits its token, which
+/// every later per-request read returns.
 struct Resolver {
     trace: Trace,
-    stored: Stored,
+    stored: Mutex<Stored>,
     login: Login,
 }
 
@@ -145,7 +147,8 @@ impl McpAuthResolver for Resolver {
             .lock()
             .unwrap()
             .push(Event::Stored(target.clone()));
-        match self.stored {
+        let stored = *self.stored.lock().unwrap();
+        match stored {
             Stored::Missing => Ok(None),
             Stored::Token => Ok(Some(TOKEN.into())),
             Stored::Mismatch => Err(ConnectorOAuthRefusal::AccountMismatch.into()),
@@ -175,7 +178,10 @@ impl McpAuthResolver for Resolver {
             .unwrap()
             .push(Event::Login(target.clone(), challenge.map(str::to_string)));
         match self.login {
-            Login::Token => Ok(TOKEN.into()),
+            Login::Token => {
+                *self.stored.lock().unwrap() = Stored::Token;
+                Ok(TOKEN.into())
+            }
             Login::Mismatch => Err(ConnectorOAuthRefusal::AccountMismatch.into()),
         }
     }
@@ -204,7 +210,7 @@ async fn observe(
     let resolver = resolver_script.map(|(stored, login)| {
         Arc::new(Resolver {
             trace: trace.clone(),
-            stored,
+            stored: Mutex::new(stored),
             login,
         }) as Arc<dyn McpAuthResolver>
     });
@@ -385,7 +391,9 @@ async fn selected_interactive_login_precedes_first_mcp_request() {
         [
             Event::Factory(config),
             Event::Stored(target.clone()),
-            Event::Login(target, None),
+            Event::Login(target.clone(), None),
+            // The request reads the committed credential.
+            Event::Stored(target),
             Event::Http(Some(format!("Bearer {TOKEN}"))),
         ]
     );
@@ -408,6 +416,8 @@ async fn selected_stored_token_keeps_exact_selection_and_bearer() {
         events,
         [
             Event::Factory(config),
+            Event::Stored(target.clone()),
+            // The request reads its bearer through the resolver.
             Event::Stored(target),
             Event::Http(Some(format!("Bearer {TOKEN}"))),
         ]
@@ -496,8 +506,116 @@ async fn selected_reauth_required_allows_login_before_first_mcp_request() {
         [
             Event::Factory(config),
             Event::Stored(target.clone()),
-            Event::Login(target, None),
+            Event::Login(target.clone(), None),
+            Event::Stored(target),
             Event::Http(Some(format!("Bearer {TOKEN}"))),
         ]
     );
+}
+
+fn mode_selected(
+    endpoint: &Endpoint,
+    selection: meerkat_core::mcp_config::McpOAuthAccountSelection,
+) -> McpServerConfig {
+    let mut config =
+        McpServerConfig::streamable_http("account-fixture", endpoint.url.clone(), HashMap::new());
+    let McpTransportConfig::Http(http) = &mut config.transport else {
+        unreachable!();
+    };
+    http.oauth_account_selection = Some(selection);
+    config
+}
+
+/// Discover and the explicitly unverified mode take the same resolver-only
+/// path as a Known selection: no static Authorization, no other transport,
+/// no connection without the resolver, and never an anonymous request when
+/// the credential is missing.
+#[tokio::test]
+async fn discover_and_unverified_selections_use_only_their_resolver() {
+    use meerkat_core::mcp_config::McpOAuthAccountSelection;
+    for selection in [
+        McpOAuthAccountSelection::Discover,
+        McpOAuthAccountSelection::Unverified,
+    ] {
+        // Conflicting static Authorization and an unsupported transport are
+        // refused before any effect.
+        for conflict in ["authorization", "sse"] {
+            let endpoint = Endpoint::start().await;
+            let mut config = mode_selected(&endpoint, selection);
+            let McpTransportConfig::Http(http) = &mut config.transport else {
+                unreachable!();
+            };
+            if conflict == "sse" {
+                http.transport = Some(McpHttpTransport::Sse);
+            } else {
+                http.headers
+                    .insert("Authorization".into(), "Bearer fixture-static".into());
+            }
+            let (error, events) = observe(
+                endpoint,
+                &config,
+                McpAuthMode::Interactive,
+                Some((Stored::Token, Login::Token)),
+            )
+            .await;
+            assert!(
+                matches!(
+                    error,
+                    McpError::OAuthAccountRejected(McpOAuthError::UnsupportedAccountSelection)
+                ),
+                "{selection:?} with {conflict}: {error:?}"
+            );
+            assert!(events.is_empty(), "{selection:?}: {events:?}");
+        }
+
+        // No resolver: refused before any effect.
+        let endpoint = Endpoint::start().await;
+        let config = mode_selected(&endpoint, selection);
+        let (error, events) = observe(endpoint, &config, McpAuthMode::Interactive, None).await;
+        assert!(matches!(
+            error,
+            McpError::OAuthAccountRejected(McpOAuthError::UnsupportedAccountSelection)
+        ));
+        assert!(events.is_empty(), "{selection:?}: {events:?}");
+
+        // Missing credential: the typed refusal, never an anonymous request.
+        let endpoint = Endpoint::start().await;
+        let config = mode_selected(&endpoint, selection);
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        let (error, events) = observe(
+            endpoint,
+            &config,
+            McpAuthMode::Stored,
+            Some((Stored::Missing, Login::Token)),
+        )
+        .await;
+        assert!(matches!(
+            error,
+            McpError::OAuthAccountRejected(McpOAuthError::MissingStoredToken { .. })
+        ));
+        assert_eq!(events, [Event::Factory(config), Event::Stored(target)]);
+
+        // Permitted resolver use: the stored bearer, read per request.
+        let endpoint = Endpoint::start().await;
+        let config = mode_selected(&endpoint, selection);
+        let target = McpServerIdentity::from_config(&config).unwrap();
+        assert!(target.is_selected());
+        assert_eq!(target.expected_account(), None);
+        let (_error, events) = observe(
+            endpoint,
+            &config,
+            McpAuthMode::Stored,
+            Some((Stored::Token, Login::Token)),
+        )
+        .await;
+        assert_eq!(
+            events,
+            [
+                Event::Factory(config),
+                Event::Stored(target.clone()),
+                Event::Stored(target),
+                Event::Http(Some(format!("Bearer {TOKEN}"))),
+            ]
+        );
+    }
 }

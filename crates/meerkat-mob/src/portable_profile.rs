@@ -62,6 +62,15 @@ pub(crate) fn project_portable_profile(
                         server.name
                     ));
                 }
+                // A Discover or unverified account selection is host
+                // configuration on the placement host; a portable profile
+                // cannot carry it, and dropping it would change the mode.
+                if http.oauth_account_selection.is_some() {
+                    return Err(format!(
+                        "MCP server '{}' has an OAuth account selection that a portable profile cannot carry",
+                        server.name
+                    ));
+                }
                 PortableMcpDecl::Http {
                     url: http.url.clone(),
                     http_transport: http.transport,
@@ -180,6 +189,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
                             headers: HashMap::new(),
                             transport: *http_transport,
                             oauth_account: oauth_account.clone(),
+                            oauth_account_selection: None,
                         },
                     ),
                     tool_names: tool_names.clone(),
@@ -473,5 +483,52 @@ mod tests {
             },
         );
         assert!(rehydrate_portable_profile(&portable).is_err());
+    }
+
+    #[test]
+    fn mcp_account_selection_fails_closed_in_portable_projection() {
+        for selection in [
+            meerkat_core::mcp_config::McpOAuthAccountSelection::Discover,
+            meerkat_core::mcp_config::McpOAuthAccountSelection::Unverified,
+        ] {
+            let mut server = meerkat_core::mcp_config::McpServerConfig::streamable_http(
+                "selected",
+                "https://mcp.example.invalid/mcp",
+                HashMap::new(),
+            );
+            if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut server.transport
+            {
+                http.oauth_account_selection = Some(selection);
+            }
+            let mut tools = ToolConfig::default();
+            tools.mcp_servers.push(server);
+            let error = project_portable_profile(
+                &Profile {
+                    model_fallback: None,
+                    model: "override-model".to_string(),
+                    provider: Some(meerkat_core::Provider::Anthropic),
+                    self_hosted_server_id: None,
+                    image_generation_provider: None,
+                    auto_compact_threshold: None,
+                    resume_overrides: Vec::new(),
+                    skills: Vec::new(),
+                    tools,
+                    peer_description: String::new(),
+                    external_addressable: false,
+                    backend: None,
+                    runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                    max_inline_peer_notifications: None,
+                    output_schema: None,
+                    provider_params: None,
+                },
+                crate::MobRuntimeMode::AutonomousHost,
+                &BTreeMap::new(),
+                "worker",
+                "review",
+                Vec::new(),
+            )
+            .expect_err("a portable profile never strips an account selection");
+            assert!(error.contains("OAuth account selection"), "{error}");
+        }
     }
 }

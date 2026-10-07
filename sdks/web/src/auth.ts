@@ -41,9 +41,11 @@ import {
   parseWireLoginReady,
   parseWireLoginStart,
   parseWireMcpAuthStatus,
+  parseWireMcpLoggedOut,
   parseWireProvisionApiKeyResult,
 } from './generated/auth.js';
 import type {
+  AuthLogoutParams,
   AuthRpcMethod,
   BindingIdParams,
   CreateProfileParams,
@@ -54,6 +56,7 @@ import type {
   LoginStartParams,
   ProvisionApiKeyParams,
   RealmIdParams,
+  WireAuthLogoutResult,
   WireAuthMethod,
   WireAuthProfile,
   WireAuthProfileCleared,
@@ -72,17 +75,23 @@ import type {
   WireLoginStart,
   WireMcpAuthStatus,
   WireMcpAuthTarget,
+  WireMcpLoggedOut,
   WireProvisionApiKeyResult,
 } from './generated/auth.js';
 import type { AuthBindingRef, SessionConfig } from './types.js';
 
 export type {
   LoginCancelParams,
+  McpLoginCancelAttemptParams,
+  McpLoginCancelParams,
   McpLoginCompleteParams,
   WireLoginCancelled,
   McpLoginStartParams,
+  WireMcpAuthAttempt,
+  WireMcpAuthAttemptPhase,
   WireMcpAuthPhase,
   WireMcpAuthStatus,
+  WireMcpLoggedOut,
   WireMcpAuthTarget,
   WireMcpLoginReady,
   WireMcpLoginStart,
@@ -243,8 +252,9 @@ export class Auth {
   /**
    * Begin an OAuth browser flow for a provider binding or an MCP server
    * (`{ mcp, redirect_uri }`). The authorize URL and state are host-channel
-   * data: open the URL only in a browser context no agent tool can observe,
-   * and never pass these values to an agent, tool result, transcript or log.
+   * data: open the URL in the user's own browser (not one an agent tool
+   * drives), and never pass these values to an agent, tool result,
+   * transcript or log.
    */
   async loginStart(params: LoginStartParams): Promise<OAuthLoginStart> {
     const result = await this.transport.request<LoginStartParams, WireLoginStart>(
@@ -263,7 +273,10 @@ export class Auth {
     return parseWireLoginReady(result);
   }
 
-  /** Retire a pending MCP OAuth attempt by its `state`. */
+  /**
+   * Retire a pending MCP OAuth attempt by its `state` (`{ mcp, state }`) or
+   * by the non-secret `attempt.ref` from `mcpStatus` (`{ mcp, attempt_ref }`).
+   */
   async loginCancel(params: LoginCancelParams): Promise<WireLoginCancelled> {
     const result = await this.transport.request<LoginCancelParams, WireLoginCancelled>(
       AUTH_RPC_METHODS.loginCancel,
@@ -321,13 +334,26 @@ export class Auth {
     return parseWireAuthStatusDetail(result);
   }
 
-  /** Authorization status of an MCP server target. */
+  /**
+   * Authorization status of an MCP server target. A pending login attempt
+   * is reported as `attempt` (a non-secret reference and its expiry).
+   */
   async mcpStatus(mcp: WireMcpAuthTarget): Promise<WireMcpAuthStatus> {
     const result = await this.transport.request<{ mcp: WireMcpAuthTarget }, WireMcpAuthStatus>(
       AUTH_RPC_METHODS.statusGet,
       { mcp },
     );
     return parseWireMcpAuthStatus(result);
+  }
+
+  /** Remove an MCP server target's stored credential (nothing is revoked at the provider). */
+  async mcpLogout(mcp: WireMcpAuthTarget): Promise<WireMcpLoggedOut> {
+    const params: AuthLogoutParams = { mcp };
+    const result = await this.transport.request<AuthLogoutParams, WireAuthLogoutResult>(
+      AUTH_RPC_METHODS.logout,
+      params,
+    );
+    return parseWireMcpLoggedOut(result);
   }
 
   /** Revoke and delete credentials for a binding. */
@@ -341,7 +367,7 @@ export class Auth {
       binding_id,
     };
     if (profile_id !== undefined) params.profile_id = profile_id;
-    const result = await this.transport.request<BindingIdParams, WireAuthProfileCleared>(
+    const result = await this.transport.request<AuthLogoutParams, WireAuthLogoutResult>(
       AUTH_RPC_METHODS.logout,
       params,
     );

@@ -22,8 +22,8 @@ pub mod token_exchange;
 
 #[cfg(feature = "oauth")]
 pub use callback::{
-    LoopbackBinding, LoopbackHandle, LoopbackOutcome, bind_loopback_callback,
-    bind_loopback_callback_with_redirect, run_loopback_callback,
+    LoopbackBinding, LoopbackClosed, LoopbackHandle, LoopbackOutcome, LoopbackWaitEnd,
+    bind_loopback_callback, bind_loopback_callback_with_redirect, run_loopback_callback,
 };
 #[cfg(feature = "oauth")]
 pub use device_code::{

@@ -37,9 +37,11 @@ pub(crate) struct ReqwestStreamableHttpClient {
 
 /// Typed, sticky record that the server dropped this connection's session
 /// (a `404` on a POST or GET that carried the session id). The transport
-/// never re-initializes or re-sends after it, refuses every later request at
-/// its entry, and the connection refuses later calls before queuing them.
-/// It says nothing about any one request; that is [`RequestDispatch`].
+/// never re-initializes or re-sends after it: every later POST that would
+/// attach the session is refused at its entry, and the connection refuses
+/// later tool calls before queuing them. `get_stream` and `delete_session`
+/// have no such entry guard. It says nothing about any one request; that is
+/// [`RequestDispatch`].
 #[derive(Clone, Debug)]
 pub(crate) struct SessionExpiryRecorder {
     expired: Arc<tokio::sync::watch::Sender<bool>>,
@@ -61,6 +63,13 @@ impl SessionExpiryRecorder {
     pub(crate) fn expired(&self) -> bool {
         *self.expired.borrow()
     }
+
+    /// Resolves once the expiry is recorded (test ordering only).
+    #[cfg(test)]
+    pub(crate) async fn recorded(&self) {
+        let mut expired = self.expired.subscribe();
+        let _ = expired.wait_for(|expired| *expired).await;
+    }
 }
 
 /// What the transport did with ONE request, recorded on that request
@@ -77,8 +86,12 @@ pub(crate) enum RequestDisposition {
     SentSessionExpired,
 }
 
-/// Request-local disposition witness. Absent a record, the request never
-/// reached the HTTP send (for example its frame failed serialization).
+/// Request-local disposition witness. `RefusedExpired` is the affirmative
+/// unsent case. No record means no final disposition was recorded: a
+/// pre-send failure (for example the frame bound), or a transport that did
+/// not finish (`Sent` is recorded only after `execute` returns, so a
+/// cancelled or unfinished send also leaves none). It is not proof that
+/// nothing was sent.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RequestDispatch {
     disposition: Arc<std::sync::OnceLock<RequestDisposition>>,

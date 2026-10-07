@@ -49,7 +49,10 @@ them.
   refused unsent until the server is reconnected. The mob member upcall
   envelope gains an `outcome_uncertain` class; a member on an older
   version cannot decode it and fails that upcall with a decode error
-  rather than misreporting it.
+  rather than misreporting it. A `404` on the session's background SSE GET
+  expires the session too: a server that answers an unsupported GET with
+  `404` instead of the specified `405` will see its sessions treated as
+  expired and must be fixed to answer `405`.
 
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound

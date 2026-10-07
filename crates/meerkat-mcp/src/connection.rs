@@ -739,8 +739,9 @@ impl McpConnection {
 /// call carries its own [`RequestDispatch`] witness through the transport,
 /// and a failure is typed from that witness alone: sent and then answered
 /// `404` for its session is uncertain ([`McpError::SessionExpired`]);
-/// refused at transport entry is unsent ([`McpError::ServerUnavailable`]);
-/// anything else keeps the ordinary [`McpError::ToolCallFailed`].
+/// refused at transport entry is affirmatively unsent
+/// ([`McpError::ServerUnavailable`]); anything else, including no recorded
+/// disposition, keeps the ordinary [`McpError::ToolCallFailed`].
 pub(crate) async fn call_tool_on(
     service: &rmcp::service::Peer<rmcp::RoleClient>,
     server: &str,
@@ -878,6 +879,122 @@ pub mod tests {
     use super::*;
     use crate::protocol::{extract_content_blocks, tool_error_reason};
 
+    /// A Streamable HTTP server whose background GET answer is configurable,
+    /// and which counts `tools/call` POSTs.
+    mod get_ordering {
+        use super::*;
+        use std::sync::Arc;
+
+        pub(super) struct Server {
+            pub(super) get_status: StatusCode,
+            pub(super) tool_posts: AtomicUsize,
+            pub(super) gets: tokio::sync::Notify,
+        }
+
+        async fn post_handler(
+            State(server): State<Arc<Server>>,
+            body: String,
+        ) -> axum::response::Response {
+            let message: Value = serde_json::from_str(&body).unwrap();
+            let id = message.get("id").cloned();
+            let reply = |result: Value| {
+                (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "application/json"),
+                        ("mcp-session-id", "s-1"),
+                    ],
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+                )
+                    .into_response()
+            };
+            match message["method"].as_str().unwrap_or_default() {
+                "initialize" => reply(serde_json::json!({
+                    "protocolVersion": message["params"]["protocolVersion"],
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "get-ordering", "version": "1"},
+                })),
+                _ if id.is_none() => StatusCode::ACCEPTED.into_response(),
+                "tools/call" => {
+                    server.tool_posts.fetch_add(1, Ordering::SeqCst);
+                    reply(serde_json::json!({"content": [{"type": "text", "text": "done"}]}))
+                }
+                _ => reply(serde_json::json!({})),
+            }
+        }
+
+        async fn get_handler(State(server): State<Arc<Server>>) -> StatusCode {
+            server.gets.notify_one();
+            server.get_status
+        }
+
+        pub(super) async fn start(get_status: StatusCode) -> (Arc<Server>, String) {
+            let server = Arc::new(Server {
+                get_status,
+                tool_posts: AtomicUsize::new(0),
+                gets: tokio::sync::Notify::new(),
+            });
+            let app = Router::new()
+                .route(
+                    "/mcp",
+                    post(post_handler)
+                        .get(get_handler)
+                        .delete(|| async { StatusCode::OK }),
+                )
+                .with_state(Arc::clone(&server));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (server, url)
+        }
+    }
+
+    /// A session the server invalidated before its first GET: the GET 404
+    /// expires it, and a later tool call is refused unsent.
+    #[tokio::test]
+    async fn a_session_invalidated_before_its_first_get_refuses_calls_unsent() {
+        let (server, url) = get_ordering::start(StatusCode::NOT_FOUND).await;
+        let config = McpServerConfig::streamable_http("get-ordering", url, HashMap::new());
+        let connection = McpConnection::connect(&config).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.session_expiry.recorded(),
+        )
+        .await
+        .expect("the background GET 404 is recorded");
+        let refused = connection
+            .call_tool("effect", &serde_json::json!({}))
+            .await
+            .expect_err("an expired session refuses the call");
+        assert!(
+            matches!(refused, McpError::ServerUnavailable { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(server.tool_posts.load(Ordering::SeqCst), 0);
+        let _ = connection.close().await;
+    }
+
+    /// Paired control: a healthy POST-only server answering the GET with 405
+    /// (the spec's "no SSE stream") stays usable.
+    #[tokio::test]
+    async fn a_post_only_server_answering_get_with_405_stays_usable() {
+        let (server, url) = get_ordering::start(StatusCode::METHOD_NOT_ALLOWED).await;
+        let config = McpServerConfig::streamable_http("get-ordering", url, HashMap::new());
+        let connection = McpConnection::connect(&config).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), server.gets.notified())
+            .await
+            .expect("the background GET was answered");
+        connection
+            .call_tool("effect", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(server.tool_posts.load(Ordering::SeqCst), 1);
+        assert!(!connection.session_expiry.expired());
+        let _ = connection.close().await;
+    }
+
     /// A call's failure is typed from its own disposition only: there is no
     /// connection-wide input, so a queued call that failed before sending is
     /// never labelled uncertain because another call expired the session.
@@ -892,8 +1009,9 @@ pub mod tests {
             failure(Some(RequestDisposition::RefusedExpired)),
             McpError::ServerUnavailable { .. }
         ));
-        // Never reached the HTTP send (for example a frame refused by the
-        // bound before sending): ordinary failure, not uncertain.
+        // No final disposition recorded (a pre-send failure such as the frame
+        // bound, or an unfinished send): ordinary failure, never typed as
+        // uncertain from connection state.
         assert!(matches!(failure(None), McpError::ToolCallFailed { .. }));
         assert!(matches!(
             failure(Some(RequestDisposition::Sent)),

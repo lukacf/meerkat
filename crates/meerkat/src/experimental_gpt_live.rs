@@ -763,9 +763,15 @@ unprompted. Where the user has said something different aloud since, the later s
 /// (`LIVE_SUPERSEDED_TYPED_STILL_CURRENT`): framed override-first and ending
 /// on the correction, gpt-live-1 dropped the whole typed update, answering the
 /// pre-typed favourite flower when only the code word was corrected aloud
-/// (Turbo S S99, #1629).
+/// (Turbo S S99, #1629). The row waits behind a late summary that was
+/// snapshotted before it was typed, so the summary still states the value the
+/// row replaced as current; framed only against the later speech, gpt-live-1
+/// kept the summary's value (S99 "Cobalt and daffodil", 6 in 182 runs since
+/// 2026-10-04, #1800). The framing therefore also ranks the row above any
+/// summary.
 pub const LIVE_SUPERSEDED_TYPED_PREFIX: &str = "From the text chat, typed before the spoken turns you have \
-already heard in this call and delivered late (context data). It stays the current source for everything that the \
+already heard in this call and delivered late (context data). It is newer than any conversation history summary \
+you have, and replaces the summary's value wherever they differ. It stays the current source for everything that the \
 later speech below does not change. Where they conflict, the later speech wins, so never restate a value it replaced \
 as current.";
 
@@ -9569,6 +9575,16 @@ mod tests {
             "the typed row's standing comes before the override (#1629)"
         );
         assert!(framing.contains("Where they conflict, the later speech wins"));
+        // The row was typed after the late summary's snapshot, so it outranks
+        // the summary's stale "current" values (S99 daffodil, #1800).
+        assert!(framing.contains(
+            "It is newer than any conversation history summary you have, and replaces the summary's value wherever they differ"
+        ));
+        assert!(
+            framing.find("newer than any conversation history summary")
+                < framing.find("later speech wins"),
+            "the row's standing over the summary comes before the speech override"
+        );
         // The open-request clause is the runtime's, for typed user input
         // only (a typed reply is never a request, #1629).
         assert!(!framing.contains("needs a response"));
@@ -22740,6 +22756,59 @@ mod tests {
                                 .is_some_and(|spoken_at| typed_at < spoken_at))
                     )),
                     "the superseded typed row carries its correction after it"
+                );
+                // #1800: the late summary was snapshotted before the typed row,
+                // so the wire append that carries the row ranks it above the
+                // summary, both up front and in the reassertion after the
+                // correction (S99 kept the summary's superseded flower).
+                let superseded = commands
+                    .iter()
+                    .find_map(|command| match command {
+                        LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.starts_with(LIVE_SUPERSEDED_TYPED_PREFIX)
+                                && text.contains("Newer code: Amber.") =>
+                        {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .expect("the superseded typed append is on the wire");
+                assert!(superseded.contains(
+                    "It is newer than any conversation history summary you have, and replaces the summary's value wherever they differ."
+                ));
+                let spoken_at = superseded
+                    .find("Spoken code: Cyan.")
+                    .expect("the correction rides in the same append");
+                let reasserted_at = superseded
+                    .find(meerkat_runtime::live_execution::LIVE_SUPERSEDED_TYPED_STILL_CURRENT)
+                    .expect("the typed content is reasserted after the correction");
+                assert!(spoken_at < reasserted_at);
+                assert!(
+                    meerkat_runtime::live_execution::LIVE_SUPERSEDED_TYPED_STILL_CURRENT.ends_with(
+                        "and replaces what any conversation history summary says about it."
+                    )
+                );
+                let summary_at = commands
+                    .iter()
+                    .position(|command| {
+                        matches!(
+                            command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
+                        )
+                    })
+                    .expect("summary on the wire");
+                let superseded_at = commands
+                    .iter()
+                    .position(|command| {
+                        matches!(
+                            command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.as_str() == superseded
+                        )
+                    })
+                    .expect("superseded append position");
+                assert!(
+                    summary_at < superseded_at,
+                    "the typed row that outranks the summary arrives after it"
                 );
                 assert!(
                     commands.iter().any(|command| matches!(

@@ -365,6 +365,14 @@ them.
   instead of becoming `NoCredentialSource`, so a refresh does not retire a
   valid credential. Browser authorization redirects and loopback callbacks
   are unchanged.
+- GPT Live: a typed row delivered late behind a history summary, together
+  with newer speech that corrected part of it, is now framed as newer than the
+  summary (#1800). The summary was snapshotted before the row was typed, so it
+  still states the replaced value as current. With the row framed only against
+  the later speech, gpt-live-1 sometimes kept the summary's value (Turbo S S99
+  answered "Cobalt and daffodil" instead of "cobalt and marigold" in 6 of 182
+  runs since 2026-10-04). Both the prefix and the closing reassertion now say
+  the typed content replaces what the summary says about it.
 - The protocol codegen owners for `ApprovalLifecycleMachine`,
   `SessionDocumentMachine` and `SessionTurnAdmissionMachine` now keep a
   compound operand of a comparison or arithmetic operator grouped. Before,
@@ -641,6 +649,12 @@ them.
 
 ### Testing
 
+- The xtask machine workflow test
+  (`machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts`)
+  now reserves its whole nextest lane in every profile, so no other test runs
+  beside it. It had hit its 480 s bound when scheduled beside other
+  CPU-heavy cases; the bound is unchanged, and
+  `scripts/test-ci-nextest-archive.sh` now requires the reservation.
 - Five tests that failed only under heavy host load (hooked pushes at load
   30-236) now wait on the owned work they observe instead of a timer that
   also covered cleanup (#1730):

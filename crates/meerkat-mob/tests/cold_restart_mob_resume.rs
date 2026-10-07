@@ -1377,6 +1377,218 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
     handle_2.shutdown().await.expect("final shutdown");
 }
 
+/// Destruction must fit the same worker stack as ordinary mob operation.
+/// The parent-owned child operations make archive disposal inspect the real
+/// operation registry beneath the actor's complete destroy call chain.
+#[test]
+fn mob_destroy_session_children_within_production_stack_budget() {
+    let thread = std::thread::Builder::new()
+        .name("mob-destroy-production-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(2 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("production-sized destroy runtime");
+            runtime.block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    Box::pin(mob_destroy_session_children_stack_budget_scenario()),
+                )
+                .await
+                .expect("real child mob destruction must finish within the test deadline");
+            });
+        })
+        .expect("spawn production-sized destroy driver");
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn mob_destroy_session_children_stack_budget_scenario() {
+    use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
+    use meerkat_mob::store::{MobEventStore as _, SqliteMobStores};
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let (service, _store) = persistent_service(&paths, runtime_store.clone());
+    let adapter = service
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
+        .expect("real session runtime");
+
+    let mut parent_definition = mob_definition(MobRuntimeMode::TurnDriven);
+    parent_definition.orchestrator = None;
+    parent_definition.wiring.auto_wire_orchestrator = false;
+    let parent = MobBuilder::new(
+        parent_definition,
+        MobStorage::persistent(&paths.mob_db_path).expect("parent mob storage"),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create real parent mob");
+    parent
+        .spawn_spec(SpawnMemberSpec::host_root("worker", "owner"))
+        .await
+        .expect("spawn real owner session");
+    let owner_session = parent
+        .resolve_bridge_session_id(&AgentIdentity::from("owner"))
+        .await
+        .expect("owner bridge session");
+    let owner_registration = adapter
+        .current_session_registration_witness(&owner_session)
+        .await
+        .expect("owner has a current runtime registration");
+    let owner_operations = adapter
+        .ops_lifecycle_registry_if_current_registration(&owner_registration)
+        .await
+        .expect("owner's exact operation registry");
+
+    let mut child_definition = mob_definition(MobRuntimeMode::TurnDriven);
+    child_definition.orchestrator = None;
+    child_definition.wiring.auto_wire_orchestrator = false;
+    let child_storage_path = temp.path().join("child-mob.db");
+    let child_storage = MobStorage::persistent(&child_storage_path).expect("child mob storage");
+    let child_events = SqliteMobStores::open(&child_storage_path)
+        .expect("child journal observer")
+        .event_store();
+    let child = MobBuilder::new(child_definition, child_storage)
+        .with_session_service(service.clone())
+        .with_owner_bridge_session_create_authority(owner_session.clone(), true, false)
+        .create()
+        .await
+        .expect("create session-owned child mob");
+    assert!(
+        child
+            .owner_bridge_session_lifecycle_authority()
+            .expect("generated child authority")
+            .destroy_on_owner_archive
+    );
+    let mut child_sessions = Vec::new();
+    for member in ["child-one", "child-two"] {
+        child
+            .spawn_spec_with_generated_owner_context(
+                SpawnMemberSpec::host_root("worker", member),
+                owner_session.clone(),
+            )
+            .await
+            .expect("spawn real child session with generated owner context");
+        child_sessions.push(
+            child
+                .resolve_bridge_session_id(&AgentIdentity::from(member))
+                .await
+                .expect("child bridge session"),
+        );
+    }
+    let operations = owner_operations
+        .list_operations()
+        .expect("read real child operations before destruction");
+    let mut child_operations = Vec::new();
+    for session in &child_sessions {
+        let matching = operations
+            .iter()
+            .filter(|operation| {
+                operation.kind == OperationKind::MobMemberChild
+                    && operation.owner_session_id == owner_session
+                    && operation.child_session_id.as_ref() == Some(session)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            1,
+            "each child must have a real owned operation"
+        );
+        assert!(!matching[0].terminal, "child operation must still be live");
+        child_operations.push(matching[0].id.clone());
+    }
+    assert!(
+        !child_events
+            .replay_all()
+            .await
+            .expect("populated child journal")
+            .is_empty()
+    );
+
+    let report = child.destroy().await.expect("destroy real child mob");
+    assert!(report.errors.is_empty(), "destroy errors: {report:?}");
+    assert!(
+        report.force_destroyed_members.is_empty(),
+        "forced destroy: {report:?}"
+    );
+    assert!(
+        report.orphaned_remote_members.is_empty(),
+        "orphaned members: {report:?}"
+    );
+    assert!(
+        !report.remote_cleanup_deadline_exceeded,
+        "cleanup timed out: {report:?}"
+    );
+    assert!(report.namespace_cleaned && report.metadata_scrubbed && report.events_cleared);
+    assert!(
+        child_events
+            .replay_all()
+            .await
+            .expect("cleared child journal")
+            .is_empty()
+    );
+    for session in &child_sessions {
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session);
+        let retained = runtime_store
+            .load_runtime_session_catalog_entry(&runtime_id)
+            .await
+            .expect("read retained child session catalog")
+            .expect("destroy preserves the child session catalog");
+        assert_eq!(retained.session_id(), session);
+        // Archive authority is the durable lifecycle, not the retained content catalog.
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read canonical child runtime state"),
+            Some(meerkat_runtime::RuntimeState::Retired)
+        );
+        assert!(
+            service
+                .session_archived_by_authority_with_terminal(session, None)
+                .await
+                .expect("owning service confirms child archive authority"),
+            "destroyed child must remain archived by runtime authority"
+        );
+        assert!(
+            service.comms_runtime(session).await.is_none(),
+            "archived child retained live comms"
+        );
+    }
+    for operation_id in child_operations {
+        assert!(
+            owner_operations
+                .snapshot(&operation_id)
+                .expect("read child operation after destroy")
+                .expect("owner retains child terminal receipt")
+                .terminal,
+            "child disposal must terminate its exact parent-owned operation"
+        );
+    }
+    assert!(
+        service.comms_runtime(&owner_session).await.is_some(),
+        "child destroy retired its owner"
+    );
+    let parent_report = parent.destroy().await.expect("destroy parent mob");
+    assert!(
+        parent_report.errors.is_empty(),
+        "parent destroy errors: {parent_report:?}"
+    );
+    assert!(
+        parent_report.namespace_cleaned
+            && parent_report.metadata_scrubbed
+            && parent_report.events_cleared
+    );
+}
+
 /// A broken wired member still needs its exact old-generation endpoint after
 /// a full service restart. The endpoint is required to retire reciprocal trust
 /// safely before spawning and wiring the replacement generation.

@@ -463,8 +463,21 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
 
     let persistent_accept = extract_braced_item(
         &persistent_driver,
-        "pub(crate) async fn accept_resolved_input",
+        "pub(crate) async fn accept_resolved_input(",
     )?;
+    assert!(
+        persistent_accept.contains("let custody = self.inner.try_credential_custody(&input)?;")
+            && persistent_accept
+                .contains("self.accept_resolved_input_with_credential(input, resolved, &custody)"),
+        "persistent accept must retain the input credential through its custody-bearing implementation"
+    );
+    let persistent_accept = extract_braced_item(
+        &persistent_driver,
+        "pub(crate) async fn accept_resolved_input_with_credential(",
+    )?;
+    let initial_authentication = persistent_accept
+        .find(".authenticate_work_with_credential(&input, custody)?")
+        .ok_or_else(|| "persistent accept must authenticate before admission work".to_string())?;
     let bounded_preview = persistent_accept
         .find("preview_accept_resolved_input_bounded(&input, &resolved)")
         .ok_or_else(|| {
@@ -475,10 +488,17 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
         .find("let flags = resolved.coarse_flags();")
         .ok_or_else(|| "persistent accept must derive flags from resolved authority".to_string())?;
     let committed_accept = persistent_accept
-        .find("let mut outcome = match self.inner.accept_resolved_input(input, resolved).await")
+        .find(".accept_authenticated_resolved_input(input, resolved)")
         .ok_or_else(|| {
-            "persistent accept must commit through the authority-revalidating inner accept"
-                .to_string()
+            "persistent accept must commit through the authenticated inner authority".to_string()
+        })?;
+    let image_externalization = persistent_accept
+        .find("externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery)")
+        .ok_or_else(|| "persistent accept must externalize images before admission".to_string())?;
+    let final_authentication = persistent_accept
+        .rfind(".authenticate_work_with_credential(&input, custody)?")
+        .ok_or_else(|| {
+            "persistent accept must revalidate after image externalization".to_string()
         })?;
     let completion_signal = persistent_accept
         .find(".machine_apply_accept_with_completion_signal")
@@ -489,12 +509,15 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
         .find(".persist_input_states_atomically(&self.runtime_id, &records)")
         .ok_or_else(|| "persistent accept must persist the exact changed-row delta".to_string())?;
     assert!(
-        bounded_preview < resolved_flags
-            && resolved_flags < committed_accept
+        initial_authentication < bounded_preview
+            && bounded_preview < resolved_flags
+            && resolved_flags < image_externalization
+            && image_externalization < final_authentication
+            && final_authentication < committed_accept
             && committed_accept < completion_signal
             && completion_signal < delta_persist
             && !persistent_accept.contains("clone_with_isolated_dsl_authority"),
-        "persistent accept must preview before committing through inner authority, signaling, and persisting only the changed-row delta"
+        "persistent accept must authenticate, preview, revalidate after externalization, then commit through inner authority, signal, and persist only the changed-row delta"
     );
 
     let persistent_preview = extract_braced_item(

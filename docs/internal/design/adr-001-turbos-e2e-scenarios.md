@@ -12,12 +12,12 @@ below, separately from scenario execution. It implements the test intent of the
 [confinement and consent addendum](adr-001-confinement-and-consent.md), and the
 [public integration guide](../../guides/authorization-integration.mdx).
 
-The inspected working tree is `meerkat-native-governed-m1`, HEAD
+The original r7 inspection used `meerkat-native-governed-m1`, HEAD
 `fe929df4981ed0c4a444ccb9dc13ab580e7a4afc`, including its uncommitted integration
 changes. HEAD alone does not identify the complete candidate. Freeze actual
 source/artifact hashes when implementing and running these cases.
 
-One native in-memory test already proves generated-grant denial reaches a
+The original r7 native in-memory foundation proves generated-grant denial reaches a
 scripted controller, a permitted tool executes, the same run completes, and
 native audit records exist. That is real runtime execution with a scripted
 provider, not a live-provider or durable-recovery result. Focused audit error,
@@ -292,12 +292,17 @@ Operation correlation across C4/C5/D8 applies to the exact resumed logical effec
 Genuinely new effects receive new OperationIds; the test must not force every
 post-recovery operation to reuse an earlier identity.
 
-Existing anchors: the four local-authorization RED tests at
-`local_authorization.rs:639-699`, `controller_custody.rs:129`, the native input
-audit buffer, and `smoke_model_fallback.rs` child-process pattern. Attach the
-fix and execution receipts for those previously observed REDs before C1-C3 are
-advertised. C4-C7 stay blocked until the
-durable owner integration works; copying a MemoryStore snapshot is not recovery.
+Existing anchors include the local-authorization and controller-custody tests,
+the native input audit buffer, and the `smoke_model_fallback.rs` child-process
+pattern. The four REDs recorded by the original r7 inspection are historical;
+selected repaired controls have passed, as qualified below. They do not establish
+all C1-C3 removal and race variants. Physical SQLite custody is implemented and
+locally qualified by the controls below, including real cross-process exclusion
+and holder release. Full C7 second-host governed transfer and C4 interrupted-work
+recovery remain open. The completed-turn cold reconstruction and fresh-work
+fixture has passed in a local tests-only successor, not yet published; it does not establish
+retained interrupted-operation recovery. Copying a MemoryStore snapshot is not
+process recovery.
 
 ## Story D: approve one exact action, then confine its actual process
 
@@ -385,35 +390,112 @@ current coverage. Implementation records should use the existing
 Covered only with an exact executed test, PendingFix with a blocker,
 Gap with a reason, and Impossible only for a justified contract exclusion.
 
-| Required feature or surface | Exact checkpoints/variant | Current prerequisite or gap |
-| --- | --- | --- |
-| Qualified identities, auth vs account, represented subject, idempotency | A1/A4/A7-A8, C2/C6 | Real ingress/authenticated association, actual mailbox callback and interleaved R/X work; native batch conjoins every original. |
-| Root/child/third-level narrowing, expiry, revocation, correlated rules | A2/A4, B1 | Generated grant owner exists; cross-agent propagation required. |
-| Same-model refusal, healthy sibling, same-run continuation, queued work | A2/A3, E1 | Native scripted foundation exists; L and surface variants proposed. |
-| Anthropic, OpenAI, Gemini text | A2 once per family; A6/E2/E4 adapter faults | Real standard credentials plus actual governed adapter selected. |
-| Compatible/self-hosted, Copilot and cloud backend/account variants | A4/A6 route-specific variant, existing active provider smoke overlay | Every advertised backend needs its own real positive route and deterministic negative send oracle; common adapter alone is insufficient. Missing credentials block that advertised cell. |
-| Hosted search/code/image, image-generation executors | A6/E4; governed overlays on existing S74/S76/S77/S79/S80/S82/S90 | Conservative capability checks and actual hosted request inspection; provider action may be opaque. No finer effect claim than provider contract supports. |
-| Compaction, memory curator, history/blob hydration/export | A5/A6 request-usage variants | Actual non-main-loop clients and resource ACL paths, not main Agent-only tests. |
-| Tools including shell, apply_patch, network/browser and MCP | A2/A4; D4/D6 | Enumerate each actual dispatch family and observe its physical target. |
-| Elephant query/fetch/write and external broad OAuth connector | A5 plus A2 calendar read/delete | Real isolated Elephant service and connector receiving-policy integration required; mocks do not close it. |
-| Comms, delegate/helpers, fork_off, fork, council, remote placement | B1-B4/B6; existing S21/S92/S93/S96 | Both autonomous and turn-driven variants, inbound authentication as well as outbound permission, exact original work retained. |
-| Wire/unwire/spawn/retire and publication queues | B3 | Actual topology/store mutation guards; no UI-only denial. |
-| Schedules/connectors including HostRunnable | B5/B7/D6 | Config-created commissioning mandate, commissioner distinct from agent owner, per-occurrence check and proactive-vs-reply permission. |
-| Session read/subscribe/monitoring and live publication | B5/B7/E5 | Actual observer auth and queued-send audience freshness, independent monitor-copy denial, no per-chunk or physical-room claims. |
-| Independent service activation and agent frontends | B7 service-lifecycle variant | PendingFix: pausing/removing an agent frontend leaves an independently active shared service available to its authorized audience; removing the service does not widen another service or release shared credential/package restrictions. Exercise actual separate owners and authorized positive controls. |
-| Separately authorized setup executor | B2/B3/D6 `find_and_install` variant | Business requester never inherits installer/shell permission; actual integration location and recipient owner are PendingFix until wired. |
-| Credential/controller admission and all removal APIs | C1-C3 | Existing four RED tests plus clear/status/acquire/storage races require fixes. |
-| Persistent/detached operation and actual process recovery | C4-C7, D5/D6 monitor | Positive restart, runtime-store reconstruction and same-store host exclusivity; retain logical effect correlation and audit prefix. Detached mid-run revocation needs actual entry/worker enforcement. |
-| Approval freshness, authenticated decision, late delivery, one-use | D1-D3/D8-D9 | Positive approved sink and concurrent consumption, pending host restart, late typed input/next request, current eligibility and relevant/unrelated change; physical integration remains outstanding. |
-| macOS/Linux confinement, non-userns/container modes | D4-D7 platform/configuration variants | Actual capabilities, bootstrap integrity and all launch families must pass; Required cannot silently downgrade. |
-| Windows/remote/browser unsupported OS requirements | D6 capability-negative variant | Explicit unsupported is correct only for unadvertised/unsupported profile; never a positive isolation claim. |
-| Required audit vs optional exporter, outcome/uncertainty | C5, E2-E6 | Native audited row and error foundations exist; durable/live recovery gaps explicit. |
-| Rust embedding, CLI, REST, RPC, MCP protocol | A1/A2/C6/E5 surface variants | Reuse S16/S23/S25/S26/S27/S31/S49-S53 and Rust SDK suites; assert governance is actually installed. |
-| Python and TypeScript packaged SDKs | C6/E5 | `sdks/python/tests/test_e2e_smoke.py` S38/S39 and `sdks/typescript/tests/e2e_smoke.test.mjs` S43/S44. Fresh generated wire artifacts required. |
-| Browser/raw WASM vs hosted browser client | A1/A6/B5/B7/E5 | Separate S47/S48 raw exports and packaged SDK variants; server-only enforcement does not prove browser execution. Browser fetch controls/capabilities remain explicit. |
-| Live text/audio, interruption, backend switch and playback | A6/B5/B7/E4/E5 overlays on S71/S72 and S97-S107 | Reuse prerecorded audio and existing calls; observe real live send/tool boundary and typed lifecycle. Text fixture is not audio evidence. |
-| MobKit console and domain policy | E5/E6, B3/D1 controls | Real decoded events and authenticated action routes; rendering is projection only. |
-| Default/trusted mode, mandatory gate, cheap checks | B2/B3, D6, cost gate below | Explicit profile inventory and measured costs, no semantic provenance tests. |
+Recorded evidence as of 2026-10-03 remains prerequisite coverage. Native PR1634
+is now published at `51` after all normal GCP hooks passed in 3,833s; fresh CI
+37177141203 passed at exact `51` with 38 successful jobs and 4 intentional skips.
+The later local tests-only
+restart successor is separate from that publication, as detailed in the
+[implementation checkpoint](adr-001-implementation/implementation-progress.md).
+The repair later committed as native `141aad15` passed 49 selected integration tests and
+six library controls: `oauth_resolve`, machine/metadata/ordinal contracts,
+`core_apply_terminal_truth`, selected `cross_host_flows` and `fork_off_surface`
+cases, `b1_live_join_*`, and `detached_delivery_follows_runtime_presence`.
+The earlier 13-test acceptance batch included
+`governed_jsonl_refusal_retains_actor_seed_and_context_then_same_run_read_finishes`,
+bundle ownership, RPC credential continuity and wire readiness. Its JSONL wire
+flow uses memory stores and a local HTTP model fixture; it proves neither disk
+JSONL persistence nor restart or live-provider coverage. Test-body durations are
+not authorization overhead measurements. Native `12fe6077` includes the repairs
+and regenerated outputs; its seventh normal push stopped on a test-helper
+`clippy::implicit_clone` lint, with no successful publication, remote CI or cost
+acceptance for this candidate.
+
+Console `103540e8` includes passing `authorization-feedback` and three
+`checked-save-*` mock-browser contracts. `real-checked-save-recovery` passed on
+Console `9762e89b` using a recorded earlier `console_acceptance_fixture` binary:
+its build log and matching Rust/Cargo inputs exist, but its historical binary
+digest does not. This is Console access-owner evidence, not current native
+readiness or C4 recovery evidence. The unfiltered Console browser suite remains
+unexecuted because three required native reference binaries were unavailable.
+
+Current local SQLite prerequisites now include the actual mixed native
+model-tool-model turn, its memory-store control, seven physical custody controls
+(including cross-process killed-holder release and proven same-file case alias),
+nine custody fault/open/memory controls, and hard-link rejection. These are
+existing root-executed results, not additional agent execution or full C4/C7
+acceptance. The stock same-process close/reopen test reproduced old service-machine
+retention, then passed after alignment with the existing upstream Weak host
+and a reviewed returned-guard lifetime repair. It preserves exact terminal
+input/audit and committed Session authority before actual actor reconstruction,
+with no effect replay. The separate fresh-work test also passed using current
+host grants, original marked token vault and fresh actor pin: distinct new
+input/run/tool IDs, two additional actual HTTP requests, local refusal feedback,
+permitted sibling entry and protected terminal audit. Its initial unrelated
+empty-vault setup failed and was corrected without changing production.
+Those same-process results did not qualify separate-process restart, admin
+flow, cost or CI. The later local tests-only successor, not yet published, based
+on native `51`
+passed completed-turn reconstruction and fresh governed work across actual
+writer/reader processes using current host grants, marked File credential restore
+and the reconstructed actor's current controller pin. It preserves the old
+protected input/audit and exact transcript prefix. Its full default
+native_governed_loop target passed 16 tests (0 ignored/filtered, 0.60s compile,
+4.85s bodies); unchanged native_cost debug correctness passed 2 more ordinary
+cases (6.61s compile, 159.51s bodies, 2 timing cases ignored). These 18 cases are
+not published successor CI, interrupted-operation recovery,
+persistent controller/grant administration or full C7 transfer acceptance.
+The revised cold test then passed within the full 16-case target (14.87s compile,
+2.05s bodies, no ignores). Its negative attempt uses the fresh actual controller
+pin and historical association: current ingress explicitly accepts it, then
+current grant authority must refuse with typed Denied, zero model/tool entry and
+no durable input row. Independent document reloads preserve the transcript;
+digest/authority agreement is enforced by the store loader. Three E1 wrapper controls passed
+separately; outer smoke execution and normal successor publication remain open.
+
+The completed-turn close/reopen slice preserves stored input/session and audit
+with current trusted host owners. Fresh governed work after reopen has its own
+executed test; cold reconstruction then fresh admission remains distinct from
+resuming an interrupted logical operation.
+The independent next slices below use existing test targets and owner fixtures.
+The identity-policy and native command-hook proposals are staged, not installed
+or accepted. Older acceptance-plan dependency/provenance workload assumptions
+are historical; these slices test concrete operation boundaries without semantic
+taint or a new receipt/runner framework.
+
+All 37 checkpoints (A1-A8, B1-B7, C1-C7, D1-D9 and E1-E6) and their advertised
+surface/platform variants remain required. These focused results do not execute
+the five proposed Turbo S suites. Full implementation review, OS/helper launch
+coverage, durable recovery and the measured cost gate remain outstanding.
+
+| Required feature or surface | Exact checkpoints/variant | Current prerequisite or gap  Next independently testable slice |
+| --- | --- | --- | --- |
+| Qualified identities, auth vs account, represented subject, idempotency | A1/A4/A7-A8, C2/C6 | Real ingress/authenticated association, actual mailbox callback and interleaved R/X work; native batch conjoins every original. | Gap: extend native_governed_loop A1/A4 controls with changed replay/account and exact zero-entry oracles; real authenticated ingress remains the owner. |
+| Root/child/third-level narrowing, expiry, revocation, correlated rules | A2/A4, B1 | Generated grant owner exists. Local explicit Allow/Deny/ReadOnly/Constraints ceiling repair is staged, not executed; current local model-tool callers request inherited policy. Remote upcalls already conjoin. | PendingFix: execute agent_tools.rs child_policy_ceiling_ staged REDs, including ReadOnly/Constraints, legacy unresolved parent and missing-parent invalid request; then actual B1 child/delegate paths. |
+| Same-model refusal, healthy sibling, same-run continuation, queued work | A2/A3, E1 | Native memory and SQLite mixed-turn controls, fresh SQLite post-reopen work, shell E1, typed shell launch feedback and explicit PreTool Deny have local prerequisite passes; full A2/A3/E1 variants remain required. | Partial prerequisites: stock_persistent.rs memory, SQLite and fresh post-reopen mixed turns passed locally. A2 resource-specific and A3 queued-work variants remain separate. |
+| Anthropic, OpenAI, Gemini text | A2 once per family; A6/E2/E4 adapter faults | Real standard credentials plus actual governed adapter selected. | Gap: reuse each existing real provider smoke request with A2 exact attempted denial and same-controller continuation; deterministic loopback is not a live-provider pass. |
+| Compatible/self-hosted, Copilot and cloud backend/account variants | A4/A6 route-specific variant, existing active provider smoke overlay | Every advertised backend needs its own real positive route and deterministic negative send oracle; common adapter alone is insufficient. Missing credentials block that advertised cell. | Gap: add the governed overlay to each current provider/account smoke owner, preserving exact endpoint/auth choice and zero forbidden sends; missing credentials remain setup blockers. |
+| Hosted search/code/image, image-generation executors | A6/E4; governed overlays on existing S74/S76/S77/S79/S80/S82/S90 | Conservative capability checks and actual hosted request inspection; provider action may be opaque. No finer effect claim than provider contract supports. | Gap: extend existing S74/S76/S77/S79/S80/S82/S90 fixtures with actual denied request inspection and a permitted inference sibling; keep catalog omission distinct from attempted-action refusal. |
+| Compaction, memory curator, history/blob hydration/export | A5/A6 request-usage variants | Actual non-main-loop clients and resource ACL paths, not main Agent-only tests. | Gap: exercise the actual compaction/curator and history/blob owners with denied read-release counters and allowed controls; then MobKit identity-memory tools under the same native policy. |
+| Tools including shell, apply_patch, network/browser and MCP | A2/A4; D4/D6 | Enumerate each actual dispatch family and observe its physical target. | Partial prerequisites: native real-shell E1 and typed launch feedback are local green slices. Next integrate command-hook Required/no-entry and retained-leader cleanup tests, then inventory apply_patch/MCP/browser owners separately. |
+| Elephant query/fetch/write and external broad OAuth connector | A5 plus A2 calendar read/delete | Real isolated Elephant service and connector receiving-policy integration required; mocks do not close it. | Gap: use the existing isolated Elephant/connector fixture to refuse crossed read/write resource tuples before receiver entry; no mock or tool-name-only gate closes resource ACL coverage. |
+| Comms, delegate/helpers, fork_off, fork, council, remote placement | B1-B4/B6; existing S21/S92/S93/S96 | Both autonomous and turn-driven variants, inbound authentication as well as outbound permission, exact original work retained. | PendingFix: MobKit identity carrier retention and fresh/resume lowering REDs are staged. Next actual private identity peer/reply/cross-mob pre-delivery counters with permitted private callback, then each child/remote mode. |
+| Wire/unwire/spawn/retire and publication queues | B3 | Actual topology/store mutation guards; no UI-only denial. | Gap: extend existing topology/mob operator tests with forbidden mutation and positive authorized sibling; separately test indirect WorkGraph/task/shared-memory publication routes. |
+| Schedules/connectors including HostRunnable | B5/B7/D6 | Config-created commissioning mandate, commissioner distinct from agent owner, per-occurrence check and proactive-vs-reply permission. | PendingFix: first bind identity intent through ordinary construction, then schedule_wiring.rs existing IdentityRuntime delivery path with allowed occurrence and revoked commissioner; HostRunnable destination checks remain application-owned. |
+| Session read/subscribe/monitoring and live publication | B5/B7/E5 | Actual observer auth and queued-send audience freshness, independent monitor-copy denial, no per-chunk or physical-room claims. | Gap: reuse existing session/SSE observer fixtures for changed audience and unauthorized monitor copy before delivery; scheduled/background send and observer scopes are separate controls. |
+| Independent service activation and agent frontends | B7 service-lifecycle variant | PendingFix: pausing/removing an agent frontend leaves an independently active shared service available to its authorized audience; removing the service does not widen another service or release shared credential/package restrictions. Exercise actual separate owners and authorized positive controls. | PendingFix: exercise the existing separate service/frontend lifecycle owners; no frontend pause may be treated as service authority revocation or a permission grant. |
+| Separately authorized setup executor | B2/B3/D6 `find_and_install` variant | Business requester never inherits installer/shell permission; actual integration location and recipient owner are PendingFix until wired. | PendingFix: first identify the actual installed setup/recipient owner, then prove business shell/install zero entry and a separate permitted setup effect; an unwired external flow stays open. |
+| Credential/controller admission and all removal APIs | C1-C3 | Selected controller/custody controls passed; full removal-API and clear/status/acquire/storage race acceptance remains pending. | Gap: execute existing account/auth owner revoke/clear/status/acquire fixtures under governed admission, with real entry barriers and allowed unrelated continuation; no successful persisted turn proves these races. |
+| Persistent/detached operation and actual process recovery | C4-C7, D5/D6 monitor | Physical SQLite custody, same-process completed-turn close/reopen and fresh post-reopen work passed locally. Separate-process completed-turn reconstruction and fresh governed work also passed in a local tests-only successor, not yet published. Interrupted replay, persistent controller/grant administration, full C7 host transfer and detached revocation remain open. | Next: qualify and integrate the existing tests-only successor through normal gates; then exercise interrupted work, pending audit and host transfer through their actual owners. |
+| Approval freshness, authenticated decision, late delivery, one-use | D1-D3/D8-D9 | Positive approved sink and concurrent consumption, pending host restart, late typed input/next request, current eligibility and relevant/unrelated change; physical integration remains outstanding. | Gap: reuse approval/action_tests.rs and actual sink owner for exact approved entry, late authenticated decision and consume race; shell confinement alone is not consent integration. |
+| macOS/Linux confinement, non-userns/container modes | D4-D7 platform/configuration variants | Actual capabilities, bootstrap integrity and all launch families must pass; Required cannot silently downgrade. | Partial prerequisites: macOS shell owner green; native command-hook ownership/confinement integration is staged. Linux/container positive capability profiles remain separate open cells, not inferred from macOS. |
+| Windows/remote/browser unsupported OS requirements | D6 capability-negative variant | Explicit unsupported is correct only for unadvertised/unsupported profile; never a positive isolation claim. | Gap: select Required through each actual configuration owner and assert exact UnsupportedRequirement/no target entry; keep a later permitted operation and no empty platform filter pass. |
+| Required audit vs optional exporter, outcome/uncertainty | C5, E2-E6 | Native audited row and error foundations exist; durable/live recovery gaps explicit. | PendingFix: protect exact refused pre-tool hook association through existing input/audit owner, then inject required append failure with no body entry and successful sibling. Existing core HookDenied transport null retention does not prove durable hook audit. |
+| Rust embedding, CLI, REST, RPC, MCP protocol | A1/A2/C6/E5 surface variants | Reuse S16/S23/S25/S26/S27/S31/S49-S53 and Rust SDK suites; assert governance is actually installed. | Gap: first register the explicit macOS native-shell E1 in existing catalog/wrapper/Bazel owners; then add governed overlays to listed surface fixtures with real installed policy and negative physical-entry oracles. |
+| Python and TypeScript packaged SDKs | C6/E5 | Published native hook feedback transport passed TypeScript build/public typecheck and 500 tests, Python type/parser file 482 tests, and Web SDK typecheck/96 tests. Known reasons retain typed narrowing; explicit unknown wrappers retain raw reasons, and null denial payloads survive. Native packaged S38/S39 and S43/S44 handoffs remain required. Staged MobKit identity-carrier SDK controls (8 Python, 4 TypeScript) are separate from pending Rust carrier/runtime enforcement; no integrated issue 1618 pass. | Gap: integrate the staged MobKit identity-carrier owner and exercise native enforcement separately; then native packaged SDK C6/E5 handoffs with decoded typed feedback and observer auth. |
+| Browser/raw WASM vs hosted browser client | A1/A6/B5/B7/E5 | Separate S47/S48 raw exports and packaged SDK variants; server-only enforcement does not prove browser execution. Browser fetch controls/capabilities remain explicit. | Gap: reuse S47/S48 exports and hosted client tests independently, asserting actual policy owner/capability and typed local feedback; server tests do not establish raw browser execution. |
+| Live text/audio, interruption, backend switch and playback | A6/B5/B7/E4/E5 overlays on S71/S72 and S97-S107 | Reuse prerecorded audio and existing calls; observe real live send/tool boundary and typed lifecycle. Text fixture is not audio evidence. | Gap: extend existing S71/S72/S97-S107 prerecorded fixtures at the actual live send/tool boundary; retain independent text/audio interruption, backend and audience controls. |
+| MobKit console and domain policy | E5/E6, B3/D1 controls | Console PR520 at 17fe7af8 passed all 11 fresh CI jobs. Typed local hook feedback, access refresh and four mock-browser scenarios are source-qualified Console projection controls; earlier qualified real checked-save evidence remains separate. Full E5/E6/B3/D1 decoded-event and authenticated-action variants remain pending. | Gap: exercise actual native typed feedback through Console/gateway owners and authenticated operator actions; current projection/browser controls do not prove integrated native identity enforcement, grant administration or revocation. |
+| Default/trusted mode, mandatory gate, cheap checks | B2/B3, D6, cost gate below | The exact published native157 optimized small fixture measured +117.33/+189.37 percent turn overhead at grant lineage depths 1/3, with signed paired added-turn p99 +1.228443/+1.643655 ms. This needs investigation; it does not measure individual-operation p99 or the representative-turn gate. Full profile inventory and performance acceptance remain open. No semantic provenance tests. | Next: investigate the small-fixture signal without weakening canonical authority/currentness/audit, then qualify the remaining existing native_cost timing matrix in reserved quiet capacity. Compilation and correctness-test duration are not overhead measurements. |
 
 Before running, enumerate the advertised profile from real provider capabilities,
 enabled tool/launch inventory and registered surfaces. Map every entry to a row

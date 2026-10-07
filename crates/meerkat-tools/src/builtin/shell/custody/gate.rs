@@ -78,6 +78,19 @@ impl SpawnGate {
         })
     }
 
+    /// Borrow only the release channel and token for a sealed native launch.
+    #[cfg(target_os = "macos")]
+    pub(in crate::builtin::shell) fn launch_parts(
+        &self,
+    ) -> std::io::Result<(std::os::fd::BorrowedFd<'_>, &OsStr)> {
+        use std::os::fd::AsFd;
+        let read = self
+            .read
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("spawn gate already consumed"))?;
+        Ok((read.as_fd(), OsStr::new(&self.token)))
+    }
+
     /// Build the gated command that will run `shell_path -c command`.
     #[cfg(test)]
     pub(in crate::builtin::shell) fn command(

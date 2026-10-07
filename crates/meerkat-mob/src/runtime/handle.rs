@@ -2260,7 +2260,8 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::SupervisorEscalation(_) => {
             mob_dsl::MobSpawnManyFailureObservationKind::SupervisorEscalation
         }
-        MobError::UnsupportedForMode { .. } => {
+        MobError::UnsupportedForMode { .. }
+        | MobError::ResumeProviderParamsRequireResume { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::UnsupportedForMode
         }
         MobError::MissingMemberCapability { .. } => {
@@ -5447,22 +5448,132 @@ pub struct SpawnCustomizationContext {
     pub requested_profile: ProfileName,
 }
 
+/// What a member's durable session holds when the member is rebuilt on it
+/// (process-restart restore or [`MobHandle::resume`]), handed to
+/// [`SpawnMemberCustomizer::customize_resume`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ResumedMemberView {
+    /// The session the member is rebuilt on.
+    pub session_id: meerkat_core::types::SessionId,
+    /// The model identity persisted with that session, when it records one.
+    pub llm_identity: Option<meerkat_core::SessionLlmIdentity>,
+}
+
+impl ResumedMemberView {
+    pub fn new(
+        session_id: meerkat_core::types::SessionId,
+        llm_identity: Option<meerkat_core::SessionLlmIdentity>,
+    ) -> Self {
+        Self {
+            session_id,
+            llm_identity,
+        }
+    }
+}
+
 /// Narrow pre-build mutator for per-spawn construction inputs.
 ///
-/// Not asked for a durable fork's seating (`SpawnSource::PersistedForkResume`,
-/// or a local temporary-council participant seated with its source's
-/// [`super::ForkBuildInheritance`]), nor for any later rebuild of such a
-/// fork-derived member: those repeat the member's first build from its own
-/// durable records. Where the rebuild of a fork-derived member takes its
-/// per-spawn overlay from its own identity, the customizer is asked a
-/// `SpawnSource::Resume` request for the member and only its `external_tools`
-/// is used.
+/// # Which spawns ask it
+///
+/// - Every fresh spawn, helper, batch item, flow provisioning, policy spawn,
+///   respawn and fork request: [`customize_spawn`](Self::customize_spawn).
+/// - Rebuilding an ordinary member on its durable session (process-restart
+///   restore and [`MobHandle::resume`]):
+///   [`customize_resume`](Self::customize_resume), with what the session
+///   holds. Its default asks `customize_spawn` with `SpawnSource::Resume`.
+///
+/// # Which spawns never ask it
+///
+/// - `SpawnSource::IdentityReconcile`: the spec is already sealed in durable
+///   identity intent, and re-running could diverge from it.
+/// - `SpawnSource::PersistedForkResume`, a local temporary-council
+///   participant seated with its source's [`super::ForkBuildInheritance`],
+///   and every later rebuild of such a fork-derived member: those repeat the
+///   member's first build from its own durable records. A provider-params
+///   migration for them happens at their source.
+///
+/// Where the rebuild of a fork-derived member takes its per-spawn overlay
+/// from its own identity, the customizer is asked a `SpawnSource::Resume`
+/// request for the member through `customize_spawn` and only its
+/// `external_tools` is used.
 pub trait SpawnMemberCustomizer: Send + Sync {
     fn customize_spawn(
         &self,
         ctx: &SpawnCustomizationContext,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError>;
+
+    /// Customize the rebuild of an ordinary member on its durable session,
+    /// given what that session holds. Use it, for example, to migrate one
+    /// provider-params knob from the persisted value through
+    /// [`SpawnMemberSpec::resume_provider_params`]. The default ignores
+    /// `durable` and asks [`customize_spawn`](Self::customize_spawn).
+    ///
+    /// `durable` is read once per rebuild, and only when a customizer is
+    /// installed. When it cannot be read, the customizer is not asked: a
+    /// restore fails that member's restore, and an explicit resume fails with
+    /// the [`MobError::SessionError`] (inside
+    /// [`MobError::SharedLifecycleFailure`], like every explicit resume
+    /// failure).
+    fn customize_resume(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        durable: &ResumedMemberView,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        let _ = durable;
+        self.customize_spawn(ctx, spec)
+    }
+}
+
+/// Spawn customizers asked in order, stopping at the first error. Later
+/// customizers see (and may override) what earlier ones set.
+#[derive(Clone, Default)]
+pub struct SpawnMemberCustomizerChain {
+    customizers: Vec<Arc<dyn SpawnMemberCustomizer>>,
+}
+
+impl SpawnMemberCustomizerChain {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append `customizer`; it runs after every customizer already present.
+    #[must_use]
+    pub fn then(mut self, customizer: Arc<dyn SpawnMemberCustomizer>) -> Self {
+        self.customizers.push(customizer);
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.customizers.is_empty()
+    }
+}
+
+impl SpawnMemberCustomizer for SpawnMemberCustomizerChain {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        for customizer in &self.customizers {
+            customizer.customize_spawn(ctx, spec)?;
+        }
+        Ok(())
+    }
+
+    fn customize_resume(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        durable: &ResumedMemberView,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        for customizer in &self.customizers {
+            customizer.customize_resume(ctx, durable, spec)?;
+        }
+        Ok(())
+    }
 }
 
 /// Spawn request for first-class batch member provisioning.
@@ -5532,6 +5643,16 @@ pub struct SpawnMemberSpec {
     /// correct seam for model-only re-profiling because tools, skills, and peer
     /// posture continue to follow the definition.
     pub model_override: Option<String>,
+    /// Field-scoped provider-params override for a member rebuilt on its
+    /// durable session.
+    ///
+    /// When set on a resume rebuild, it becomes the resumed identity's
+    /// provider params (and is persisted with it), replacing the persisted
+    /// value; every other identity field keeps its persisted value. Build it
+    /// from [`ResumedMemberView::llm_identity`] to change one knob and keep
+    /// the rest. A fresh spawn rejects it: use the profile's provider params.
+    pub resume_provider_params:
+        Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Objective causality inherited from the spawning turn.
     pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-member auth binding. When set, this member's agent builds with
@@ -5689,6 +5810,7 @@ impl SpawnMemberSpec {
             inherited_tool_filter: None,
             override_profile: None,
             model_override: None,
+            resume_provider_params: None,
             objective_id: None,
             auth_binding: None,
             external_tools: None,
@@ -14436,10 +14558,12 @@ impl MobHandle {
             },
             source_session_id.clone(),
         );
-        let creation_source = match self.capture_member_creation_source(source_session_id).await {
-            Ok(witness) => witness,
-            Err(_) => crate::MemberCreationSourceWitness::unavailable(),
-        };
+        // Optional proof: a capture fault is classified and traced, and the
+        // fork is still admitted with an unproven source.
+        let creation_source = crate::CreationSourceCapture::classify(
+            self.capture_member_creation_source(source_session_id).await,
+        )
+        .into_admitted_witness("fork_member");
         let mut inheritance = super::ForkBuildInheritance::new(
             source,
             app_context,
@@ -18531,6 +18655,7 @@ mod tests {
             tool_use_id: "call-84".to_string(),
             tool_name: "ask_batch".to_string(),
             args: serde_json::json!({"question": "continue all?"}),
+            settlement_failures: Vec::new(),
         }];
         let batch = bounded_direct_session_failure(
             meerkat_core::service::SessionError::Agent(

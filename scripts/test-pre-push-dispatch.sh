@@ -93,6 +93,11 @@ if ! grep -Fxq 'fail_fast: true' "$REPO_ROOT/.pre-commit-config.yaml"; then
 fi
 
 git -C "$TEST_ROOT" init -q
+printf 'unchanged source\n' > "$TEST_ROOT/unchanged.rs"
+printf 'first revision\n' > "$TEST_ROOT/changing.txt"
+printf 'removed in next revision\n' > "$TEST_ROOT/obsolete.txt"
+printf 'ignored-scratch/\n' > "$TEST_ROOT/.gitignore"
+git -C "$TEST_ROOT" add unchanged.rs changing.txt obsolete.txt .gitignore
 git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
   commit --allow-empty -qm "base"
 base_sha="$(git -C "$TEST_ROOT" rev-parse HEAD)"
@@ -123,15 +128,33 @@ git -C "$MEERKAT_DISPATCH_NESTED_INIT_ROOT" init -q
   printf 'remote_url=%s\n' "${PRE_COMMIT_REMOTE_URL:-}"
   printf 'lane=%s\n' "${RUST_LANE_ID:-}"
   printf 'bazel_output_base=%s\n' "${MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE:-}"
+  if [[ -f changing.txt ]]; then
+    printf 'changing_text=%s\n' "$(cat changing.txt)"
+    for source_path in obsolete.txt untracked-result ignored-scratch; do
+      if [[ -e "$source_path" ]]; then
+        printf 'entry_%s=present\n' "$source_path"
+      else
+        printf 'entry_%s=absent\n' "$source_path"
+      fi
+    done
+  fi
   if [[ -e dirty-source-only ]]; then
     printf 'dirty_source_visible=yes\n'
   fi
 } > "$MEERKAT_DISPATCH_INVOCATION_LOG"
+if [[ "${MEERKAT_DISPATCH_MUTATE_THEN_FAIL:-0}" == 1 ]]; then
+  printf 'failed-hook mutation\n' > changing.txt
+  printf 'untracked residue\n' > untracked-result
+  mkdir -p ignored-scratch
+  printf 'ignored residue\n' > ignored-scratch/result
+  exit 1
+fi
 EOF
 chmod +x "$FAKE_PRE_COMMIT"
 
 run_dispatch() {
   local stdin_payload="$1"
+  local requested_lane="${2:-}"
   (
     cd "$TEST_ROOT"
     PATH="${HARNESS_ROOT}:$PATH" \
@@ -141,7 +164,7 @@ run_dispatch() {
       MEERKAT_DISPATCH_NESTED_INIT_ROOT="$NESTED_INIT_ROOT" \
       MEERKAT_SKIP_PRE_PUSH_TREE_CACHE=1 \
       MEERKAT_PRE_PUSH_BAZEL_OUTPUT_ROOT="${HARNESS_ROOT}/bazel-output" \
-      RUST_LANE_ID="" \
+      RUST_LANE_ID="$requested_lane" \
       "$REPO_ROOT/scripts/pre-push-dispatch.sh" origin example.invalid \
       <<<"$stdin_payload"
   )
@@ -178,8 +201,8 @@ if [[ -z "${validated_bazel_output_base}" ]]; then
   echo "dispatcher did not export a stable Bazel output base" >&2
   exit 1
 fi
-if [[ -e "$validated_cwd" ]]; then
-  echo "dispatcher leaked its detached validation worktree: ${validated_cwd}" >&2
+if [[ ! -d "$validated_cwd" ]]; then
+  echo "dispatcher discarded the managed checkout needed for source timestamp reuse" >&2
   exit 1
 fi
 if [[ "$(git -C "$TEST_ROOT" config --bool core.bare)" != "false" ]]; then
@@ -187,10 +210,25 @@ if [[ "$(git -C "$TEST_ROOT" config --bool core.bare)" != "false" ]]; then
   exit 1
 fi
 
+# Give the unchanged file a distinctive timestamp and refresh its Git stat
+# entry, as an unchanged source file would have after an ordinary checkout.
+touch -t 200001010000 "$validated_cwd/unchanged.rs"
+git -C "$validated_cwd" update-index --refresh
+timestamp_reference="${HARNESS_ROOT}/unchanged-timestamp"
+touch -r "$validated_cwd/unchanged.rs" "$timestamp_reference"
+printf 'second revision\n' > "$TEST_ROOT/changing.txt"
+git -C "$TEST_ROOT" rm -q obsolete.txt
+git -C "$TEST_ROOT" add changing.txt
+git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit -qm "change one source and remove another"
+head_sha="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+
 : > "$INVOCATION_LOG"
 run_dispatch "refs/heads/new ${head_sha} refs/heads/new ${ZERO_SHA:-0000000000000000000000000000000000000000}"
 assert_log_line "args=run --config .pre-commit-config.yaml --hook-stage pre-push --from-ref ${base_sha} --to-ref ${head_sha}"
 assert_log_line "from=${base_sha}"
+assert_log_line "changing_text=second revision"
+assert_log_line "entry_obsolete.txt=absent"
 second_validated_cwd="$(sed -n 's/^cwd=//p' "$INVOCATION_LOG")"
 second_bazel_output_base="$(sed -n 's/^bazel_output_base=//p' "$INVOCATION_LOG")"
 if [[ "${second_validated_cwd}" != "${validated_cwd}" ]]; then
@@ -204,6 +242,86 @@ if [[ "${second_bazel_output_base}" != "${validated_bazel_output_base}" ]]; then
     "${validated_bazel_output_base}" "${second_bazel_output_base}" >&2
   exit 1
 fi
+if [[ "$validated_cwd/unchanged.rs" -nt "$timestamp_reference" || \
+      "$timestamp_reference" -nt "$validated_cwd/unchanged.rs" ]]; then
+  echo "dispatcher rewrote an unchanged source timestamp between pushed trees" >&2
+  exit 1
+fi
+cmp "$TEST_ROOT/changing.txt" "$validated_cwd/changing.txt"
+if [[ -e "$validated_cwd/obsolete.txt" ]]; then
+  echo "dispatcher retained a source deleted from the pushed tree" >&2
+  exit 1
+fi
+
+# A failed gate leaves its real private checkout dirty. The next gate must
+# restore exact tracked bytes and remove both ignored and untracked residue.
+if MEERKAT_DISPATCH_MUTATE_THEN_FAIL=1 run_dispatch \
+  "refs/heads/main ${head_sha} refs/heads/main ${base_sha}" \
+  > "${HARNESS_ROOT}/dirty-failure.log" 2>&1; then
+  echo "dispatcher accepted the deliberately failed hook" >&2
+  exit 1
+fi
+if [[ ! -f "$validated_cwd/untracked-result" ]]; then
+  echo "dirty retry fixture did not retain the failed checkout" >&2
+  exit 1
+fi
+run_dispatch "refs/heads/main ${head_sha} refs/heads/main ${base_sha}"
+assert_log_line "changing_text=second revision"
+assert_log_line "entry_untracked-result=absent"
+assert_log_line "entry_ignored-scratch=absent"
+cmp "$TEST_ROOT/changing.txt" "$validated_cwd/changing.txt"
+if [[ -e "$validated_cwd/untracked-result" || -e "$validated_cwd/ignored-scratch" ]]; then
+  echo "dispatcher exposed previous hook residue to the next gate" >&2
+  exit 1
+fi
+
+# The managed path is not sufficient ownership proof for destructive reuse.
+git -C "$validated_cwd" switch -qc operator-owned
+printf 'preserve this checkout\n' > "$validated_cwd/changing.txt"
+if run_dispatch "refs/heads/main ${head_sha} refs/heads/main ${base_sha}" \
+  > "${HARNESS_ROOT}/foreign-checkout.log" 2>&1; then
+  echo "dispatcher reused a checkout attached to a branch" >&2
+  exit 1
+fi
+if [[ "$(cat "$validated_cwd/changing.txt")" != 'preserve this checkout' ]]; then
+  echo "dispatcher changed a checkout whose ownership check failed" >&2
+  exit 1
+fi
+git -C "$validated_cwd" switch --detach --discard-changes -q "$head_sha"
+
+# A replaced .git pointer must not borrow another detached checkout's index
+# and HEAD, even when it names the same repository and the managed path.
+peer_checkout="${HARNESS_ROOT}/detached-peer"
+git -C "$TEST_ROOT" worktree add --detach --quiet "$peer_checkout" "$base_sha"
+peer_git_dir="$(git -C "$peer_checkout" rev-parse --absolute-git-dir)"
+peer_index_before="$(git -C "$peer_checkout" hash-object "$peer_git_dir/index")"
+cp "$validated_cwd/.git" "${HARNESS_ROOT}/validation-git-pointer"
+cp "$peer_checkout/.git" "$validated_cwd/.git"
+if run_dispatch "refs/heads/main ${head_sha} refs/heads/main ${base_sha}" \
+  > "${HARNESS_ROOT}/aliased-admin.log" 2>&1; then
+  echo "dispatcher reused another checkout's Git admin directory" >&2
+  exit 1
+fi
+if [[ "$(git -C "$peer_checkout" rev-parse HEAD)" != "$base_sha" || \
+      "$(git -C "$peer_checkout" hash-object "$peer_git_dir/index")" != "$peer_index_before" ]]; then
+  echo "dispatcher changed the peer checkout's HEAD or index before refusing it" >&2
+  exit 1
+fi
+if [[ "$(cat "$peer_checkout/changing.txt")" != 'first revision' ]]; then
+  echo "dispatcher changed the peer checkout's source before refusing it" >&2
+  exit 1
+fi
+cp "${HARNESS_ROOT}/validation-git-pointer" "$validated_cwd/.git"
+git -C "$TEST_ROOT" worktree remove --force "$peer_checkout"
+
+for invalid_lane in . ..; do
+  if run_dispatch "refs/heads/main ${head_sha} refs/heads/main ${base_sha}" "$invalid_lane" \
+    > "${HARNESS_ROOT}/invalid-lane.log" 2>&1; then
+    echo "dispatcher accepted unsafe lane ${invalid_lane}" >&2
+    exit 1
+  fi
+done
+cmp "$TEST_ROOT/changing.txt" "$validated_cwd/changing.txt"
 
 # `git push origin HEAD:refs/heads/x` reports local_ref=HEAD. Branch creation
 # is decided by where the push goes, not how the local side was spelled, so it
@@ -275,6 +393,7 @@ fi
 cache_common_dir="$(git -C "$CACHE_REPO" rev-parse --path-format=absolute --git-common-dir)"
 cache_validation_lane="$(default_lane_for_root "$CACHE_REPO")"
 active_validation_tree="${cache_common_dir}/meerkat-hook-cache/worktrees/${cache_validation_lane}"
+git -C "$CACHE_REPO" worktree remove --force "$active_validation_tree"
 git -C "$CACHE_REPO" worktree add --detach --quiet "$active_validation_tree" "$cache_head_sha"
 run_cached_dispatch \
   "refs/tags/dispatch-cache-test ${cache_tag_object} refs/tags/dispatch-cache-test 0000000000000000000000000000000000000000"
@@ -627,9 +746,11 @@ case "$mode" in
     ;;
   undeletable-residue)
     printf 'Passed\n'
-    mkdir -p residue/locked
-    : > residue/locked/artifact
-    chmod 500 residue/locked
+    for scratch in "$TMPDIR"/meerkat-pre-push-exact.*; do
+      mkdir -p "$scratch/locked"
+      : > "$scratch/locked/artifact"
+      chmod 500 "$scratch/locked"
+    done
     exit 0
     ;;
   *)

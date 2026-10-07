@@ -1,5 +1,1197 @@
 # ADR-001 implementation checkpoint
 
+## Current delivery status, 2026-10-06
+
+The 0.9 coordinator leads the cross-repository work. Native
+[PR1730](https://github.com/lukacf/meerkat/pull/1730) is the current publication
+checkpoint. Commit `24efa210844e640c6907babb485cc745118c8801`, tree
+`c10c045bca384e0b64bb7460bbaf8dfe3b2454cb`, completed the normal hooked
+fast-forward push on GCP at 05:35:01.899 UTC on 2026-10-06. The command exited
+zero after 2h05m53s, with no skipped hooks, bypass or force push. The owner
+verified the remote branch at the same commit and the source checkout clean.
+
+All normal hook stages passed, including strict workspace/all-target/all-feature
+Clippy, machine verification, generated/Bazel freshness, and the deterministic
+unit, integration, HeadCanonical cold-restart and E2E-fast gate. The successful
+runner does not retain per-lane counts, so this checkpoint claims no new test
+totals. The raw push log is retained locally at
+`/private/tmp/adr-001-envelope-v4-r1/adr-push-24efa210/push-raw.log` and on GCP
+at `/tmp/rb/toolkit-work/receipts/adr-push-24efa210/push-raw.log`, with SHA256
+`db5499442ed2689acc64df4eb65f72ecf1557a9a8708367fc014d376d9247ec2`.
+
+This successor integrates main `17853e0e48fa7a865274ed8d8a28bd1604ed0f18`,
+including the debug-stack and write-only-when-changed code-generation fixes.
+The Mac owns source resolution and focused regression preparation; GCP owns
+the successor's compilation, normal push hooks, hosted CI and merge. The
+exact-24 qualification above does not qualify this merged successor. Normal
+hosted CI is required again; the temporary Actions-outage exception has ended.
+No accepted overhead benchmark or full-surface completion is claimed.
+
+The merge applies the read-only restriction before authorization entry
+observation and preserves it when currentness refreshes the dispatch context.
+Prepared OpenAI dispatch retains the shared replay projection and backend-owned
+cache-field filtering. Three new regression tests cover refreshed direct and
+resolved tool contexts, nested policy gates, and prepared request bodies across
+public OpenAI, ChatGPT and Azure backends. They were authored before the source
+resolution and remain uncompiled and unexecuted pending GCP validation. The
+Bazel module lock and two automatically merged BUILD files were regenerated;
+the repository's strict Bazel freshness command passed on this source.
+
+## Earlier qualification history
+
+The previous integrated baseline is
+`64349561d898d0a9e3ad279fa1a7d286ff7b302f`, tree
+`2041118ca2f545541a1a05cccccb908765307589`. It integrates main through
+`98e26901ba24c0b2154192e17590cdb3773eb3b5`, the custody fixture correction,
+the accepted model-review/consent ADR, and a test-only OAuth fixture migration.
+Documentation commit `c982b3b52ca7f0dff3d25328bb73caeeb3baf3e1` additionally
+refreshed this record and the Codex source comparison. At the coordinator's
+direction, commit `c25ba2969b1c4e66be05e1f8150cc56c173958a8` integrated main
+through `be2932374793ae84d3b844129cf58229509a1f0c`, including connector OAuth.
+The current successor also integrates actual main merge
+`74b6c7473797cb904f554c8c2cc1bb7386ec3c66`, containing the upstream memory-test
+correction described below. That correction changes no production behavior.
+Qualification of that integrated source, `f3ebf2a02e19330aa926b61a205fcd62466ca2fc`,
+failed as described below. Its fixture successor completed GCP qualification
+with two test failures; earlier published results did not qualify it. Luka's
+explicit 2026-10-05 instruction in the 0.9 coordinator chat temporarily removed
+GitHub CI as a blocker during the Actions outage. Those historical CI omissions
+remain recorded as skipped, never passed.
+
+MobKit's approval display checkpoint [PR594](https://github.com/lukacf/meerkat-mobkit/pull/594)
+merged as `e09a3c33e25c96a29cff30ec2923eaccc7a9c7ba` at 22:15:37 UTC.
+Its final source passed 726 console tests and all 14 existing static, build,
+freshness and inventory commands. Inventory checks are not E2E executions.
+The operator guide [PR603](https://github.com/lukacf/meerkat-mobkit/pull/603)
+merged as `62bef663cdbae8d59340d5d85d09650b698bf318` at 22:20:43 UTC after
+normal applicable documentation hooks. Hosted CI for both merges was skipped
+under the explicit outage exception. These changes display existing decisions
+and document their limits; they do not implement the native model reviewer or
+establish release/deployment acceptance.
+
+The Mac integration commit `eff3fcddf2dd3e86816d3cd02b2a986276958a8a`, tree
+`91f03eca38fc1c3c732d297998330af9915ebe9a`, integrates main `851fd7de9`, including PR1749's retained
+member lineage and PR1760's in-memory ops lifecycle deadlock repair. The store
+merge preserves native custody and epoch retirement while placing ops snapshots
+and retirement fences behind the incoming separate short-lived mutex. CI keeps
+both governed JSONL and upstream TLC requirements; changelog entries from both
+parents remain. A source review also migrated the newly added CLI and retained
+metadata fixtures to the fallible native constructors. These are source-level
+integration findings, not executed test passes. Normal merge commit hooks passed
+in 11.55 seconds. Existing GCP `c7f42abb` results remain baseline evidence;
+the final normal Mac gate must qualify the integrated successor. Routine
+unrelated main changes do not require repeating this integration.
+
+Clock times in the qualification history below are UTC on 2026-10-05.
+
+The GCP run lasted from 20:39:20 to 21:05:56 UTC on the exact `f3ebf2a02`
+source. Workspace library, integration and E2E inventories stopped during
+compilation and ran zero tests. Three fixtures had not adopted the fallible
+`PersistenceBundle` or `MobMcpState` constructors: the shared delivery-inbox
+fixture, the stuck member-retirement fixture and the profile tool-denial fixture.
+The separate `cold_restart_mob_resume` target passed all nine tests with zero
+skips in 2.751 seconds of test execution; its command took 7m49s. That result
+does not qualify the inventories that did not run. Raw command output and timing
+remain under `/tmp/rb/toolkit-work/receipts/adr1730-f3ebf2a0` on GCP.
+
+The redundant Mac normal push was stopped after the deterministic compile
+failures were reported. Its process exited 143 and its owned group was confirmed
+absent at 21:05:58 UTC; no push occurred. The fixture successor `970fa7a0181ae8aa1fdb05b4024794c387efe21e`, tree
+`2beafcd1907974dedf1ac291e921187f43c6a0de`, handled constructor failure in those
+three fixtures and three analogous live/replay fixtures, including fallible mob
+composition. Its local workspace all-targets check with the replay feature
+exited 101 after 1424.17 seconds and ran no tests. It found one remaining setup
+mismatch: the profile tool-denial fixture also needed to handle the fallible
+`wire_mob_tools` result. All nine other calls already handled that result. Raw
+output is `envelope-main-fixture-all-targets-check.log` in the local evidence
+directory below.
+
+The sole GCP qualification owner applied the fixture changes as `feebf5f327`,
+whose tree is identical to local `970fa7a01`, and added the final positive-fixture
+unwrap as `c7f42abbd2fb9bb3df0b724a83f6df8ce3659681`, tree
+`c3d5133b9b68c8a31d0fa2d3ca3af711017b0f0e`. Root verified the returned bundle
+and the one-line difference against local `970fa7a01`. The GCP owner reports
+format checking and the default-feature workspace all-targets check passed;
+the latter ran from 21:59:47 to 22:10:37 UTC. That command did not include the
+replay feature. The four test commands completed at 22:42:16 UTC:
+
+- Workspace library: 13,021 passed, one failed and 19 skipped. Command wall time
+  was 1,114.63 seconds; test execution took 380.644 seconds. The live-close test
+  failed its independently started clocks' 150 ms lower bound at 149.894422 ms
+  after its `Ok(None)` assertion passed. This unchanged upstream timing oracle
+  is tracked by [issue1779](https://github.com/lukacf/meerkat/issues/1779), with
+  its correction owned separately. There was no retry.
+- Workspace integration: 3,098 passed, one failed and 83 skipped. Command wall
+  time was 454.53 seconds; test execution took 452.847 seconds. The transcript
+  retention fixture expected version 3 after an explicit write, conflicting
+  with this checkpoint's version 4 writer. This is an integration regression
+  in the test expectation, not a passing inventory.
+- Cold restart: all nine passed, zero skipped. Command wall time was 325.06
+  seconds; test execution took 2.845 seconds.
+- E2E fast lane: all 30 passed, zero skipped. Command wall time was 3.66 seconds;
+  test execution took 2.576 seconds.
+
+All command results and source identity are retained under
+`/private/tmp/adr-001-envelope-v4-r1/adr1730-c7f42abb/`, copied and hash-verified
+against the GCP owner's raw receipts. The GCP transport commit skipped commit
+hooks; its explicit format check and normal Mac hooks are separate evidence.
+These results do not qualify the later main integration or establish performance.
+
+The normal Mac push of `eff3fcdd` started at 22:28:59 UTC and was stopped at
+22:44:25 UTC after the deterministic version mismatch was reported. It exited
+143 after 925.78 seconds; its owned process group subsequently drained and no
+push occurred. Preliminary checks and formatting passed. The lint hook was
+still building prerequisites, so lint and later gates did not pass. Raw output
+is `envelope-main-851-normal-push.log` in the local evidence directory above.
+The narrow successor corrects the retention test to assert a version 3 input,
+a version 4 write, and exact equality of every other JSON field. It changes
+neither the historical fixture nor production behavior; its focused execution
+passed the affected test, with five unrelated tests unselected. The command
+took 112.52 seconds, including 1m51s compilation and 0.040 seconds of test
+execution. Independent source review confirmed that all history, message,
+metadata and subsequent retention assertions remain intact. The focused pass
+does not qualify the broad candidate. Raw output is
+`envelope-retention-v4-fixture-green.log` in the same local evidence directory.
+
+The retention correction committed as
+`1394677f2768fdaa49290f3746aa8214596daf22`, tree
+`e5bbf083fe8c7c04446b35ec3393028ed51d4262`. Its normal push started at
+22:53:41 UTC and exited 1 after 1,664.44 seconds; terminal state was observed
+at 23:21:43 UTC and the owned process group drained. Preliminary checks and
+formatting passed. Strict Clippy rejected the runtime admission closure at
+`meerkat-session/src/ephemeral.rs:6422`: its error tuple had grown to at least
+128 bytes. Later gates did not execute and no push occurred. Raw output is
+`envelope-main-retention-normal-push.log` in the same evidence directory.
+
+The narrow repair boxes the owned `ToolError::HookDenied.denial` and
+`AgentError::PolicyIndeterminate.failure` payloads. These nested error variants enlarged
+`SessionError`; the admission guard and closure are unchanged from main.
+Typed classification, serialized hook denial shape and settlement diagnostics
+remain intact. The allocation occurs only when constructing those failures.
+The public Rust fields now contain `Box` values, so downstream explicit
+constructors and owned payload consumers must adapt. Two independent reviews
+cleared this source delta. Scoped strict Clippy for every `meerkat-session`
+target passed with warnings denied in 168.70 seconds, starting at 23:35:21 UTC.
+The command exited 0 and its owned process group drained. Raw output is
+`envelope-error-payload-clippy.log` in the same evidence directory. All six
+selected denial, settlement and admission controls passed across four binaries;
+5,059 other tests were not run. That command started at 23:38:55 UTC, exited 0
+after 1,068.96 seconds, and its owned process group drained. Compilation took
+17m46s; test execution took 2.113 seconds. The controls preserve same-turn
+siblings after refusal, exact hook payload roundtrips, the original infrastructure
+failure class, joined admission capacity and the terminal carrier. Raw output is
+`envelope-error-payload-focused-green.log`. Normal publication qualification
+remains pending; these scoped passes do not qualify the broad candidate.
+
+That repair committed as `e89d3cae0c6be29e49852ba01e2ab87055b54838`, tree
+`33a7e23fe8b63540aa5947abe7f629959782a015`, after normal applicable commit
+hooks passed in 10.32 seconds. Its normal push started at 23:58:57 UTC on
+2026-10-05 and exited 1 after 3,152.13 seconds. Terminal state and full process
+group drain were observed at 00:51:34 UTC on 2026-10-06. Preliminary checks and
+formatting passed. Broad strict Clippy found two test-only `ToolResult` literals
+in `meerkat-mob-mcp/src/live_delegation/peer_replies.rs` that omitted the added
+`settlement_failures` field. Later gates did not execute and no push occurred;
+the remote branch remained at `afb79ea29d8cdf30689345d884b43bc6c5baa428`.
+Raw output is `envelope-error-payload-normal-push.log` in the same evidence
+directory. The successor initializes both fixtures with an empty diagnostics
+vector, matching the existing constructors and preserving all positive and
+negative assertions. Independent source review confirmed that neither fixture
+represents a settlement failure. A whole-workspace source sweep, including
+live/replay fixtures, examples and the core result alias, found no other
+incomplete literals. Production code is unchanged. Normal publication
+qualification remains pending.
+
+That fixture correction committed as `fcd5115487897a252cadb408d2ee989fc935ceb6`,
+tree `765df7331470c1dfb29edc15c8846f5075045586`, after normal applicable commit
+hooks passed in 10.08 seconds. GCP's locked workspace all-target/all-feature
+strict Clippy passed on that exact clean source in 1,065.83 seconds, from
+00:58:14 to 01:16:00 UTC on 2026-10-06. Its raw log, timing and pre/post source
+identity are retained under `adr-precheck-fcd51154/` in the local evidence
+directory. This is compile/lint evidence, not runtime test execution.
+
+The normal Mac push started at 00:57:44 UTC on 2026-10-06 and exited 1 after
+1,254.81 seconds. Its terminal state and full process group drain were observed
+at 01:18:43 UTC. Preliminary checks, formatting and broad strict Clippy passed.
+Machine verification then found a stale hand-written run-start hold audit call:
+the generated admission operator now takes twelve arguments, including optional
+authority binding and batch key, while the audit still supplied ten. TLC stopped
+at semantic analysis. No push occurred and later runtime test gates did not run.
+Raw output is `envelope-peer-replies-normal-push.log`.
+
+The successor supplies `None` for both added arguments, preserving this audit's
+ordinary unbound input. Generated models, production code, guards, properties,
+witnesses and bounds are unchanged. Two independent source reviews confirmed
+the mapping. The existing `run_start_hold_audit.sh 12` command passed in 58.37
+seconds, including safety and all seven required reachability witnesses. Its
+optional mutant checks were not selected. Raw output is
+`envelope-run-start-hold-green.log`. Normal publication qualification remains
+pending. A full source sweep against integrated main found 66 changed admission
+signatures across the native and composition models; all 69 corresponding calls
+in the 35 tracked TLA files now supply twelve arguments, with no stale aliases
+or qualified references. This sweep is source review, not additional TLC runs.
+
+The Mac candidate adds one test-build correction to that GCP source:
+`StdioChildCustody::spawned_pid` is compiled only for Linux tests, matching its
+only caller. The Mac compile check emitted an unused-method warning for its
+former all-platform test configuration, which conflicts with the normal strict
+lint policy. Both predicates are true for Linux tests, so their helper and
+caller behavior are unchanged. This is a source-level conclusion; the final
+normal Mac gate still must execute. The recorded GCP source remains unchanged.
+
+The connector merge needed four integration repairs: preserve typed stale
+preparation, use coordinated mode-constrained logout, adapt the generated
+refresh transition return type, and reuse the held lifecycle guard during cold
+credential recovery. The mode check and credential clear share the existing
+coordinator transaction and guard; foreign-mode credentials remain untouched.
+Two tests were written first using a fresh runtime owner over a real committed
+credential. Both failed on the intended five-second deadlock timeout. That RED
+command took 185.39 seconds, including 2m54s compilation and 10.031 seconds of
+test execution. After guard reuse, eight selected controls passed across two
+binaries in 14.36 seconds, including 13.59 seconds compilation and 0.071 seconds
+of test execution. They cover cold status/bearer, foreign-row logout protection,
+failed-clear status, scope/account refresh refusals and infrastructure error
+classification. Raw logs are
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-connector-cold-red.log` and
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-connector-cold-green.log`.
+These are focused integration results, not full candidate qualification.
+
+The native integration regression was executed before its repair: acquisition
+incorrectly accepted a builder-seeded runtime owner from a different store.
+After the repair, all eight selected tests passed across four binaries. They
+cover persistent owner/store conflicts, the typed conflicting-owner outcome,
+ephemeral service ownership, and queued work surviving model-visible permission
+refusal. The green command took 688.77 seconds, including 11m26s compilation;
+the test bodies took 0.737 seconds. Its raw log is
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-owner-green.log`.
+
+The auth-core test library initially failed to compile because its refresh tests
+still used the removed `BrowserOpener` fixture. A test-only migration to the
+host-driven login API retained the refresh cases. The targeted
+`mcp_oauth::tests::ce_mcp_stale_error_roundtrip_remains_typed` then passed,
+including the assertion that stale preparation is not a permission refusal.
+The command took 36.61 seconds, including 34.94 seconds compilation and a
+0.017-second test body. Its raw log is
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-stale-preparation-classification-r2.log`.
+Normal commit hooks passed. These nine selected passes do not establish complete
+surface coverage or replace the pending normal publication gate.
+
+The combined runtime-correctness candidate
+`e27338d97be661c1eb4e7670809020b91cba37f7`, tree
+`c92a3ef7ceded9e1d475bfa7ba4916a537604383`, failed its second normal push at
+19:05:07 UTC after 6474.52 seconds. Lint, machine, generated-header, Bazel
+freshness and workspace compilation passed. Both unit attempts timed out at
+900 seconds. The first ran 7,070 of 12,407 selected tests: 7,068 passed, one
+memory assertion failed and one test was terminated; 14 were skipped and
+5,337 selected tests never ran. The retry ran 6,891: 6,890 passed, one was
+terminated, 14 were skipped and 5,516 selected tests never ran. Integration,
+HeadCanonical and E2E did not start, and no push occurred. The raw log is
+`/private/tmp/adr-001-envelope-v4-r1/runtime-checkpoint-normal-push-r2.log`.
+
+The real memory failure also applies to the native candidate: the source is
+identical. The released-v2 purge/reopen test had confirmed three durable rows,
+then required approximate HNSW search to return all three and received two.
+The local trial correction retained all earlier migration, staging, finalize
+and search checks, verified the exact three durable texts through scoped
+enumeration, and checked that lazy rebuild indexes three points. It also checked
+nonempty, nonblank reopened search results. The affected test passed in the root
+worktree's own target in 118.03 seconds, including 1m57s compilation and a
+0.033-second test body; 65 unrelated tests were unselected. Its raw log is
+`/private/tmp/adr-001-envelope-v4-r1/envelope-main-memory-reopen-oracle.log`.
+That targeted pass does not qualify the failed broad inventory. GCP independently
+reproduced the assertion on current main and owns the upstream correction in
+[PR1759](https://github.com/lukacf/meerkat/pull/1759), inspected at
+`915fdab04714e318a8ccd148de7a4f934507196d`. The PR uses the same exact index-count
+and durable-text checks, preserving the earlier search assertions. Root withdrew
+its duplicate hunk and retained it at
+`/private/tmp/adr-001-envelope-v4-r1/superseded-local-memory-oracle.patch`.
+GCP reported runner capacity as the cause of cancelled CI jobs. Under Luka's
+outage exception, its owner merged PR1759 at 20:29:08 UTC as `74b6c7473`, with
+CI explicitly skipped and local evidence recorded on the PR. The actual merge
+is integrated here. Fresh candidate qualification remains pending; the earlier
+local trial is not an executed pass of the upstream variant.
+
+The combined cohort's owned processes drained. PR1730 has the next normal push,
+using the existing isolated
+detached target and a 1,800-second unit timeout
+within the unchanged two-hour overall bound. Publication does not require
+merging the separate runtime-correctness branch first. One broad test cohort
+remains active at a time because socket and timing tests share host resources;
+independent source review and documentation continue in parallel.
+
+The [model-review and consent amendment](../adr-001-model-review-and-consent.md)
+incorporates the inspected Codex implementation and the accepted host deltas.
+It keeps default authorization local, treats optional reviewer unavailability
+separately from denial, and requires operation-local feedback with continued
+sibling and queued work. A reviewer cannot grant missing native permission.
+This is accepted design direction, not implemented reviewer, consent-consumption
+or host-integration functionality. Approval-store atomicity remains tracked by
+[issue1741](https://github.com/lukacf/meerkat/issues/1741).
+
+Performance acceptance remains open. No measurement qualifies the current
+integrated candidate. The historical six-cell study below missed every
+conditional mean threshold; fresh-turn overhead was 137.01 and 145.20 percent
+at grant depths 1 and 3. The required added authorization p99 below 1 ms per
+operation and representative overhead at most 10 percent remain unchanged.
+The accepted W20/N32 representative study follows functional qualification and
+optimized correctness at the earliest actual quiet GCP window. Meta publication
+is not a prerequisite, and no idle window is reserved. It must finish within
+20 minutes. It measures conditional mean ratios, not
+individual-operation p99; the latter still needs separate valid evidence.
+
+Full implementation remains incomplete under the
+[acceptance plan](acceptance-plan.md). Required follow-ons include interrupted
+recovery, persistent authority administration, principal/peer/callback carry,
+all surface and operation-family activation, Elephant integration, supported
+OS confinement, model review and human consent, and measured overhead. Narrow
+native or Console checkpoints do not satisfy those remaining requirements.
+The dated sections below preserve historical evidence and do not supersede
+this current delivery status.
+
+## Historical delivery status, 2026-10-04 at 21:03 UTC
+
+Native PR1634 is published at `b12d81e71e57bfeb2c3bc677c21c782f57cc3df6`,
+tree `1f9553187e12d0a7f91ac0cdd0ff54e56e658c77`. All normal push hooks,
+including the workspace unit, integration and E2E gate, passed in 117m48s,
+ending at 17:52:00 UTC. Successful hook output does not retain individual
+lane counts; no counts are inferred from that result. The raw log is
+`publicb12d-normal-push-r1.log` in the retained evidence directory.
+[Fresh CI37222144847](https://github.com/lukacf/meerkat/actions/runs/37222144847)
+passed 38 jobs with four intentional skips in 22m13s; its final gate completed
+at 18:14:19 UTC. The exact three governed JSONL cases passed with zero failures
+or ignores in 0.21s test bodies. [Semver readiness](https://github.com/lukacf/meerkat/actions/runs/37222144843)
+also passed. Raw final CI JSON and governed JSONL logs use the `publicb12d-`
+prefix in the retained evidence directory. Predecessor `00b0cab3` remains
+separately CI-green. Performance is
+still unacceptable: the latest six-cell study missed every conditional mean
+threshold, with fresh-turn overhead of 137.01 and 145.20 percent at grant
+depths 1 and 3. Individual-operation p99 and full coverage remain open.
+
+Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published
+at `b997bdcc5bcab37f7080215099c1d5be1307b892`, tree
+`2b9e7d232dbce80c82e58b0824279c74575e52d0`. Local queue/send-attempt suites
+passed 102 cases and the adapter suite passed 317, all without skips. Normal
+commit, embedded freshness and applicable push hooks passed. However,
+[CI37230079692](https://github.com/lukacf/meerkat-mobkit/actions/runs/37230079692)
+failed: nine jobs passed, Console failed and the aggregate gate failed. The
+5,000-turn send-streaming browser scenario timed out. A source reproduction
+finds anonymous historical tool results appended after the assistant snapshot's
+observation boundary, leaving the queue busy after the current run completes.
+The real gateway can emit this ordering too. Repair and fresh CI remain open.
+Predecessor `86e0cdf0a17d9727c90ba036a8b9dbca97c521b8` passed all 11 CI jobs
+in 39m34s. These are Console projection results; MobKit still pins Meerkat 0.8.50.
+
+The preview safety baseline is committed at
+`64b44ff9d0fb6d3118c324b20e0bcc4449ac6659`, tree
+`aeceef3a8ed608b6fab842cf62f80e1595534a49`. Two preview tests and the existing
+archival/recovery test passed with zero failures or ignores; normal commit
+hooks passed. They cover isolated effects and full state, binding rejection,
+retained poison, and cleanup. They do not prove that a poisoned preview invokes
+cold validation. The first
+compile attempt used a stale macro artifact and ran no tests; rebuilding the
+correct macro took 2m31s before the two preview cases passed in 0.04s.
+Raw results are `costf9-preview-live-fork-baseline-r1.log`,
+`costf9-preview-live-fork-baseline-r2.log` and
+`costf9-preview-live-fork-archive-baseline-r1.log` in the retained evidence.
+
+The reviewed production preview change is now under qualification. Healthy
+locks use the generated authority's existing isolated fork; poisoned locks
+retain cold recovery validation. On GCP, the same two preview tests passed
+with zero failures or ignores after 11m13s of optimized compilation. Three
+existing provisional-transition tests and the archival/recovery control also
+passed, with test bodies reported as 0.00s. Raw logs use the
+`native34f-preview-` prefix in the retained evidence directory. Both optimized
+native-workload correctness tests then passed with zero failures or ignores in
+8.05s, after a 6m18s rebuild. These eight controls cover local refusal feedback,
+permitted effects, revocation, queued-work cancellation, isolation and cleanup.
+Candidate `4cffdf3752574a886a0024bfe70f59dde3b5d254` failed its normal
+push after 41m26s in Clippy. E0275 occurred while proving that the existing
+CLI RPC-deployment test future is Send; later test gates and fresh CI were
+not reached. A reviewed test-only explicit Send boundary then passed the
+same workspace, all-target, all-feature Clippy command in 7.58s using the
+retained warm target. The existing CLI RPC-deployment scenario then passed
+with zero failures in 0.158s after a 9m24s compile, finishing at 19:37:46 UTC.
+The test-only repair is committed in candidate
+`d6f2369fab6caed654caa992ffe9423d1e3736a4`. Its normal push failed after
+66m21s at 20:46:42 UTC, before integration/E2E: 12,796 of 12,798 unit tests
+passed, two OpenAI authorization tests failed, and 22 were skipped. One success
+fixture received two HTTP requests; the transport-failure fixture did not see
+a transport error. The failure tests release an ephemeral port before using
+it, allowing another parallel test to receive the request. A repair retains
+port ownership through an actual request followed by transport closure across
+OpenAI, Anthropic and Gemini. All 39 selected authorization tests passed
+across the three provider binaries after 2m33s of compilation, with 0.07s test
+bodies and 617 unrelated tests excluded by the selection. This includes both
+previously failed cases. The scoped raw log is
+`/private/tmp/adr-001-http-test-isolation-r1/provider-authorization-tests.log`.
+Normal publication and fresh CI for this repair remain open. The full failed push log is
+`publicd6f-normal-push-r1.log` in the retained evidence directory.
+No production allocation or recursion-limit change is part of the CLI repair.
+Toolkit's bounded preview source review found no blocker; it does not supply
+missing execution or performance evidence.
+Raw logs are `public4cff-normal-push-r1.log` and
+`native4cff-cli-send-clippy-r1.log` and `native4cff-cli-send-scenario-r1.log`
+in the retained evidence directory.
+No new performance result is claimed; timing requires fresh GCP clearance
+after both active release tags.
+
+The separate push-range workflow repair is published in
+[PR1682](https://github.com/lukacf/meerkat/pull/1682) at
+`032547f2ab26462842fb1d113bd73eb5d510d0b1`. Its complete normal push passed
+in 126m22s, ending at 20:59:08 UTC, including the deterministic unit,
+integration and E2E gate. Individual counts are not retained in successful
+hook output and are not inferred. Fresh
+[CI37234271914](https://github.com/lukacf/meerkat/actions/runs/37234271914)
+is running.
+It follows `5ecab297`, whose 70m13s push passed Clippy and machine checks,
+then failed one of 12,155 unit tests (17 skipped). Two new controls reproduced
+the cleanup observer's assumption that FIFO closure implies process exit.
+Both passed after a bounded exit-observation repair; the two original real
+process timeout/interruption controls also passed in 5.015s. The repair
+changes test observation, not production cleanup. Normal commit hooks passed.
+Two earlier 600s and 840s attempts expired during compilation before tests
+ran; the completed baseline then took 8m47s to compile and the repair 1.91s.
+Raw results are retained under
+`/private/tmp/adr-001-cargo-push-range-r1/cleanup-oracle-r1`.
+That first-branch push conservatively validated the whole tree because
+its source ref was `HEAD`; future first pushes will name the source branch
+explicitly so the existing dispatcher can select its proven comparison base.
+
+The representative benchmark now defaults to the approved fixed W20/N32
+profile and rejects the withdrawn tail profile or conflicting count overrides.
+Both profile tests first failed against the prior helper, then passed after the
+repair; all three existing deadline controls also passed. Initial compilation
+took 3m19s, the repair recompile took 2.63s, and test bodies took 0.03s total.
+The six measurement cells, workload oracles, output format, 1,200-second budget
+and separate small-matrix profile remain unchanged. Raw `red.log`, `green.log`
+and `deadline.log` are retained in
+`/private/tmp/adr-001-representative-profile-contract-r1`. This qualifies profile
+selection, not performance. Strict scoped Clippy passed in 3m21s and the
+repository analyzer self-test passed all 20 cases in 1.419s. The correction is
+committed at `ce8d57524897fe656df8c9944ea13d4913c82f8f`, tree
+`535415075d176351885843d763628804363ffbf7`, with normal commit hooks passed.
+Its publication is pending.
+
+## Publication gate, 2026-10-04
+
+Native [PR1634](https://github.com/lukacf/meerkat/pull/1634) is published at
+`00b0cab3e3480efac149c91f0823fa687b862639`, tree
+`858a61c033b266086a0cf313d27b588b23247e6a`. All installed normal push hooks
+passed without bypass in 118m17s, ending at 14:58:02 UTC
+(`public00b0-normal-push.log`). Exact-head
+[CI run 37211222497](https://github.com/lukacf/meerkat/actions/runs/37211222497)
+passed 38 jobs with four intentional skips in 15m56s, ending at 15:14:04 UTC.
+[Semver readiness](https://github.com/lukacf/meerkat/actions/runs/37211222385)
+also passed. The governed JSONL job ran all three required cases with zero
+failures or ignores in 0.21s test bodies. PR readback confirmed the exact head
+and clean merge state. Raw evidence is `public00b0-ci-37211222497-final.json`,
+`public00b0-governed-jsonl-ci.log` and
+`public00b0-pr1634-ci-green-readback.json`. No merge or release is recorded.
+
+Published predecessor `7defcdd7fa069782b12c9073bd3b128a08147d6d` passed all
+normal hooks in 79m48s and
+[CI run 37196269479](https://github.com/lukacf/meerkat/actions/runs/37196269479)
+in 17m27s with 38 successful jobs and four intentional skips. Its retained
+logs remain historical evidence for that exact source.
+
+Published predecessor `c18c619bf2d140663eb0a78d17d7122d9ac1a5ef`, tree
+`f81231a73c2f4ba5befa1cf2575fe1834016c77f`. Its normal GCP push passed all
+required hooks in 4,078s wall time and completed at 06:17:43 UTC
+(`native-c18-gcp-normal-push-green-r1.log`). Fresh
+[CI run 37182383940](https://github.com/lukacf/meerkat/actions/runs/37182383940)
+completed successfully on exact c18: 38 successful jobs and 4 intentional skips,
+with its final gate at 06:39:26 UTC, 21m42s from creation. The exact-head
+[semver run 37182383935](https://github.com/lukacf/meerkat/actions/runs/37182383935)
+also passed. Independent PR readback confirmed exact c18 and clean merge state.
+The final API record is `native-c18-ci-37182383940-final.json`, SHA256
+`8577ababd8d3d8d40a7b2aeec66960f672c642d27c5a635c2487115822eb20a8`.
+No merge or release is recorded.
+
+The preceding `51cd489916387039121e751e595670b92a0d4b65` publication passed all
+required hooks in 3,833s (`push-51.log`). Its
+[CI run 37177141203](https://github.com/lukacf/meerkat/actions/runs/37177141203)
+also passed with 38 successful jobs and 4 intentional skips. These remain the
+source-qualified predecessor results, rather than the current head's evidence.
+
+The previous `157a73e75aed677c5f5a37d20cd07fe53710c216` publication passed normal
+hooks in 4,726s (`native-157-gcp-normal-push-green-r1.log`). Its
+[CI run 37170072061](https://github.com/lukacf/meerkat/actions/runs/37170072061)
+completed with 35 successful jobs. Format + governance failed because two
+standalone example locks were stale; Generation ratchets failed only poster
+freshness in two HTML outputs, after canonical coverage and typed content
+checks passed. The dependent CI gate failed too. Those results remain historical
+for the previous head; they do not describe CI-green predecessor c18.
+
+The preceding repair is `51cd489916387039121e751e595670b92a0d4b65`, tree
+`f365afd3b3bc18f14c70da35db3615ce97e5fc7c`. Its only four changed files are the
+two example locks and two poster outputs. Existing dependency identities/pins
+are preserved; existing canonical metadata refresh and lock checks passed.
+The unchanged Node poster generator produced the reviewed bytes and passed
+byte idempotence. The GCP publication owner then passed the existing
+example/root-lock checks and full compiled-alphabet poster gate before the
+normal successor publication. Published `51` has identical Rust bytes to `157`.
+Additional runtime production integration remains held.
+
+Console [PR520](https://github.com/lukacf/meerkat-mobkit/pull/520) is published
+at `db369979a28bef472ddae729b9f5003e0bec4aeb`, tree
+`6c76fbd96eeaf92cb40ac93e4d776fd782b062dc`. Normal hooks passed and
+[CI run 37206031337](https://github.com/lukacf/meerkat-mobkit/actions/runs/37206031337)
+passed all 11 jobs in 40m27s, ending at 14:13:42 UTC. The complete browser suite
+passed. The repaired canonical-send scenario waits for its exact RPC response
+before checking the refreshed access state; its identity, member and pending
+state assertions remain. PR readback confirmed the exact head and clean merge
+state. Raw evidence is `consoledb369-ci-37206031337-final.json`,
+`consoledb369-ci-browser-job.log` and
+`consoledb369-pr520-ci-green-readback.json`.
+
+The preceding c973 source passed Python20/TypeScript44 event tests and SDK build,
+but its CI browser scenario failed; that failure remains retained. Earlier e26
+passed all 11 CI jobs. These packet and browser results qualify projection and
+access UX, not integrated native-plus-Console enforcement. MobKit still needs
+the explicit native dependency and authenticated ingress integration.
+
+Docs-only predecessor `37ca84df0fb3b6c956501374183b3e0866880db6` passed its normal
+push and all 11 jobs in [CI run 37188101522](https://github.com/lukacf/meerkat-mobkit/actions/runs/37188101522)
+(32m20s elapsed). Only the Console guide and changelog differ from `17`.
+The preceding
+`17fe7af8b2b374402d0e198f44879c2891446ac8` is the ordinary merge of published
+`fc0509cfe` and main `fa233b756`, whose five-file delta added Python init-timeout
+SDK/tests/docs and retained both changelog entries.
+The four incoming Python stand-in gateway tests passed (2.57s bodies).
+The earlier tree-qualified Console/component/build and four mock browser
+scenarios remain valid; these establish projection/access UX, not integrated
+native-plus-Console governance. The fc0509 normal push passed all 2,183
+workspace library tests (2 existing skips, 396.504s bodies). The 17 push passed
+applicable hygiene hooks; Rust/unit hooks correctly selected no files for its
+five-file Python/docs/changelog delta, rather than repeating that test result.
+Fresh [CI run 37172144001](https://github.com/lukacf/meerkat-mobkit/actions/runs/37172144001)
+passed all 11 jobs at exact 17, including the final gate at 03:24:41 UTC
+(36m53s elapsed from run creation). This remains the predecessor's CI result,
+separate from current e26's completed 11-job result.
+
+The published SDK adapter exports known hook reasons plus an explicit unknown
+wrapper retaining the exact original reason/code. Known TypeScript variants
+keep discriminant narrowing, malformed known reasons do not fall back to legacy
+strings, and explicit-null HookDenied payloads survive. The existing TypeScript
+build/public typecheck and 500 tests, Python type/parser file (482 tests) and Web
+SDK typecheck/96 tests passed at their recorded checkpoints. These are contract
+compatibility results. The existing CI planner's 15.1-minute runtime unit model
+preserves the 16-minute budget; it is not measured authorization overhead or a
+hosted-job completion guarantee.
+
+The exact published `157` optimized cost binary is prepared:
+`native_cost-8340d2a996464c6b`,
+SHA256 `03d524567eea7aff409d228dc9e1916912536b7a97b3d8dd777cccf562a20dd3`.
+The optimized build passed in 472s (`native-157-optimized-build-correctness-r1.log`).
+`native_cost_correctness` passed 1 test in 0.04s bodies
+(`native-157-cost-correctness-r1.log`); `representative::native_representative_correctness`
+passed 1 test in 11.44s bodies (`native-157-representative-correctness-r1.log`).
+Those correctness results are separate from build duration and timing.
+
+The first actual small timing run completed at 03:22:42 UTC: the existing test
+exited 0 with 1 case in 46.91s bodies (`native-small157-r1.log`). Its four cells
+contain 16,000 valid samples, with 100 warmup pairs and 2,000 measured matched
+pairs per cell. Independent review confirmed sample/order cardinality, effect
+and audit counts, and the arithmetic (`native-small157-r1-independent-review.log`).
+The existing analyzer's summary is `native-small157-r1-summary.json`.
+The uninstrumented `turn_only` results are:
+
+| Grant lineage depth | Trusted p50 turn (ms) | Local p50 turn (ms) | Signed paired added-turn p99 (ms) | Turn overhead, ratio of means |
+| --- | --- | --- | --- | --- |
+| 1 | 0.919699 | 2.005658 | +1.228443 | +117.33 percent |
+| 3 | 0.797036 | 2.285658 | +1.643655 | +189.37 percent |
+
+Added-turn quantiles use signed Local-minus-Trusted matched samples and empirical
+nearest rank; overhead is `100 * (sum(Local) / sum(Trusted) - 1)`. These turns
+exceed 10 percent in this small fixture and require investigation; the
+representative-turn gate remains unproven. The added whole-turn p99 is not the under-1-ms per-operation
+metric. The instrumented boundary cells are diagnostics, with no individual
+full-tool timing samples. One small quiet run does not establish the full
+representative/platform budget result or full acceptance.
+
+Root owned the explicitly allocated 45-minute small quiet window. The GCP
+resource owner confirmed no build-monitor violation from START through DONE
+and released the lease at 03:24:56 UTC. Post-run observations showed 100 percent
+CPU idle, zero iowait and no swap, with writeback activity in the final sample;
+this is not an all-IO-zero claim. That 45-minute allocation is historical.
+Luka rejected the former 6-7-hour representative allocation: every future
+benchmark attempt must finish in less than 20 minutes total, including setup,
+warmup, measured work, all oracles, cleanup and output. Full surface and
+performance acceptance remain open, including under 1 ms p99 added authorization
+per operation and at most 10 percent representative turn overhead.
+
+The first attribution-only profile completed at 04:41:19 UTC within the explicitly
+reserved five-minute quiet window. The existing optimized small fixture passed
+1 case in 48.41s; perf captured 5,109 CPU-clock samples with zero lost samples
+(`native-small157-profile-r1.log`, `perf157-native-small-r1.data`). The resource
+owner confirmed no build-monitor violation through DONE and released the host.
+Allocation, copying and formatting appear in the self samples, but application
+call stacks are incomplete and both execution modes plus setup were profiled.
+This cannot assign the governed delta to an owner or qualify the performance
+budget. Profile-perturbed timings do not replace the uninstrumented results.
+
+The second attribution-only capture completed at 06:31:32 UTC using the same
+verified `157` binary; only the DWARF user-stack capture changed from 8,192 to
+32,768 bytes. The existing small test passed 1 case in 51.24s; perf recorded
+5,447 samples and zero reported loss (`native-small157-profile-r2.log`). The
+resource owner's external monitor confirmed no build violation from START at
+06:26:50 through DONE, and the lease was released at 06:34:11. The larger stack
+did not establish useful application-owner attribution improvement: major
+allocation caller trees still stop in libc. Both modes, setup and capture costs
+remain mixed, so this is not an incremental governed-cost or optimization result.
+The separate exact-byte hex production candidate is committed at
+`f4671b7c5f190d0a165cffe87e43f86845a6c718`, with only the reviewed 4-line/3-line
+encoding change. Seven input-authority tests, the canonical encoding control
+and both native cost correctness selectors passed. These qualify encoding and
+correctness; the later comparison below is separate from published c18.
+The fixed-mean harness is committed locally at
+`761ce0d1b25454daf49bfbafb59d85d5f3c66f8b`: four deadline/profile controls
+failed behaviorally before repair (9m21s compile, 0.28s bodies) and then passed
+(6.51s compile, 0.05s bodies). Its full ordinary target passed six cases with
+two intentional ignored timing matrices (0.45s compile, 216.25s debug bodies;
+`native-fixed-mean-harness-all-ordinary-r1.log`). The repository-owned analyzer's
+fixed-profile extension passed 20 pure-Python tests. These qualify the harness
+and analysis contract; neither ignored matrix ran as part of those checks.
+
+The prerequisite small comparison of preserved `157` and `f467` completed in
+91s, including both runs, output and repository analysis. Each raw retained
+16,000 samples, four cells, 100 warmups and 2,000 matched pairs per cell;
+independent review reproduced the summaries and effect/audit counts. Signed
+added means fell 18.50/14.59 percent at lineage depths 1/3, meeting the declared
+GO screen for representative investigation only. Trusted controls rose
+9.09/17.68 percent, while Local means fell only about 6.3/3.8 percent;
+candidate whole-turn overhead remained 94.46/144.09 percent. This establishes
+neither causal optimization gain nor cheap-default acceptance
+(`native157-small-comparison-r1.log`, `nativef467-small-comparison-r1.log`).
+The preceding quiet queue consumed 53m40s; waiting, the 79m48s publication push
+and the 91s measurement are separate costs.
+
+Exact clean `761` optimized qualification then passed: build 6m24s, small
+correctness 1/1 in 0.03s, representative correctness 1/1 in 11.04s, four profile
+controls in 0.04s and analyzer 20/20 in 1.709s. The initial wrong control filter
+selected zero tests and is retained as setup failure, not qualification.
+The fixed W20/N32 representative attempt ran on the exact optimized `761`
+fixture from START 12:23:07 to DONE 12:29:02 UTC, 355s elapsed, below the
+1,200s hard limit. The existing test passed 1 case in 354.84s bodies
+(`native761-fixed-mean32-r1.log`). Raw schema2 records complete fixed_mean_32,
+20 warmup pairs, 32 measured pairs per cell, zero failures/timeouts and 384
+measured samples across all six depth/workload cells
+(`raw761-native-fixed-mean32-r1.json`, SHA256
+`8483a11f3283adc11f84464bc437c695dc83964ce90699da0ed79aa06e9ddafe`).
+The repository analyzer's summary is `native761-fixed-mean32-r1-summary.json`,
+SHA256 `5071c7e5b5dca4d75cfc3ca6a0dcfe8dbdad6851b4efe79be040eb253b9391df`.
+
+| Unit | Grant lineage depth | Trusted mean (ms) | Local mean (ms) | Signed added mean (ms) | Ratio-of-means overhead | Conditional result |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fresh-admission whole turn | 1 | 13.221447 | 33.108947 | +19.887500 | +150.42 percent | MISS |
+| Fresh-admission whole turn | 3 | 15.840237 | 41.495532 | +25.655295 | +161.96 percent | MISS |
+| Continuing segment | 1 | 8.052576 | 18.678672 | +10.626096 | +131.96 percent | MISS |
+| Continuing segment | 3 | 8.712939 | 22.311535 | +13.598597 | +156.07 percent | MISS |
+| Sum of four fenced calls | 1 | 0.068328 | 0.432402 | +0.364074 | +532.83 percent | MISS |
+| Sum of four fenced calls | 3 | 0.088986 | 0.979219 | +0.890233 | +1000.42 percent | MISS |
+
+Each cell uses 16 adjacent opposite-order blocks. The six paired Fieller
+mean-ratio intervals use family alpha .05, conditional on stationary, independent,
+approximately bivariate-normal blocks. All six intervals are above the 1.10
+threshold; fresh-admission ratio intervals are [2.494751, 2.513664] and
+[2.570860, 2.669374] at depths 1 and 3. This is a conditional mean-study cheap-turn
+failure, not a passing performance result. Full performance acceptance remains
+UNPROVEN. Only fresh admission measures whole turns; continuing segments and
+summed correlated direct calls are diagnostic units, not individual-operation
+p99 measurements. No small-N tail or full-platform acceptance follows.
+
+The final external observer retained 72 complete overlapping five-second
+frames covering 12:23:03-12:29:06 UTC around the 12:23:07-12:29:02 measurement.
+No unexpected heavy process was observed. Known PID3381992 was zombie ZN;
+gate PID3381990 was suspended TN at 0.0 percent CPU. CPU idle ranged from
+99.34 to 99.77 percent; maximum iowait/steal were zero, minimum available memory
+was 729,390 MiB and swap was zero (`native761-fixed-mean32-r1-monitor.log`, SHA256
+`2f1e3e7e132efd43541f04168bba8e7832d11fd993935cd6e36f31d560f8c1f9`).
+These samples establish observed resource quiet under the prior reservation.
+A fresh typing-lag HOLD acknowledgment was absent; no new all-owner clearance
+is claimed. Root owns measurement and the GCP resource owner owns host quiet
+qualification. The less-than-20-minute total attempt bound includes setup,
+warmup, measured work, oracles, cleanup and output. Functional PASS, sampled
+quiet and the conditional MISS do not establish causal optimization gain or
+full performance acceptance.
+
+The next optimized candidate `a08b46c22eb178ed41a321f2831ef0424bfb23a8`, tree
+`e04e777ed0ce3546e41612e0ec7a96119fc64445`, removes the intermediate replay JSON
+buffer and a redundant full-state preview copy. It preserves all owner checks
+and the measured fixture. Its release build took 385s, and both existing cost
+correctness selectors passed (0.04s and 10.48s). The emitted binary SHA256 is
+`5da51a8c5a24ca7902bd8530e354be38e5518671a8b0859a1f52287b05ee8ac7`;
+profile and feature selection match optimized761.
+
+The unchanged W20/N32 study ran from 15:15:01 to 15:20:43 UTC: 342s total,
+341.59s test bodies, 384 complete measured samples, no failures or timeouts.
+All six conditional mean comparisons again missed the 10 percent threshold.
+
+| Unit | Lineage depth | Trusted mean (ms) | Local mean (ms) | Added mean (ms) | Overhead | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fresh whole turn | 1 | 12.887888 | 32.329614 | 19.441726 | 150.85 percent | MISS |
+| Fresh whole turn | 3 | 15.747978 | 40.822693 | 25.074715 | 159.22 percent | MISS |
+| Continuing segment | 1 | 8.037428 | 18.776226 | 10.738798 | 133.61 percent | MISS |
+| Continuing segment | 3 | 8.918356 | 22.747428 | 13.829072 | 155.06 percent | MISS |
+| Sum of four direct calls | 1 | 0.076086 | 0.441294 | 0.365208 | 480.00 percent | MISS |
+| Sum of four direct calls | 3 | 0.083527 | 0.966538 | 0.883011 | 1057.16 percent | MISS |
+
+Fresh added means were only 2.24/2.26 percent lower than the separate761 run;
+continuing added means increased 1.06/1.69 percent. These descriptive changes
+establish neither causal nor material improvement. The unchanged conditional
+mean model and six-comparison limits still apply; direct sums are diagnostics,
+not per-operation p99 acceptance. Raw `rawa08-native-fixed-mean32-r1.json` has
+SHA256 `f8dd00ed9abbbe188483291fd2342a32d31591383a268dfddecb2b449cb0f18e`;
+`nativea08-fixed-mean32-r1-summary.json` has SHA256
+`069bd2e3bc7bd13445f6125d2b7cbd3ef9809e1a560d54a9452e391b255c4c15`.
+Local reanalysis reproduced the summary bytes. The external five-second
+observer retained 68 complete frames overlapping the measurement, covering
+15:15:00-15:20:43 UTC. They showed no competing compiler, 99.33-99.43 percent
+CPU idle and zero iowait/steal/swap.
+Its raw log is `quiet-a08-fixed-mean32-r1-monitor.log`, SHA256
+`7957dbadc462f3d2881182ca169eb9a42618601226e82b48bd48ba3f5287fda7`.
+OB3 and Toolkit supplied current nonconflict replies, while fresh
+lead/typing-lag acknowledgment was absent. No full-host acknowledgment is
+claimed. Performance remains an unmet architecture gate, and further runtime
+expansion remains held behind it.
+
+The next candidate `f9f0cd55ef06156ebda74097cac3591ca538f2f4`, tree
+`4ef17e5630398603de7accb6ccef7f9c9e1780d1`, shares the private immutable input
+association across clones. Its new sharing/encoding test first failed on the
+old representation; the repair passed all 58 contracts tests and strict
+all-target Clippy. The optimized build passed in 453s, followed by both native
+cost correctness selectors (0.04s and 8.74s). The executable SHA256 is
+`18293a9065f91338a55bd93df24f176689bd120600b3c1220e2f772a65385664`.
+OB3 and Toolkit source reviews found no blocker. The measured fixture, analyzer,
+features, build profile and canonical encoding are unchanged from a08.
+
+Its W20/N32 study ran from 15:43:16 to 15:47:59 UTC: 283s total, 283.10s
+reported test bodies, all 384 measured samples complete and no failures or
+timeouts. All six conditional mean comparisons still missed the threshold.
+
+| Unit | Lineage depth | Trusted mean (ms) | Local mean (ms) | Added mean (ms) | Overhead | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fresh whole turn | 1 | 12.830315 | 30.408860 | 17.578546 | 137.01 percent | MISS |
+| Fresh whole turn | 3 | 15.042932 | 36.884818 | 21.841885 | 145.20 percent | MISS |
+| Continuing segment | 1 | 8.041696 | 17.584395 | 9.542699 | 118.67 percent | MISS |
+| Continuing segment | 3 | 8.719318 | 21.029911 | 12.310593 | 141.19 percent | MISS |
+| Sum of four direct calls | 1 | 0.073372 | 0.432092 | 0.358720 | 488.90 percent | MISS |
+| Sum of four direct calls | 3 | 0.076322 | 0.922383 | 0.846061 | 1108.54 percent | MISS |
+
+Fresh added means were 9.58/12.89 percent lower than the separate a08 run;
+continuing added means were 11.14/10.98 percent lower. These are descriptive
+comparisons between separate runs, not a causal estimate or performance
+acceptance. The same conditional mean assumptions and scope limits apply.
+Raw `rawf9f0-native-fixed-mean32-r1.json` has SHA256
+`952f2c5ce7de889757f2d2f66daab6a12d753581799e3c7c98ba4bc66f3dff30`;
+`nativef9f0-fixed-mean32-r1-summary.json` has SHA256
+`162bfbb49c0fe40f9c4b35d23c16e74cf0dfb0aad072ff070f26b266ed384bc2`.
+Local reanalysis reproduced the summary bytes. The external observer retained
+57 complete five-second frames covering 15:43:16-15:48:03 UTC, with
+99.34-99.79 percent CPU idle, zero iowait/steal/swap and no unexpected matching
+heavy process. Minimum available memory was 729,546 MiB. The retained Cargo
+process was a zero-CPU zombie and its parent remained suspended. Raw
+`quiet-f9f0-fixed-mean32-r1-monitor.log` has SHA256
+`4399342d870895bdb808459cf7aceb4ccd0b0c8461e2d89d9c116b0293304aa0`.
+Fresh lead/typing-lag acknowledgment remained absent; this is sampled resource
+qualification, not all-owner clearance. Source and measurement remain separate
+from published native00b0 CI; the combined successor must pass its own normal gates.
+
+The fixture-only `685e336d3b0984f72dab5517e6617bd366ce2b7a` checkpoint passed
+input-authority 9 and controller-custody 5 tests under ordinary parallelism,
+with no failures or ignores; post-format passes and applicable normal hooks
+also passed. It isolates the actual retained credential selection in two test
+files. The earlier four Busy failures remain separate from these 14 passes;
+this is not production, a full-runtime suite or persistent administration.
+
+The backend-only scaffold's initial 14-test batch reported 2 passed and 12
+failed. The runtime E0502 counter-borrow compile failure ran no test bodies;
+its narrow repair preceded the actual 8-test runtime RED
+(`persistent-backend-runtime-red-r1.log`, `persistent-backend-runtime-red-r2.log`;
+2m16s compile, 0.16s bodies). Strict-fence/profile/schema selectors each ran two
+cases; the no-conversion profile case failed at fence setup before checking WAL.
+The two added catalog controls then reported 1 pass and 1 failure after 1.27s
+compilation, 0.03s bodies: foreign/retired compatibility passed, while the old
+normalizer accepted oversized owned SQL. Those 16 controls reported 3 passes
+and 13 failures. The two canonical grant-lock probes then both failed after
+2m28s compilation and 5.01s bodies
+(`persistent-controller-grant-locks-red-r1.log`): mutation waited while the actual
+publication or grant-owner lock remained held instead of returning Unavailable.
+The initial backend and nonwaiting-mutation selections executed 18 critical
+tests: 3 passed, 15 failed and none ignored. That is the historical RED result;
+the earlier counter-borrow compile failure remains separate from executed bodies.
+
+The local nonwaiting grant repair is committed at
+`e108e2053768554bdc8a4948a8429f0e1650ca2b`, tree
+`5b934671599491734102a9cc22296e8f49455fa1`. It changes only the two canonical
+publication/grant owners and the existing grant tests. Native-custody revocation
+tries the actual publication and generated-owner locks; Busy returns Unavailable,
+while the generated Revoke decision and publication/result semantics remain.
+The first repaired authorization library run passed all 97 tests after 18.72s
+compilation, with 0.06s bodies. Strict library Clippy passed in 1m24s before the
+normal commit's whitespace-only Rust formatting. The first normal commit attempt
+stopped after that formatter changed a file; the second passed. Post-format
+library execution again passed all 97 tests, with no failures or ignores, after
+21.61s compilation and 0.06s bodies. Both formerly failing grant-lock probes and
+the publication/grant invariant companions passed
+(`persistent-controller-nonwaiting-grants-green-r1.log`,
+`persistent-controller-nonwaiting-clippy-r1.log`,
+`persistent-controller-nonwaiting-normal-commit-r1.log`,
+`persistent-controller-nonwaiting-normal-commit-r2.log`,
+`persistent-controller-nonwaiting-grants-green-postfmt-r1.log`).
+
+The public repair commit `ec7196736c8c43677724c1c2eb6fb135c121623b` is included
+in published, CI-green `00b0` above, along with the status and public-guide
+updates. The two grant-lock REDs are resolved and published;
+the separate 16 backend controls remain at 3 passes and 13 failures. No backend
+production repair or native/grant assembly has been accepted, and persistent
+public Try remains unsupported. This narrow lock repair does not qualify full
+persistent controller administration or performance.
+
+Historical failure/preparation logs remain in the existing evidence directory.
+The first Web SDK exhaustive-event check omitted HookLaunchRefused, while its
+11m43s WASM compile/17m00s complete build did not qualify overhead. The no-SQLite
+WASM push of 0576 failed after 43.5 minutes; the 9a7 Linux push failed after 34.4
+minutes on unsupported-target fields/imports and the missing E2E confinement
+field. Those narrow cfg/fixture repairs preceded published `157`; earlier failed
+pushes did not publish. Console's GH007 metadata rejection and Python 3.14
+process-fixture failure remain separate from its subsequent successful normal
+publication with installed Python 3.12. Earlier d1/fca optimized preparation and
+the 22:30-23:00 UTC NOT_MEASURED window remain historical evidence; they are not
+substitutes for the exact `157` binary or current timing.
+
+
+### Published tests-only restart checkpoint
+
+Published c18 is based on `51` with fixture/catalog changes, the canonical BUILD
+source-list refresh and checkpoint documentation. It promotes the six existing
+deterministic default-feature acceptance cases to ordinary tests and adds one
+real separate-process SQLite case. Published `157` retains its historical six
+ignore annotations; c18's results are separate and do not establish an
+automatically governed surface profile.
+
+The first cold run failed at fixture discovery: raw SqliteSessionStore listing
+returned zero sessions before the reader started (0.62s compile, 0.66s body;
+`restart-acceptance51-cold-process-r1.log`). The fixture now discovers the real
+session through the existing public RuntimeStore catalog and typed session ID;
+it still validates the actual committed WholeBlob, input and protected audit.
+This was a fixture owner-selection error, not an established recovery defect.
+The repaired exact cold selector passed 1 test (16.84s recompile, 1.85s body;
+`restart-acceptance51-cold-process-r2.log`). The directly executed default
+native_governed_loop target then passed all 16 tests, with 0 ignored and 0 filtered out (0.60s compile,
+4.85s bodies; `restart-acceptance51-ordinary-r2.log`). Unchanged native_cost
+debug correctness also passed both ordinary cases (6.61s compile, 159.51s bodies,
+2 timing cases ignored; `restart-acceptance51-cost-correctness-r1.log`), making
+18 ordinary cases across the two authorization integration targets.
+
+The writer and reader are actual separate processes using the real SQLite and
+File token owners. The reader starts with a cold generated credential registry,
+restores the writer's marked credential through the existing lifecycle owner,
+installs newly issued current host grants and obtains the reconstructed actor's
+current controller pin. Reconstruction performs no model/tool work. A fresh
+input/run then receives exact local delete refusal, one permitted callback read,
+two loopback model requests and same-run completion. Reader and parent verify
+the original protected row/audit and exact transcript prefix remain unchanged.
+The strengthened negative control explicitly lets current authentication accept
+an attempt carrying the writer's historical association and the reader's actual
+fresh controller pin. Current grant authority must then return typed Denied,
+with zero HTTP/tool entry and no accepted native or durable input row. Independent
+document loads verify transcript preservation; stored digest agreement with
+document authority is enforced by the existing store loader.
+The revised full target passed all 16 tests with no ignored or filtered cases
+(14.87s compile, 2.05s bodies;
+`restart-acceptance51-ordinary-antifallback-r1.log`).
+
+The three existing E1 smoke-wrapper controls passed (7.06s warm compile, 0.00s
+bodies; `restart-acceptance51-wrapper-controls-r2.log`) after a missing test-only
+OutputPolicy import was fixed. The initial broader dependency build consumed
+about 39 minutes before that compile error. These controls are not the execution
+of the outer smoke wrapper. Documentation checks passed after the status edits.
+The Make agent gate stopped before Clippy on two existing lane-doctor failures:
+archive-mode nextest workflow scanning and the Rust selector module parser
+selftest. Its shell also cannot source the Bash backend helper under /bin/sh.
+The documented Cargo changed-path gate passed all selected governance and
+Clippy checks (`restart-acceptance51-cargo-agent-gate-r1.log`); Clippy finished
+its dev-profile check in 23m49s. This does not make the failed Make agent gate green.
+
+The first Make e2e-smoke attempt was deliberately stopped during redundant
+dev-profile materialization (exit 143;
+`restart-acceptance51-outer-e1-prebuilt-r1.log`). The existing prebuilt outer E1
+wrapper then passed 1 selected case (15.88s leaf compile, 0.72s outer body),
+running the already-built native case with 1 inner pass in 0.63s
+(`restart-acceptance51-outer-e1-prebuilt-r2.log`). Its existing
+`restart-e1-artifact-manifest.json` records the artifact selection. These are
+outer/inner wrapper results for E1, not a new execution of all 16 native cases.
+
+This qualifies completed-turn reconstruction followed by new work in the
+explicit embedding fixture. The HTTP Bearer header is synthetic and independent
+of restored secret bytes; the read is a callback rather than filesystem/source
+access. It does not qualify interrupted replay, provider secret refresh/rotation,
+persistent controller/grant administration, automatic constructors, full surface
+coverage or performance. The changed-path governance/Clippy and selected outer
+wrapper results are qualified separately above. Normal c18 publication and
+exact-head CI are green; these recorded unit/integration and CI inventories do
+not supply an independently verified native_governed_loop exact-selector count.
+The earlier failed full Make invocation remains historical. No runtime production
+change is included in this restart delta.
+The earlier separate public-entry/notification candidate was committed at
+`c9361659b3e09a147eba0e3b863550b2d9952521`, tree
+`8053319b92ba75913e3c761d615965c8a392ce57`. The first execution on `643` passed
+two cases and failed the new public case: its fixture read the durable accepted
+row while in-flight audit was still held by the actual native owner. The normal
+fixture-only repair reads that audit through the existing runtime adapter and
+retains final durable audit assertions. The same three no-default/local-authorization
+RPC cases then passed, with no ignores, 553 filtered cases and 0.03s bodies after
+a 9m18s optimized rebuild (`publicc936-governed-jsonl-r2.log`). The new case
+executes exported JSONL setup/serve, two actual model requests, zero denied
+delete callbacks, one permitted read callback, same-run feedback/completion,
+protected native audit and ordered public event notifications. The negative
+unsupported/ungoverned entry and existing refusal case passed too. Normal commit
+hooks passed. Its source-reviewed local successor was
+`f687e95d6c2611491e102a192429e7c8558b2c6a`, tree
+`da4bce4bddba21698fbce883aae9cb0d556e3ba1`. Its same three cases passed with
+0 failed, 0 ignored and 553 filtered in 0.04s bodies after a 9m06s release build
+(`publicf687-governed-jsonl-r1.log`, SHA256
+`4298fa4acb389ccf1f7631370ae3885e2996aeaae4392dab479a8108e04cc1fd`).
+This includes the source-reviewed cross-operation model-tool-model audit ordering,
+without imposing serial order on siblings. Published `7def` retains those
+exact test bytes and adds no production behavior. Its fresh CI Governed JSONL
+job 111418874872 listed and ran all three exact names: 3 passed, 0 failed,
+0 ignored and 553 filtered, with 0.21s bodies
+(`public7def-governed-jsonl-ci-job.log`). These exact-head results are separate
+from c18's two-selector evidence and do not establish integrated
+native-plus-Console acceptance.
+
+## Current local shell and hook checkpoint, 2026-10-03
+
+The native shell continuation is committed locally through
+`6cfa8cbbbe428ef3d51b4b8bdf8098c3725ec632`, tree
+`c23875f3f0479c384cc8c79dced0695185e9957d`, on
+`codex/security-shell-confinement`. The stock factory Required-shell E1 has
+executed authenticated ingress, actual OS refusal after command entry,
+permitted sibling execution, ordered feedback, a second loopback model request
+and completion of the same run. Typed mechanical refusal causes remain distinct
+from permission decisions and ordinary IO across shell and member upcall paths.
+The core pre-tool launch-refusal slice has behavioral RED/GREEN for all five
+confinement causes and ordinary pre-entry IO. Its normal commit hooks, broader
+Clippy, schema/SDK freshness and 18 wire regressions passed. The broader Clippy
+command spent 43m01s compiling/checking; the wire test body took 0.01s after
+2m53s compilation. Raw results remain in the existing evidence directory below.
+These results describe the local shell/hook checkpoints before publication.
+The publication section above records CI-green `51` and the measured small
+fixture. Native command-hook integration, full surface coverage and the
+representative/per-operation performance gates remain open.
+
+The explicit pre-tool policy-denial slice is committed locally at
+`9a3a80964b486e86416d1cab99448d5e90184150`, tree
+`fde1829da8c2975154f43c8def3cf73645223b61`. Its behavioral
+RED aborted the run with HookDenied; after repair, five selected pre-tool tests
+and thirteen hook contract tests passed. Eleven member-upcall controls then
+passed in 0.01s after 15m54s compile. Adversarial review found existing decision
+and event decoders collapsed a present JSON null payload into absence. Both
+transport regressions reproduced the defect; their repair passed all fifteen
+hook contracts. Schema/SDK generation, SDK freshness, event inventory, docs and
+Bazel generation checks passed. Final core/Mob all-targets, all-features Clippy
+passed in 26m36s. All twelve existing hook behavior controls passed (37.00s
+compile, 0.16s body). Final schema freshness and normal commit hooks passed.
+Native command-hook confinement, protected hook
+refusal audit and other hook-point locality remain incomplete.
+
+The bus monitor is active. Publication clearance and a quiet performance window
+are specific scheduling dependencies, not a halt on independent work. Root owns
+the serial Rust lane while agents prepare and review child-process cleanup,
+physical SQLite custody, documentation and existing E2E registration. SQLite
+ordinary admission reproduced `UnsupportedScope` before entry (4m09s compile,
+0.04s body). Five actual backend tests reproduced the missing custody owner
+(6m41s compile, 0.10s body). The reviewed physical owner then passed those five
+controls (3m09s compile, 0.14s body) and nine memory/fault/open/path controls
+(0.58s compile, 0.10s body). The actual governed SQLite model-tool-model flow
+passed (2m12s compile, 0.66s body); its memory-backed control also passed
+(0.87s compile, 0.09s body). Seven backend controls, including independent
+process exclusion/release and a proven same-file case alias, passed
+(48.13s compile, 0.14s body). The existing hard-link rejection control passed
+(0.50s compile, 0.04s body). The same-process close/reopen test reached teardown
+and failed because the default service-machine composition retained the old
+owners. A diagnostic run confirmed one machine, two session-store and three
+runtime-store references after explicit teardown. Fresh release inspection
+found upstream `27f8de8a6` already fixed that cycle. This candidate imports its
+Weak host and RPC callers, retaining current fallible custody boundaries.
+The separate returned-guard lifetime test reproduced premature service release
+(21.46s compile, 0.04s body); a small tuple retaining the service passed all
+eleven reconfigure controls (25.65s compile, 0.03s body).
+The actual close/reopen scenario then passed (10.69s compile, 0.56s body), as
+did all three stock memory/SQLite/reopen controls (0.48s compile, 0.60s body).
+Targeted runtime all-target Clippy passed in 4m59s. Host/RPC library Clippy
+passed in 13m15s. Normal commit hooks passed at
+`2dd9d80d53f8be2d94bb5b553c903377f263ee0f`, tree
+`8c266d2d5355917f5c7996b12c3ea6f5566a129b`.
+Separate process restart,
+persistent controller administration and additional-platform acceptance remain
+open. The source-reviewed canonical service-slot adaptation is a separate next
+slice, not included in this checkpoint.
+
+The fresh-work tests-only slice executes authenticated work after physical
+close/reopen. Its first run failed at credential setup (5.23s compile, 0.34s
+body): a newly created empty token vault requested release of the still-live
+credential registry. This was a fixture ownership error, not a native recovery
+defect. The corrected fixture retains the original actual host token vault and
+verifies its marked credential through the existing status owner without
+republishing or changing lifecycle state. The fresh model-tool-model run passed
+(3.82s compile, 0.62s body), with distinct input/run/tool IDs, exact protected
+audit, local denial feedback and a permitted sibling. All four stock controls
+passed; the final existing native-loop target passed nine tests with six existing
+acceptance cases explicitly ignored (0.23s compile, 0.88s body). Targeted test
+Clippy passed in 5m31s. The slice is committed locally at
+`249b13147f78af6c615b3bf0347e71f962ab33a3`, tree
+`26972407da9ae3e702084dd36cbd344b2cb1a4de`; normal commit hooks passed.
+On that clean commit, all six acceptance cases were then explicitly executed
+and passed (0.90s compile, 0.32s bodies). Raw results are retained in
+`native7899-current-ignored-scenarios-r1.log` under the existing evidence
+directory below. Publication remains pending. This is same-process
+current-owner work, not process restart or restored controller authority.
+
+[Meerkat issue 1618](https://github.com/lukacf/meerkat/issues/1618) is part of
+full default-profile coverage: effective per-identity policy must survive fresh,
+restored, child and scheduled/delegated paths, refuse peer/reply/cross-mob sends
+before delivery, and retain permitted private memory, schedule and scoped
+callbacks. Initial source inspection confirms MobKit DurableAgentSpec,
+AgentBuildDraft and build_spawn_spec lack this binding. Native SessionBuildOptions
+already carries tool_access_policy and application_tool_policy, so these existing
+owners should be composed. Remote member upcalls already conjoin explicit child
+policy with the parent; the separate local agent-tools resolver still accepts
+explicit overrides without that ceiling. Current model-tool spawn/fork/delegate
+paths pass an inherited policy; the unchecked explicit branch is a contract gap,
+not an established model-reachable widening exploit. Python customization can also drop
+the missing binding, and direct host comms handles need a stated authority scope
+before claiming all-route restriction.
+No integrated acceptance for this issue is claimed.
+
+## Recorded checkpoint, 2026-10-03
+
+The latest recorded normal native push was
+`9c996bac0b0bba7b709339858c155c57e5523eea`. It failed after 2,319.07s on
+integration-test compilation and lints, before the machine and broad
+deterministic test gates. The caller/lint repair is pending validation. Two
+earlier focused repair gates passed 26 and 13 native tests respectively;
+those 39 passes do not establish a successful normal push or qualify the
+pending repair. Exact sources and raw results are retained under
+`/Users/luka/.codex/adr-001-evidence/custody-repair-20261003`.
+
+The 13-test acceptance gate includes real loopback model/tool/model continuation
+with an exported alias to the same governed owner. Its negative setup refuses
+an ordinary ungoverned bundle before provider calls or catalog rows; sharing the
+same already-governed owner is valid.
+
+Separate Console readiness response compatibility passed 69 UI/state and 70
+transport tests. The existing contracts typecheck reported zero new errors and
+41 documented baseline diagnostics. The source and its guide were committed
+through `bf7930c34207f60458c3e351f1dbdb8cce368c18`; the installed MobKit gateway
+does not yet emit the native readiness code. The Web SDK reason-preservation
+fix passed 96 isolated JS tests. It and its CI unit-route correction are included
+in this repair candidate, awaiting normal gates. These client results do not
+establish integrated gateway or native runtime acceptance.
+
+At that recorded push, physical SQLite custody was unimplemented and the held
+C7 tests and temporary API scaffold were unexecuted. The current local physical
+custody and same-process reopen results are recorded above. C4 durable grant,
+controller and credential restoration remains unimplemented. There is no native implementation PR with
+green CI or accepted overhead measurement. Full ABAC, sandbox and supported
+surface/platform coverage remain required.
+
+## Historical first-native-path acceptance, 2026-10-02
+
+The native publication source at this checkpoint was
+`5c833bdbdbfb7106019a81da0dec60f19a3f8bc0`.
+Its initial focused attempt stopped at a mixed-cache bridge-symbol link failure
+after 262.30s, exit 101; zero tests ran. Removing the cross-source target/lane
+overrides allowed the same command on the same source to exit 0 in 273.34s:
+53 selected tests passed in 5.942s of test execution; 4,710 tests were outside
+the selection. Root matched all eight former failures to unique PASS lines.
+That candidate also passed both non-default-feature governed JSONL tests
+in 0.08s of test execution, 452.55s command time: local refusal followed by
+permitted execution in the same run, and rejection of shared bundles and
+unsupported wire setup. Four earlier functional passes on ancestor `2210e70b6`
+remain source-qualified; its MCP and live-barge-in selections have not been
+rerun on this candidate. There is no current native implementation PR, green PR CI, or accepted
+overhead result. The full ABAC and sandbox objective remains open; these narrow
+checkpoints do not remove persistence/restart or broader surface/platform coverage.
+
+Earlier, root and independent raw review accepted the narrow R7 gate: 14 selected,
+14 PASS, zero failures, ignored tests or timeouts, on source
+`f7e871a46296a2c494cb748780db86957675d39e`. This covers 11 custody/cancellation
+controls, two governed JSONL tests and one MCP unsupported-profile control;
+historical gate counts are not included.
+
+The first supported slice is fixed-host, single-connection JSONL with stock
+memory-backed persistence for the process lifetime. Real loopback model HTTP,
+model-visible tool refusal, a permitted callback and same-run completion pass
+with retained actor/seed/context and stored history/audit. The MCP control
+proves refusal before setup, not governed MCP support. See the
+[native embedding guide](../../../rust/native-authorization.mdx) for the exact
+realm, selected-client and fixed-registry configuration.
+
+R7 evidence is retained under
+`/Users/luka/.codex/adr-001-evidence/gcp-native-governed-jsonl-r7-20261002`,
+seal `68c703166c141ad2b46fe6752ff459fb43dc828a265ca27263904968719ad45e`.
+Schema R2 and module metadata acceptance are separate, source-qualified gates.
+Clean checkpoint `11b3b77912bd7c6511f3d26f7f2a1b81087948e0` normally merges main
+without an authorization-code change; it does not establish a new aggregate
+runtime result.
+
+The accepted R4 optimized build and two correctness smokes cover historical
+source `455d0e3b6bb143a53017392b203df49af2b518cc`, not the final publication
+candidate. Their receipt is
+`/Users/luka/.codex/adr-001-evidence/gcp-native-cost-build-smoke-r4-20261002/root-acceptance.json`.
+Before a fresh measurement grant, the final publication candidate must have
+its own exact-source optimized build and both correctness smokes. Performance
+remains unproven. Window `W-minimal-20261002-1` was not granted and was cancelled
+at 2026-10-02 11:19:43 UTC; zero measurements ran. Measurement ordering awaits
+the owner's cost-timing clarification. No publication-first sequence or new
+benchmark window is established by this record; low-overhead acceptance remains
+required.
+
+Separately, 47 Console backend tests passed on
+`13e1847720a5e1ae0654137da724f085fcf68bbc`. The reviewed UI repair patch
+`081bf002dc1e80c08b72a139600e9cd092e84597dee0f9597dc78aa0006993f2`
+is committed remotely as `77d9eb0f0eb67e5058b41cdc56ff211de9003968`, tree
+`299b015fa48937db6a7fb09f90982157c31a5fbd`; normal commit hooks passed in 0.16s.
+The local private checkout retains the same patch on `13e184772`. The repair
+passed 20 component tests and the real checked-save/recovery browser scenario,
+including three exact writes, no read-only writes, and recovery after one
+deliberate failed protected read. This is acceptance of existing MobKit access
+administration, not native governed work, SQLite/restart, or JWT ingress.
+MobKit is version 0.8.45 with Meerkat dependencies pinned to 0.8.50. PR520's old green CI does
+not qualify the reviewed repair; current publication and CI are separate gates.
+
+The earlier publication plan targeted `release/0.8.51`, reserved tip
+`178f137543d532820cbe1f9013a25de93975de10`, and held other queued PRs except the
+no-wedge fix, TLA precedence fix and demonstrated mandatory tip CI blockers.
+That reservation was released at 2026-10-02 19:52 UTC. Development continues on
+its own branches; full-feature integration remains held. Neither a native
+checkpoint PR nor a Console PR520 milestone merge has occurred.
+Regenerated source was committed at `5c833bdb`; its normal commit hooks passed.
+The focused repairs and non-default-feature governed JSONL pair passed on that
+source. Normal push hooks and required PR CI were pending at that checkpoint.
+Source preparation is not a native PR or CI result.
+
+The separate persistent controller-administration extension passed eight focused
+tests on `8f65c1364395f7f91c477134b859069b64e2132b`: the unchanged real JSONL
+scenario, four native custody controls and three memory-store controls. Root and
+independent raw review accepted matching source/binary identities and all eight
+passes, with no ignored tests or timeouts. The initial candidate on `c20172`
+had returned `Unavailable` instead of `ControllerInUse`; the repair joins the
+initial empty Idle checkpoint to the actual live owner without adding hot-path
+persistence. The original failure and diagnostic evidence remain preserved.
+The accepted result is under
+`/Users/luka/.codex/adr-001-evidence/gcp-native-s3-persistent-admin-green-r2-20261002`.
+At that acceptance checkpoint, this source candidate was outside the first
+publication checkpoint. It covers loaded owners with the stock memory store,
+not SQLite or process restart; later integration needs its own source-qualified
+validation. SQLite/restart,
+broader surfaces, performance and full five-story/37-checkpoint ADR coverage
+remain required next slices. Earlier
+records retain their historical source and scope; this section supersedes
+only their first-native-path and publication status.
+
 ## Scope change, 2026-10-01
 
 The owner explicitly approved replacing the previous first-profile requirements
@@ -10,7 +1202,7 @@ blanket requirement to finish parked high-assurance work before delivery.
 Existing source/test claims below retain their exact historical scope. They
 do not establish an implemented local governed path.
 
-## Current integration and publication checkpoint, 2026-10-01
+## Earlier integration and publication checkpoint, 2026-10-01
 
 The integrated donor remains `meerkat-native-governed-m1` on
 `codex/local-governed-default`. Its frozen audit/SDK checkpoint is unchanged:
@@ -182,7 +1374,12 @@ requester propagation, live authority, audience authorization or helper history
 durability across restart. The old manifest that selected identity-key paths is
 retained privately for audit and must not be used for packaging.
 
-## Next acceptance boundary
+## Historical next acceptance boundary (2026-10-01)
+
+This section records the plan at that date. See the current checkpoint above
+for completed acceptance and remaining work, and [Native authorization](/rust/native-authorization)
+for the supported local profile. The earlier independent-witness proposal below
+is not a requirement of the local default.
 
 The first governed vertical slice still must compose authenticated ingress and
 durable work association, canonical grant/policy/resource generations, physical

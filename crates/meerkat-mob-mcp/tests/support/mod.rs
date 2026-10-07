@@ -325,8 +325,11 @@ enum FixtureRuntime {
     DerivedFromService,
     /// The runtime-backed composition product surfaces use.
     RuntimeBacked,
-    /// No runtime adapter at all.
-    Absent,
+    /// [`Self::RuntimeBacked`], with every member build waiting for its MCP
+    /// servers to finish connecting before its first turn.
+    RuntimeBackedWaitingForMcp,
+    /// No explicitly supplied adapter; the session service supplies its owner.
+    ImplicitOnly,
 }
 
 pub struct CouncilFixture {
@@ -422,18 +425,21 @@ fn runtime_backed_service(
     root: &std::path::Path,
     runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
     client: Arc<dyn LlmClient>,
+    wait_for_mcp: bool,
 ) -> (
     Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
     Arc<meerkat_runtime::MeerkatMachine>,
 ) {
-    let (builder, store, project_root) = fixture_builder(root, client);
+    let (mut builder, store, project_root) = fixture_builder(root, client);
+    builder.wait_for_mcp = wait_for_mcp;
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::default());
     let (service, runtime) = meerkat::surface::build_runtime_backed_service(
         builder,
         32,
-        meerkat::PersistenceBundle::new(store_dyn, runtime_store, blob_store),
+        meerkat::PersistenceBundle::new(store_dyn, runtime_store, blob_store)
+            .expect("construct runtime authority"),
     );
     (Arc::new(event_projection(service, &project_root)), runtime)
 }
@@ -468,6 +474,20 @@ impl CouncilFixture {
         )
     }
 
+    /// [`Self::new_runtime_backed`], with every member build waiting for its
+    /// MCP servers to finish connecting before its first turn, so a member's
+    /// first model request already carries its MCP tools.
+    pub fn new_runtime_backed_waiting_for_mcp(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+    ) -> Self {
+        Self::build(
+            script,
+            |state, _root| state,
+            FixtureRuntime::RuntimeBackedWaitingForMcp,
+            None,
+        )
+    }
+
     /// [`Self::new_runtime_backed`] with [`Self::new_with`]'s customization.
     pub fn new_runtime_backed_with(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
@@ -476,12 +496,17 @@ impl CouncilFixture {
         Self::build(script, customize, FixtureRuntime::RuntimeBacked, None)
     }
 
-    /// A fixture whose mob state has NO runtime adapter: the host shape that
-    /// cannot admit a detached completion, whatever it declares.
-    pub fn new_without_runtime_adapter(
+    /// A fixture that passes no explicit runtime adapter to the mob state.
+    /// The persistent session service supplies its actual execution owner.
+    pub fn new_with_implicit_runtime_adapter(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
     ) -> Self {
-        Self::build(script, |state, _root| state, FixtureRuntime::Absent, None)
+        Self::build(
+            script,
+            |state, _root| state,
+            FixtureRuntime::ImplicitOnly,
+            None,
+        )
     }
 
     /// [`Self::new`] over a caller-supplied runtime store (for example one
@@ -524,8 +549,16 @@ impl CouncilFixture {
         let calls = client.calls();
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             runtime_store.unwrap_or_else(|| Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()));
-        let (service, runtime_adapter) = if runtime == FixtureRuntime::RuntimeBacked {
-            let (service, runtime) = runtime_backed_service(&root, runtime_store.clone(), client);
+        let (service, runtime_adapter) = if matches!(
+            runtime,
+            FixtureRuntime::RuntimeBacked | FixtureRuntime::RuntimeBackedWaitingForMcp
+        ) {
+            let (service, runtime) = runtime_backed_service(
+                &root,
+                runtime_store.clone(),
+                client,
+                runtime == FixtureRuntime::RuntimeBackedWaitingForMcp,
+            );
             (service, Some(runtime))
         } else {
             (
@@ -534,8 +567,9 @@ impl CouncilFixture {
             )
         };
         let state_root = root.join("state");
-        let state = if runtime == FixtureRuntime::Absent {
+        let state = if runtime == FixtureRuntime::ImplicitOnly {
             MobMcpState::new_with_runtime_adapter(service.clone(), None, MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
         } else {
             Self::state_over(&service, runtime_adapter.as_ref())
         };
@@ -568,8 +602,10 @@ impl CouncilFixture {
                 service.clone(),
                 Some(Arc::clone(runtime)),
                 MobControlPrincipal::Owner,
-            ),
-            None => MobMcpState::new(service.clone(), MobControlPrincipal::Owner),
+            )
+            .expect("construct runtime authority"),
+            None => MobMcpState::new(service.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
         }
     }
 

@@ -118,7 +118,8 @@ async fn make_smoke_stack(paths: &SmokePaths) -> (MethodRouter, Arc<MobMcpState>
         store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         blob_store,
-    );
+    )
+    .expect("construct runtime authority");
     let runtime = SessionRuntime::new(
         factory,
         config.clone(),
@@ -132,11 +133,14 @@ async fn make_smoke_stack(paths: &SmokePaths) -> (MethodRouter, Arc<MobMcpState>
         Arc::clone(&config_store),
         paths.runtime_root.join("config_state.json"),
     )));
-    let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
-        runtime.session_service(),
-        Some(runtime.runtime_adapter()),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let mob_state = Arc::new(
+        MobMcpState::new_with_runtime_adapter(
+            runtime.session_service(),
+            Some(runtime.runtime_adapter()),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     *runtime.builder_mob_tools_slot.write().unwrap() = Some(Arc::new(
         meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
     ));

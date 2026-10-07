@@ -140,6 +140,9 @@ pub(crate) struct EphemeralDriverRollbackSnapshot {
 /// Ephemeral runtime driver -- all state in-memory.
 #[derive(Clone)]
 pub struct EphemeralRuntimeDriver {
+    work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
+    executor_supports_work_authorization: bool,
+    work_durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
     runtime_id: LogicalRuntimeId,
     /// Shared coarse runtime projection owned by the machine/session entry.
     ///
@@ -276,6 +279,9 @@ impl EphemeralRuntimeDriver {
         dsl: SharedIngressDslAuthority,
     ) -> Self {
         Self {
+            work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+            executor_supports_work_authorization: false,
+            work_durability_health: None,
             runtime_id,
             control,
             ledger: InputLedger::new(),
@@ -295,6 +301,248 @@ impl EphemeralRuntimeDriver {
             admission_order: HashSet::new(),
             live_boundary_join_witnesses: HashMap::new(),
         }
+    }
+
+    pub(crate) fn set_work_authorization_host(
+        &mut self,
+        host: crate::input_authority::NativeWorkAuthorizationSlot,
+    ) {
+        self.work_authorization_host = host;
+    }
+
+    pub(crate) fn set_work_durability_health(
+        &mut self,
+        health: crate::meerkat_machine::DurabilityHealthHandle,
+    ) {
+        self.work_durability_health = Some(health);
+    }
+
+    pub(crate) fn set_executor_work_authorization_support(&mut self, supported: bool) {
+        self.executor_supports_work_authorization = supported;
+    }
+
+    pub(crate) fn authenticate_work(&self, input: &Input) -> Result<(), RuntimeDriverError> {
+        if let Some(row) = self.ledger.get(input.id()) {
+            crate::input_authority::verify_retained_replay(row, input)?;
+        }
+        match (
+            self.work_authorization_host.get(),
+            input.header().authority_association.as_ref(),
+        ) {
+            (None, None) => Ok(()),
+            (Some(host), Some(association)) => {
+                if association.candidate().controller_grant_lineage.is_empty()
+                    || association.candidate().controller_model.is_none()
+                    || association.candidate().target.logical_runtime.as_str()
+                        != self.runtime_id.to_string()
+                    || (self.runtime_phase_snapshot() == RuntimeState::Running
+                        && input.handling_mode() == Some(HandlingMode::Steer))
+                {
+                    return Err(crate::input_authority::unavailable());
+                }
+                let ingress = input
+                    .header()
+                    .ingress_context
+                    .as_ref()
+                    .ok_or_else(crate::input_authority::unavailable)?;
+                ingress.verify_submission(input)?;
+                if ingress.requester() != &association.candidate().requester
+                    || ingress.ingress_actor() != &association.candidate().ingress_actor
+                    || ingress.realm() != &association.candidate().ingress_namespace.realm
+                {
+                    return Err(crate::input_authority::unavailable());
+                }
+                host.host()
+                    .authenticate_association(&self.runtime_id, input, ingress, association)
+                    .map_err(RuntimeDriverError::from)?;
+                // A valid governed input still needs an executor that actually
+                // supports its context. This is pre-admission readiness only.
+                if !self.executor_supports_work_authorization {
+                    return Err(RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: crate::traits::ControllerReadinessFailure::ExecutorUnavailable,
+                    });
+                }
+                Ok(())
+            }
+            _ => Err(crate::input_authority::unavailable()),
+        }
+    }
+
+    /// Exact query of this driver's accepted rows and generated lifecycle.
+    /// Callers must cover every driver in the grant's attached native scope
+    /// under the same admission/revocation publication custody. This result
+    /// makes no assertion about any absent, detached or unavailable scope.
+    pub fn unfinished_work_references_controller(
+        &self,
+        grant: &meerkat_authorization_contracts::work_association::GrantLineageRef,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.visit_unfinished_controller_inputs(|row| {
+            Ok(row.authority_contributors.iter().any(|original| {
+                original
+                    .association()
+                    .candidate()
+                    .controller_grant_lineage
+                    .contains(grant)
+            }))
+        })
+    }
+
+    /// Visit the actual governed rows still capable of contributing to work.
+    /// No generated-state mutex is held across the callback. The caller owns
+    /// driver custody; no secondary active-work inventory is maintained.
+    pub(crate) fn visit_unfinished_controller_inputs(
+        &self,
+        mut visit: impl FnMut(&InputState) -> Result<bool, RuntimeDriverError>,
+    ) -> Result<bool, RuntimeDriverError> {
+        let current_run = self.with_dsl_state(|state| {
+            state
+                .current_run_id
+                .as_ref()
+                .filter(|run| {
+                    state.lifecycle_phase == mm_dsl::MeerkatPhase::Running
+                        && state.turn_terminal_run_id.as_ref() != Some(run)
+                })
+                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl)
+        });
+        for (id, row) in self.ledger.iter() {
+            let input_terminal = self.input_is_terminal_by_authority(id)?;
+            let contributes_to_current_run = current_run
+                .as_ref()
+                .is_some_and(|run| self.input_last_run_id(id).as_ref() == Some(run));
+            if (!input_terminal || contributes_to_current_run)
+                && !row.authority_contributors.is_empty()
+                && visit(row)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn batch_work_authorization(
+        &self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+    ) -> Result<Option<meerkat_core::WorkAuthorizationContext>, RuntimeDriverError> {
+        let mut originals = Vec::new();
+        let mut selected_input_bindings = std::collections::BTreeMap::new();
+        for input_id in input_ids {
+            let row = self
+                .ledger
+                .get(input_id)
+                .ok_or_else(crate::input_authority::unavailable)?;
+            if self.work_authorization_host.get().is_some() && row.authority_contributors.is_empty()
+            {
+                return Err(crate::input_authority::unavailable());
+            }
+            let own = row
+                .authority_contributors
+                .iter()
+                .find(|item| item.input_id() == input_id);
+            let expected = own
+                .map(|item| crate::input_authority::association_binding(item.association()))
+                .transpose()?
+                .unwrap_or((None, None));
+            let key = Self::dsl_key(input_id);
+            if !self.with_dsl_state(|state| {
+                state.input_authority_bindings.get(&key) == expected.0.as_ref()
+                    && state.input_authority_batch_keys.get(&key) == expected.1.as_ref()
+            }) {
+                return Err(crate::input_authority::unavailable());
+            }
+            if let (Some(binding), Some(batch_key)) = expected
+                && selected_input_bindings
+                    .insert(key, (binding, batch_key))
+                    .is_some()
+            {
+                return Err(crate::input_authority::unavailable());
+            }
+            originals.extend(row.authority_contributors.iter().cloned());
+        }
+        if originals.is_empty() {
+            return Ok(None);
+        }
+        if selected_input_bindings.len() != input_ids.len() {
+            return Err(crate::input_authority::unavailable());
+        }
+        let first = originals
+            .first()
+            .ok_or_else(crate::input_authority::unavailable)?;
+        if !self.executor_supports_work_authorization
+            || originals.iter().any(|item| {
+                !first
+                    .association()
+                    .batch_compatible_with(item.association())
+            })
+        {
+            return Err(crate::input_authority::unavailable());
+        }
+        let host = self
+            .work_authorization_host
+            .get()
+            .ok_or_else(crate::input_authority::unavailable)?;
+        let canonical_input_id = input_ids
+            .first()
+            .ok_or_else(crate::input_authority::unavailable)?
+            .clone();
+        let selected = self
+            .ledger
+            .get(&canonical_input_id)
+            .ok_or_else(crate::input_authority::unavailable)?;
+        let authority = self.shared_dsl_authority();
+        // This is structural staging under the actual driver custody. A
+        // concurrent reader of the same generated owner must not turn valid
+        // admitted work into a metadata conflict or a failed run. Use the
+        // existing owner projection; warm checks read this same short-lived lock.
+        let (owner_session_id, runtime_epoch_id) = self.with_dsl_state(|state| {
+            let session = state
+                .session_id
+                .as_ref()
+                .ok_or_else(crate::input_authority::unavailable)?;
+            let epoch = state
+                .active_runtime_epoch_id
+                .as_ref()
+                .ok_or_else(crate::input_authority::unavailable)?;
+            Ok::<_, RuntimeDriverError>((
+                meerkat_core::SessionId::parse(&session.0)
+                    .map_err(|_| crate::input_authority::unavailable())?,
+                meerkat_core::RuntimeEpochId::from_uuid(
+                    uuid::Uuid::parse_str(&epoch.0)
+                        .map_err(|_| crate::input_authority::unavailable())?,
+                ),
+            ))
+        })?;
+        let execution_scope =
+            meerkat_core::exact_operation::OperationExecutionScope::RuntimeInput {
+                owner_session_id,
+                runtime_epoch_id,
+                submitted_input_id: canonical_input_id.clone(),
+                canonical_input_id: canonical_input_id.clone(),
+            };
+        let audit_sink = selected
+            .authorization_audit
+            .bind(
+                &canonical_input_id,
+                execution_scope.clone(),
+                run_id.clone(),
+                &originals,
+            )
+            .map_err(|_| crate::input_authority::unavailable())?;
+        let batch = crate::input_authority::NativeWorkBatch {
+            runtime_id: self.runtime_id.clone(),
+            run_id: run_id.clone(),
+            execution_scope,
+            contributors: originals,
+            selected_input_bindings,
+            controller_client: selected.controller_client.clone(),
+            authority,
+            audit_sink,
+            durability_health: self.work_durability_health.clone(),
+        };
+        host.host()
+            .work_context(&batch)
+            .map(Some)
+            .map_err(|_| crate::input_authority::unavailable())
     }
 
     pub(crate) fn rollback_snapshot(&self) -> EphemeralDriverRollbackSnapshot {
@@ -764,14 +1012,16 @@ impl EphemeralRuntimeDriver {
         input: mm_dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, RuntimeDriverError> {
-        let state = {
-            let authority = self.dsl.lock();
-            authority.state().clone()
-        };
-        let mut preview =
-            mm_dsl::MeerkatMachineAuthority::recover_from_state(state).map_err(|err| {
-                RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}"))
-            })?;
+        let mut preview = match self.dsl.0.lock() {
+            Ok(authority) => Ok(authority.fork()),
+            Err(poisoned) => {
+                // A panic may have left a partial state. Retain cold validation
+                // after cloning and releasing the actual poisoned guard.
+                let state = poisoned.into_inner().state().clone();
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            }
+        }
+        .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))?;
         mm_dsl::MeerkatMachineMutator::apply(&mut preview, input)
             .map(|transition| transition.into_effects())
             .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))
@@ -1375,6 +1625,27 @@ impl EphemeralRuntimeDriver {
             admission_sequence_recovery,
             runtime_grouping,
         )?;
+        let own = recovered_state
+            .authority_contributors
+            .iter()
+            .find(|item| item.input_id() == &work_id);
+        match (own, persisted_input.header().authority_association.as_ref()) {
+            (Some(original), Some(association)) if original.association() == association => {
+                let (binding, batch) = crate::input_authority::generated_binding(persisted_input)?;
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                        input_id: Self::dsl_key(&work_id),
+                        authority_binding: binding
+                            .ok_or_else(crate::input_authority::unavailable)?,
+                        authority_batch_key: batch
+                            .ok_or_else(crate::input_authority::unavailable)?,
+                    },
+                    "BindInputAuthority(recovered row)",
+                )?;
+            }
+            (None, None) if recovered_state.authority_contributors.is_empty() => {}
+            _ => return Err(crate::input_authority::unavailable()),
+        }
         self.register_accepted_idempotency(&work_id, recovered_state.idempotency_key.as_ref())?;
         self.record_admission_metadata(
             &work_id,
@@ -1730,6 +2001,13 @@ impl EphemeralRuntimeDriver {
         if let Some(action) = existing_action {
             match action {
                 ExistingQueuedAdmissionAction::Coalesce { existing_id } => {
+                    let existing = self
+                        .ledger
+                        .get(existing_id)
+                        .ok_or_else(crate::input_authority::unavailable)?;
+                    state
+                        .authority_contributors
+                        .extend(existing.authority_contributors.iter().cloned());
                     let existing_key = Self::dsl_key(existing_id);
                     let aggregate_key = Self::dsl_key(input_id);
                     let from_phase = self.input_phase_required(existing_id, "before coalescing")?;
@@ -1808,7 +2086,7 @@ impl EphemeralRuntimeDriver {
             }
         }
 
-        self.register_accepted_idempotency(input_id, input.header().idempotency_key.as_ref())?;
+        self.register_accepted_idempotency(input_id, state.idempotency_key.as_ref())?;
 
         let now = Utc::now();
         state.persisted_input = Some(input.clone());
@@ -2324,31 +2602,63 @@ impl EphemeralRuntimeDriver {
                     )));
                 }
             };
-        self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::ArchiveTerminalInput {
-                input_id: Self::dsl_key(input_id),
-                phase,
-                terminal_kind,
-                superseded_by,
-                aggregate_id,
-                abandon_reason,
-                abandon_attempt_count,
-                attempt_count: u64::from(bundle.seed.attempt_count),
-                run_id: bundle
-                    .seed
-                    .last_run_id
-                    .as_ref()
-                    .map(mm_dsl::RunId::from_domain),
-                boundary_sequence: bundle.seed.last_boundary_sequence,
-                admission_sequence: bundle.seed.admission_sequence,
-                idempotency_key: bundle
-                    .state
-                    .idempotency_key
-                    .as_ref()
-                    .map(|key| key.0.clone()),
-            },
-            "ArchiveTerminalInput(durable)",
-        )?;
+        let archive = mm_dsl::MeerkatMachineInput::ArchiveTerminalInput {
+            input_id: Self::dsl_key(input_id),
+            phase,
+            terminal_kind,
+            superseded_by,
+            aggregate_id,
+            abandon_reason,
+            abandon_attempt_count,
+            attempt_count: u64::from(bundle.seed.attempt_count),
+            run_id: bundle
+                .seed
+                .last_run_id
+                .as_ref()
+                .map(mm_dsl::RunId::from_domain),
+            boundary_sequence: bundle.seed.last_boundary_sequence,
+            admission_sequence: bundle.seed.admission_sequence,
+            idempotency_key: bundle
+                .state
+                .idempotency_key
+                .as_ref()
+                .map(|key| key.0.clone()),
+        };
+        let transition = {
+            let mut authority = self.dsl.lock();
+            match mm_dsl::MeerkatMachineMutator::apply(&mut *authority, archive) {
+                Ok(transition) => transition,
+                Err(mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. })
+                    if {
+                        let state = authority.state();
+                        let run = bundle
+                            .seed
+                            .last_run_id
+                            .as_ref()
+                            .map(mm_dsl::RunId::from_domain);
+                        state
+                            .input_authority_bindings
+                            .contains_key(&Self::dsl_key(input_id))
+                            && run.is_some()
+                            && state.lifecycle_phase == mm_dsl::MeerkatPhase::Running
+                            && state.current_run_id == run
+                            && state.turn_terminal_run_id != run
+                    } =>
+                {
+                    // Only post-commit cleanup interprets this generated
+                    // refusal as deferral. Direct generated callers retain
+                    // GuardRejected. The existing run terminal commit calls
+                    // cleanup again for its exact contributing input rows.
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "DSL rejected ArchiveTerminalInput(durable): {error:?}"
+                    )));
+                }
+            }
+        };
+        self.absorb_dsl_effects(transition.effects());
 
         let removed = self.ledger.remove(input_id);
         if removed.is_none() {
@@ -2518,6 +2828,13 @@ impl EphemeralRuntimeDriver {
             )?;
         }
 
+        bundle.state.authorization_audit = bundle
+            .state
+            .authorization_audit
+            .restore_observations_for_owner()
+            .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                reason: error.to_string(),
+            })?;
         self.ledger.recover(bundle.state);
         self.validate_queue_payloads("after stored input recovery")?;
         self.authorized_stored_input_state(&input_id)?
@@ -3484,8 +3801,14 @@ impl EphemeralRuntimeDriver {
         let preserved_reservation_key = std::mem::take(&mut self.reservation_key);
         let preserved_policy_snapshot = std::mem::take(&mut self.policy_snapshot);
         let control = self.control.clone();
+        let work_host = self.work_authorization_host.clone();
+        let work_supported = self.executor_supports_work_authorization;
+        let work_health = self.work_durability_health.clone();
 
         *self = Self::new_with_control(runtime_id, control);
+        self.work_authorization_host = work_host;
+        self.executor_supports_work_authorization = work_supported;
+        self.work_durability_health = work_health;
         self.ledger = ledger;
         self.dsl = preserved_dsl;
         self.admission_order = preserved_admission_order;
@@ -4057,6 +4380,7 @@ impl EphemeralRuntimeDriver {
         without_wake: bool,
         active_turn_boundary_available: bool,
     ) -> Result<ResolvedAdmission, RuntimeDriverError> {
+        self.authenticate_work(input)?;
         crate::input::validated_directed_interaction_id(input)
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
@@ -4071,7 +4395,8 @@ impl EphemeralRuntimeDriver {
             self.runtime_phase_snapshot() == RuntimeState::Running,
             active_turn_boundary_available,
             without_wake,
-        );
+        )
+        .with_authority_binding(crate::input_authority::generated_binding(input)?);
         let effects = self.dsl_preview(
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
@@ -4118,7 +4443,52 @@ impl EphemeralRuntimeDriver {
         )
     }
 
+    pub(crate) fn try_credential_custody(
+        &self,
+        input: &Input,
+    ) -> Result<
+        crate::meerkat_machine::credential_custody::NativeCredentialCustody,
+        RuntimeDriverError,
+    > {
+        crate::meerkat_machine::credential_custody::NativeCredentialCustody::try_acquire(
+            &self.work_authorization_host,
+            input,
+        )
+    }
+
+    pub(crate) fn authenticate_work_with_credential(
+        &self,
+        input: &Input,
+        custody: &crate::meerkat_machine::credential_custody::NativeCredentialCustody,
+    ) -> Result<(), RuntimeDriverError> {
+        self.authenticate_work(input)?;
+        custody.validate(&self.work_authorization_host, input)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn accept_resolved_input(
+        &mut self,
+        input: Input,
+        resolved: crate::accept::ResolvedAdmission,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let custody = self.try_credential_custody(&input)?;
+        self.accept_resolved_input_with_credential(input, resolved, &custody)
+    }
+
+    pub(crate) fn accept_resolved_input_with_credential(
+        &mut self,
+        input: Input,
+        resolved: crate::accept::ResolvedAdmission,
+        custody: &crate::meerkat_machine::credential_custody::NativeCredentialCustody,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        self.authenticate_work_with_credential(&input, custody)?;
+        self.accept_authenticated_resolved_input(input, resolved)
+    }
+
+    /// Same-owner continuation of the immediately preceding authentication.
+    /// The persistent caller retains driver and exact credential custody and
+    /// performs no await or external effect between that check and this apply.
+    pub(super) fn accept_authenticated_resolved_input(
         &mut self,
         input: Input,
         resolved: crate::accept::ResolvedAdmission,
@@ -4193,9 +4563,7 @@ impl EphemeralRuntimeDriver {
 
         if let Some(existing_id) = self.resolve_idempotency(
             &input_id,
-            input
-                .header()
-                .idempotency_key
+            crate::input_authority::qualified_idempotency_key(&input)?
                 .as_ref()
                 .map(std::string::ToString::to_string),
         )? {
@@ -4204,6 +4572,7 @@ impl EphemeralRuntimeDriver {
                     "generated idempotency authority references missing input {existing_id}"
                 ))
             })?;
+            crate::input_authority::verify_retained_replay(&existing.state, &input)?;
             crate::input_state::PromptReplayIdentity::verify_replay(
                 &existing.state,
                 &input,
@@ -4229,7 +4598,16 @@ impl EphemeralRuntimeDriver {
 
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
-        state.idempotency_key = input.header().idempotency_key.clone();
+        state.idempotency_key = crate::input_authority::qualified_idempotency_key(&input)?;
+        state.authority_contributors =
+            crate::input_authority::RetainedInputAuthority::from_input(&input)?
+                .into_iter()
+                .collect();
+        state.controller_client = input
+            .header()
+            .ingress_context
+            .as_ref()
+            .and_then(|ingress| ingress.controller_client().cloned());
         state.prompt_replay_identity =
             crate::input_state::PromptReplayIdentity::from_input(&input)?;
         state.directed_run_started_attribution =
@@ -4247,7 +4625,8 @@ impl EphemeralRuntimeDriver {
             self.runtime_phase_snapshot() == RuntimeState::Running,
             resolved.authority().active_turn_boundary_available(),
             resolved.authority().without_wake(),
-        );
+        )
+        .with_authority_binding(crate::input_authority::generated_binding(&input)?);
         let effects = self.dsl_apply_effects(
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
@@ -4282,7 +4661,7 @@ impl EphemeralRuntimeDriver {
                 )?;
                 self.register_accepted_idempotency(
                     &input_id,
-                    input.header().idempotency_key.as_ref(),
+                    crate::input_authority::qualified_idempotency_key(&input)?.as_ref(),
                 )?;
                 let terminal_outcome = self.input_terminal_outcome(&input_id).ok_or_else(|| {
                     RuntimeDriverError::Internal(format!(
@@ -4372,6 +4751,7 @@ impl EphemeralRuntimeDriver {
         input: &Input,
         resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        self.authenticate_work(input)?;
         let runtime_phase = self.runtime_phase_snapshot();
         let lifecycle_facts = crate::meerkat_machine::classify_runtime_lifecycle_state(
             runtime_phase,
@@ -4436,9 +4816,7 @@ impl EphemeralRuntimeDriver {
 
         if let Some(existing_id) = self.preview_idempotency(
             &input_id,
-            input
-                .header()
-                .idempotency_key
+            crate::input_authority::qualified_idempotency_key(input)?
                 .as_ref()
                 .map(std::string::ToString::to_string),
         )? {
@@ -4447,6 +4825,7 @@ impl EphemeralRuntimeDriver {
                     "generated idempotency authority references missing input {existing_id}"
                 ))
             })?;
+            crate::input_authority::verify_retained_replay(&existing.state, input)?;
             crate::input_state::PromptReplayIdentity::verify_replay(
                 &existing.state,
                 input,
@@ -4471,7 +4850,8 @@ impl EphemeralRuntimeDriver {
             self.runtime_phase_snapshot() == RuntimeState::Running,
             resolved.authority().active_turn_boundary_available(),
             resolved.authority().without_wake(),
-        );
+        )
+        .with_authority_binding(crate::input_authority::generated_binding(input)?);
         let effects = self.dsl_preview(
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan(accept preview)",
@@ -4486,7 +4866,16 @@ impl EphemeralRuntimeDriver {
 
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
-        state.idempotency_key = input.header().idempotency_key.clone();
+        state.idempotency_key = crate::input_authority::qualified_idempotency_key(input)?;
+        state.authority_contributors =
+            crate::input_authority::RetainedInputAuthority::from_input(input)?
+                .into_iter()
+                .collect();
+        state.controller_client = input
+            .header()
+            .ingress_context
+            .as_ref()
+            .and_then(|ingress| ingress.controller_client().cloned());
         state.policy = Some(PolicySnapshot {
             version: resolved.policy().policy_version,
             decision: resolved.policy().clone(),
@@ -4850,11 +5239,13 @@ impl EphemeralRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let custody = self.try_credential_custody(&input)?;
+        self.authenticate_work_with_credential(&input, &custody)?;
         let resolved = self.resolve_admission(&input)?;
         let flags = resolved.coarse_flags();
         self.ensure_contract_session_authority()?;
         let checkpoint = self.rollback_snapshot();
-        let outcome = match self.accept_resolved_input(input, resolved).await {
+        let outcome = match self.accept_resolved_input_with_credential(input, resolved, &custody) {
             Ok(outcome) => outcome,
             Err(err) => {
                 self.restore_rollback_snapshot(checkpoint);
@@ -4939,6 +5330,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -4967,6 +5360,8 @@ mod tests {
         let operation_id = OperationId::new();
         Input::Operation(OperationInput {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::System,
@@ -4989,6 +5384,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -6132,6 +6529,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -6190,6 +6589,134 @@ mod tests {
             }),
             "generated machine projection is the only terminal-outcome owner"
         );
+    }
+
+    #[tokio::test]
+    async fn dsl_preview_preserves_poisoned_live_authority_and_generated_guards() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("poisoned-preview"));
+        driver
+            .ensure_contract_session_authority()
+            .expect("actual generated contract-session registration");
+        let input = prompt_input("retain the actual queued input");
+        let input_id = input.id().clone();
+        driver
+            .accept_input(input)
+            .await
+            .expect("actual tracked input");
+        let binding = "exact-original-association".repeat(256);
+        let batch = "exact-original-participants".repeat(256);
+        // Opaque equality facts confer no authentication or permission.
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                    input_id: input_id.to_string(),
+                    authority_binding: binding.clone(),
+                    authority_batch_key: batch.clone(),
+                },
+                "BindInputAuthority(poisoned preview fixture)",
+            )
+            .expect("bind the actual tracked input");
+        // Consume the original admission signal through the actual loop seam.
+        // A later preview must return its effect without publishing that signal.
+        let _ = driver.take_post_admission_signal();
+        let before = driver.with_dsl_state(Clone::clone);
+        let signal_before = driver.post_admission_signal();
+        assert_eq!(signal_before, super::PostAdmissionSignal::None);
+        let authority = driver.shared_dsl_authority();
+        for poison in [false, true] {
+            if poison {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = authority.lock().expect("healthy fixture mutex");
+                    panic!("deliberate valid-state preview fixture poison");
+                }));
+                assert!(result.is_err());
+                assert!(authority.is_poisoned());
+            }
+            let effects = driver
+                .dsl_preview(
+                    mm_dsl::MeerkatMachineInput::AcceptWithCompletion {
+                        input_id: mm_dsl::InputId::from_domain(&input_id),
+                        request_immediate_processing: true,
+                        interrupt_yielding: false,
+                        wake_if_idle: false,
+                    },
+                    "AcceptWithCompletion(valid live preview)",
+                )
+                .expect("valid healthy or poisoned preview");
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                mm_dsl::MeerkatMachineEffect::PostAdmissionSignal {
+                    signal: mm_dsl::PostAdmissionSignalKind::RequestImmediateProcessing,
+                }
+            )));
+            assert_eq!(driver.with_dsl_state(Clone::clone), before);
+            assert_eq!(driver.post_admission_signal(), signal_before);
+            let error = driver
+                .dsl_preview(
+                    mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                        input_id: input_id.to_string(),
+                        authority_binding: "different-association".into(),
+                        authority_batch_key: batch.clone(),
+                    },
+                    "BindInputAuthority(conflicting live preview)",
+                )
+                .expect_err("the retained exact binding cannot change in preview");
+            assert!(matches!(error, RuntimeDriverError::Internal(detail)
+                if detail.contains("BindInputAuthority(conflicting live preview)")
+                    && detail.contains("GuardRejected")));
+            assert_eq!(driver.with_dsl_state(Clone::clone), before);
+            assert_eq!(driver.post_admission_signal(), signal_before);
+            if poison {
+                assert!(authority.is_poisoned(), "preview cannot clear poison");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_archive_removes_both_native_authority_bindings() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("authority-archive"));
+        let input = prompt_input("archive exact input");
+        let input_id = input.id().clone();
+        let key = input_id.to_string();
+        driver.accept_input(input).await.expect("accepted input");
+        // Exercise generated association custody and actual archival. These
+        // opaque test values confer no authentication or operation permission.
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::BindInputAuthority {
+                    input_id: key.clone(),
+                    authority_binding: "exact-association".into(),
+                    authority_batch_key: "exact-participants".into(),
+                },
+                "test immutable association",
+            )
+            .expect("bind accepted input");
+        driver.with_dsl_state(|state| {
+            assert!(state.input_authority_bindings.contains_key(&key));
+            assert!(state.input_authority_batch_keys.contains_key(&key));
+            let mut orphan = state.clone();
+            orphan.input_phases.remove(&key);
+            orphan.admission_authorized_plans.remove(&key);
+            assert!(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(orphan).is_err(),
+                "orphan authority entries must fail the generated invariant"
+            );
+        });
+        assert!(
+            driver
+                .abandon_queued_input(&input_id, InputAbandonReason::Stopped)
+                .expect("ordinary terminal transition")
+        );
+        driver
+            .archive_terminal_input_after_durable_commit(&input_id)
+            .expect("exact terminal archival transition");
+        driver.with_dsl_state(|state| {
+            assert!(!state.input_phases.contains_key(&key));
+            assert!(!state.admission_authorized_plans.contains_key(&key));
+            assert!(!state.input_authority_bindings.contains_key(&key));
+            assert!(!state.input_authority_batch_keys.contains_key(&key));
+        });
+        assert!(driver.ledger().get(&input_id).is_none());
     }
 
     #[test]

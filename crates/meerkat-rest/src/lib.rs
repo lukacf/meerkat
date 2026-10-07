@@ -669,7 +669,7 @@ impl AppState {
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
-            runtime_adapter,
+            runtime_adapter: runtime_adapter.clone(),
             runtime_pre_admissions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             schedule_host: Arc::new(schedule_host::ScheduleHostState::default()),
@@ -685,12 +685,13 @@ impl AppState {
                     .map_err(|detail| {
                         std::io::Error::new(std::io::ErrorKind::InvalidInput, detail)
                     })?;
-                let mut state = meerkat_mob_mcp::MobMcpState::new(
+                let mut state = meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                     mob_session_service,
+                    Some(runtime_adapter),
                     // A16: the local REST console is the owning operator
                     // (phase 5 explicit mint, DEC-P5E-8).
                     meerkat_mob::MobControlPrincipal::Owner,
-                )
+                )?
                 .with_persistent_storage_root(Some(realm_paths.root.clone()))
                 .with_workgraph_service(Some(workgraph_service.clone()));
                 if let Some(acceptor) = controlling_acceptor {
@@ -1736,6 +1737,11 @@ async fn apply_runtime_turn_under_runtime_turn_boundary(
                 .and_then(|meta| meta.turn_tool_overlay.clone()),
             primitive.turn_metadata().cloned(),
         )
+        .with_work_authorization(
+            primitive
+                .turn_metadata()
+                .and_then(|meta| meta.work_authorization.clone()),
+        )
         .with_typed_turn_appends(typed_turn_appends.clone()),
     };
     meerkat::surface::inject_workgraph_attention_turn_overlay(
@@ -1839,6 +1845,9 @@ async fn apply_runtime_turn(
 
 #[async_trait::async_trait]
 impl CoreExecutor for RestSessionRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(RestSessionRuntimeBoundaryHandle {
             context: self.context.clone(),
@@ -3680,6 +3689,8 @@ fn make_runtime_external_event_input(
         meerkat_runtime::ExternalEventInput {
             objective_id: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::External {
@@ -4525,6 +4536,7 @@ fn callback_pending_api_error(
             tool_use_id,
             tool_name,
             args,
+            settlement_failures: Vec::new(),
         }],
         session_created,
     )
@@ -5214,6 +5226,9 @@ fn help_request_to_create_session(
 }
 
 fn create_session_error_to_api(err: SessionError) -> ApiError {
+    if let Some(unavailable) = session_runtime_unavailable_api_error(&err) {
+        return unavailable;
+    }
     if let Some(busy) = session_busy_api_error(&err) {
         return busy;
     }
@@ -5450,6 +5465,7 @@ async fn create_session_inner(
         mob_tools: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         initial_turn_metadata: None,
+        initial_work_authorization: None,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -6178,6 +6194,9 @@ async fn archive_session(
 }
 
 fn archive_session_error_to_api_error(id: &str, error: SessionError) -> ApiError {
+    if let Some(unavailable) = session_runtime_unavailable_api_error(&error) {
+        return unavailable;
+    }
     if let Some(busy) = session_busy_api_error(&error) {
         return busy;
     }
@@ -6682,6 +6701,7 @@ async fn continue_session_inner(
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
+            initial_work_authorization: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let model = match req.model.clone() {
@@ -8258,6 +8278,10 @@ pub enum ApiError {
         request_id: String,
     },
     ServiceUnavailable(String),
+    SessionRuntimeUnavailable {
+        message: String,
+        details: Value,
+    },
     Gone(String),
     /// Retryable `SESSION_BUSY` (409) with typed details, e.g. a runtime
     /// teardown still completing past the caller's bounded wait.
@@ -8269,6 +8293,16 @@ pub enum ApiError {
 
 /// `ApiError::SessionBusyWithData` for a typed retryable runtime teardown
 /// still in progress (`SessionError::runtime_teardown_in_progress`).
+fn session_runtime_unavailable_api_error(error: &SessionError) -> Option<ApiError> {
+    match error {
+        SessionError::RuntimeUnavailable { .. } => Some(ApiError::SessionRuntimeUnavailable {
+            message: error.to_string(),
+            details: meerkat_contracts::error::session_error_details(error)?,
+        }),
+        _ => None,
+    }
+}
+
 fn session_busy_api_error(error: &SessionError) -> Option<ApiError> {
     match error {
         SessionError::FailedWithData { message, data }
@@ -8296,7 +8330,8 @@ fn api_error_message(error: &ApiError) -> String {
         | ApiError::Gone(message) => message.clone(),
         ApiError::BadRequestWithData { message, .. }
         | ApiError::InternalWithData { message, .. }
-        | ApiError::SessionBusyWithData { message, .. } => message.clone(),
+        | ApiError::SessionBusyWithData { message, .. }
+        | ApiError::SessionRuntimeUnavailable { message, .. } => message.clone(),
         ApiError::DuplicateInput { existing_id } => {
             format!("duplicate input: {existing_id}")
         }
@@ -8382,6 +8417,12 @@ impl IntoResponse for ApiError {
                 "SERVICE_UNAVAILABLE".to_string(),
                 msg,
                 None,
+            ),
+            ApiError::SessionRuntimeUnavailable { message, details } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SESSION_RUNTIME_UNAVAILABLE".to_string(),
+                message,
+                Some(details),
             ),
             ApiError::Gone(msg) => (StatusCode::GONE, "GONE".to_string(), msg, None),
             ApiError::SessionBusyWithData { message, details } => (
@@ -9101,7 +9142,8 @@ mod tests {
         let adapter = meerkat_runtime::MeerkatMachine::persistent(
             store as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let session_id = SessionId::new();
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
         let snapshot = meerkat_runtime::RuntimeOpsLifecycleRegistry::new()
@@ -9168,6 +9210,24 @@ mod tests {
     /// surface AS a fault — an `error` event carrying the typed cause — never a
     /// fabricated success-shaped event (the old `json!({"type":"unknown"})`
     /// launder) nor an empty data frame (`unwrap_or_default()`).
+    #[tokio::test]
+    async fn archive_runtime_readiness_preserves_503_and_exact_reason() {
+        let response = archive_session_error_to_api_error(
+            "retained-session",
+            SessionError::RuntimeUnavailable {
+                reason: meerkat_core::authorization::ControllerReadinessFailure::Busy,
+            },
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "SESSION_RUNTIME_UNAVAILABLE");
+        assert_eq!(body["details"]["reason"]["kind"], "busy");
+    }
+
     #[test]
     fn sse_serialization_fault_surfaces_as_error_event_not_fake_success() {
         // A real serde_json::Error from a failed parse stands in for the
@@ -12447,6 +12507,7 @@ mod tests {
                 Some(state.runtime_adapter.clone()),
                 meerkat_mob::MobControlPrincipal::Owner,
             )
+            .expect("construct runtime authority")
             .with_persistent_storage_root(Some(temp.path().to_path_buf()))
             .with_default_llm_client(Some(mock_client)),
         );
@@ -15551,6 +15612,12 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(code, "CALLBACK_PENDING");
         assert_eq!(details["session_id"], session_id.to_string());
         assert_eq!(details["pending_tool_calls"][0]["tool_use_id"], "call-1");
+        assert!(
+            details["pending_tool_calls"][0]
+                .get("settlement_failures")
+                .is_none(),
+            "legacy callback has no diagnostics and keeps its existing wire shape"
+        );
         assert_eq!(
             details["session_ref"],
             format_session_ref(&realm, &session_id)
@@ -15558,6 +15625,45 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(details["resumable"], true);
         assert_eq!(details["tool_name"], "external_mock");
         assert_eq!(details["args"], json!({ "value": "browser" }));
+    }
+
+    #[test]
+    fn completion_outcome_to_api_result_preserves_callback_settlement_diagnostics() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("realm");
+        let pending = vec![meerkat_core::error::PendingCallbackToolCall {
+            tool_use_id: "call-with-diagnostic".into(),
+            tool_name: "external_mock".into(),
+            args: json!({"value": "browser"}),
+            settlement_failures: vec![meerkat_core::ToolDispatchSettlementFailure {
+                admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+                effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+                physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Unknown,
+                failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+            }],
+        }];
+        let expected = serde_json::to_value(&pending).expect("typed pending calls");
+        let error = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
+                pending_tool_calls: pending,
+            },
+            &session_id,
+            &realm,
+            true,
+        )
+        .expect_err("callback remains pending despite settlement diagnostics");
+        let ApiError::InternalWithData { code, details, .. } = error else {
+            panic!("expected callback data");
+        };
+        assert_eq!(code, "CALLBACK_PENDING");
+        assert_eq!(details["pending_tool_calls"], expected);
+        assert_eq!(details["session_id"], session_id.to_string());
+        assert_eq!(
+            details["session_ref"],
+            format_session_ref(&realm, &session_id)
+        );
+        assert_eq!(details["session_created"], true);
+        assert_eq!(details["resumable"], true);
     }
 
     #[test]
@@ -15828,6 +15934,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 state.session_service.clone(),
                 meerkat_mob::MobControlPrincipal::Owner,
             )
+            .expect("construct runtime authority")
             .with_default_llm_client(Some(mock_client)),
         );
         let mut definition =
@@ -16644,10 +16751,13 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             // Replace process-local machine authority while preserving the
             // durable stores. Graceful unregister would finalize Stopped to
             // Idle and make this cold-restart regression test vacuous.
-            state.runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-                state.session_service.runtime_store(),
-                state.session_service.blob_store(),
-            ));
+            state.runtime_adapter = Arc::new(
+                meerkat_runtime::MeerkatMachine::persistent(
+                    state.session_service.runtime_store(),
+                    state.session_service.blob_store(),
+                )
+                .expect("construct runtime authority"),
+            );
             assert!(
                 !state
                     .runtime_adapter

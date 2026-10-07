@@ -99,20 +99,35 @@ if [[ -z "$version" ]]; then
 fi
 package_target="$tmp_dir/package-target"
 mkdir -p "$package_target/package"
-for crate in "${RELEASE_CRATES[@]}"; do
+# Each archive ships exactly the license texts its crate's license
+# expression names (scripts/crate-license-files.sh; unknown expressions fail).
+license_map="$("$(dirname "${BASH_SOURCE[0]}")/crate-license-files.sh" "${RELEASE_CRATES[@]}")"
+while IFS=$'\t' read -r crate expression required_files; do
     archive="$TARGET_ROOT/$crate/package/$crate-$version.crate"
     if [[ ! -f "$archive" ]]; then
         echo "missing verified package archive: $archive" >&2
         exit 1
     fi
     cp "$archive" "$package_target/package/"
+    if [[ -z "$required_files" ]]; then
+        echo "unsupported license expression for $crate: $expression" >&2
+        exit 1
+    fi
+    archive_files="$(tar -tzf "$archive")"
     for license_file in LICENSE-MIT LICENSE-APACHE; do
-        if ! tar -tzf "$archive" | grep -qx "$crate-$version/$license_file"; then
-            echo "package archive lacks $license_file: $archive" >&2
+        packaged=false
+        grep -qx "$crate-$version/$license_file" <<< "$archive_files" && packaged=true
+        if [[ " $required_files " == *" $license_file "* ]]; then
+            if [[ "$packaged" != true ]]; then
+                echo "package archive lacks $license_file: $archive" >&2
+                exit 1
+            fi
+        elif [[ "$packaged" == true ]]; then
+            echo "package archive ships $license_file, which its license ($expression) does not name: $archive" >&2
             exit 1
         fi
     done
-done
+done <<< "$license_map"
 
 echo "Running published-style facade link smoke..."
 MEERKAT_PUBLISHED_FACADE_PACKAGE_TARGET="$package_target" \

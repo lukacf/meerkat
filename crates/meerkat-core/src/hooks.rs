@@ -569,7 +569,7 @@ pub enum HookReasonCode {
 pub enum HookFailureReason {
     /// The hook runtime did not complete within its configured timeout.
     Timeout { timeout_ms: u64 },
-    /// The hook runtime executed but failed.
+    /// The invocation failed. Entry disposition is retained by its engine error.
     ExecutionFailed {
         /// Display projection of the underlying execution error.
         message: String,
@@ -582,11 +582,16 @@ pub enum HookFailureReason {
     /// A background hook attempted a non-observe action, which is not
     /// permitted for observe-only background hooks at any hook point.
     ObserveOnlyViolation,
+    /// Mechanical requirements prevented the hook from entering.
+    ConfinementRefused {
+        refusal: crate::confinement::ConfinementRefusal,
+    },
 }
 
 impl std::fmt::Display for HookFailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ConfinementRefused { refusal } => write!(f, "{refusal}"),
             Self::Timeout { timeout_ms } => write!(f, "hook timed out after {timeout_ms}ms"),
             Self::ExecutionFailed { message } => write!(f, "{message}"),
             Self::ConfigInvalid { message } => write!(f, "{message}"),
@@ -609,6 +614,7 @@ impl HookFailureReason {
     #[must_use]
     pub fn from_engine_error(error: &HookEngineError) -> Self {
         match error {
+            HookEngineError::LaunchRefused { reason, .. } => reason.clone(),
             HookEngineError::InvalidConfiguration(reason) => Self::ConfigInvalid {
                 message: reason.clone(),
             },
@@ -631,7 +637,11 @@ pub enum HookDecision {
         hook_id: HookId,
         reason_code: HookReasonCode,
         message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_hook_payload",
+            skip_serializing_if = "Option::is_none"
+        )]
         payload: Option<Value>,
     },
 }
@@ -650,6 +660,33 @@ impl HookDecision {
             payload,
         }
     }
+}
+
+/// Exact facts of an authoritative hook decision that refuses an operation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+#[error("Hook '{hook_id}' denied at {point:?}: {reason_code:?} - {message}")]
+pub struct HookDenial {
+    pub hook_id: HookId,
+    pub point: HookPoint,
+    pub reason_code: HookReasonCode,
+    pub message: String,
+    // A present JSON null remains distinct from an absent payload on transport.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_hook_payload",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payload: Option<Value>,
+}
+
+pub(crate) fn deserialize_present_hook_payload<'de, D>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// LLM request view exposed to hooks.
@@ -1017,13 +1054,24 @@ impl HookExecutionReport {
     /// This projection only preserves the denial facts emitted by the hook
     /// engine without reclassifying them through string matching.
     pub fn denial_error(&self, point: HookPoint) -> Option<AgentError> {
+        self.denial(point).map(|denial| AgentError::HookDenied {
+            hook_id: denial.hook_id,
+            point: denial.point,
+            reason_code: denial.reason_code,
+            message: denial.message,
+            payload: denial.payload,
+        })
+    }
+
+    /// Retain the engine-owned decision without deciding the run disposition.
+    pub fn denial(&self, point: HookPoint) -> Option<HookDenial> {
         match self.decision.as_ref()? {
             HookDecision::Deny {
                 hook_id,
                 reason_code,
                 message,
                 payload,
-            } => Some(AgentError::HookDenied {
+            } => Some(HookDenial {
                 hook_id: hook_id.clone(),
                 point,
                 reason_code: *reason_code,
@@ -1044,18 +1092,28 @@ pub enum HookEngineError {
     ExecutionFailed { hook_id: HookId, reason: String },
     #[error("Hook '{hook_id}' timed out after {timeout_ms}ms")]
     Timeout { hook_id: HookId, timeout_ms: u64 },
+    /// The hook was refused before its target code entered. The reason remains
+    /// in its original domain, including ordinary invocation setup failures.
+    #[error("Hook launch refused for '{hook_id}': {reason}")]
+    LaunchRefused {
+        hook_id: HookId,
+        reason: HookFailureReason,
+    },
 }
 
 impl HookEngineError {
     pub fn hook_id(&self) -> Option<&HookId> {
         match self {
-            Self::InvalidConfiguration(_) => None,
+            Self::InvalidConfiguration(_) | Self::LaunchRefused { .. } => None,
             Self::ExecutionFailed { hook_id, .. } | Self::Timeout { hook_id, .. } => Some(hook_id),
         }
     }
 
     pub fn into_agent_error(self) -> AgentError {
         match self {
+            Self::LaunchRefused { hook_id, reason } => {
+                AgentError::HookLaunchRefused { hook_id, reason }
+            }
             Self::InvalidConfiguration(reason) => AgentError::HookConfigInvalid { reason },
             Self::Timeout {
                 hook_id,

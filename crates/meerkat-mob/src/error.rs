@@ -798,6 +798,11 @@ pub enum MobError {
     #[error("supervisor escalation: {0}")]
     SupervisorEscalation(String),
 
+    /// A spawn carried `SpawnMemberSpec::resume_provider_params` but does not
+    /// resume a durable session (a fresh, policy or remote spawn).
+    #[error("'{identity}' carries resume provider params but does not resume a durable session")]
+    ResumeProviderParamsRequireResume { identity: AgentIdentity },
+
     /// Operation is not supported for the member's runtime mode.
     #[error("unsupported for runtime mode {mode}: {reason}")]
     UnsupportedForMode {
@@ -1436,7 +1441,7 @@ impl MobError {
             Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
                 error.structured_data()
             }
-            Self::SessionError(error) => error.structured_data(),
+            Self::SessionError(error) => meerkat_contracts::error::session_error_details(error),
             // A restore failure that IS a typed resume hold projects the hold
             // under meerkat's own key, so a wire caller classifies the Broken
             // member exactly as it classifies meerkat's -32013 refusal.
@@ -1648,6 +1653,9 @@ impl MobError {
             .or_else(|| match self {
                 Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
                     error.wire_error_code()
+                }
+                Self::SessionError(meerkat_core::SessionError::RuntimeUnavailable { .. }) => {
+                    Some(meerkat_contracts::ErrorCode::SessionRuntimeUnavailable)
                 }
                 Self::SessionError(meerkat_core::SessionError::CapabilityUnavailable(_)) => {
                     Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)

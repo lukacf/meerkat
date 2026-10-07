@@ -285,7 +285,8 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
             let machine = meerkat_runtime::MeerkatMachine::persistent(
                 runtime,
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
-            );
+            )
+            .expect("construct runtime authority");
             let mut created = Vec::new();
             for policy in [Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly), None] {
                 let result = service
@@ -551,7 +552,17 @@ async fn assert_retained_profile_policy_matches_native_gate(
                 &["retained_read"]
             };
             assert_eq!(dispatched.lock().unwrap().as_slice(), expected_calls);
-            handle.retire(identity).await.unwrap();
+            // #1805: `retire` is bounded by the retirement budget and answers a
+            // slow but healthy saga with a typed in-progress error; join the
+            // exact saga to its terminal reply instead, under an outer bound so
+            // a wedged retirement still fails the test rather than hanging it.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                retire_to_terminal(&handle, &identity),
+            )
+            .await
+            .expect("the source's retirement settles within the failure bound")
+            .expect("retire the source member");
             assert!(
                 service
                     .load_persisted_session_metadata(&source_id)

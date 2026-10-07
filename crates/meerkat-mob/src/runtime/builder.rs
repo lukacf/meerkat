@@ -2622,20 +2622,10 @@ fn canonical_runtime_adapter_for_session_service(
     session_service: &Arc<dyn MobSessionService>,
     runtime_adapter: RuntimeAdapterOption,
 ) -> Result<RuntimeAdapterOption, MobError> {
-    let service_adapter = session_service.runtime_adapter();
-    match (runtime_adapter, service_adapter) {
-        // One owner of record: the session service archives and controls
-        // sessions through its own machine, so an explicit adapter must be
-        // that same owner (a clone), not merely another machine over the same
-        // store (#1550).
-        (Some(adapter), Some(service_adapter))
-            if !adapter.is_same_runtime_owner(&service_adapter) =>
-        {
-            Err(MobError::RuntimeOwnerConflict)
-        }
-        (Some(adapter), _) => Ok(Some(adapter)),
-        (None, service_adapter) => Ok(service_adapter),
-    }
+    session_service
+        .acquire_runtime_adapter(runtime_adapter)
+        .map_err(super::session_service::runtime_acquisition_session_error)
+        .map_err(MobError::from)
 }
 
 fn inline_external_addressable(definition: &MobDefinition, role: &ProfileName) -> bool {
@@ -6925,14 +6915,10 @@ impl MobBuilder {
     /// Set the session service for creating meerkat sessions.
     ///
     /// The service must implement both `SessionService` and `MobSessionService`
-    /// to provide comms runtime access for wiring operations. If no explicit
-    /// runtime adapter override has been set yet, the builder seeds its
-    /// canonical runtime adapter from `service.runtime_adapter()`.
+    /// to provide comms runtime access for wiring operations. Runtime authority
+    /// is acquired during fallible build or resume, after any explicit adapter
+    /// has been supplied.
     pub fn with_session_service(mut self, service: Arc<dyn MobSessionService>) -> Self {
-        #[cfg(feature = "runtime-adapter")]
-        if self.runtime_adapter.is_none() {
-            self.runtime_adapter = service.runtime_adapter();
-        }
         self.session_service = Some(service);
         self
     }
@@ -7207,7 +7193,7 @@ impl MobBuilder {
                     return Err(MobError::Internal(
                     "definition contains AutonomousHost profiles but no runtime adapter is available; \
                      provide one via with_runtime_adapter() or use a session service that implements \
-                     runtime_adapter()"
+                     acquire_runtime_adapter()"
                         .to_string(),
                 ));
                 }
@@ -8773,12 +8759,42 @@ impl MobBuilder {
             // The host's spawn customizer makes an ordinary member's restore
             // request; a fork-derived member's is its own durable records,
             // like its first build (see `fork_build`).
-            let restore_spec = super::fork_build::rebuild_resume_spec(
+            // What the bound session holds, read once, for the customizer's
+            // resume view (an ordinary member only; a fork-derived member's
+            // rebuild is not customized). A failed read fails this member's
+            // restore, like any other per-member restore failure.
+            let restore_view = if entry.fork_source.is_none() && spawn_member_customizer.is_some() {
+                match super::fork_build::load_resumed_member_view(
+                    session_service.as_ref(),
+                    &bridge_session_id,
+                )
+                .await
+                {
+                    Ok(view) => view,
+                    Err(error) => {
+                        record_restore_failure(bridge_session_id.clone(), error.to_string()).await;
+                        continue;
+                    }
+                }
+            } else {
+                super::handle::ResumedMemberView::new(bridge_session_id.clone(), None)
+            };
+            // A customizer refusal (a host policy that is not configured,
+            // say) fails this member's restore with the refusal as its
+            // diagnostic; the rest of the mob still comes up, and the member
+            // is restored once the customizer admits it.
+            let mut restore_spec = match super::fork_build::rebuild_resume_spec(
                 &definition.id,
                 spawn_member_customizer.as_ref(),
                 entry,
-                &bridge_session_id,
-            )?;
+                &restore_view,
+            ) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    record_restore_failure(bridge_session_id.clone(), error.to_string()).await;
+                    continue;
+                }
+            };
             if restore_spec.identity != entry.agent_identity {
                 return Err(MobError::Internal(format!(
                     "spawn customizer cannot change resume restore identity from '{}' to '{}'",
@@ -8990,6 +9006,44 @@ impl MobBuilder {
                             if reuse_active_replacement {
                                 continue;
                             }
+                            // The rebuild now runs on the successor: ask the
+                            // customizer again with what it holds.
+                            if entry.fork_source.is_none() && spawn_member_customizer.is_some() {
+                                let successor_view =
+                                    match super::fork_build::load_resumed_member_view(
+                                        session_service.as_ref(),
+                                        &bridge_session_id,
+                                    )
+                                    .await
+                                    {
+                                        Ok(view) => view,
+                                        Err(error) => {
+                                            record_restore_failure(
+                                                bridge_session_id.clone(),
+                                                error.to_string(),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                    };
+                                restore_spec.resume_provider_params =
+                                    match super::fork_build::successor_resume_provider_params(
+                                        &definition.id,
+                                        spawn_member_customizer.as_ref(),
+                                        entry,
+                                        &successor_view,
+                                    ) {
+                                        Ok(params) => params,
+                                        Err(error) => {
+                                            record_restore_failure(
+                                                bridge_session_id.clone(),
+                                                error.to_string(),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                    };
+                            }
                             replacement_authorized
                         } else {
                             // Typed-observation contract: this arm is only
@@ -9020,6 +9074,10 @@ impl MobBuilder {
                 if let Some(model) = restore_model_override.as_ref() {
                     profile.model.clone_from(model);
                 }
+                super::fork_build::apply_resume_provider_params(
+                    &mut profile,
+                    restore_spec.resume_provider_params.as_ref(),
+                );
                 if restore_spec.inherited_tool_filter.is_some()
                     && restore_profile_override.is_none()
                 {
@@ -9265,6 +9323,10 @@ impl MobBuilder {
             if let Some(model) = restore_model_override.as_ref() {
                 profile.model.clone_from(model);
             }
+            super::fork_build::apply_resume_provider_params(
+                &mut profile,
+                restore_spec.resume_provider_params.as_ref(),
+            );
             if restore_spec.inherited_tool_filter.is_some() && restore_profile_override.is_none() {
                 build::open_profile_tool_categories_for_inherited_filter(&mut profile);
             }

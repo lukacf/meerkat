@@ -4,7 +4,9 @@
 //! assignment and ordered application. `RuntimeStore` implementations retain
 //! its exact state with CAS and atomically insert opaque inbox rows.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -312,7 +314,62 @@ struct SubmissionEnvelope {
 pub struct RuntimeDeliveryInbox {
     store: Arc<dyn RuntimeStore>,
     commits: Arc<crate::tokio::sync::watch::Sender<u64>>,
+    /// Runtimes that received a newly committed row since the last
+    /// [`Self::take_committed_runtimes`], shared by all clones.
+    committed_runtimes: Arc<Mutex<HashSet<LogicalRuntimeId>>>,
+    /// Whether a [`RuntimeDeliveryOwnership`] is outstanding, shared by all
+    /// clones.
+    owner_claimed: Arc<AtomicBool>,
 }
+
+/// Exclusive delivery ownership of one [`RuntimeDeliveryInbox`].
+///
+/// At most one ownership exists per inbox (across its clones) at a time; it
+/// is released when dropped. Only the owner takes the runtimes of new
+/// commits, so a second consumer can never steal another's wakeups.
+pub struct RuntimeDeliveryOwnership {
+    inbox: RuntimeDeliveryInbox,
+}
+
+impl std::fmt::Debug for RuntimeDeliveryOwnership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeDeliveryOwnership")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeDeliveryOwnership {
+    pub fn inbox(&self) -> &RuntimeDeliveryInbox {
+        &self.inbox
+    }
+
+    /// Take the runtimes that received a newly committed row through the
+    /// inbox (or a clone) since the previous call.
+    ///
+    /// A runtime is recorded before the commit generation advances, so an
+    /// owner that observes a generation change and then takes the set always
+    /// sees the runtime of that commit. Like the commit signal, this is
+    /// in-process only.
+    pub fn take_committed_runtimes(&self) -> Vec<LogicalRuntimeId> {
+        let mut committed = self
+            .inbox
+            .committed_runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        committed.drain().collect()
+    }
+}
+
+impl Drop for RuntimeDeliveryOwnership {
+    fn drop(&mut self) {
+        self.inbox.owner_claimed.store(false, Ordering::Release);
+    }
+}
+
+/// A second delivery owner was armed on an inbox that already has one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("runtime delivery inbox already has a delivery owner")]
+pub struct RuntimeDeliveryOwnerAlreadyArmed;
 
 impl std::fmt::Debug for RuntimeDeliveryInbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -327,7 +384,34 @@ impl RuntimeDeliveryInbox {
         Self {
             store,
             commits: Arc::new(commits),
+            committed_runtimes: Arc::new(Mutex::new(HashSet::new())),
+            owner_claimed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Claim exclusive delivery ownership of this inbox.
+    ///
+    /// Fails with [`RuntimeDeliveryOwnerAlreadyArmed`] while another
+    /// ownership (through this inbox or any clone) is outstanding. The set of
+    /// committed runtimes is reset on claim: rows committed before the claim
+    /// are found by the owner's reconcile read, not by the set.
+    pub fn claim_delivery_ownership(
+        &self,
+    ) -> Result<RuntimeDeliveryOwnership, RuntimeDeliveryOwnerAlreadyArmed> {
+        if self
+            .owner_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(RuntimeDeliveryOwnerAlreadyArmed);
+        }
+        self.committed_runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        Ok(RuntimeDeliveryOwnership {
+            inbox: self.clone(),
+        })
     }
 
     /// Observe newly committed deliveries made through this inbox or any of
@@ -354,6 +438,34 @@ impl RuntimeDeliveryInbox {
         &self,
         runtime_id: &LogicalRuntimeId,
         submission: RuntimeDeliverySubmission,
+    ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
+        self.submit_with_acknowledgement(runtime_id, submission, false)
+            .await
+    }
+
+    /// Commit a delivery whose effect its producer applies itself, already
+    /// acknowledged, in the same authority compare-and-swap as the insert.
+    ///
+    /// No applier ever runs a sink for the new row: it is consumed when the
+    /// cursor reaches it, exactly like a row acknowledged out of band, but
+    /// with no window in which a delivery owner can observe it unacknowledged.
+    /// The producer must be able to re-derive its effect after a crash from
+    /// its own durable state. An exact replay of an existing row acknowledges
+    /// it as [`Self::acknowledge`] would.
+    pub async fn submit_acknowledged(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        submission: RuntimeDeliverySubmission,
+    ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
+        self.submit_with_acknowledgement(runtime_id, submission, true)
+            .await
+    }
+
+    async fn submit_with_acknowledgement(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        submission: RuntimeDeliverySubmission,
+        acknowledge: bool,
     ) -> Result<RuntimeDeliveryReceipt, RuntimeDeliveryError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
             let observed = self
@@ -396,6 +508,9 @@ impl RuntimeDeliveryInbox {
                         stored.sequence()
                     )));
                 }
+                if acknowledge {
+                    self.acknowledge(runtime_id, &delivery_id, sequence).await?;
+                }
                 return Ok(RuntimeDeliveryReceipt {
                     delivery_id,
                     sequence,
@@ -403,6 +518,18 @@ impl RuntimeDeliveryInbox {
                 });
             }
 
+            if acknowledge {
+                let transition = dsl::RuntimeDeliveryMachineMutator::apply(
+                    &mut authority,
+                    dsl::RuntimeDeliveryInput::AcknowledgeDelivery {
+                        delivery_id: delivery_id.as_str().to_string(),
+                        delivery_sequence: sequence,
+                    },
+                )
+                .map_err(|error| RuntimeDeliveryError::Authority(format!("{error:?}")))?;
+                classify_acknowledgement_effects(transition.effects(), &delivery_id, sequence)?;
+                advance_acknowledged_prefix(&mut authority)?;
+            }
             let next_revision = observed
                 .as_ref()
                 .map_or(Ok(1), |record| next_revision(record.revision()))?;
@@ -428,6 +555,10 @@ impl RuntimeDeliveryInbox {
                 .await?
             {
                 RuntimeDeliveryAuthorityCasOutcome::Applied(_) => {
+                    self.committed_runtimes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(runtime_id.clone());
                     self.commits
                         .send_modify(|generation| *generation = generation.wrapping_add(1));
                     return Ok(RuntimeDeliveryReceipt {

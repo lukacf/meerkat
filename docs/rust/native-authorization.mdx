@@ -1,0 +1,641 @@
+---
+title: "Native governed embedding"
+description: "Wire native Rust authorization to real owners and choose the matching session persistence composition."
+icon: "shield-check"
+---
+
+This guide starts with explicitly configured, storeless native Rust sessions
+and describes native persistent composition, including locally tested SQLite
+execution custody.
+The embedding application is trusted code: it authenticates callers, supplies
+current policy owners, and attaches the actual controller and executor. Merely
+enabling a Cargo feature or calling `agent.run(...)` does not establish this
+integration.
+
+<Note>
+Explicit native embedding has bounded acceptance for storeless sessions and
+completed-turn SQLite close/reopen followed by fresh governed work in actual
+separate processes, with
+current host grants, a stable configured provider binding and the real File token
+owner. Cold acceptance was run directly; publication and CI used their
+recorded test inventories. See the
+[implementation checkpoint](/internal/design/adr-001-implementation/implementation-progress)
+for exact source and evidence scope.
+
+Stock CLI, REST, RPC and MCP paths do not acquire governed activation from this
+API. The additive `meerkat_rpc::governed_jsonl` entry provides a fixed-host,
+single-connection profile; it requires `default-features = false` plus
+`local-authorization` and does not activate ordinary RPC constructors. The
+public-entry/notification profile has focused local and published CI acceptance.
+Its fixed-host loopback evidence does not establish ordinary-constructor activation.
+Console projection is not integrated native-plus-Console proof.
+Persistent controller administration, interrupted recovery, human consent and
+full surface/platform coverage remain separate work. The shell composition below
+covers supported macOS requirements. Provider login and Console access
+administration do not grant native operation permission. The measured conditional
+fresh-turn means missed the cheap-default target; full-platform and per-operation
+p99 acceptance remain open. See the
+[acceptance scope](/internal/design/adr-001-implementation/acceptance-plan)
+for the required coverage. No live-provider coverage is claimed.
+</Note>
+
+## Install the real owners before sharing the machine
+
+Enable `meerkat-runtime`'s `local-authorization` feature in the matching checkout
+or dependency release. Compose `NativeGrantWorkConfiguration` from these owners:
+
+| Field | Required host behavior |
+| --- | --- |
+| `grants` | A `LocalGrantAuthority` with qualified principals and real issued controller and operation grants. Credential possession supplies neither grant. |
+| `ingress` | A `NativeIngressCheck` that validates the authenticated submission and the requester's right to invoke this executor and represented subject. |
+| `invocation_owner` | An `AdmittedWorkPolicyOwner` that checks current caller and mandate permissions. Native composition also checks the actual accepted batch. |
+| `operation_owner` | An `OperationPolicyOwner` that checks exact resources, accounts, endpoints and recipients. Implement `authorize_controller_admission`; its default is unavailable. |
+
+The policy callbacks read current local owner facts without I/O. Relevant owner
+mutations participate in the grant authority's publication. Preserve correlated
+principal/action/resource rules; independent lists must not grant extra pairs.
+
+```rust
+use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
+use meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration;
+
+fn install_governance(
+    owners: NativeGrantWorkConfiguration,
+) -> Result<MeerkatMachine, RuntimeDriverError> {
+    MeerkatMachine::ephemeral().with_local_grant_authorization(owners)
+}
+```
+
+For a storeless machine, install before wrapping it in `Arc`, cloning it, or
+registering sessions. Already shared or populated machines refuse installation.
+For persistence, select governed mode during construction as shown below. The
+fluent installer does not upgrade a persistent machine. The backend must supply
+exclusive execution custody; setup refusal must propagate before publishing a
+service or provider-auth handle.
+
+## Configure native shell confinement on the factory
+
+For automatically composed shell tools, install the trusted host requirement
+with `AgentFactory::with_shell_confinement`. Keep using the native owners above
+to authorize each exact shell operation. Confinement controls the process's
+mechanical access after authorization; it does not authenticate input or grant
+permission to a command.
+
+This native Rust excerpt assumes existing, canonical absolute paths named
+`work_root` and `sessions_path`. It grants application filesystem access to the
+work tree plus the declared command-runtime baseline and denies IP networking:
+
+```rust
+use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
+use meerkat_core::confinement::{
+    ConfinementSpec, ExecutionConfinement, FilesystemAccess, IpNetworkAccess,
+    PathAccess, PlatformBaseline,
+};
+use meerkat_tools::builtin::shell::ShellConfinement;
+
+let requirement: ExecutionConfinement = ConfinementSpec {
+    baseline: PlatformBaseline::CommandRuntimeV1,
+    read: FilesystemAccess::Paths(vec![PathAccess::Subtree(work_root.clone())]),
+    write: FilesystemAccess::Paths(vec![PathAccess::Subtree(work_root.clone())]),
+    deny_read: vec![],
+    deny_write: vec![],
+    network: IpNetworkAccess::Denied,
+    unix_connect: vec![],
+    require_descendant_termination: false,
+}
+.try_into()?;
+
+let factory = AgentFactory::new(sessions_path)
+    .project_root(&work_root)
+    .builtins(false)
+    .shell(true)
+    .with_shell_confinement(ShellConfinement::Required { requirement });
+let mut config = Config::default();
+config.shell.program = "/bin/bash".into();
+// This example grants local shell operations, not provider-hosted search.
+config.provider_tools.anthropic.web_search = false;
+let builder = FactoryAgentBuilder::new(factory, config);
+```
+
+Use this builder in the native service composition below. Each agent build
+creates its own shell dispatcher and shared job manager, retaining the same
+immutable host requirement for foreground, background and monitor launches.
+The application need not inject a shared shell dispatcher or a second policy
+evaluator. When the factory also has a runtime root and session identity, it
+settles earlier process custody and binds that session's durable process owner
+before publishing the dispatcher. Without a runtime root, shell containment is
+in process; background jobs still require their separate durable job runtime.
+
+`Required` enforces the complete supported requirement or refuses that launch;
+there is no unrestricted fallback. The current backend uses macOS Seatbelt.
+Non-macOS hosts, exact IP endpoint grants and required termination of descendants
+that escape their process group are unsupported. Invalid requirements or an
+unavailable executor also refuse before the requested command runs. Required
+launches use the configured cwd and exact explicit environment, with no ambient
+environment inheritance. Select a directly executable shell allowed by the
+requirement; the example uses `/bin/bash` to avoid macOS `/bin/sh`'s mutable
+selector outside the work grant. `TrustedHost` is the default shell compatibility
+mode and inherits the host environment. It is independent of local-governed
+authorization: installing native grant owners does not select `Required`, and
+selecting `Required` does not install those owners.
+
+If the application grants only its local tools, disable provider-hosted
+capabilities it does not authorize in the existing `Config` before constructing
+the builder. For example, Anthropic web search defaults to enabled on supported
+models; the shell E1 fixture uses the explicit disable shown above. It is an
+application capability choice rather than a requirement for every shell host.
+This selects requested provider capabilities. It does not replace the native
+controller or operation owner checks, and a capability kept enabled still needs
+its own current authorization.
+
+The macOS `e1_policy_control/shell_confinement.rs` fixture passed its bounded E1
+test with authenticated native ingress, actual grants and model HTTP boundaries,
+two authorized shell commands and native audit. The first command enters and
+then receives a nonzero exit with stderr for a denied
+filesystem write; the outside file remains unchanged, a permitted sibling
+executes, and the same run continues to its next model turn. That is returned
+shell feedback from an entered process. A backend or launch refusal happens
+before the command runs. Shell dispatch preserves its exact mechanical cause as
+`confinement_refused` tool feedback, including foreground, background and monitor
+recovery paths. Ordinary IO and custody failures retain their execution error
+class. The member upcall bridge preserves the exact confinement cause and
+settlement companions in tool feedback; malformed causes become an ordinary
+execution failure rather than a fabricated mechanical refusal.
+This bounded scenario does not establish restart,
+performance acceptance or full surface/platform coverage.
+
+The core pre-tool path also accepts a typed `HookEngineError::LaunchRefused`
+from an injected hook engine. It skips that tool and returns the exact
+`confinement_refused` or ordinary `execution_failed` feedback; permitted
+siblings and the next model turn continue. `HookLaunchRefused` retains the
+attempted tool call ID without emitting hook start or completion events.
+An explicit pre-tool hook decision likewise refuses only its attempted call,
+using `hook_denied` feedback with the exact hook ID, point, reason code and
+optional JSON payload. An absent payload and a present JSON null remain distinct,
+including across the member upcall bridge. The entered deciding hook retains its
+start, completion and denial events; its decision is not a launch failure.
+This core integration does not yet wire required confinement into the native
+command-hook engine or record the refusal in protected audit. Other hook points
+still need their own local-refusal integration.
+
+## Attach and pin the controller before submitting work
+
+### Storeless sessions
+
+Use `FactoryAgentBuilder` and `EphemeralSessionService`, then
+`meerkat::surface::materialize_ephemeral_runtime_session` to attach the session to
+that same machine. Start with `InitialTurnPolicy::Defer` and
+`DeferredPromptPolicy::Discard`; the first prompt will enter through native
+admission.
+
+### In-memory persistent sessions
+
+Enable the facade's `session-store`, `memory-store` and `local-authorization`
+features. The following excerpt assumes `owners` from above, a configured
+`FactoryAgentBuilder` named `builder`, a session capacity `max_sessions`, and
+an application-selected `PathBuf` for the existing reconfigure configuration.
+The configuration path is not the session storage location.
+
+```rust
+use std::sync::Arc;
+use meerkat::{MemoryBlobStore, MemoryStore, PersistenceBundle};
+use meerkat_runtime::InMemoryRuntimeStore;
+
+let bundle = PersistenceBundle::new_with_local_grant_authorization(
+    Arc::new(MemoryStore::new()),
+    Arc::new(InMemoryRuntimeStore::new()),
+    Arc::new(MemoryBlobStore::new()),
+    owners,
+)?;
+
+let (service, machine) =
+    meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
+        builder, max_sessions, bundle, reconfigure_config_path,
+    );
+```
+
+This returns the stock `PersistentSessionService` and the bundle's same
+`MeerkatMachine`. The service retains the actual session actor; the bundle's
+`RuntimeStore` holds the committed Session document and store-issued revision.
+The native runtime owns accepted inputs, original authority associations and
+attached audit, persisted in that same store. These memory stores retain records
+for the lifetime of the process; they do not provide restart durability.
+
+### SQLite persistent sessions
+
+<Note>
+Local macOS tests passed for actual backend custody, independent-process
+exclusion and release, same-file case and symlink aliases, upgrade failures,
+and the authenticated native model-tool-model flow with committed Session,
+input and protected audit. Same-process completed-turn close/reopen and actor
+reconstruction also passed, retaining the current trusted host owners and
+proving that stored effects were not replayed. Fresh authenticated work after
+reopen also passed with distinct input/run/tool IDs, local denial feedback,
+a permitted sibling and protected terminal audit. These results qualify this local
+source on the executed filesystem. Published c18's bounded separate-process
+completed-turn case was run directly; its publication and exact-head CI used
+their recorded test inventories. Other
+platforms, interrupted recovery, persistent administration and performance remain
+separate gates.
+</Note>
+
+The facade's `session-store` feature already enables its built-in SQLite stores;
+keep `local-authorization` enabled for governed construction. Use the actual
+SQLite session and WholeBlob runtime backends as co-tenants of the same database.
+This excerpt assumes an application-selected `PathBuf` named `database_path`
+and the application's existing `Arc<dyn BlobStore>` named `blob_store`, alongside
+`owners`, `builder`, `max_sessions` and `reconfigure_config_path` from above:
+
+```rust
+use std::sync::Arc;
+use meerkat::{PersistenceBundle, SqliteSessionStore};
+use meerkat_runtime::SqliteRuntimeStore;
+
+let runtime_store = Arc::new(
+    SqliteRuntimeStore::new_whole_blob(database_path.clone())?,
+);
+let bundle = PersistenceBundle::new_with_local_grant_authorization(
+    Arc::new(SqliteSessionStore::open(database_path)?),
+    runtime_store,
+    blob_store,
+    owners,
+)?;
+
+let (service, machine) =
+    meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
+        builder, max_sessions, bundle, reconfigure_config_path,
+    );
+```
+
+The backend binds row I/O and execution custody to the same canonical
+regular database file. The trusted host must keep the database and lock namespace
+stable. Its two dedicated lock files coordinate lifetime claims and short claim
+admission through the operating system; SQLite transaction locks alone do not
+supply execution custody. Ordinary backend opening creates no execution lock
+files. Acquiring a claim requires access to that writable lock namespace.
+
+The physical-lock owner targets macOS, Linux and Windows; each target
+requires its own execution qualification. An ordinary
+execution owner requests shared custody; a governed owner requests exclusive
+custody before recovering provider authority or publishing handles. Conflicting
+claims refuse locally through the existing `Busy` class. Unsupported scope and
+operational acquisition failures remain explicit setup refusals. SQLite's special
+`:memory:` path cannot supply physical file custody and is refused. Use the actual
+`InMemoryRuntimeStore` for a process-local in-memory composition.
+
+Retained native drivers and exported authorization handles retain their same
+actual claim. An upgrade from shared to governed custody excludes new admissions
+while it releases and reacquires the lifetime lock. Contention restores shared
+custody before returning `Busy`; an uncertain unlock or restoration failure
+retains the admission gate and returns `Unavailable` until the failed claim's
+last owner drops. A failed claim does not become governed authority.
+
+This mechanical owner supplies the construction prerequisite for the existing
+ordinary native mixed-turn fixture. It does not establish persistent controller
+administration, grant revocation or complete credential removal, which remain
+unsupported at their separate native owner seams. The close/reopen
+scenario additionally drops the original service and all backend claims before
+opening new stores, then reconstructs the actor using the same actual trusted
+host owners and the stored Session document. Historical serialized authority
+associations remain audit data. They never bootstrap current grant, ingress or
+controller authority. The fresh-work test additionally retains the actual host
+token vault and verifies its original marked credential through the existing
+status owner. Creating an unrelated empty vault requests credential release;
+it does not reconstruct the current provider authority. The new input uses
+current host grants, ingress authentication and a fresh actor pin, then completes
+the native model-tool-model flow with exact audit and no replay of the old work.
+The later completed-turn cold-process case uses separate writer and reader
+processes with the same SQLite database, a real File token store and stable
+host-configured provider binding. The reader restores the marked credential
+through the existing lifecycle owner, issues new current grants and pins the
+reconstructed actor's actual client before fresh authenticated work. An attempt
+carrying the writer's old grant association passes current ingress authentication
+but is refused by current grant authority before model/tool or durable input
+entry. Reader and parent independently verify the original transcript prefix,
+input row and protected audit remain unchanged. This qualifies that fixed-bearer,
+callback fixture, not interrupted recovery, every credential refresh flow,
+persistent administration, performance acceptance or full surface coverage.
+
+The low-level equivalent is
+`MeerkatMachine::persistent_with_local_grant_authorization(runtime_store, Some(blob_store), owners)?`.
+Ordinary `MeerkatMachine::persistent`, `persistent_without_blobs`, and the
+`session-store` variants of `PersistenceBundle::new` and its related constructors
+also return `Result`. They request shared custody when the backend supports it;
+governed construction requires exclusive custody directly, without dropping and
+reacquiring a claim. Ordinary custom backends without custody support remain
+usable; governed construction rejects them with `UnsupportedScope`.
+
+For an existing Rust integration, `persistent(store, blob_store)` and
+`persistent_without_blobs(store)` now return `Result<Self, RuntimeDriverError>`.
+Handle the result before wrapping the machine in `Arc`, for example
+`Arc::new(MeerkatMachine::persistent(store, blob_store)?)`.
+
+Reuse the bundle's machine when composing another surface. Built-in mob session
+services accept it through `acquire_runtime_adapter(Some(machine.clone()))?`. A clone of
+the same underlying machine owner is valid. A different live owner is refused
+with `ControllerReadinessFailure::AuthorityChanged`, even when it uses the same
+store. A store mismatch is `UnsupportedScope`; custody contention is `Busy`.
+`Ok(None)` remains an explicit optional-runtime outcome for custom services,
+not a substitute for a failed persistent acquisition. Builders and archive paths
+propagate acquisition errors before performing their operation.
+
+With the `runtime-adapter` feature, replace the old `MobSessionService::runtime_adapter()`
+getter with `acquire_runtime_adapter(None)?`, or pass the intended shared machine
+as `Some(machine.clone())`. The method returns
+`Result<Option<Arc<MeerkatMachine>>, RuntimeDriverError>`. A wrapper must forward
+that candidate and result to its underlying service instead of creating another
+machine. Both built-in services' `canonical_runtime_adapter()` methods now
+return `Result<Arc<MeerkatMachine>, RuntimeDriverError>`.
+`PersistentSessionService::with_canonical_runtime_adapter` remains an infallible
+builder binding; acquisition still rejects a retained owner for a foreign store.
+Direct acquisition uses `RuntimeDriverError::ControllerReadinessUnavailable
+{ reason }`; mob composition preserves the reason in
+`MobError::SessionError(SessionError::RuntimeUnavailable { reason })`.
+These failures describe runtime readiness, not permission denial.
+
+Exported auth lifecycle and OAuth capabilities retain the acquired backend
+custody, including generated/raw lifecycle clones and nested credential or device
+poll handles. Dropping only the machine does not make a conflicting governed
+owner available while those capabilities survive. This retains backend custody,
+not the machine or a runnable controller after restart. Keep using the installed
+authority for credential updates; persistent registry replacement is refused,
+while requesting the already installed owner is a no-op.
+
+Reserve creation with `service.reserve_create_session_admission().await?`, then use
+`meerkat::surface::materialize_session_with_reserved_admission_and_actor_slot`
+with the same deferred/discard initial-turn options. Its executor factory must
+construct `meerkat::surface::PersistentRuntimeExecutor::new(service, machine, session_id)` and
+pass the supplied actor slot to `.with_publication_actor_slot(actor_slot)`.
+Clone the same service and machine into that factory and await materialization
+before pinning the controller. This executor forwards
+store-boundary acknowledgements to the actual persistent service owner.
+
+Do not combine `EphemeralSessionService` with a persistent machine. In the tested
+snapshot, `materialize_ephemeral_runtime_session` rejects that pairing with a wrapped
+`SessionError::Unsupported` before constructing an actor or registering native
+work. Migrating to persistence requires the stock service and executor above;
+an ephemeral executor cannot acknowledge the persistent owner's committed data.
+
+### Pin the selected controller
+
+When supplying a registry-selected client override, also set
+`SessionBuildOptions.auth_binding` from that client's actual
+`ControllerModelSelection::auth_binding()`. For a storeless service, obtain the
+actor with `live_session_actor_witness` and its real client with
+`pin_controller_client_for_actor`. For a persistent service, acquire
+`acquire_live_session_actor_turn_boundary_lease`, pin that exact actor with
+`pin_controller_client_for_actor`, then drop the boundary lease before native
+submission. A copied model name is not a pinned client.
+The selected credential must be usable in this machine's generated auth owner;
+use the normal credential lifecycle, not a fabricated Ready flag.
+
+## Remove a permission without removing the controller
+
+For a storeless machine, use the existing native custody accessor before grant
+revocation. This excerpt assumes the same actual `machine` and `grants` owner,
+an authenticated administrative `PrincipalRef` named `administrator`, and the
+exact issued `GrantLineageRef` named `grant_to_remove`. Propagate both typed
+custody and grant errors:
+
+```rust
+let mut custody = machine.try_controller_grant_mutation()?;
+grants.revoke(&administrator, &grant_to_remove, &mut custody)?;
+```
+
+Keep the guard through this synchronous mutation. The accessor tries the actual
+machine locks once; ordinary operation checks do not use this administration
+path. `GrantRefusal::ControllerInUse` means an unfinished controller retains the
+grant or one of its ancestors. Separate controller and operation permissions
+into appropriately narrowed leaves so removing an operation permission need not
+remove the controller. A terminal input can still belong to an unfinished run;
+its original contributor continues to protect that controller.
+
+Busy or unsupported custody is public `ControllerCustodyRefusal::Unavailable`,
+without a permission verdict. Persistent machines, including SQLite, are
+currently unsupported by this accessor. Completed-turn reopen and exclusive
+execution custody do not provide persistent grant-administration authority.
+Do not replace the guard with a catalog listing, serialized association or a
+caller-owned assertion of no unfinished work. A host sharing grants with another
+machine or detached owner must include that additional scope in actual custody.
+
+The Console Access panel changes MobKit's console ABAC rules; it is not a native
+grant editor. Native permission repair belongs to the embedding's authorized
+grant/resource owners. Keep local refusals as affected-call feedback while
+permitted work continues; audit availability and launch failures require their
+own infrastructure repair. No CLI grant command or universal Console permission
+control is supplied by this API.
+
+## Bind the final input to authenticated ingress
+
+Issue the controller and operation grants through `LocalGrantAuthority` and
+construct the `InputAuthorityAssociation` for the actual runtime, identities,
+mandate, grant references and pinned selection. It remains a claim until the
+installed owners validate it.
+
+The following excerpt assumes the host already has those values and `pin` from
+the attached actor. Authenticate `requester`, `ingress_actor`, `realm` and
+`authentication` outside the request body. Set any idempotency key before binding:
+
+```rust
+use meerkat_runtime::input::{Input, PromptInput};
+use meerkat_runtime::input_authority::NativeIngressContext;
+
+let mut prompt = PromptInput::new("Read the permitted record", None);
+prompt.header.authority_association = Some(association);
+let input = Input::Prompt(prompt);
+let ingress = NativeIngressContext::from_trusted_ingress(
+    &input, requester, ingress_actor, realm, authentication,
+)?.with_controller_client(&input, pin)?;
+let input = input.with_ingress_context(ingress)?;
+let (accepted, completion) = machine
+    .accept_input_with_completion(&session_id, input)
+    .await?;
+```
+
+Inspect the `AcceptOutcome` and optional completion handle. Finalizing this
+context does not itself admit work. Do not mutate the bound payload, manufacture
+a `WorkAuthorizationContext`, or reuse one from a prior turn; the native owner
+builds it from the admitted contributors.
+
+## Serve one fixed governed JSONL connection
+
+Enable `meerkat-rpc` with `default-features = false` and
+`local-authorization`. This profile takes an in-memory `PersistenceBundle`
+constructed with `new_with_local_grant_authorization` above, a selected
+`LlmClient`, one fixed `Config`, and a nonempty `Vec<ToolDef>` of callback tools.
+Initialize the selected credential through that bundle's installed auth lifecycle
+before serving. The entry checks that governance is already installed and uses
+that same owner; it does not install or upgrade persistent governance.
+
+The retained client does not bypass configuration validation. Its actual
+`ControllerModelSelection::auth_binding()` must name a binding in
+`config.realm[binding.realm]`. Populate that realm's `binding`, `backend` and
+`auth` maps with the corresponding `ProviderBindingConfig`,
+`BackendProfileConfig` and `AuthProfileConfig`. The binding must resolve through
+`resolve_explicit_auth_binding_target` to the selected credential identity, and
+its provider/backend/auth combination must be supported by
+`ProviderRuntimeCatalog`. Keep the actual endpoint and credential account
+consistent with the selected client. The binding realm must equal the connection
+realm, and `config.agent.model` must equal the selected model.
+
+Authenticate the connection in trusted host code. Construct qualified requester,
+ingress actor and optional represented-subject identities there, with their realm
+and historical authentication evidence. Supply an `Arc<InputAssociationProducer>`:
+it receives the final merged `Input`, actual runtime ID and pinned
+`ControllerModelClient`, and returns an `InputAuthorityAssociation` referencing
+real issued grants. These are historical claims, not permission or proof of the
+semantic provenance of prompt text. The installed native owners still validate
+them and current permissions before admission.
+
+This excerpt assumes those host-owned values, the fresh `bundle`, and one JSONL
+`reader`/`writer` pair:
+
+```rust
+use meerkat_rpc::governed_jsonl::{
+    GovernedConnection, GovernedJsonlSetup, serve_governed_jsonl,
+};
+
+let connection = GovernedConnection::new(
+    requester, represented_subject, ingress_actor, realm,
+    authentication_evidence, association_producer,
+)?;
+let setup = GovernedJsonlSetup {
+    config,
+    persistence: bundle,
+    client: selected_client,
+    connection,
+    tools: catalog,
+};
+serve_governed_jsonl(reader, writer, setup).await?;
+```
+
+The entry constructs `AgentFactory::minimal()` internally and owns one private
+runtime, config store and callback connection. It installs the host's catalog once
+and supplies the same fixed definitions as inline session tools. Wire requests
+cannot replace that registry or choose principals, grants, model or credentials.
+Core catalog controls such as `tool_catalog_search` and `tool_catalog_load` may
+still be advertised. They remain subject to native operation policy and cannot
+register tools or expand this fixed callback registry; dynamic `tools/register`
+is unsupported.
+
+After initialization, use `session/create` with `initial_turn: "deferred"`, then
+`turn/start`. Both accept `prompt` and optional `injected_context`; the turn also
+identifies its session. The entry merges the deferred seed and contexts before
+binding native ingress, retaining the actual actor and controller across an input
+permission refusal. The client must handle server `tool/execute` requests and
+return their results on that same connection.
+
+A refused tool operation becomes safe model feedback without entering that
+callback; permitted sibling operations can continue. Input refusal, readiness,
+infrastructure failure and post-effect settlement remain distinct, as described
+below. A later cleanup or settlement failure does not authorize repeating an
+effect.
+
+This first slice supports deferred create, turn execution, callback replies and
+necessary initialization/cancellation protocol. Dynamic tool registration,
+configuration changes, cold/restarted sessions, public history/observation and
+MCP setup are outside it. The constructor rejects an MCP-enabled build and
+configurations enabling skills, hooks, built-in tools, shell, comms, mobs,
+scheduling, workgraphs, model fallback or a system-prompt file. Broader transport,
+SQLite/recovery, policy-administration and full ADR coverage remain pending.
+
+The focused fixture requires the non-MCP feature profile:
+
+```bash
+./scripts/repo-cargo test --locked -p meerkat-rpc --lib \
+  --no-default-features --features local-authorization \
+  governed_jsonl::tests:: -- --test-threads=1
+```
+
+The fixture uses a loopback provider to check authenticated ingress, two model
+requests and one allowed read callback, with zero denied-delete callbacks. It
+also checks retained seed/context/controller ownership, committed audit and the
+saved transcript. These fixture checks do not establish live-provider coverage.
+
+## Acceptance boundary for a Console host adapter
+
+A governed Console submission adapter is still required. A compatible native
+dependency and `local-authorization` feature are prerequisites; enabling them
+or Console access does not commission native owners. Keep the same governed
+bundle, session service, machine and attached controller described above.
+
+Implement this handoff with tests in the existing Console send and native ingress
+modules, after declaring the missing host adapter with unsupported behavior:
+
+1. Thread trusted identity to final admission. Keep `console_send_handler`'s
+   authenticated `agent.send` check, then carry the host-qualified requester,
+   ingress actor, represented subject and authentication evidence through
+   `dispatch_message_to_resolved_member` to the final member input. The browser
+   cannot supply these facts. Obtain the actual actor's controller pin and bind
+   the final input using `NativeIngressContext`, as in `GovernedConnection::bind`.
+   Assert the exact runtime, input, identities and pin seen by native owners;
+   mismatched or missing facts must refuse before model or tool entry.
+2. Exercise a real denied operation alongside a permitted sibling. Extend the
+   existing Console send fixture with the commissioned native owners and a
+   loopback model, retaining the fixed JSONL fixture's real callback, second
+   model-request, transcript and audit assertions. Require zero denied body
+   entries, the permitted result, model-visible refusal and later completion.
+   Transport the actual owner events through SDK and Console projection;
+   decoded synthetic packets alone do not establish this path.
+3. Preserve acceptance and repair boundaries. Extend the existing send-attempt
+   tests for a native input refusal or readiness failure after Console reservation:
+   settle the reserved interaction without reporting that nothing was accepted.
+   A generic HTTP 403 currently means pre-dispatch rejection to this UI. A lost
+   acknowledgement remains outcome-unknown under the frozen idempotency key.
+   Keep operation refusal separate from input readiness, and outcome-audit failure
+   separate from the actual effect; neither infrastructure failure authorizes
+   replaying an effect. Persistent grant or credential administration remains
+   outside this adapter's supported scope.
+
+## Preserve the result and test the actual effect
+
+An operation-local `OperationAuthorizationError::Refused` can become safe model
+feedback while permitted work continues. `Unavailable` and
+`ObservationUnavailable` are distinct infrastructure outcomes, not permission
+denials. Native input refusal is retained as `RuntimeDriverError::InputRefused`;
+admission readiness is reported separately through
+`RuntimeDriverError::ControllerReadinessUnavailable`. The facade's
+`native_admission_error_detail` projects these to finite
+`WireInputAdmissionErrorDetail` values: `ErrorCode::InputRefused` (-32030) or
+`ErrorCode::InputNotReady` (-32031). Preserve that distinction and handle
+serialization failure; a readiness result does not prescribe automatic retry.
+Session operations that cannot acquire runtime authority instead return
+`SessionError::RuntimeUnavailable { reason }`. Its audience-safe projection uses
+`ErrorCode::SessionRuntimeUnavailable` (-32032, HTTP 503, CLI exit 52), preserving
+the typed readiness reason. It is separate from an attempted operation's local
+permission feedback and does not terminate retained work. `ErrorCode` is publicly
+exhaustive, so downstream Rust matches must handle these added variants. This
+Rust/JSONL projection does not imply new typed SDK decoders.
+
+Retain `settlement_failures` alongside the physical result. A diagnostic after a
+successful effect does not authorize repeating it. Use native input audit
+records for this process-lifetime path. With the persistent composition, the
+normal session/input commits retain the original association and ordered audit
+alongside the committed transcript. Keep authorization checks local and persist
+observations through these existing commit boundaries. This does not prove
+crash-safe recovery.
+Route controller grant/policy removal and credential maintenance through their
+custody-aware owners so unfinished work retains its controller. Persistent
+controller/grant administrative mutation remains unavailable in this checkpoint;
+the memory-backed admission path does not remove that limit.
+
+The repository fixture
+`crates/meerkat-authorization/tests/native_governed_loop/e1_policy_control.rs`
+shows the complete factory, native admission, loopback HTTP and tool path. Its
+E1/E3 cases distinguish refusal before body entry from diagnostics after an
+effect. The A2/A3/A8 children cover resource-specific permissions, queued work and
+requester revocation. These are deterministic fixtures, not live model or full
+ADR acceptance. The `e1_policy_control/stock_persistent.rs` child exercises the
+stock bundle/service/executor with a committed Session document, native input
+and audit readback. QJ r3 passed all 11 native cases, including six opt-in cases,
+on the tested tree above; candidate and adjacent-owner checks totalled 132
+distinct passing tests from 145 executions. This bounded gate includes the
+actual stock persistent turn and early rejection of the unsupported mixed
+composition. It does not establish release, SQLite, restart, stock transport
+activation, full ADR coverage or performance. For an application, require zero
+forbidden body entries, one permitted effect, the same admitted run's feedback
+and normal completion.
+
+Read the broader [integration contract](/guides/authorization-integration) and
+[authorization concepts](/concepts/authorization) before extending the protected
+operation inventory.

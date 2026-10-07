@@ -1792,8 +1792,12 @@ async fn materialize_identity_mismatch_preserves_durable_session_and_quiesces_bo
         panic!("corrupted create result must reject, got {reply:?}");
     };
     assert_eq!(cause, BridgeRejectionCause::Internal);
+    // Exactly the typed mismatch: an unproven cleanup reports
+    // `UnrecordedSessionCleanup`, whose reason embeds this one, and
+    // fail-stops the host, so a containment check would pass it here and
+    // only the retry below would fail.
     assert!(
-        reason.contains("session service returned"),
+        reason.starts_with("session service returned"),
         "typed mismatch reason must survive successful cleanup: {reason}"
     );
 
@@ -1868,13 +1872,103 @@ async fn materialize_identity_mismatch_preserves_durable_session_and_quiesces_bo
     // Exact volatile cleanup converged, so this was a retryable typed mismatch
     // rather than sticky uncertainty. The same request now builds under an
     // honest result; reaching attachment also proves no stale sidecar survived.
-    assert!(matches!(
-        probe
-            .send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT)
-            .await
-            .expect("retry after converged mismatch cleanup"),
-        BridgeReply::MemberMaterialized(_)
+    let retry = probe
+        .send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT)
+        .await
+        .expect("retry after converged mismatch cleanup");
+    assert!(
+        matches!(retry, BridgeReply::MemberMaterialized(_)),
+        "retry after converged mismatch cleanup must materialize, got {retry:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// The mismatch rollback compensates a registration its own materialization
+/// created, so it joins that registration's unregister saga until terminal.
+/// A saga outliving the plain unregister's caller grace is cleanup in
+/// progress, not unproven cleanup: the reply stays the typed mismatch, the
+/// host is not fail-stopped, and the same request then materializes. The
+/// saga is held until the rollback has dispatched its wait, and the machine
+/// witnesses which wait that was, so no scheduling decides the outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn materialize_identity_mismatch_rollback_joins_a_slow_unregister_saga() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture = spawn_host_daemon_fixture(HostFixtureOptions {
+        corrupt_first_create_session_result_identity: true,
+        ..HostFixtureOptions::named("mat-identity-mismatch-slow-saga-host").with_member_build()
+    })
+    .await
+    .expect("identity-mismatch fixture");
+    let probe =
+        spawn_peer_comms_endpoint("mat-identity-mismatch-slow-saga-supervisor", true, None).await;
+    probe.trust(fixture.host_peer_descriptor()).await;
+    let mob_id = "mob-identity-mismatch-slow-saga";
+    raw_bind(&probe, &fixture, mob_id, 1).await;
+
+    let command = BridgeCommand::MaterializeMember(sample_materialize_payload(
+        &probe,
+        1,
+        sample_portable_member_spec(mob_id, "b2", "worker"),
+        1,
+        1,
+        MaterializeLaunchMode::Fresh {},
     ));
+    let adapter = fixture
+        .member_runtime_adapter
+        .as_ref()
+        .expect("member runtime adapter");
+    let (saga_entered, release_saga) = adapter.test_hold_next_unregister_saga();
+    let rollback_wait = adapter.test_witness_next_unregister_wait();
+    adapter.test_set_unregister_caller_wait_grace(Duration::ZERO);
+    let release_after_dispatch = async {
+        saga_entered
+            .await
+            .expect("the mismatch rollback started an unregister saga");
+        let wait = rollback_wait
+            .await
+            .expect("the mismatch rollback dispatched its wait on the held saga");
+        let _ = release_saga.send(());
+        wait
+    };
+    let host = fixture.host_peer_descriptor();
+    let (reply, rollback_wait) = tokio::join!(
+        probe.send_bridge_command_raw(&host, &command, REPLY_TIMEOUT),
+        release_after_dispatch,
+    );
+    assert_eq!(
+        rollback_wait,
+        meerkat_runtime::UnregisterTeardownWaitWitness::UntilTerminal,
+        "the rollback joins its saga until terminal instead of answering within the caller grace"
+    );
+    let reply = reply.expect("identity mismatch rejection");
+    let BridgeReply::Rejected { cause, reason } = reply else {
+        panic!("corrupted create result must reject, got {reply:?}");
+    };
+    assert_eq!(cause, BridgeRejectionCause::Internal);
+    assert!(
+        reason.starts_with("session service returned"),
+        "the typed mismatch, not unproven cleanup: {reason}"
+    );
+    let actual = fixture
+        .failing_create
+        .as_ref()
+        .expect("identity-mismatch wrapper")
+        .actual_session_id()
+        .expect("delegated service created a real session");
+    assert!(
+        !adapter.contains_session(&actual).await,
+        "the reply follows the joined saga's terminal teardown"
+    );
+
+    let retry = probe
+        .send_bridge_command_raw(&host, &command, REPLY_TIMEOUT)
+        .await
+        .expect("retry after the joined mismatch rollback");
+    assert!(
+        matches!(retry, BridgeReply::MemberMaterialized(_)),
+        "the host is not fail-stopped, so the retry materializes, got {retry:?}"
+    );
 
     fixture.shutdown().await;
 }

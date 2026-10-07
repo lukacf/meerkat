@@ -2772,6 +2772,8 @@ impl MobActor {
         let input = Input::Prompt(PromptInput {
             injected_context: Vec::new(),
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::Operator,

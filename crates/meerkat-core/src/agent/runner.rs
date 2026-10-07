@@ -41,6 +41,44 @@ use tokio::sync::mpsc;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
+/// The agent borrow and its per-work context have the same lifetime. Dropping
+/// a polled run future also drops this scope, including at an async suspension.
+struct WorkAuthorizationRunScope<'a, C, T, S>
+where
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+{
+    agent: &'a mut Agent<C, T, S>,
+}
+
+impl<'a, C, T, S> WorkAuthorizationRunScope<'a, C, T, S>
+where
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+{
+    fn new(
+        agent: &'a mut Agent<C, T, S>,
+        context: Option<crate::WorkAuthorizationContext>,
+    ) -> Self {
+        agent.tool_dispatch_context =
+            crate::ToolDispatchContext::default().with_work_authorization(context);
+        Self { agent }
+    }
+}
+
+impl<C, T, S> Drop for WorkAuthorizationRunScope<'_, C, T, S>
+where
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+{
+    fn drop(&mut self) {
+        self.agent.tool_dispatch_context = crate::ToolDispatchContext::default();
+    }
+}
+
 /// Owned operation-local future prepared for one noncommitting live bridge
 /// execution. Native executors retain the cross-thread `Send` guarantee;
 /// wasm32 uses the repository's single-threaded local-future convention.
@@ -499,6 +537,13 @@ where
         contexts: Vec<crate::lifecycle::run_primitive::TurnRequestContext>,
     ) {
         self.active_turn_request_contexts = contexts;
+    }
+
+    /// Clear invocation-local authorization after the session owner has
+    /// dropped the run future. This is infallible mechanical cleanup only.
+    pub fn clear_work_authorization(&mut self) {
+        self.tool_dispatch_context.work_authorization = None;
+        self.tool_dispatch_context.prepared_authorization = None;
     }
 
     fn clear_runtime_execution_kind(&mut self) {
@@ -1269,12 +1314,28 @@ where
                 }
                 Ok(outcome)
             }
-            Err(crate::error::ToolError::CallbackPending { tool_name, args }) => {
-                Err(AgentError::CallbackPending {
-                    tool_use_id: call.id,
-                    tool_name,
-                    args,
-                })
+            Err(error) if error.is_callback_pending() => {
+                let (tool_name, args) = error.as_callback_pending().ok_or_else(|| {
+                    AgentError::InternalError(
+                        "callback classification lost its exact payload".to_string(),
+                    )
+                })?;
+                Err(AgentError::callback_pending_with_settlement(
+                    crate::error::PendingCallbackToolCall {
+                        tool_use_id: call.id,
+                        tool_name: tool_name.to_owned(),
+                        args: args.clone(),
+                        settlement_failures: error.settlement_failures().cloned().collect(),
+                    },
+                ))
+            }
+            Err(error)
+                if matches!(
+                    error.primary_error(),
+                    ToolError::OperationObservationUnavailable
+                ) =>
+            {
+                Err(AgentError::tool(error))
             }
             Err(error) => Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error)),
         }
@@ -1995,7 +2056,10 @@ where
 
     /// Run the agent with a user message.
     pub async fn run(&mut self, user_input: ContentInput) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), Vec::new(), None, None)
+        let scope = WorkAuthorizationRunScope::new(self, None);
+        scope
+            .agent
+            .run_inner(user_input, Vec::new(), Vec::new(), None, None)
             .await
     }
 
@@ -2005,8 +2069,15 @@ where
         user_input: ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), Vec::new(), None, Some(event_tx))
-            .await
+        self.run_with_events_and_work_authorization(
+            user_input,
+            Vec::new(),
+            Vec::new(),
+            None,
+            event_tx,
+            None,
+        )
+        .await
     }
 
     /// Execute one live bridge request through this exact agent's client,
@@ -2249,14 +2320,42 @@ where
         transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_inner(
+        self.run_with_events_and_work_authorization(
             user_input,
             typed_turn_appends,
             injected_context,
             transcript_identity,
-            Some(event_tx),
+            event_tx,
+            None,
         )
         .await
+    }
+
+    /// Run with the exact native owner's process-local work context.
+    ///
+    /// This always replaces the prior context, including when `None` is
+    /// supplied, and clears it on completion or future cancellation. It does
+    /// not infer input coordinates or authenticate a supplied association.
+    pub async fn run_with_events_and_work_authorization(
+        &mut self,
+        user_input: ContentInput,
+        typed_turn_appends: Vec<ConversationAppend>,
+        injected_context: Vec<ContentInput>,
+        transcript_identity: Option<TranscriptMessageIdentity>,
+        event_tx: mpsc::Sender<AgentEvent>,
+        work_authorization: Option<crate::WorkAuthorizationContext>,
+    ) -> Result<RunResult, AgentError> {
+        let scope = WorkAuthorizationRunScope::new(self, work_authorization);
+        scope
+            .agent
+            .run_inner(
+                user_input,
+                typed_turn_appends,
+                injected_context,
+                transcript_identity,
+                Some(event_tx),
+            )
+            .await
     }
 
     fn stamp_user_message_identity(&self, mut message: UserMessage) -> UserMessage {
@@ -2290,7 +2389,8 @@ where
     /// Returns `NoPendingBoundary` when generated pending-continuation
     /// authority does not admit the current transcript tail.
     pub async fn run_pending(&mut self) -> Result<RunResult, AgentError> {
-        self.run_pending_inner(None).await
+        let scope = WorkAuthorizationRunScope::new(self, None);
+        scope.agent.run_pending_inner(None).await
     }
 
     /// Run the agent using the pending continuation boundary, with event streaming.
@@ -2300,7 +2400,19 @@ where
         &mut self,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_pending_inner(Some(event_tx)).await
+        self.run_pending_with_events_and_work_authorization(event_tx, None)
+            .await
+    }
+
+    /// Continue an admitted callback/deferred boundary with its own context.
+    /// A prior content turn's authorization is never used as a fallback.
+    pub async fn run_pending_with_events_and_work_authorization(
+        &mut self,
+        event_tx: mpsc::Sender<AgentEvent>,
+        work_authorization: Option<crate::WorkAuthorizationContext>,
+    ) -> Result<RunResult, AgentError> {
+        let scope = WorkAuthorizationRunScope::new(self, work_authorization);
+        scope.agent.run_pending_inner(Some(event_tx)).await
     }
 
     fn push_transcript_append(&mut self, append: ConversationAppend) -> Result<(), AgentError> {
@@ -2518,6 +2630,7 @@ where
             );
         }
         self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&run_prompt_input)
+            .with_work_authorization(self.tool_dispatch_context.work_authorization().cloned())
             .with_turn_metadata(dispatch_metadata)
             .with_runtime_identity(
                 self.session.id().clone(),
@@ -2532,9 +2645,10 @@ where
                 .with_live_bridge_admission(admission);
         }
         let loop_result = self
-            .run_loop(Some(run_prompt_input), event_tx.clone())
+            .run_loop(Some(run_prompt_input), event_tx.clone(), None)
             .await;
-        self.tool_dispatch_context = crate::ToolDispatchContext::default();
+        self.tool_dispatch_context = crate::ToolDispatchContext::default()
+            .with_work_authorization(self.tool_dispatch_context.work_authorization().cloned());
 
         match loop_result {
             Ok(mut result) => {
@@ -2636,6 +2750,16 @@ where
             }
         };
 
+        // Read the exact applied callback receipt before publishing its
+        // post-tool effects. Fresh content runs never receive this marker.
+        let deferred_callback = self
+            .session
+            .deferred_callback_continuation()
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to restore callback failure continuation: {error}"
+                ))
+            })?;
         let committed_images = self
             .session
             .apply_pending_callback_resume_effects()
@@ -2693,6 +2817,7 @@ where
             );
         }
         self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&prompt)
+            .with_work_authorization(self.tool_dispatch_context.work_authorization().cloned())
             .with_turn_metadata(dispatch_metadata)
             .with_runtime_identity(
                 self.session.id().clone(),
@@ -2700,8 +2825,11 @@ where
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
             );
-        let loop_result = self.run_loop(Some(prompt), event_tx.clone()).await;
-        self.tool_dispatch_context = crate::ToolDispatchContext::default();
+        let loop_result = self
+            .run_loop(Some(prompt), event_tx.clone(), deferred_callback)
+            .await;
+        self.tool_dispatch_context = crate::ToolDispatchContext::default()
+            .with_work_authorization(self.tool_dispatch_context.work_authorization().cloned());
 
         match loop_result {
             Ok(mut result) => {
@@ -4043,6 +4171,490 @@ mod skill_activation_effect_tests {
             .with_runtime_execution_kind_for_test(
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
+    }
+
+    #[tokio::test]
+    async fn external_dispatch_preserves_observation_infrastructure_and_settlement_companion() {
+        struct ErrorTools(ToolError);
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for ErrorTools {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([Arc::new(ToolDef::new(
+                    "probe",
+                    "test",
+                    serde_json::json!({"type":"object"}),
+                ))])
+            }
+
+            async fn dispatch(
+                &self,
+                _call: crate::ToolCallView<'_>,
+            ) -> Result<crate::ToolDispatchOutcome, ToolError> {
+                Err(self.0.clone())
+            }
+        }
+
+        let companion = crate::ops::ToolDispatchSettlementFailure {
+            admission_source: crate::ops::ToolDispatchAdmissionSource::ContextGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Failed,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        };
+        for infrastructure in [true, false] {
+            let primary = if infrastructure {
+                ToolError::OperationObservationUnavailable
+            } else {
+                ToolError::AccessDenied {
+                    name: "probe".into(),
+                }
+            };
+            let expected = primary.with_settlement_failures(vec![companion.clone()]);
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    Arc::new(StaticLlmClient),
+                    Arc::new(ErrorTools(expected.clone())),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            let result = agent
+                .dispatch_external_tool_call_with_timeout_policy(
+                    crate::ToolCall::new(
+                        "call-probe".into(),
+                        "probe".into(),
+                        serde_json::json!({}),
+                    ),
+                    ToolDispatchTimeoutPolicy::Disabled,
+                )
+                .await;
+            if infrastructure {
+                let AgentError::Tool { error } =
+                    result.expect_err("infrastructure must remain an engine error")
+                else {
+                    panic!("lost typed external infrastructure error");
+                };
+                assert_eq!(error, expected);
+                assert_eq!(
+                    error.settlement_failures().cloned().collect::<Vec<_>>(),
+                    vec![companion.clone()]
+                );
+            } else {
+                let outcome = result.expect("ordinary denial remains tool feedback");
+                assert!(outcome.result.is_error);
+                assert_eq!(outcome.result.tool_use_id, "call-probe");
+                assert_eq!(outcome.result.settlement_failures, vec![companion.clone()]);
+                assert_eq!(
+                    outcome.terminal_cause().unwrap().kind(),
+                    crate::ToolDispatchTerminalErrorKind::AccessDenied
+                );
+            }
+        }
+    }
+
+    struct AttachmentOnlyAuthorization;
+
+    impl crate::WorkAuthorization for AttachmentOnlyAuthorization {
+        fn prepare(
+            &self,
+            _binding: &crate::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn crate::PreparedOperationAuthorization>,
+            crate::OperationAuthorizationError,
+        > {
+            // These fixtures stop before model execution and test custody only.
+            Err(crate::OperationRefused::new(crate::OperationRefusalKind::Denied).into())
+        }
+    }
+
+    fn attachment_context() -> crate::WorkAuthorizationContext {
+        crate::WorkAuthorizationContext::new(
+            Arc::new(AttachmentOnlyAuthorization),
+            // This fixture is an explicit standalone owner, not a missing
+            // native RuntimeInput silently converted to Domain.
+            crate::OperationExecutionScope::Domain,
+        )
+    }
+
+    // Polling/completion fixtures must reach an authorized model operation;
+    // legacy clients correctly refuse any supplied work authorization.
+    struct AttachmentRunClient {
+        pending: bool,
+        entered: AtomicBool,
+    }
+
+    fn attachment_controller_selection() -> crate::ControllerModelSelection {
+        let binding = crate::AuthBindingRef {
+            realm: crate::RealmId::parse("attachment-test").unwrap(),
+            binding: crate::BindingId::parse("controller").unwrap(),
+            profile: None,
+            origin: crate::BindingOrigin::Configured,
+        };
+        crate::ControllerModelSelection::new(
+            crate::SessionLlmIdentity {
+                model: "attachment-model".into(),
+                provider: crate::Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: Some(binding.clone()),
+            },
+            crate::AuthCredentialIdentity::Binding(binding),
+            "attachment-profile".into(),
+            "fixture".into(),
+        )
+    }
+
+    impl AttachmentRunClient {
+        fn new(pending: bool) -> Arc<Self> {
+            Arc::new(Self {
+                pending,
+                entered: AtomicBool::new(false),
+            })
+        }
+
+        fn work_context(self: &Arc<Self>) -> crate::WorkAuthorizationContext {
+            crate::WorkAuthorizationContext::new(
+                self.clone(),
+                crate::OperationExecutionScope::Domain,
+            )
+            .with_controller_client(crate::ControllerModelClient::new(
+                attachment_controller_selection(),
+                self.clone(),
+            ))
+            .expect("fixture work retains the exact controller client")
+        }
+    }
+
+    impl crate::WorkAuthorization for AttachmentRunClient {
+        fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+            Some(attachment_controller_selection())
+        }
+
+        fn prepare(
+            &self,
+            binding: &crate::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn crate::PreparedOperationAuthorization>,
+            crate::OperationAuthorizationError,
+        > {
+            let crate::AuthorizationOperation::Model(model) = &binding.facts().operation else {
+                panic!("attachment fixture must not authorize non-model operations");
+            };
+            assert!(attachment_controller_selection().matches_model_facts(model));
+            assert!(model.usage == crate::ModelAuthorizationUse::ControllerInference);
+            assert_eq!(model.endpoint.as_ref(), "http://attachment.invalid/model");
+            assert_eq!(model.wire_model.as_ref(), "attachment-model");
+            assert!(model.hosted_capabilities.is_empty());
+            assert!(model.live_channel.is_none());
+            assert!(binding.facts().run_id.is_some());
+            assert!(matches!(
+                binding.facts().execution_scope,
+                crate::OperationExecutionScope::Domain
+            ));
+            Ok(Arc::new(AttachmentRunPermit(binding.clone())))
+        }
+    }
+
+    struct AttachmentRunPermit(crate::PreparedAuthorizationBinding);
+
+    impl crate::PreparedOperationAuthorization for AttachmentRunPermit {
+        fn check_current(
+            &self,
+            binding: &crate::PreparedAuthorizationBinding,
+        ) -> Result<(), crate::OperationAuthorizationError> {
+            assert!(self.0.same_operation(binding));
+            Ok(())
+        }
+    }
+
+    struct AttachmentRunAttempt {
+        client: Arc<AttachmentRunClient>,
+        check: crate::authorization::PreparedOperationCheck,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::AgentLlmRequestAttempt for AttachmentRunAttempt {
+        fn request_pressure(&self) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+            Ok(None)
+        }
+
+        async fn stream_response(
+            &self,
+            _assistant_message_id: crate::AssistantMessageId,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            self.check.current().map_err(AgentError::from)?;
+            self.client.entered.store(true, Ordering::SeqCst);
+            if self.client.pending {
+                std::future::pending().await
+            } else {
+                Ok(super::super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "ok".into(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    normalized_test_usage(self.client.as_ref(), Usage::default()),
+                ))
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for AttachmentRunClient {
+        fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+            Some(attachment_controller_selection())
+        }
+
+        fn prepare_request_attempt_authorized(
+            self: Arc<Self>,
+            _messages: Arc<Vec<Message>>,
+            tools: Arc<[Arc<ToolDef>]>,
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            authorization: Option<crate::LlmRequestAuthorization>,
+        ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+            assert!(tools.is_empty());
+            let selection = attachment_controller_selection();
+            let check = authorization
+                .expect("run must forward its retained work context")
+                .prepare(crate::ModelAuthorizationFacts {
+                    identity: Arc::new(crate::SessionLlmIdentity {
+                        model: selection.model().into(),
+                        provider: selection.provider(),
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding: selection.auth_binding().cloned(),
+                    }),
+                    wire_model: selection.model().into(),
+                    hosted_capabilities: Arc::from([]),
+                    backend_profile_id: Some(selection.backend_profile_id().into()),
+                    backend_kind: selection.backend_kind().into(),
+                    endpoint: "http://attachment.invalid/model".into(),
+                    credential: Some(selection.credential().clone()),
+                    usage: crate::ModelAuthorizationUse::ControllerInference,
+                    live_channel: None,
+                })
+                .map_err(AgentError::from)?;
+            Ok(Arc::new(AttachmentRunAttempt {
+                client: self,
+                check,
+            }))
+        }
+
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            panic!("governed fixture must use its authorized request attempt")
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "attachment-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn work_authorization_scope_replaces_some_and_none_and_clears_on_drop() {
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let previous = attachment_context();
+        let selected = attachment_context();
+        agent.tool_dispatch_context =
+            crate::ToolDispatchContext::default().with_work_authorization(Some(previous.clone()));
+        {
+            let scope = WorkAuthorizationRunScope::new(&mut agent, Some(selected.clone()));
+            let active = scope
+                .agent
+                .tool_dispatch_context
+                .work_authorization()
+                .expect("selected work context");
+            assert!(active.same_context(&selected));
+            assert!(!active.same_context(&previous));
+        }
+        assert!(agent.tool_dispatch_context.work_authorization().is_none());
+        agent.tool_dispatch_context =
+            crate::ToolDispatchContext::default().with_work_authorization(Some(previous));
+        {
+            let scope = WorkAuthorizationRunScope::new(&mut agent, None);
+            assert!(
+                scope
+                    .agent
+                    .tool_dispatch_context
+                    .work_authorization()
+                    .is_none()
+            );
+        }
+        assert!(
+            agent
+                .tool_dispatch_context
+                .prepared_authorization()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_polled_work_authorized_run_clears_dispatch_context() {
+        let client = AttachmentRunClient::new(true);
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let (tx, _rx) = mpsc::channel(64);
+        let mut run = Box::pin(agent.run_with_events_and_work_authorization(
+            "held model request".into(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            tx,
+            Some(client.work_context()),
+        ));
+        assert!(futures::poll!(run.as_mut()).is_pending());
+        assert!(client.entered.load(Ordering::SeqCst));
+        drop(run);
+        assert!(agent.tool_dispatch_context.work_authorization().is_none());
+        assert!(
+            agent
+                .tool_dispatch_context
+                .prepared_authorization()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_unpolled_work_authorized_run_does_not_install_context() {
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let before = agent.session().messages().to_vec();
+        let (tx, _rx) = mpsc::channel(64);
+        let run = agent.run_with_events_and_work_authorization(
+            "never polled".into(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            tx,
+            Some(attachment_context()),
+        );
+        drop(run);
+        assert!(agent.tool_dispatch_context.work_authorization().is_none());
+        assert_eq!(agent.session().messages(), before);
+    }
+
+    #[tokio::test]
+    async fn work_authorization_clears_after_completion_and_early_refusal() {
+        let client = AttachmentRunClient::new(false);
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let (tx, _rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_work_authorization(
+                "allowed mechanics".into(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                tx,
+                Some(client.work_context()),
+            )
+            .await
+            .expect("ordinary no-tool run completes");
+        assert!(client.entered.load(Ordering::SeqCst));
+        assert!(agent.tool_dispatch_context.work_authorization().is_none());
+
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        client.entered.store(false, Ordering::SeqCst);
+        let (tx, _rx) = mpsc::channel(64);
+        let error = agent
+            .run_with_events_and_work_authorization(
+                "invalid duplicate lowering".into(),
+                vec![skill_append(
+                    ConversationAppendRole::User,
+                    CoreRenderable::text("typed"),
+                )],
+                vec!["injected".into()],
+                None,
+                tx,
+                Some(attachment_context()),
+            )
+            .await
+            .expect_err("two owners of injected context refuse before execution");
+        assert!(matches!(error, AgentError::ConfigError(_)));
+        assert!(!client.entered.load(Ordering::SeqCst));
+        assert!(agent.tool_dispatch_context.work_authorization().is_none());
+    }
+
+    #[tokio::test]
+    async fn work_authorization_clears_after_pending_boundary_refusal() {
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.set_runtime_execution_kind(Some(
+            crate::lifecycle::RuntimeExecutionKind::ResumePending,
+        ));
+        let (tx, _rx) = mpsc::channel(64);
+        let error = agent
+            .run_pending_with_events_and_work_authorization(tx, Some(attachment_context()))
+            .await
+            .expect_err("empty session has no pending continuation");
+        assert!(matches!(error, AgentError::NoPendingBoundary));
+        assert!(agent.tool_dispatch_context.work_authorization().is_none());
+        assert!(
+            agent
+                .tool_dispatch_context
+                .prepared_authorization()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_polled_pending_work_run_clears_dispatch_context() {
+        let client = AttachmentRunClient::new(true);
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent
+            .session_mut()
+            .push(Message::User(UserMessage::text("pending first turn")));
+        agent.set_runtime_execution_kind(Some(
+            crate::lifecycle::RuntimeExecutionKind::ResumePending,
+        ));
+        let (tx, _rx) = mpsc::channel(64);
+        let mut run = Box::pin(
+            agent.run_pending_with_events_and_work_authorization(tx, Some(client.work_context())),
+        );
+        assert!(futures::poll!(run.as_mut()).is_pending());
+        assert!(client.entered.load(Ordering::SeqCst));
+        drop(run);
+        assert!(agent.tool_dispatch_context.work_authorization().is_none());
+        assert!(
+            agent
+                .tool_dispatch_context
+                .prepared_authorization()
+                .is_none()
+        );
     }
 
     struct CountingLlmClient {

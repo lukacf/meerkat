@@ -190,8 +190,14 @@ pub enum TurnFailureSourceKind {
 }
 
 impl TurnFailureSourceKind {
-    pub fn from_agent_error(error: &AgentError) -> Self {
-        match error {
+    /// Refused operations have no terminal failure source. The caller must
+    /// return their feedback through the admitted controller route.
+    pub fn from_agent_error(error: &AgentError) -> Result<Self, crate::OperationRefused> {
+        if let Some(refusal) = error.operation_refusal() {
+            return Err(refusal);
+        }
+        Ok(match error {
+            AgentError::OperationRefused { refusal } => return Err(*refusal),
             AgentError::Llm { .. } => Self::Llm,
             AgentError::StoreError(_) => Self::StoreError,
             AgentError::Tool { .. } => Self::ToolError,
@@ -231,15 +237,23 @@ impl TurnFailureSourceKind {
             AgentError::InvalidOutputSchema(_) => Self::InvalidOutputSchema,
             AgentError::HookDenied { .. } => Self::HookDenied,
             AgentError::HookTimeout { .. } => Self::HookTimeout,
-            AgentError::HookExecutionFailed { .. } => Self::HookExecutionFailed,
+            // Non-PreTool points retain their existing fatal disposition until
+            // their operation owners define local recovery. This classifier
+            // preserves the hook fault category, not a claim of target entry.
+            AgentError::HookExecutionFailed { .. } | AgentError::HookLaunchRefused { .. } => {
+                Self::HookExecutionFailed
+            }
             AgentError::HookConfigInvalid { .. } => Self::HookConfigInvalid,
             AgentError::TerminalFailure { .. } => Self::TerminalFailure,
             AgentError::NoPendingBoundary => Self::NoPendingBoundary,
             // Capability-unsupported sync; classified like the config-class it
             // was previously represented as (a `ConfigError`).
+            // A control-append refusal (never a turn failure) keeps the
+            // config class its previous `ConfigError` representation had.
             AgentError::DurableSnapshotSyncUnsupported
-            | AgentError::ModelFallbackResumeHeld { .. } => Self::ConfigError,
-        }
+            | AgentError::ModelFallbackResumeHeld { .. }
+            | AgentError::ControlAppendBlockedByCallbackBatch => Self::ConfigError,
+        })
     }
 
     pub fn is_known(self) -> bool {
@@ -262,11 +276,11 @@ impl TurnFailureSource {
         }
     }
 
-    pub fn from_agent_error(error: &AgentError) -> Self {
-        Self::new(
-            TurnFailureSourceKind::from_agent_error(error),
+    pub fn from_agent_error(error: &AgentError) -> Result<Self, crate::OperationRefused> {
+        Ok(Self::new(
+            TurnFailureSourceKind::from_agent_error(error)?,
             error.to_string(),
-        )
+        ))
     }
 
     pub fn llm_retry_exhausted(error: &AgentError) -> Self {
@@ -685,7 +699,52 @@ mod tests {
 
         assert_eq!(
             TurnFailureSourceKind::from_agent_error(&error),
-            TurnFailureSourceKind::InternalError
+            Ok(TurnFailureSourceKind::InternalError)
         );
+    }
+
+    #[test]
+    fn operation_refusal_cannot_become_a_terminal_failure_source() {
+        let refusal = crate::OperationRefused::new(crate::OperationRefusalKind::Denied);
+        let error = AgentError::OperationRefused { refusal };
+        assert_eq!(
+            TurnFailureSourceKind::from_agent_error(&error),
+            Err(refusal)
+        );
+        assert_eq!(TurnFailureSource::from_agent_error(&error), Err(refusal));
+        assert!(crate::retry::LlmRetryFailure::from_agent_error(&error).is_none());
+        assert!(crate::model_fallback::model_fallback_trigger(&error).is_none());
+    }
+
+    #[test]
+    fn projected_refusal_cannot_claim_provider_retryability_or_terminality() {
+        use crate::error::{LlmFailureReason, LlmProviderError, LlmProviderErrorKind};
+        for (details, expected) in [
+            (
+                serde_json::json!({"kind": "denied"}),
+                crate::OperationRefusalKind::Denied,
+            ),
+            (
+                serde_json::json!({}),
+                crate::OperationRefusalKind::MalformedFacts,
+            ),
+        ] {
+            let error = AgentError::llm(
+                "adapter",
+                LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                    LlmProviderErrorKind::OperationRefused,
+                    details,
+                )),
+                "private provider diagnostic",
+            );
+            let refusal = crate::OperationRefused::new(expected);
+            assert_eq!(
+                TurnFailureSourceKind::from_agent_error(&error),
+                Err(refusal)
+            );
+            assert_eq!(TurnFailureSource::from_agent_error(&error), Err(refusal));
+            assert!(crate::retry::LlmRetryFailure::from_agent_error(&error).is_none());
+            assert!(crate::model_fallback::model_fallback_trigger(&error).is_none());
+        }
     }
 }

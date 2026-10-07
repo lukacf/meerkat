@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::image_generation::ToolCallId;
+use crate::ops::ToolDispatchSettlementFailure;
 use crate::provider::Provider;
 use crate::realtime_transcript::{
     RealtimeTranscriptEvent, RealtimeUserContentIdentity, RealtimeUserContentTombstone,
@@ -86,6 +87,9 @@ pub struct LiveToolResult {
     pub call_id: ToolCallId,
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
+    /// Ordered settlement diagnostics that accompany the unchanged physical result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_failures: Vec<ToolDispatchSettlementFailure>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,6 +1368,7 @@ mod tests {
                 call_id: ToolCallId::new("call_123"),
                 content: vec![ContentBlock::Text { text: "42".into() }],
                 is_error: false,
+                settlement_failures: Vec::new(),
             },
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -2405,6 +2410,7 @@ mod tests {
                 text: "answer is 42".into(),
             }],
             is_error: false,
+            settlement_failures: Vec::new(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let deser: LiveToolResult = serde_json::from_str(&json).unwrap();
@@ -2419,6 +2425,7 @@ mod tests {
                 text: "tool not found".into(),
             }],
             is_error: true,
+            settlement_failures: Vec::new(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let deser: LiveToolResult = serde_json::from_str(&json).unwrap();
@@ -2438,6 +2445,7 @@ mod tests {
                 },
             ],
             is_error: false,
+            settlement_failures: Vec::new(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let deser: LiveToolResult = serde_json::from_str(&json).unwrap();
@@ -2475,5 +2483,90 @@ mod tests {
         let json = serde_json::to_string(&schema).unwrap();
         let _deser: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(json.contains("LiveChannelOpenResponse"));
+    }
+
+    #[test]
+    fn command_submit_tool_result_retains_ordered_settlement_companions() {
+        let audit = serde_json::json!({
+            "admission_source": "authorization_audit",
+            "effect_kind": "external_io",
+            "physical_outcome": "committed",
+            "failure_kind": "operation_observation_unavailable"
+        });
+        let gate = serde_json::json!({
+            "admission_source": "configured_gate",
+            "effect_kind": "external_io",
+            "physical_outcome": "committed",
+            "failure_kind": "policy_indeterminate"
+        });
+        let wire = serde_json::json!({
+            "command": "submit_tool_result",
+            "result": {
+                "call_id": "ordered-call",
+                "content": [{"type": "text", "text": "effect completed"}],
+                "is_error": false,
+                "settlement_failures": [audit.clone(), gate, audit]
+            }
+        });
+        let command: LiveAdapterCommand = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(command).unwrap(), wire);
+    }
+
+    #[test]
+    fn live_tool_result_legacy_and_empty_settlement_shapes_stay_omitted() {
+        for is_error in [false, true] {
+            let legacy = serde_json::json!({
+                "call_id": "legacy-call",
+                "content": [{"type": "text", "text": "original content"}],
+                "is_error": is_error
+            });
+            let mut explicit_empty = legacy.clone();
+            explicit_empty["settlement_failures"] = serde_json::json!([]);
+            for input in [legacy.clone(), explicit_empty] {
+                let result: LiveToolResult = serde_json::from_value(input).unwrap();
+                assert_eq!(serde_json::to_value(result).unwrap(), legacy);
+            }
+        }
+    }
+
+    #[test]
+    fn live_tool_result_rejects_malformed_settlement_companions() {
+        let known = serde_json::json!({
+            "admission_source": "authorization_audit",
+            "effect_kind": "external_io",
+            "physical_outcome": "committed",
+            "failure_kind": "operation_observation_unavailable"
+        });
+        let mut unknown_kind = known.clone();
+        unknown_kind["failure_kind"] = serde_json::json!("unknown_future_failure");
+        let mut private_payload = known;
+        private_payload["private_error"] = serde_json::json!("PRIVATE-COMPANION-CANARY");
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([{}]),
+            serde_json::json!(["not a typed companion"]),
+            serde_json::json!([unknown_kind]),
+            serde_json::json!([private_payload]),
+        ] {
+            let result = serde_json::json!({
+                "call_id": "malformed-call",
+                "content": [{"type": "text", "text": "original content"}],
+                "is_error": false,
+                "settlement_failures": invalid
+            });
+            assert!(
+                serde_json::from_value::<LiveToolResult>(result.clone()).is_err(),
+                "malformed companion must not be silently discarded: {result}"
+            );
+            let command = serde_json::json!({
+                "command": "submit_tool_result",
+                "result": result
+            });
+            assert!(
+                serde_json::from_value::<LiveAdapterCommand>(command.clone()).is_err(),
+                "command must use the same typed companion decoder: {command}"
+            );
+        }
     }
 }

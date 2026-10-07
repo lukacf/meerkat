@@ -163,6 +163,7 @@ fn test_rct_contracts_shell_defaults_contract() -> Result<(), Box<dyn std::error
         security_patterns: vec![],
         env_vars: std::collections::HashMap::new(),
         max_output_chars: 40_000,
+        confinement: meerkat_tools::builtin::shell::ShellConfinement::TrustedHost,
     };
     let json_str = serde_json::to_string(&tool)?;
     let json_val: serde_json::Value = serde_json::from_str(&json_str)?;

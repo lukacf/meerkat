@@ -1712,6 +1712,8 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
     fn from(value: WireRuntimeTurnMetadata) -> Self {
         use meerkat_core::lifecycle::run_primitive::ModelId;
         Self {
+            // A wire value cannot mint the trusted native work context.
+            work_authorization: None,
             handling_mode: value.handling_mode.map(Into::into),
             skill_references: value.skill_references,
             turn_tool_overlay: value.turn_tool_overlay,

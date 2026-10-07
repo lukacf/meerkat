@@ -425,6 +425,10 @@ struct MachineManagedPostStopExecutor {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        self.inner.supports_work_authorization()
+    }
+
     fn boundary_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
@@ -957,7 +961,8 @@ mod ops_persistence_worker_tests {
         let machine = MeerkatMachine::persistent(
             Arc::clone(&store),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("persistent machine");
         let session_id = SessionId::new();
         machine
             .register_session(session_id.clone())
@@ -1001,6 +1006,10 @@ mod ops_persistence_worker_tests {
             Arc::clone(&store),
             runtime_id.clone(),
             persist_rx,
+            store
+                .execution_custody()
+                .map(|owner| owner.try_acquire_shared().map(Arc::new))
+                .transpose(),
         )
         .expect("persistence worker");
 
@@ -1031,6 +1040,10 @@ mod ops_persistence_worker_tests {
             Arc::clone(&store),
             runtime_id.clone(),
             persist_rx,
+            store
+                .execution_custody()
+                .map(|owner| owner.try_acquire_shared().map(Arc::new))
+                .transpose(),
         )
         .expect("persistence worker");
         registry.set_persistence_channel(persist_tx, epoch_id.clone(), cursor_state);
@@ -1170,12 +1183,18 @@ fn spawn_ops_lifecycle_persistence_worker(
     store: Arc<dyn RuntimeStore>,
     runtime_id: LogicalRuntimeId,
     mut persist_rx: OpsLifecyclePersistenceReceiver,
+    execution_custody: Result<
+        Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+        crate::store::RuntimeStoreExecutionCustodyError,
+    >,
 ) -> Result<OpsLifecyclePersistenceWorker, RuntimeDriverError> {
+    let execution_custody = execution_custody.map_err(super::execution_custody_error)?;
     let thread_name = format!("ops-lifecycle-persist-{runtime_id}");
     let worker_runtime_id = runtime_id.clone();
     let handle = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            let _execution_custody = execution_custody;
             let runtime = match crate::tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1209,8 +1228,14 @@ fn spawn_ops_lifecycle_persistence_worker(
     store: Arc<dyn RuntimeStore>,
     runtime_id: LogicalRuntimeId,
     mut persist_rx: OpsLifecyclePersistenceReceiver,
+    execution_custody: Result<
+        Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+        crate::store::RuntimeStoreExecutionCustodyError,
+    >,
 ) -> Result<OpsLifecyclePersistenceWorker, RuntimeDriverError> {
+    let execution_custody = execution_custody.map_err(super::execution_custody_error)?;
     let handle = crate::tokio::spawn(async move {
+        let _execution_custody = execution_custody;
         while let Some(request) = persist_rx.recv().await {
             persist_ops_lifecycle_request(&store, &runtime_id, request).await;
         }
@@ -2728,6 +2753,7 @@ impl MeerkatMachine {
                 Arc::clone(store),
                 runtime_id.clone(),
                 receiver,
+                Ok(self.execution_custody.clone()),
             )?),
             (None, None) => None,
             _ => {
@@ -3665,12 +3691,26 @@ impl MeerkatMachine {
             drop(gate_guard);
             #[cfg(feature = "live")]
             drop(live_lifecycle_lease);
-            self.join_or_start_unregister_teardown(
+            // This rollback compensates a registration its own materialization
+            // created, and callers act on that registration being gone: a
+            // typed build failure is reported only once cleanup is proven.
+            // Join the owned saga until terminal. The ordinary caller grace
+            // would answer a saga still running under load with
+            // `UnregisterInProgress`, which callers must treat as unproven
+            // cleanup. With B held, the claim's provisional post-stop cleanup
+            // completed above under B, and its completion bit makes the
+            // saga's ordinary cleanup return before it takes its cleanup gate
+            // or B, so this join adds no wait on B.
+            self.join_or_start_unregister_teardown_with_admission(
                 session_id,
                 expected_epoch,
                 UnregisterTeardownCaller::Explicit,
+                UnregisterTeardownAdmission::AnyCurrentRegistration,
+                None,
+                UnregisterTeardownWait::UntilTerminal,
             )
-            .await?;
+            .await?
+            .require_completed()?;
             return Ok(true);
         }
 
@@ -4643,6 +4683,7 @@ impl MeerkatMachine {
                     Arc::clone(store),
                     runtime_id,
                     persist_rx,
+                    Ok(self.execution_custody.clone()),
                 )?;
                 let previous_worker = {
                     let mut sessions = self.sessions.write().await;
@@ -6090,6 +6131,7 @@ impl MeerkatMachine {
                     Arc::clone(store),
                     recovered_runtime_id.clone(),
                     receiver,
+                    Ok(self.execution_custody.clone()),
                 )?),
                 (None, None) => None,
                 _ => {
@@ -6502,6 +6544,7 @@ impl MeerkatMachine {
                 }
                 wake_tx
             };
+            self.record_attachment_commit();
             if should_wake {
                 let _ = wake_tx.try_send(());
             }
@@ -6674,10 +6717,26 @@ impl MeerkatMachine {
             }
             wake_tx
         };
+        self.record_attachment_commit();
         if should_wake {
             let _ = wake_tx.try_send(());
         }
         Ok(witness.clone())
+    }
+
+    /// Observe runtime attachments becoming serving.
+    ///
+    /// The generation advances once each time an executor attachment is
+    /// committed as serving, after the session entry publishes it, so a
+    /// session whose earlier delivery failed because it was not attached can
+    /// be retried on a typed signal instead of a timer. In-process only.
+    pub fn subscribe_attachment_commits(&self) -> crate::tokio::sync::watch::Receiver<u64> {
+        self.attachment_commits.subscribe()
+    }
+
+    fn record_attachment_commit(&self) {
+        self.attachment_commits
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     pub(super) async fn abort_pending_executor_attachment(
@@ -8133,6 +8192,9 @@ impl MeerkatMachine {
                 (result_rx, coordinator_id)
             }
         };
+
+        #[cfg(feature = "test-support")]
+        self.report_unregister_wait_test_witness(&wait);
 
         if wait == UnregisterTeardownWait::ReturnObserver {
             let registration = expected_registration.cloned().ok_or_else(|| {
@@ -10714,6 +10776,50 @@ Ok::<(), RuntimeDriverError>(())
             .test_unregister_caller_wait_grace
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(grace);
+    }
+
+    /// Witness the wait the next caller dispatches on once it has started or
+    /// joined an unregister teardown saga and is about to wait on it. The
+    /// report is sent at the dispatch itself, before any waiting, so a test
+    /// holding the saga with [`Self::test_hold_next_unregister_saga`] proves
+    /// which wait the caller took without relying on scheduling.
+    #[cfg(feature = "test-support")]
+    pub fn test_witness_next_unregister_wait(
+        &self,
+    ) -> crate::tokio::sync::oneshot::Receiver<super::UnregisterTeardownWaitWitness> {
+        let (witness_tx, witness_rx) = crate::tokio::sync::oneshot::channel();
+        let replaced = self
+            .test_unregister_wait_witness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(witness_tx);
+        assert!(
+            replaced.is_none(),
+            "unregister wait test witness already armed"
+        );
+        witness_rx
+    }
+
+    #[cfg(feature = "test-support")]
+    fn report_unregister_wait_test_witness(&self, wait: &UnregisterTeardownWait) {
+        let witness = match wait {
+            UnregisterTeardownWait::CallerGrace(_) => {
+                super::UnregisterTeardownWaitWitness::CallerGrace
+            }
+            UnregisterTeardownWait::UntilTerminal => {
+                super::UnregisterTeardownWaitWitness::UntilTerminal
+            }
+            // An observer return does not wait at all.
+            UnregisterTeardownWait::ReturnObserver => return,
+        };
+        let witness_tx = self
+            .test_unregister_wait_witness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(witness_tx) = witness_tx {
+            let _ = witness_tx.send(witness);
+        }
     }
 
     /// The deadline for a plain unregister caller's bounded wait.

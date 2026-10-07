@@ -307,11 +307,11 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         write_generated(&machine_model_path(root, &machine.slug), &machine_model)?;
         write_generated(
             &machine_ci_path(root, &machine.slug),
-            &render_machine_ci_cfg(&machine.schema, false),
+            &render_machine_ci_cfg(&machine.schema, false)?,
         )?;
         write_generated(
             &machine_deep_path(root, &machine.slug),
-            &render_machine_ci_cfg(&machine.schema, true),
+            &render_machine_ci_cfg(&machine.schema, true)?,
         )?;
         write_generated(
             &machine_contract_path(root, &machine.slug),
@@ -522,6 +522,7 @@ fn run_tlc_lane(
                 lane_profile_config(profile),
                 profile,
                 job_budget,
+                machine_requires_transition_coverage(&machine.schema, profile),
             );
             LaneJobResult {
                 output: capture.output,
@@ -536,6 +537,7 @@ fn run_tlc_lane(
                 lane_profile_config(profile),
                 profile,
                 job_budget,
+                matches!(profile, VerifyProfile::Deep),
             );
             LaneJobResult {
                 output: capture.output,
@@ -565,10 +567,18 @@ fn run_tlc_lane(
         };
         print!("{}", result.output);
         match result.coverage {
-            Ok(Some(coverage)) if matches!(profile, VerifyProfile::Deep) => {
+            Ok(Some(coverage))
+                if machine_requires_transition_coverage(&machine.schema, profile) =>
+            {
                 if let Err(err) = ensure_machine_transition_coverage(&machine.schema, &coverage) {
                     failures.push(format!("machine {}: {err:#}", machine.schema.machine));
                 }
+            }
+            Ok(None) if machine_requires_transition_coverage(&machine.schema, profile) => {
+                failures.push(format!(
+                    "machine {}: required TLC action coverage missing",
+                    machine.schema.machine
+                ));
             }
             Ok(_) => {}
             Err(err) => failures.push(format!("machine {}: {err:#}", machine.schema.machine)),
@@ -852,12 +862,12 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         )?;
         compare_generated(
             &machine_ci_path(root, &machine.slug),
-            &render_machine_ci_cfg(&machine.schema, false),
+            &render_machine_ci_cfg(&machine.schema, false)?,
             &mut mismatches,
         )?;
         compare_generated(
             &machine_deep_path(root, &machine.slug),
-            &render_machine_ci_cfg(&machine.schema, true),
+            &render_machine_ci_cfg(&machine.schema, true)?,
             &mut mismatches,
         )?;
         compare_generated(
@@ -4080,9 +4090,18 @@ fn run_tlc_capture(
     config_name: &str,
     profile: VerifyProfile,
     budget: TlcRunBudget,
+    require_coverage: bool,
 ) -> TlcCapture {
     let mut output = String::new();
-    let result = run_tlc_capture_inner(dir, slug, config_name, profile, budget, &mut output);
+    let result = run_tlc_capture_inner(
+        dir,
+        slug,
+        config_name,
+        profile,
+        budget,
+        require_coverage,
+        &mut output,
+    );
     TlcCapture { output, result }
 }
 
@@ -4092,6 +4111,7 @@ fn run_tlc_capture_inner(
     config_name: &str,
     profile: VerifyProfile,
     budget: TlcRunBudget,
+    require_coverage: bool,
     output: &mut String,
 ) -> Result<Option<TlcCoverageSummary>> {
     let model = dir.join("model.tla");
@@ -4141,9 +4161,10 @@ fn run_tlc_capture_inner(
     let mut cmd = Command::new("tlc");
     cmd.arg("-workers")
         .arg(budget.workers.to_string())
-        .args(match profile {
-            VerifyProfile::Ci => Vec::new(),
-            VerifyProfile::Deep => vec!["-coverage".to_string(), "1".to_string()],
+        .args(if require_coverage {
+            vec!["-coverage", "1"]
+        } else {
+            Vec::new()
         })
         .arg("-metadir")
         .arg(&metadir)
@@ -4194,7 +4215,7 @@ fn run_tlc_capture_inner(
         Some(_) => {}
     }
 
-    let coverage = if matches!(profile, VerifyProfile::Deep) {
+    let coverage = if require_coverage {
         let model_text = match pruned_model_text {
             Some(text) => text,
             None => fs::read_to_string(&model)
@@ -4482,6 +4503,7 @@ fn verify_composition_witness_capture(
         &config_name,
         VerifyProfile::Deep,
         budget,
+        true,
     );
     let result = witness_completion_result(composition, witness, capture.result);
     (capture.output, result)
@@ -4625,6 +4647,14 @@ pub fn machine_verify_witness(args: VerifyWitnessArgs) -> Result<()> {
     Ok(())
 }
 
+fn machine_requires_transition_coverage(schema: &MachineSchema, profile: VerifyProfile) -> bool {
+    matches!(profile, VerifyProfile::Deep)
+        || schema
+            .tlc_model
+            .as_ref()
+            .is_some_and(|model| model.require_ci_transition_coverage)
+}
+
 pub fn ensure_machine_transition_coverage(
     schema: &MachineSchema,
     coverage: &TlcCoverageSummary,
@@ -4647,7 +4677,7 @@ pub fn ensure_machine_transition_coverage(
     }
 
     bail!(
-        "deep TLC coverage for {} left zero-hit transitions:\n{}",
+        "TLC coverage for {} left zero-generated-state transitions:\n{}",
         schema.machine,
         zero_hit
             .into_iter()

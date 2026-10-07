@@ -275,6 +275,10 @@ impl DetachedJobStore for PausingSubscriptionStore {
     fn is_persistent(&self) -> bool {
         self.inner.is_persistent()
     }
+
+    fn outbox_commit_signal(&self) -> meerkat_jobs::JobOutboxCommitSignal {
+        self.inner.outbox_commit_signal()
+    }
 }
 
 #[tokio::test]

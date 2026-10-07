@@ -67,6 +67,8 @@ mod session_context;
 mod turn_state;
 
 pub use auth_lease::RuntimeAuthLeaseHandle;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use auth_lease::{AuthLeaseReleaseObserver, AuthLeaseReleasePermit, ReleasedOAuthFlows};
 pub use comms_drain::RuntimeCommsDrainHandle;
 pub use external_tool_surface::RuntimeExternalToolSurfaceHandle;
 pub use interaction_stream::RuntimeInteractionStreamHandle;
@@ -630,3 +632,6 @@ mod tests {
         assert_eq!(state.session_id, None);
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) use oauth_flow::tests::FailingOAuthSnapshotStore;

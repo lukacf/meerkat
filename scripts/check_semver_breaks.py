@@ -179,6 +179,14 @@ def _symbols_inherent_method_missing(text: str) -> tuple[str, ...] | None:
     return _symbols_path_member(match.group(1)) if match else None
 
 
+def _symbols_function_missing(text: str) -> tuple[str, ...] | None:
+    # function meerkat_core::auth::clear_tokens_and_publish_lifecycle_released
+    match = re.fullmatch(
+        r"function\s+(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Za-z_][A-Za-z0-9_]*)", text
+    )
+    return (match.group(1),) if match else None
+
+
 def _symbols_struct_pub_field_missing(text: str) -> tuple[str, ...] | None:
     # field delivery_backlog of struct JobHealthSummary
     match = re.fullmatch(
@@ -303,6 +311,7 @@ STRUCTURAL_EXTRACTORS = {
     "enum_variant_missing": _symbols_enum_variant_missing,
     "derive_trait_impl_removed": _symbols_derive_trait_impl_removed,
     "inherent_method_missing": _symbols_inherent_method_missing,
+    "function_missing": _symbols_function_missing,
     "function_parameter_count_changed": _symbols_function_parameter_count_changed,
     "method_parameter_count_changed": _symbols_callable_parameter_count_changed,
     "method_requires_different_generic_type_params": _symbols_method_generic_count_changed,

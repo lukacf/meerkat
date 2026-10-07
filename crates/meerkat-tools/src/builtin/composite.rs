@@ -646,7 +646,16 @@ impl CompositeDispatcher {
                 BuiltinToolError::ExecutionFailed(msg) => {
                     ToolError::ExecutionFailed { message: msg }
                 }
+                BuiltinToolError::OperationObservationUnavailable => {
+                    ToolError::OperationObservationUnavailable
+                }
+                BuiltinToolError::OperationAuthorizationUnavailable => {
+                    ToolError::OperationAuthorizationUnavailable
+                }
                 BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
+                BuiltinToolError::ConfinementRefused { refusal } => {
+                    ToolError::ConfinementRefused { refusal }
+                }
             })?;
         let async_ops = tool.async_ops_for_output(&output);
         match output {
@@ -1122,15 +1131,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
         #[allow(clippy::redundant_clone)]
         // clone needed on non-wasm32 where owner_bridge_session_id is reused
         let rebound_external = match owned.external.take() {
+            // An external dispatcher that needs the binding but is still
+            // shared cannot be rebound. Leaving it unbound would silently drop
+            // its owner session and registry, so the bind is rejected.
             Some(external)
-                if external.capabilities().ops_lifecycle && Arc::strong_count(&external) == 1 =>
+                if external.capabilities().ops_lifecycle && Arc::strong_count(&external) != 1 =>
             {
-                Some(
-                    external
-                        .bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?
-                        .into_dispatcher(),
-                )
+                return Err(OpsLifecycleBindError::SharedOwnership);
             }
+            Some(external) if external.capabilities().ops_lifecycle => Some(
+                external
+                    .bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?
+                    .into_dispatcher(),
+            ),
             other => other,
         };
 
@@ -1265,6 +1278,87 @@ mod tests {
     /// laundered ambient CWD.
     fn test_project_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    struct RefusingLocalTool(meerkat_core::confinement::ConfinementRefusal);
+
+    #[async_trait]
+    impl BuiltinTool for RefusingLocalTool {
+        fn name(&self) -> &'static str {
+            "refusing_local_tool"
+        }
+
+        fn def(&self) -> ToolDef {
+            ToolDef::new(
+                self.name(),
+                "Refusal projection fixture",
+                json!({"type": "object"}),
+            )
+        }
+
+        fn default_enabled(&self) -> bool {
+            true
+        }
+
+        async fn call(&self, _args: Value) -> Result<ToolOutput, BuiltinToolError> {
+            Err(BuiltinToolError::ConfinementRefused { refusal: self.0 })
+        }
+    }
+
+    #[tokio::test]
+    async fn local_tool_dispatch_preserves_every_confinement_cause() {
+        use meerkat_core::confinement::ConfinementRefusal;
+
+        let dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let raw_args = serde_json::value::RawValue::from_string("{}".into()).unwrap();
+        for (refusal, wire_cause) in [
+            (
+                ConfinementRefusal::InvalidRequirement,
+                "invalid_requirement",
+            ),
+            (ConfinementRefusal::InvalidLaunch, "invalid_launch"),
+            (
+                ConfinementRefusal::UnsupportedRequirement,
+                "unsupported_requirement",
+            ),
+            (
+                ConfinementRefusal::BackendUnavailable,
+                "backend_unavailable",
+            ),
+            (ConfinementRefusal::PreparationFailed, "preparation_failed"),
+        ] {
+            let tool = RefusingLocalTool(refusal);
+            let call = ToolCallView {
+                id: "refused-call",
+                name: tool.name(),
+                args: &raw_args,
+            };
+            let error = dispatcher
+                .call_local_tool(&tool, call, json!({}), &ToolDispatchContext::default())
+                .await
+                .expect_err("launch refusal must remain an operation-local error");
+            assert!(matches!(
+                &error,
+                ToolError::ConfinementRefused { refusal: actual } if *actual == refusal
+            ));
+            assert_eq!(error.error_code(), "confinement_refused");
+            assert_eq!(
+                error.structured_data(),
+                Some(json!({"refusal": wire_cause}))
+            );
+            assert!(matches!(
+                meerkat_core::ToolDispatchTerminalErrorKind::from(&error),
+                meerkat_core::ToolDispatchTerminalErrorKind::ConfinementRefused
+            ));
+        }
     }
 
     #[derive(Default)]
@@ -1885,6 +1979,60 @@ mod tests {
             1,
             "bind_external_tool_surface_handle must forward to the external dispatcher"
         );
+    }
+
+    /// An external dispatcher that needs the ops binding but is still shared
+    /// rejects the composite's bind instead of staying silently unbound.
+    #[test]
+    fn shared_ops_capable_external_rejects_the_bind() {
+        struct OpsCapableExternal;
+
+        #[async_trait::async_trait]
+        impl AgentToolDispatcher for OpsCapableExternal {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::from([])
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::not_found(call.name))
+            }
+
+            fn capabilities(&self) -> DispatcherCapabilities {
+                DispatcherCapabilities {
+                    ops_lifecycle: true,
+                }
+            }
+
+            fn bind_ops_lifecycle(
+                self: Arc<Self>,
+                _registry: Arc<dyn OpsLifecycleRegistry>,
+                _owner_bridge_session_id: SessionId,
+            ) -> Result<BindOutcome, OpsLifecycleBindError> {
+                Ok(BindOutcome::Bound(self))
+            }
+        }
+
+        let shared: Arc<dyn AgentToolDispatcher> = Arc::new(OpsCapableExternal);
+        let dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            Some(Arc::clone(&shared)),
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        match Arc::new(dispatcher).bind_ops_lifecycle(registry, SessionId::new()) {
+            Err(OpsLifecycleBindError::SharedOwnership) => {}
+            Err(other) => panic!("expected SharedOwnership, got {other:?}"),
+            Ok(_) => panic!("a shared ops-capable external must not be left unbound"),
+        }
+        drop(shared);
     }
 
     #[test]
@@ -3287,5 +3435,71 @@ mod tests {
             names.contains(&"load_skill".to_string()),
             "explicitly enabled load_skill must appear: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn observation_infrastructure_web_search_retains_type_through_dispatcher() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ObservationUnavailableSearch(Arc<AtomicUsize>);
+        #[async_trait]
+        impl meerkat_llm_core::WebSearchExecutor for ObservationUnavailableSearch {
+            async fn execute_web_search(
+                &self,
+                _request: meerkat_core::web_search::WebSearchRequest,
+            ) -> Result<meerkat_core::web_search::WebSearchResult, meerkat_llm_core::LlmError>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(meerkat_llm_core::LlmError::OperationObservationUnavailable)
+            }
+        }
+
+        let root = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(root.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        dispatcher.register_web_search_tool(
+            Arc::new(ObservationUnavailableSearch(Arc::clone(&attempts))),
+            ToolCategoryOverride::Enable,
+        );
+        let args = serde_json::value::RawValue::from_string(
+            json!({"query": "fixed test query"}).to_string(),
+        )
+        .unwrap();
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "observation-failure",
+                name: "web_search",
+                args: &args,
+            })
+            .await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no search retry");
+
+        // The same actual tool family still routes a healthy independent call.
+        // This rules out disabled-tool or malformed-argument false positives.
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "healthy search",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        let healthy = dispatch_json(&dispatcher, "web_search", json!({"query": "healthy"})).await;
+        assert_eq!(healthy["answer"], "healthy search");
+        let error = result.expect_err("the failing search must not become a tool result");
+        assert_eq!(
+            error.primary_error(),
+            &ToolError::OperationObservationUnavailable,
+            "stringifying into ExecutionFailed would re-enable ordinary model feedback"
+        );
+        assert_eq!(error.error_code(), "operation_observation_unavailable");
+        assert_eq!(error.settlement_failures().count(), 0);
     }
 }

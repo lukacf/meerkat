@@ -442,6 +442,9 @@ pub struct MobMcpState {
     tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     /// The host's explicit application tool policy for child mob members.
     child_application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
+    /// The host's spawn customizer for child mob members, run before the
+    /// internal child policy customizer.
+    child_spawn_member_customizer: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
     persistent_storage_root: Option<PathBuf>,
     /// Legacy infallible persistent-root construction records setup failure so
     /// every managed-mob operation fails closed rather than using ephemeral
@@ -558,12 +561,24 @@ impl MobMcpState {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         console_principal: MobControlPrincipal,
-    ) -> Self {
-        let runtime_adapter = session_service.runtime_adapter();
-        Self::new_with_runtime_adapter(session_service, runtime_adapter, console_principal)
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        Self::new_with_runtime_adapter(session_service, None, console_principal)
     }
 
     pub fn new_with_runtime_adapter(
+        session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        console_principal: MobControlPrincipal,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        let runtime_adapter = session_service.acquire_runtime_adapter(runtime_adapter)?;
+        Ok(Self::from_acquired_runtime_adapter(
+            session_service,
+            runtime_adapter,
+            console_principal,
+        ))
+    }
+
+    fn from_acquired_runtime_adapter(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         console_principal: MobControlPrincipal,
@@ -583,6 +598,7 @@ impl MobMcpState {
             child_mcp_servers: std::sync::RwLock::new(ChildMcpServers::default()),
             tool_consequence_policy_registry: None,
             child_application_tool_policy: None,
+            child_spawn_member_customizer: None,
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
             mobs: Arc::new(RwLock::new(BTreeMap::new())),
@@ -1365,6 +1381,23 @@ impl MobMcpState {
         self
     }
 
+    /// A host [`meerkat_mob::SpawnMemberCustomizer`] for every mob this state
+    /// creates or restores, child mobs included: fresh spawns, process-restart
+    /// restore and explicit resume (where it is asked through
+    /// [`meerkat_mob::SpawnMemberCustomizer::customize_resume`] with the
+    /// member's persisted identity).
+    ///
+    /// It runs before the internal child application tool policy, so in a
+    /// child mob the policy always has the last word: a host customizer
+    /// cannot widen a child member's application tool policy.
+    pub fn with_child_spawn_member_customizer(
+        mut self,
+        customizer: Arc<dyn meerkat_mob::SpawnMemberCustomizer>,
+    ) -> Self {
+        self.child_spawn_member_customizer = Some(customizer);
+        self
+    }
+
     /// Refuse child mob creation (the agent `mob_create` tool, and the
     /// implicit mob `delegate` helpers run in) up front when the host's child
     /// policy cannot be applied (a managed host without a child policy, a
@@ -1487,6 +1520,54 @@ impl MobMcpState {
         })
     }
 
+    /// The activation hook for a restored mob: classify it from its persisted
+    /// owner bridge authority, then run the host's own hook. A cold resume
+    /// calls it before any member is restored, so every restored member of a
+    /// child mob is built under the child policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restore_scope_hook(
+        &self,
+        scope: child_tool_policy::ChildMobScope,
+    ) -> meerkat_mob::MobBeforeActivation {
+        let host = self.before_activation.get().cloned();
+        Arc::new(move |handle: meerkat_mob::MobReadHandle| {
+            if handle
+                .owner_bridge_session_lifecycle_authority()
+                .is_some_and(|authority| {
+                    child_tool_policy::is_child_mob(authority.destroy_on_owner_archive)
+                })
+            {
+                scope.mark_child();
+            }
+            match &host {
+                Some(host) => host(handle),
+                None => Box::pin(async { Ok(()) }),
+            }
+        })
+    }
+
+    /// The spawn customizer of every mob this state builds: the host's, then
+    /// the child policy. Policy last: the child policy overrides whatever the
+    /// host customizer set.
+    fn member_customizer(
+        &self,
+        scope: child_tool_policy::ChildMobScope,
+    ) -> Arc<dyn meerkat_mob::SpawnMemberCustomizer> {
+        let child_policy: Arc<dyn meerkat_mob::SpawnMemberCustomizer> =
+            Arc::new(child_tool_policy::ChildPolicyCustomizer {
+                policy: self.child_tool_policy(),
+                scope,
+            });
+        match &self.child_spawn_member_customizer {
+            Some(host) => Arc::new(
+                meerkat_mob::SpawnMemberCustomizerChain::new()
+                    .then(Arc::clone(host))
+                    .then(child_policy),
+            ),
+            None => child_policy,
+        }
+    }
+
     fn configure_builder(
         &self,
         mut builder: MobBuilder,
@@ -1507,12 +1588,7 @@ impl MobMcpState {
         if let Some(registry) = &self.tool_consequence_policy_registry {
             builder = builder.with_tool_consequence_policy_registry(Arc::clone(registry));
         }
-        builder = builder.with_spawn_member_customizer(Arc::new(
-            child_tool_policy::ChildPolicyCustomizer {
-                policy: self.child_tool_policy(),
-                scope,
-            },
-        ));
+        builder = builder.with_spawn_member_customizer(self.member_customizer(scope));
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
         }
@@ -1698,16 +1774,9 @@ impl MobMcpState {
                 let scope = child_tool_policy::ChildMobScope::default();
                 let handle = self
                     .configure_builder(MobBuilder::for_resume(storage), scope.clone())
+                    .before_activation(self.restore_scope_hook(scope))
                     .resume()
                     .await?;
-                if handle
-                    .owner_bridge_session_lifecycle_authority()
-                    .is_some_and(|authority| {
-                        child_tool_policy::is_child_mob(authority.destroy_on_owner_archive)
-                    })
-                {
-                    scope.mark_child();
-                }
                 let mob_id = handle.definition().id.clone();
                 match self.mobs.write().await.entry(mob_id.clone()) {
                     Entry::Vacant(entry) => {
@@ -4187,7 +4256,9 @@ impl MobMcpState {
     /// the byte-identical path v2 bearer auth lands on.
     pub fn new_in_memory_as(console_principal: MobControlPrincipal) -> Arc<Self> {
         let service = Arc::new(LocalSessionService::new());
-        Self::new(service, console_principal).into_shared()
+        let runtime_adapter = Some(Arc::clone(&service.runtime_adapter));
+        Self::from_acquired_runtime_adapter(service, runtime_adapter, console_principal)
+            .into_shared()
     }
 }
 
@@ -5454,8 +5525,24 @@ impl MobSessionService for LocalSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>> {
-        Some(Arc::clone(&self.runtime_adapter))
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<
+        Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        let owner = Some(Arc::clone(&self.runtime_adapter));
+        if let (Some(owner), Some(requested)) = (owner.as_ref(), explicit.as_ref())
+            && !owner.shares_runtime_execution_owner_with(requested)
+        {
+            return Err(
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: meerkat_runtime::traits::ControllerReadinessFailure::AuthorityChanged,
+                },
+            );
+        }
+        Ok(owner.or(explicit))
     }
 
     async fn archive_with_mob_lifecycle_authority(
@@ -5518,7 +5605,12 @@ impl MobMcpState {
     pub fn new_in_memory_with_archive_delay(delay_ms: u64) -> Arc<Self> {
         let session_service = Arc::new(LocalSessionService::new());
         session_service.set_archive_delay_ms(delay_ms);
-        Arc::new(Self::new(session_service, MobControlPrincipal::Owner))
+        let runtime_adapter = Some(Arc::clone(&session_service.runtime_adapter));
+        Arc::new(Self::from_acquired_runtime_adapter(
+            session_service,
+            runtime_adapter,
+            MobControlPrincipal::Owner,
+        ))
     }
 
     #[doc(hidden)]
@@ -5528,8 +5620,13 @@ impl MobMcpState {
         let session_service = Arc::new(LocalSessionService::new_with_archive_failures(
             failures.clone(),
         ));
+        let runtime_adapter = Some(Arc::clone(&session_service.runtime_adapter));
         (
-            Arc::new(Self::new(session_service, MobControlPrincipal::Owner)),
+            Arc::new(Self::from_acquired_runtime_adapter(
+                session_service,
+                runtime_adapter,
+                MobControlPrincipal::Owner,
+            )),
             failures,
         )
     }
@@ -7971,6 +8068,9 @@ mod tests {
         /// meaningful; unprimed sessions keep reporting zero.
         session_usage: RwLock<HashMap<SessionId, Usage>>,
         runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+        /// The application tool policy of every build, by session, in order.
+        build_policies:
+            std::sync::Mutex<Vec<(SessionId, meerkat_core::ApplicationToolPolicyBinding)>>,
     }
 
     impl MockSessionSvc {
@@ -7989,6 +8089,7 @@ mod tests {
                 persisted_metadata_loads: AtomicU64::new(0),
                 session_usage: RwLock::new(HashMap::new()),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                build_policies: std::sync::Mutex::default(),
             }
         }
 
@@ -8013,6 +8114,27 @@ mod tests {
                 .unwrap_or_default()
         }
 
+        fn build_policies_snapshot(
+            &self,
+        ) -> Vec<(SessionId, meerkat_core::ApplicationToolPolicyBinding)> {
+            self.build_policies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        /// The application tool policy of every build on `session_id`.
+        fn build_policies_for(
+            &self,
+            session_id: &SessionId,
+        ) -> Vec<meerkat_core::ApplicationToolPolicyBinding> {
+            self.build_policies_snapshot()
+                .into_iter()
+                .filter(|(session, _)| session == session_id)
+                .map(|(_, policy)| policy)
+                .collect()
+        }
+
         async fn cold_restart(&self) -> Self {
             let persisted_sessions = self.persisted_sessions.read().await.clone();
             let archive_failures = self.archive_failures.read().await.clone();
@@ -8032,6 +8154,7 @@ mod tests {
                 persisted_metadata_loads: AtomicU64::new(0),
                 session_usage: RwLock::new(self.session_usage.read().await.clone()),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                build_policies: std::sync::Mutex::new(self.build_policies_snapshot()),
             }
         }
 
@@ -8046,6 +8169,12 @@ mod tests {
                 .and_then(|build| build.resume_session.clone())
                 .unwrap_or_default();
             let sid = persisted_session.id().clone();
+            if let Some(build) = build.as_ref() {
+                self.build_policies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((sid.clone(), build.application_tool_policy.clone()));
+            }
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
             let is_keep_alive = build
                 .as_ref()
@@ -8719,8 +8848,25 @@ mod tests {
             true
         }
 
-        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-            Some(self.runtime_adapter.clone())
+        fn acquire_runtime_adapter(
+            &self,
+            explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        ) -> Result<
+            Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            let owner = Some(self.runtime_adapter.clone());
+            if let (Some(owner), Some(requested)) = (owner.as_ref(), explicit.as_ref())
+                && !owner.shares_runtime_execution_owner_with(requested)
+            {
+                return Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason:
+                            meerkat_runtime::traits::ControllerReadinessFailure::AuthorityChanged,
+                    },
+                );
+            }
+            Ok(owner.or(explicit))
         }
 
         async fn archive_with_mob_lifecycle_authority(
@@ -9319,10 +9465,10 @@ mod tests {
     #[tokio::test]
     async fn test_dispatcher_exposes_expected_tools() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
         let tools = d.tools();
         let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
@@ -9352,10 +9498,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_lifecycle_rejects_unknown_action_at_contract_boundary() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         call_tool(
@@ -9398,10 +9544,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_lifecycle_accepts_typed_contract_params() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         call_tool(
@@ -9449,10 +9595,10 @@ mod tests {
     async fn test_owns_persisted_session_requires_actual_roster_membership() {
         let svc = Arc::new(MockSessionSvc::new());
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
-        let state = Arc::new(MobMcpState::new(
-            session_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(session_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let dispatcher = MobMcpDispatcher::new(Arc::clone(&state));
 
         call_tool(
@@ -9517,10 +9663,10 @@ mod tests {
     async fn test_owns_persisted_bridge_session_accepts_mob_marked_session_without_live_handle() {
         let svc = Arc::new(MockSessionSvc::new());
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
-        let state = Arc::new(MobMcpState::new(
-            session_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(session_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
 
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
@@ -9576,10 +9722,10 @@ mod tests {
     async fn test_owns_persisted_bridge_session_reads_metadata_seam_without_full_load() {
         let svc = Arc::new(MockSessionSvc::new());
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
-        let state = Arc::new(MobMcpState::new(
-            session_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(session_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
 
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
@@ -9632,10 +9778,10 @@ mod tests {
     async fn test_retire_member_by_bridge_session_id_falls_back_to_archiving_persisted_member() {
         let svc = Arc::new(MockSessionSvc::new());
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
-        let state = Arc::new(MobMcpState::new(
-            session_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(session_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
 
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
@@ -9695,10 +9841,10 @@ mod tests {
         // consumer has to re-parse by message prefix.
         let svc = Arc::new(MockSessionSvc::new());
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
-        let state = Arc::new(MobMcpState::new(
-            session_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(session_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
 
         let unknown = SessionId::new();
         let err = state
@@ -9773,10 +9919,10 @@ mod tests {
     #[tokio::test]
     async fn test_multi_mob_isolation() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let a = call_tool(&d, "mob_create", json!({"definition":{"id":"mob_a","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
@@ -9823,10 +9969,10 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_e2e_flow_and_destroy_removes_mob() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-e2e-flow-and-destroy-removes-mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
@@ -9909,10 +10055,10 @@ mod tests {
     async fn test_mob_list_observes_without_waiting_for_in_flight_member_turn() {
         let svc = Arc::new(MockSessionSvc::new());
         svc.set_turn_delay_ms(5_000);
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(Arc::clone(&state));
 
         let mob_id = state
@@ -9971,10 +10117,10 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_stop_resume_round_trip() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-stop-resume-round-trip","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
@@ -10034,10 +10180,10 @@ mod tests {
     async fn test_mcp_flow_tools_dispatch_run_status_cancel() {
         let svc = Arc::new(MockSessionSvc::new());
         svc.set_turn_delay_ms(60_000);
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(
@@ -10135,6 +10281,7 @@ mod tests {
             meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
         let state = Arc::new(
             MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_workgraph_service(Some(workgraph.clone())),
         );
         let dispatcher = MobMcpDispatcher::new(state.clone());
@@ -10219,6 +10366,7 @@ mod tests {
             meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
         let state = Arc::new(
             MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_workgraph_service(Some(workgraph.clone())),
         );
         let dispatcher = MobMcpDispatcher::new(state.clone());
@@ -10311,6 +10459,7 @@ mod tests {
             meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
         let state = Arc::new(
             MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_workgraph_service(Some(workgraph.clone())),
         );
         let dispatcher = MobMcpDispatcher::new(state.clone());
@@ -10432,10 +10581,10 @@ mod tests {
     #[tokio::test]
     async fn workgraph_flow_bridge_observes_exact_run_without_broad_list_grant() {
         let svc = Arc::new(MockSessionSvc::new());
-        let owner = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let owner = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let dispatcher = MobMcpDispatcher::new(owner.clone());
         let created = call_tool(
             &dispatcher,
@@ -10469,6 +10618,7 @@ mod tests {
             meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
         let operator = Arc::new(
             MobMcpState::new(svc, MobControlPrincipal::External(principal))
+                .expect("construct runtime authority")
                 .with_workgraph_service(Some(workgraph.clone())),
         );
         operator
@@ -10504,7 +10654,10 @@ mod tests {
     #[tokio::test]
     async fn revoked_launch_authority_terminalizes_precommitted_binding() {
         let svc = Arc::new(MockSessionSvc::new());
-        let owner = Arc::new(MobMcpState::new(svc.clone(), MobControlPrincipal::Owner));
+        let owner = Arc::new(
+            MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let dispatcher = MobMcpDispatcher::new(owner.clone());
         let created = call_tool(
             &dispatcher,
@@ -10528,6 +10681,7 @@ mod tests {
             meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
         let operator = Arc::new(
             MobMcpState::new(svc, MobControlPrincipal::External(principal.clone()))
+                .expect("construct runtime authority")
                 .with_workgraph_service(Some(workgraph.clone())),
         );
         operator
@@ -10634,10 +10788,10 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_flow_status_rejects_invalid_run_id() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let error = call_tool_err(
@@ -10659,10 +10813,10 @@ mod tests {
     #[ignore = "requires live comms peer after external binding validation was added"]
     async fn test_mob_spawn_backend_arg_returns_backend_member_ref() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(
@@ -10726,10 +10880,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_spawn_runtime_mode_defaults_and_override() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-spawn-runtime-mode-defaults-and-override","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
@@ -10833,10 +10987,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_spawn_many_dispatches_batch() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-spawn-many-dispatches-batch","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
@@ -10879,10 +11033,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_spawn_many_dispatches_typed_failure_cause() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-spawn-many-dispatches-typed-failure-cause","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
@@ -10914,10 +11068,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_wait_kickoff_returns_member_snapshots() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-wait-kickoff-returns-member-snapshots","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
@@ -10954,10 +11108,10 @@ mod tests {
     #[tokio::test]
     async fn test_bound_mob_wait_ready_returns_detached_operation() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(Arc::clone(&state));
 
         let created = call_tool(
@@ -11017,10 +11171,10 @@ mod tests {
         // The kickoff barrier waits for the initial autonomous turn to complete.
         // Use turn_driven members to avoid the keep_alive mock blocking.
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-wait-kickoff-completes-after-initial-turn","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
@@ -11059,10 +11213,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_create_rejects_duplicate_mob_id() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let created = call_tool(&d, "mob_create", json!({"definition":{"id":"dup_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
@@ -11093,10 +11247,10 @@ mod tests {
     #[tokio::test]
     async fn test_mobpack_duplicate_create_requires_same_verified_identity() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let definition = explicit_definition("dup-pack-mob");
         let first_identity =
             meerkat_mob::MobDefinitionSourceIdentity::mobpack("a".repeat(64), Vec::new());
@@ -11128,10 +11282,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_create_rejects_missing_definition() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         // definition field is required at the serde level — empty args should
@@ -11146,10 +11300,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_create_rejects_invalid_definition() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         // A definition with no profiles triggers DiagnosticCode::EmptyProfiles
@@ -11169,10 +11323,10 @@ mod tests {
     #[tokio::test]
     async fn test_mob_create_rejects_internal_profile_tool_bundles() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let d = MobMcpDispatcher::new(state);
 
         let error = call_tool_err(
@@ -11535,6 +11689,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(
             MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .try_with_persistent_storage_root(Some(root.path().to_path_buf()))
                 .expect("open rooted capability custody"),
         );
@@ -11578,6 +11733,7 @@ mod tests {
         drop(state);
 
         let restored = MobMcpState::new(svc, MobControlPrincipal::Owner)
+            .expect("construct runtime authority")
             .try_with_persistent_storage_root(Some(root.path().to_path_buf()))
             .expect("reopen rooted capability custody");
         assert!(
@@ -11672,6 +11828,7 @@ mod tests {
         );
 
         let state = MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+            .expect("construct runtime authority")
             .with_realm_profile_store(Some(store))
             .with_realm_skill_sources(sources);
         let mut definition = MobDefinition::explicit(MobId::from("child-mob"));
@@ -11700,7 +11857,8 @@ mod tests {
     #[tokio::test]
     async fn realm_ref_mob_create_spawns_against_shared_profile_store() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner);
+        let state = MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+            .expect("construct runtime authority");
         let mut profile = sample_realm_profile("gpt-5.5");
         profile.tools.comms = true;
         state
@@ -11753,6 +11911,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
 
@@ -11797,6 +11956,7 @@ mod tests {
 
         let restored = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         let status = restored
@@ -11819,6 +11979,398 @@ mod tests {
         assert_eq!(mobs[0].0, mob_id);
     }
 
+    /// A host spawn customizer that widens every member's application tool
+    /// policy to Unmanaged, recording each call: the mob, the spawn source,
+    /// the member and, on a resume, the session of its resume view.
+    #[derive(Default)]
+    struct WideningHostCustomizer {
+        calls: std::sync::Mutex<
+            Vec<(
+                MobId,
+                meerkat_mob::SpawnSource,
+                AgentIdentity,
+                Option<SessionId>,
+            )>,
+        >,
+    }
+
+    impl WideningHostCustomizer {
+        fn record(
+            &self,
+            ctx: &meerkat_mob::SpawnCustomizationContext,
+            spec: &mut SpawnMemberSpec,
+            view: Option<SessionId>,
+        ) {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((
+                    ctx.mob_id.clone(),
+                    ctx.spawn_source,
+                    spec.identity.clone(),
+                    view,
+                ));
+            spec.application_tool_policy = meerkat_core::ApplicationToolPolicyBinding::Unmanaged;
+        }
+
+        fn calls(
+            &self,
+        ) -> Vec<(
+            MobId,
+            meerkat_mob::SpawnSource,
+            AgentIdentity,
+            Option<SessionId>,
+        )> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl meerkat_mob::SpawnMemberCustomizer for WideningHostCustomizer {
+        fn customize_spawn(
+            &self,
+            ctx: &meerkat_mob::SpawnCustomizationContext,
+            spec: &mut SpawnMemberSpec,
+        ) -> Result<(), MobError> {
+            self.record(ctx, spec, None);
+            Ok(())
+        }
+
+        fn customize_resume(
+            &self,
+            ctx: &meerkat_mob::SpawnCustomizationContext,
+            durable: &meerkat_mob::ResumedMemberView,
+            spec: &mut SpawnMemberSpec,
+        ) -> Result<(), MobError> {
+            self.record(ctx, spec, Some(durable.session_id.clone()));
+            Ok(())
+        }
+    }
+
+    fn managed_policy_registry() -> Arc<meerkat_core::ToolConsequencePolicyRegistry> {
+        Arc::new(
+            meerkat_core::ToolConsequencePolicyRegistry::new(
+                Vec::new(),
+                meerkat_core::PolicyEvaluationSupervisorConfig::default(),
+                None,
+            )
+            .expect("policy registry"),
+        )
+    }
+
+    fn host_child_policy() -> meerkat_core::ApplicationToolPolicyBinding {
+        meerkat_core::ApplicationToolPolicyBinding::Provider {
+            provider_id: meerkat_core::PolicyProviderId::new("host").expect("provider id"),
+            policy_id: meerkat_core::PolicyId::new("child-tools").expect("policy id"),
+        }
+    }
+
+    /// #1701: the host's spawn customizer reaches the members of every mob the
+    /// state builds; in a child mob the child policy runs after it, so a host
+    /// customizer that widens the application tool policy is overridden. In a
+    /// host-created mob the child policy does not govern, and the host's
+    /// choice stands.
+    #[tokio::test]
+    async fn host_spawn_customizer_runs_first_and_the_child_policy_has_the_last_word() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let host = Arc::new(WideningHostCustomizer::default());
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_tool_consequence_policy_registry(managed_policy_registry())
+                .with_child_application_tool_policy(host_child_policy())
+                .with_child_spawn_member_customizer(host.clone()),
+        );
+        let child = state
+            .mob_create_definition_with_owner_bridge_session(
+                explicit_definition("customized-child"),
+                SessionId::new(),
+                true,
+                false,
+            )
+            .await
+            .expect("create child mob");
+        let root = state
+            .mob_create_definition(explicit_definition("customized-root"))
+            .await
+            .expect("create host mob");
+        let worker = AgentIdentity::from("worker-1");
+        let mut sessions = Vec::new();
+        for mob_id in [&child, &root] {
+            state
+                .mob_spawn(
+                    mob_id,
+                    ProfileName::from("worker"),
+                    worker.clone(),
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("spawn worker");
+            sessions.push(
+                state
+                    .mob_resolve_bridge_session_id(mob_id, &worker)
+                    .await
+                    .expect("resolve bridge session")
+                    .expect("worker bridge session"),
+            );
+        }
+        assert_eq!(
+            svc.build_policies_for(&sessions[0]),
+            [host_child_policy()],
+            "the child policy overrides the host customizer's widening"
+        );
+        assert_eq!(
+            svc.build_policies_for(&sessions[1]),
+            [meerkat_core::ApplicationToolPolicyBinding::Unmanaged],
+            "outside child mobs the host customizer's choice stands"
+        );
+        let calls = host.calls();
+        for mob_id in [&child, &root] {
+            assert!(
+                calls.iter().any(|(mob, source, member, view)| mob == mob_id
+                    && *source != meerkat_mob::SpawnSource::Resume
+                    && member == &worker
+                    && view.is_none()),
+                "the host customizer customizes the spawn into {mob_id}: {calls:?}"
+            );
+        }
+    }
+
+    /// Create a mob (a child mob when `child`) under `root`, seat `worker-1`
+    /// and retire the state's supervisor route, as a process exit does.
+    /// Returns the restarted session service (live sessions gone, persisted
+    /// ones kept), the mob and the worker's session.
+    async fn seat_worker_then_exit(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+        child: bool,
+        mob_name: &str,
+    ) -> (Arc<MockSessionSvc>, MobId, SessionId) {
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.to_path_buf())),
+        );
+        let mob_id = if child {
+            // A child mob outlives a restart only with its owner session.
+            let owner = SessionId::new();
+            svc.insert_persisted_session(Session::with_id(owner.clone()))
+                .await;
+            state
+                .mob_create_definition_with_owner_bridge_session(
+                    explicit_definition(mob_name),
+                    owner,
+                    true,
+                    false,
+                )
+                .await
+                .expect("create child mob")
+        } else {
+            state
+                .mob_create_definition(explicit_definition(mob_name))
+                .await
+                .expect("create host mob")
+        };
+        let worker = AgentIdentity::from("worker-1");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                worker.clone(),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        let session = state
+            .mob_resolve_bridge_session_id(&mob_id, &worker)
+            .await
+            .expect("resolve bridge session")
+            .expect("worker bridge session");
+        state
+            .handle_for(&mob_id)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        (Arc::new(svc.cold_restart().await), mob_id, session)
+    }
+
+    /// #1701: restoring a child mob asks the host customizer for each member's
+    /// rebuild through `customize_resume`, with the member's bound session.
+    #[tokio::test]
+    async fn restored_child_mob_members_are_customized_with_their_resume_view() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (svc, mob_id, session) =
+            seat_worker_then_exit(&svc, root.path(), true, "restored-customized-child").await;
+        let host = Arc::new(WideningHostCustomizer::default());
+        let restored = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_child_spawn_member_customizer(host.clone()),
+        );
+        let status = restored
+            .mob_member_status(&mob_id, &AgentIdentity::from("worker-1"))
+            .await
+            .expect("restore member status");
+        assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);
+        let calls = host.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|(mob, source, member, view)| mob == &mob_id
+                    && *source == meerkat_mob::SpawnSource::Resume
+                    && member.as_str() == "worker-1"
+                    && view.as_ref() == Some(&session)),
+            "the restore asks the host customizer with the worker's session: {calls:?}"
+        );
+    }
+
+    /// #1701 restore ordering, under the joint child-policy decision: a
+    /// restored mob is classified as a child mob before any member is
+    /// restored, so its members' rebuilds run under the child policy. A
+    /// managed host without a child policy still restores everything: the
+    /// child mob comes up, and its members are not brought back unconstrained.
+    /// Each carries a typed restore failure saying why and naming the fixes,
+    /// and calls into it return that refusal. (Recovery once the refusal
+    /// lifts is proved in meerkat-mob:
+    /// `refused_restore_is_per_member_and_recovers_once_admitted`.)
+    #[tokio::test]
+    async fn unconfigured_child_policy_refuses_restored_child_members_not_the_restore() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let worker = AgentIdentity::from("worker-1");
+        let seating = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+        let owner = SessionId::new();
+        svc.insert_persisted_session(Session::with_id(owner.clone()))
+            .await;
+        let child = seating
+            .mob_create_definition_with_owner_bridge_session(
+                explicit_definition("restored-policy-child"),
+                owner,
+                true,
+                false,
+            )
+            .await
+            .expect("create child mob");
+        let host_mob = seating
+            .mob_create_definition(explicit_definition("restored-policy-host"))
+            .await
+            .expect("create host mob");
+        for mob_id in [&child, &host_mob] {
+            seating
+                .mob_spawn(
+                    mob_id,
+                    ProfileName::from("worker"),
+                    worker.clone(),
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("spawn worker");
+            seating
+                .handle_for(mob_id)
+                .await
+                .expect("predecessor mob handle")
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+        }
+        let svc = Arc::new(svc.cold_restart().await);
+
+        let unconfigured = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_tool_consequence_policy_registry(managed_policy_registry()),
+        );
+        let mobs = unconfigured
+            .mob_list()
+            .await
+            .expect("the restore completes");
+        for mob_id in [&child, &host_mob] {
+            assert!(
+                mobs.iter().any(|(id, _)| id == mob_id),
+                "{mob_id} is restored: {mobs:?}"
+            );
+        }
+        assert_eq!(
+            unconfigured
+                .mob_member_status(&host_mob, &worker)
+                .await
+                .expect("host mob member status")
+                .status,
+            meerkat_mob::MobMemberStatus::Active,
+            "the host mob's member restores"
+        );
+        let refusal = unconfigured
+            .handle_for(&child)
+            .await
+            .expect("the child mob is restored")
+            .member(&worker)
+            .await
+            .err()
+            .expect("the child member is refused");
+        let MobError::MemberRestoreFailed { reason, .. } = &refusal else {
+            panic!("a typed restore failure, got {refusal:?}");
+        };
+        for needle in [
+            "no child application tool policy is configured",
+            "MobMcpState::with_child_application_tool_policy(binding)",
+            "child_application_tool_policy",
+            "ApplicationToolPolicyBinding::Unmanaged",
+        ] {
+            assert!(reason.contains(needle), "{needle} missing from: {reason}");
+        }
+    }
+
+    /// #1701 control: the managed host without a child policy that refuses a
+    /// restored child mob's members (above) restores a host-created mob's
+    /// members as before: it is never classified as a child mob, so the child
+    /// policy does not govern its members' rebuilds.
+    #[tokio::test]
+    async fn host_mob_restore_is_untouched_by_the_child_policy() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (svc, mob_id, session) =
+            seat_worker_then_exit(&svc, root.path(), false, "restored-host-mob").await;
+        let restored = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("runtime custody")
+                .with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .with_tool_consequence_policy_registry(managed_policy_registry()),
+        );
+        let worker = AgentIdentity::from("worker-1");
+        let status = restored
+            .mob_member_status(&mob_id, &worker)
+            .await
+            .expect("the host mob restores");
+        assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);
+        let rebuilt_on = restored
+            .mob_resolve_bridge_session_id(&mob_id, &worker)
+            .await
+            .expect("resolve bridge session")
+            .expect("the restored member has a session");
+        assert_eq!(
+            svc.build_policies_for(&rebuilt_on).last(),
+            svc.build_policies_for(&session).last(),
+            "the restored member is built with the binding it was seated with"
+        );
+    }
+
     #[tokio::test]
     async fn current_session_schedule_survives_member_respawn_and_runtime_restart() {
         use meerkat::surface::SurfaceScheduleMobHost as _;
@@ -11837,6 +12389,7 @@ mod tests {
 
         let state = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(runtime_root.clone())),
         );
         let mob_id = state
@@ -11970,6 +12523,7 @@ mod tests {
         let svc = Arc::new(svc.cold_restart().await);
         let restored_state = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(runtime_root)),
         );
         let restored_bridge_session = restored_state
@@ -12073,6 +12627,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
 
@@ -12095,6 +12650,7 @@ mod tests {
 
         let restored = Arc::new(
             MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         assert!(
@@ -12124,6 +12680,7 @@ mod tests {
 
         let state = Arc::new(
             MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         let err = state
@@ -12143,6 +12700,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
 
@@ -12271,10 +12829,10 @@ mod tests {
     #[tokio::test]
     async fn test_default_constructor_exposes_realm_profile_crud_with_in_memory_store() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
 
         let created = state
             .realm_profile_create("worker", &sample_realm_profile("claude-sonnet-4-6"))
@@ -12331,6 +12889,7 @@ mod tests {
 
         let state = Arc::new(
             MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         state
@@ -12340,6 +12899,7 @@ mod tests {
 
         let restored = Arc::new(
             MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority")
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         let fetched = restored
@@ -12378,10 +12938,10 @@ mod tests {
     #[tokio::test]
     async fn test_destroy_bridge_session_mobs_fails_closed_on_incomplete_destroy() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let sid = SessionId::new().to_string();
 
         let definition = explicit_definition("bridge-session-partial-destroy");
@@ -12445,10 +13005,10 @@ mod tests {
     #[tokio::test]
     async fn test_archive_session_with_mob_cleanup_surfaces_incomplete_and_retries_success() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let owner_session_id = SessionId::new();
         svc.insert_persisted_session(Session::with_id(owner_session_id.clone()))
             .await;
@@ -12545,10 +13105,10 @@ mod tests {
     async fn test_archive_of_a_member_session_redrives_its_stuck_retirement_and_surfaces_a_still_failing_cause()
      {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let mob_id = state
             .mob_create_definition(explicit_definition("archive-redrive"))
             .await
@@ -12622,10 +13182,10 @@ mod tests {
     #[tokio::test]
     async fn test_archive_session_with_mob_cleanup_runs_member_retire_then_child_cleanup() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let parent_mob_id = state
             .mob_create_definition(explicit_definition("archive-helper-live-parent"))
             .await
@@ -12811,10 +13371,10 @@ mod tests {
     #[tokio::test]
     async fn test_scavenge_orphaned_bridge_session_scoped_mobs() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
 
         // Create a session and its implicit mob
         let result = svc
@@ -12875,10 +13435,10 @@ mod tests {
     #[tokio::test]
     async fn test_scavenge_orphaned_bridge_session_scoped_mobs_honors_bridge_owner_index() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            svc.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
 
         let result = svc
             .create_session(CreateSessionRequest {
@@ -12955,7 +13515,9 @@ mod tests {
     async fn test_local_session_service_provides_runtime_adapter() {
         let svc = LocalSessionService::new();
         assert!(
-            <LocalSessionService as MobSessionService>::runtime_adapter(&svc).is_some(),
+            <LocalSessionService as MobSessionService>::acquire_runtime_adapter(&svc, None)
+                .expect("acquire runtime authority")
+                .is_some(),
             "LocalSessionService must provide adapter for AutonomousHost"
         );
     }
@@ -13672,7 +14234,8 @@ mod tests {
     #[tokio::test]
     async fn run_accounting_attributes_each_session_usage_to_its_own_member() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = MobMcpState::new(svc.clone(), MobControlPrincipal::Owner);
+        let state = MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+            .expect("construct runtime authority");
         let mob_id = state
             .mob_create_definition(explicit_definition("run-accounting-mapping"))
             .await
@@ -13759,7 +14322,8 @@ mod tests {
     #[tokio::test]
     async fn run_accounting_degrades_per_member_when_a_session_is_unreadable() {
         let svc = Arc::new(MockSessionSvc::new());
-        let state = MobMcpState::new(svc.clone(), MobControlPrincipal::Owner);
+        let state = MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+            .expect("construct runtime authority");
         let mob_id = state
             .mob_create_definition(explicit_definition("run-accounting-degrade"))
             .await

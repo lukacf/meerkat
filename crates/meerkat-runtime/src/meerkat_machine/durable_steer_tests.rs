@@ -447,9 +447,10 @@ impl DurableSteerRig {
     }
 
     async fn persistent(store: Arc<dyn crate::store::RuntimeStore>) -> Self {
-        let rig = Self::with_adapter(Arc::new(MeerkatMachine::persistent_without_blobs(
-            Arc::clone(&store),
-        )))
+        let rig = Self::with_adapter(Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        ))
         .await;
         *rig.script.publication_store.lock().unwrap() =
             Some((store, MeerkatMachine::logical_runtime_id(&rig.session_id)));
@@ -643,6 +644,8 @@ fn peer_steer(body: &str) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: chrono::Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -1330,7 +1333,10 @@ async fn persistent_crash_after_the_join(append_record_lag: Duration) {
     std::mem::forget(crashed);
 
     let recovered = DurableSteerRig::with_adapter_for_session(
-        Arc::new(MeerkatMachine::persistent_without_blobs(Arc::clone(&store))),
+        Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        ),
         session_id,
     )
     .await;

@@ -6955,16 +6955,18 @@ mod tests {
     #[tokio::test]
     async fn restarted_default_coordinator_retains_borrowed_member_and_never_resubmits() {
         let mut sessions = crate::LocalSessionService::new();
-        sessions.runtime_adapter =
-            Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
-                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
-            ));
+        sessions.runtime_adapter = Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent_without_blobs(Arc::new(
+                meerkat_runtime::InMemoryRuntimeStore::new(),
+            ))
+            .expect("construct runtime authority"),
+        );
         let runtime = Arc::clone(&sessions.runtime_adapter);
         let sessions = Arc::new(sessions);
-        let mobs = Arc::new(crate::MobMcpState::new(
-            sessions.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mobs = Arc::new(
+            crate::MobMcpState::new(sessions.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let mob = meerkat_mob::MobBuilder::new(
             meerkat_mob::MobDefinition::implicit("existing-member-restart", "claude-sonnet-4-5"),
             meerkat_mob::MobStorage::in_memory(),
@@ -7098,16 +7100,18 @@ mod tests {
     #[tokio::test]
     async fn a_worker_start_published_after_its_channel_closed_runs_and_settles() {
         let mut sessions = crate::LocalSessionService::new();
-        sessions.runtime_adapter =
-            Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
-                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
-            ));
+        sessions.runtime_adapter = Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent_without_blobs(Arc::new(
+                meerkat_runtime::InMemoryRuntimeStore::new(),
+            ))
+            .expect("construct runtime authority"),
+        );
         let runtime = Arc::clone(&sessions.runtime_adapter);
         let sessions = Arc::new(sessions);
-        let mobs = Arc::new(crate::MobMcpState::new(
-            sessions.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mobs = Arc::new(
+            crate::MobMcpState::new(sessions.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let mob = meerkat_mob::MobBuilder::new(
             meerkat_mob::MobDefinition::implicit("start-after-close", "claude-sonnet-4-5"),
             meerkat_mob::MobStorage::in_memory(),

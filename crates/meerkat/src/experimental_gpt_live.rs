@@ -14799,7 +14799,8 @@ mod tests {
             Arc::new(crate::MemoryStore::new()),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let temp = tempfile::tempdir().expect("tempdir");
         let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
@@ -15031,7 +15032,8 @@ mod tests {
             Arc::new(crate::MemoryStore::new()),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let temp = tempfile::tempdir().expect("tempdir");
         let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
@@ -15153,7 +15155,8 @@ mod tests {
             Arc::new(crate::MemoryStore::new()),
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let temp = tempfile::tempdir().expect("tempdir");
         let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
@@ -18493,7 +18496,8 @@ mod tests {
                 Arc::new(crate::MemoryStore::new()),
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
-            );
+            )
+            .expect("construct runtime authority");
             let temp = tempfile::tempdir().expect("tempdir");
             let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
             let mut config = crate::Config::default();
@@ -21831,7 +21835,8 @@ mod tests {
             session_store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let temp = tempfile::tempdir().expect("tempdir");
         let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut config = crate::Config::default();
@@ -24803,7 +24808,8 @@ mod tests {
                 Arc::new(crate::MemoryStore::new()),
                 store.clone(),
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
-            );
+            )
+            .expect("construct runtime authority");
             let client = Arc::new(DelayedStreamClient {
                 inner: TestClient::new(vec![
                     meerkat_client::LlmEvent::TextDelta {

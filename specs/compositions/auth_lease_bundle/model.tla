@@ -209,7 +209,7 @@ auth_machine_ObserveCredentialFreshnessValid(arg_now_ts, arg_refresh_window_secs
        /\ packet.payload.refresh_window_secs = arg_refresh_window_secs
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid"
-       /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))
+       /\ (IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None))))
        /\ auth_machine_phase' = "Valid"
        /\ UnchangedFrame_b8305a9f03dbd4c5
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -4471,7 +4471,7 @@ auth_machine_released_not_release_draining == (IF (auth_machine_phase # "Release
 EntryPacketAdmissible_auth_machine(packet) ==
     \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released")
     \/ /\ (packet.variant = "MarkExpiring") /\ (auth_machine_phase = "Valid")
-    \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None))))
+    \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN TRUE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((packet.payload.now_ts + packet.payload.refresh_window_secs) <= (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)))))
     \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN FALSE ELSE ((packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None)) /\ ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) < (packet.payload.now_ts + packet.payload.refresh_window_secs)))))
     \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_expires_at = None) THEN FALSE ELSE ((IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None) <= packet.payload.now_ts)))
     \/ /\ (packet.variant = "ObserveCredentialFreshness") /\ (auth_machine_phase = "Expiring") /\ ((IF (auth_machine_expires_at = None) THEN TRUE ELSE (packet.payload.now_ts < (IF "value" \in DOMAIN auth_machine_expires_at THEN auth_machine_expires_at["value"] ELSE None))))

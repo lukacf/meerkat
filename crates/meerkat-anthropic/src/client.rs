@@ -42,6 +42,8 @@ pub struct AnthropicClient {
     api_key: String,
     base_url: String,
     http: reqwest::Client,
+    #[cfg(not(target_arch = "wasm32"))]
+    checked_http: std::sync::OnceLock<Result<reqwest::Client, LlmError>>,
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
@@ -167,6 +169,8 @@ impl AnthropicClientBuilder {
             api_key: self.api_key,
             base_url,
             http,
+            #[cfg(not(target_arch = "wasm32"))]
+            checked_http: std::sync::OnceLock::new(),
             connect_timeout,
             request_timeout,
             pool_idle_timeout,
@@ -571,6 +575,10 @@ impl AnthropicClient {
             self.http = http;
         }
         self.base_url = url;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.checked_http = std::sync::OnceLock::new();
+        }
         self
     }
 
@@ -633,6 +641,10 @@ impl AnthropicClient {
                 .unwrap_or_else(|| Value::String(String::new())),
             _ => Value::Array(parts),
         }
+    }
+
+    fn messages_endpoint(&self) -> String {
+        format!("{}/v1/messages", self.base_url)
     }
 
     /// Lower the typed tool choice to Anthropic's `tool_choice`. `Auto`
@@ -1264,15 +1276,79 @@ impl AnthropicClient {
         body: &Value,
         betas: &[String],
         has_images: bool,
+        prepared: Option<&meerkat_llm_core::PreparedLlmRequest>,
+        diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
+        let check: Option<meerkat_core::authorization::PreparedOperationCheck> =
+            if let Some(prepared) = prepared.filter(|request| request.authorization().is_some()) {
+                http::validate_authorization_base_url(&self.base_url)?;
+                // The browser reqwest path exposes no redirect policy. Refuse the
+                // affected operation until its actual Fetch owner can enforce the
+                // destination contract; never silently use unchecked browser sends.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = prepared;
+                    return Err(LlmError::operation_refused(
+                        meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                    ));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let wire_model =
+                        body.get("model").and_then(Value::as_str).ok_or_else(|| {
+                            LlmError::operation_refused(
+                                meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                            )
+                        })?;
+                    let capabilities = body
+                        .get("tools")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|tool| {
+                            tool.get("type").and_then(Value::as_str).map(|kind| {
+                                match tool.get("name").and_then(Value::as_str) {
+                                    Some("web_search") => ServerToolKind::WebSearch,
+                                    _ => ServerToolKind::ProviderNative {
+                                        name: kind.to_owned(),
+                                    },
+                                }
+                            })
+                        })
+                        .collect();
+                    prepared.prepare_model_authorization(url, wire_model, capabilities)?
+                }
+            } else {
+                None
+            };
+        #[cfg(not(target_arch = "wasm32"))]
+        let http = if check.is_some() {
+            self.checked_http
+                .get_or_init(|| {
+                    http::build_checked_http_client_for_base_url(
+                        reqwest::Client::builder()
+                            .connect_timeout(self.connect_timeout)
+                            .timeout(self.request_timeout)
+                            .pool_idle_timeout(self.pool_idle_timeout)
+                            .pool_max_idle_per_host(4)
+                            .tcp_keepalive(Duration::from_secs(30)),
+                        &self.base_url,
+                    )
+                })
+                .as_ref()
+                .map_err(Clone::clone)?
+        } else {
+            &self.http
+        };
+        #[cfg(target_arch = "wasm32")]
+        let http = &self.http;
         #[cfg(target_arch = "wasm32")]
         let _ = has_images;
         #[cfg(not(target_arch = "wasm32"))]
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
         let request_betas = betas.to_vec();
-        let mut request = self
-            .http
+        let mut request = http
             .post(url)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
@@ -1326,11 +1402,19 @@ impl AnthropicClient {
         if !request_betas.is_empty() {
             request = request.header("anthropic-beta", request_betas.join(","));
         }
-        let response = request
+        let request = request
             .json(body)
-            .send()
-            .await
-            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })?;
+            .build()
+            .map_err(|_| LlmError::InvalidRequest {
+                message: "could not construct model request".to_owned(),
+            })?;
+        // Header/auth preparation can await. Recheck the exact retained body
+        // and target after it, immediately before the physical logical send.
+        let response =
+            http::execute_with_authorization(http, request, check.as_ref(), diagnostics, |_| {
+                LlmError::NetworkTimeout { duration_ms: 30000 }
+            })
+            .await?;
         Ok((response, receipt))
     }
 
@@ -1428,171 +1512,12 @@ fn attach_normalized_usage(model: &str, usage: &mut Usage) {
     ));
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl LlmClient for AnthropicClient {
-    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        project_anthropic_replay_messages(messages)
-    }
-
-    fn request_pressure(
-        &self,
-        request: &LlmRequest,
-    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
-        let mut projected_request = request.clone();
-        projected_request.messages = self.project_replay_messages(&request.messages)?;
-        let mut body = self.build_request_body(&projected_request)?;
-        if self.authorizer_needs_claude_ai_oauth_system_marker() {
-            Self::ensure_claude_ai_oauth_system_marker(&mut body);
-        }
-        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
-            message: format!("failed to serialize Anthropic request body: {error}"),
-        })?;
-        Ok(Some(
-            meerkat_core::ProviderRequestPressure::new(
-                encoded_body.len() as u64,
-                meerkat_models::approximate_request_byte_cap(self.provider()),
-            )
-            .with_lowered_request_provenance(
-                meerkat_core::LoweredRequestProvenance::from_body(
-                    Provider::Anthropic,
-                    meerkat_core::LoweredRequestEncoding::AnthropicMessagesJson,
-                    &encoded_body,
-                ),
-            ),
-        ))
-    }
-
-    fn authored_cache_breakpoints(
-        &self,
-        request: &LlmRequest,
-        canonical_messages: &[Message],
-    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
-        if request.messages.len() != canonical_messages.len() {
-            return Ok(Vec::new());
-        }
-        let policy = anthropic_tag(request)
-            .and_then(|tag| tag.cache_control)
-            .unwrap_or(self.default_cache_control);
-        if !matches!(
-            policy,
-            AnthropicCacheControlPolicy::SystemPrefix
-                | AnthropicCacheControlPolicy::SystemAndConversation
-        ) {
-            return Ok(Vec::new());
-        }
-        let mut body = self.build_request_body(request)?;
-        if self.authorizer_needs_claude_ai_oauth_system_marker() {
-            Self::ensure_claude_ai_oauth_system_marker(&mut body);
-        }
-        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
-            message: format!("failed to serialize Anthropic cache evidence body: {error}"),
-        })?;
-        let ttl = match anthropic_tag(request)
-            .and_then(|tag| tag.cache_ttl)
-            .unwrap_or(AnthropicCacheTtl::FiveMinutes)
-        {
-            AnthropicCacheTtl::FiveMinutes => meerkat_core::ProviderCacheTtl::FiveMinutes,
-            AnthropicCacheTtl::OneHour => meerkat_core::ProviderCacheTtl::OneHour,
-        };
-        let mut boundaries = Vec::new();
-        let leading_system_count = request
-            .messages
-            .iter()
-            .take_while(|message| matches!(message, Message::System(_)))
-            .count();
-        if leading_system_count > 0 && body.get("system").is_some_and(Self::contains_cache_control)
-        {
-            boundaries.push(meerkat_core::CacheBreakpointBoundary::SystemProfilePrefix {
-                message_count: leading_system_count as u64,
-            });
-        }
-
-        if matches!(policy, AnthropicCacheControlPolicy::SystemAndConversation) {
-            let source_indices: Vec<usize> = request
-                .messages
-                .iter()
-                .enumerate()
-                .filter_map(|(index, message)| {
-                    (!(index < leading_system_count && matches!(message, Message::System(_))))
-                        .then_some(index)
-                })
-                .collect();
-            if let Some(lowered_messages) = body.get("messages").and_then(Value::as_array) {
-                for (source_index, lowered) in source_indices.into_iter().zip(lowered_messages) {
-                    if lowered
-                        .get("content")
-                        .is_some_and(Self::contains_cache_control)
-                    {
-                        boundaries.push(meerkat_core::CacheBreakpointBoundary::TranscriptAfter {
-                            message_count: (source_index + 1) as u64,
-                        });
-                    }
-                }
-            }
-        }
-
-        boundaries
-            .into_iter()
-            .map(|boundary| {
-                let lowered_message_count = match boundary {
-                    meerkat_core::CacheBreakpointBoundary::SystemProfilePrefix { .. } => 0,
-                    meerkat_core::CacheBreakpointBoundary::TranscriptAfter { message_count } => {
-                        request
-                            .messages
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, message)| {
-                                !(*index < leading_system_count
-                                    && matches!(message, Message::System(_)))
-                            })
-                            .take_while(|(index, _)| (*index as u64) < message_count)
-                            .count()
-                    }
-                };
-                let lowered_messages = body
-                    .get("messages")
-                    .and_then(Value::as_array)
-                    .and_then(|messages| messages.get(..lowered_message_count))
-                    .ok_or_else(|| LlmError::InvalidRequest {
-                        message: "Anthropic cache breakpoint did not map to lowered messages"
-                            .to_string(),
-                    })?;
-                let rendered_prefix = serde_json::to_vec(&serde_json::json!({
-                    "renderer_mode": "anthropic_messages_cache_prefix_v1",
-                    "model": body.get("model"),
-                    "tools": body.get("tools"),
-                    "tool_choice": body.get("tool_choice"),
-                    "cache_control": body.get("cache_control"),
-                    "system": body.get("system"),
-                    "messages": lowered_messages,
-                }))
-                .map_err(|error| LlmError::InvalidRequest {
-                    message: format!(
-                        "failed to serialize Anthropic rendered cache prefix: {error}"
-                    ),
-                })?;
-                meerkat_core::provider_cache_breakpoint_claim(
-                    meerkat_core::ProviderCacheBreakpointClaimRequest {
-                        provider: Provider::Anthropic,
-                        model: &request.model,
-                        messages: canonical_messages,
-                        boundary,
-                        ttl,
-                        rendered_prefix: &rendered_prefix,
-                        lowered_request_encoding:
-                            meerkat_core::LoweredRequestEncoding::AnthropicMessagesJson,
-                        lowered_request_body: &encoded_body,
-                    },
-                )
-                .map_err(|error| LlmError::InvalidRequest {
-                    message: format!("invalid Anthropic cache-breakpoint evidence: {error}"),
-                })
-            })
-            .collect()
-    }
-
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+impl AnthropicClient {
+    fn stream_with_authorization<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        prepared: Option<&'a meerkat_llm_core::PreparedLlmRequest>,
+    ) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
@@ -1649,10 +1574,13 @@ impl LlmClient for AnthropicClient {
                 betas.push(beta.to_string());
             }
 
-            let url = format!("{}/v1/messages", self.base_url);
+            let url = self.messages_endpoint();
             let has_images = request.has_images();
+            let mut diagnostics = Vec::new();
             let response_with_receipt =
-                self.send_messages_request(&url, &body, &betas, has_images).await?;
+                self.send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics).await;
+            for diagnostic in diagnostics.drain(..) { yield diagnostic; }
+            let response_with_receipt = response_with_receipt?;
             #[cfg(not(target_arch = "wasm32"))]
             let (mut response, receipt) = response_with_receipt;
             #[cfg(target_arch = "wasm32")]
@@ -1680,8 +1608,10 @@ impl LlmClient for AnthropicClient {
                     == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             {
                 let retried = self
-                    .send_messages_request(&url, &body, &betas, has_images)
-                    .await?;
+                    .send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics)
+                    .await;
+                for diagnostic in diagnostics.drain(..) { yield diagnostic; }
+                let retried = retried?;
                 response = retried.0;
                 let retry_receipt = retried.1;
                 status_code = response.status().as_u16();
@@ -2152,6 +2082,199 @@ impl LlmClient for AnthropicClient {
         });
 
         streaming::ensure_terminal_done(inner)
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl LlmClient for AnthropicClient {
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        let authorizer = self
+            .authorizer
+            .as_ref()
+            .ok_or(meerkat_core::auth::AuthError::HostOwnedUnavailable)?;
+        authorizer.prepare_request().await
+    }
+
+    fn plain_model_route(
+        &self,
+        logical_model: &str,
+    ) -> Result<meerkat_llm_core::PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
+        http::validate_authorization_base_url(&self.base_url)
+            .map_err(|_| meerkat_core::ControllerFactsUnavailable)?;
+        meerkat_llm_core::PlainModelRoute::new(&self.messages_endpoint(), logical_model)
+    }
+
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        project_anthropic_replay_messages(messages)
+    }
+
+    fn request_pressure(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages = self.project_replay_messages(&request.messages)?;
+        let mut body = self.build_request_body(&projected_request)?;
+        if self.authorizer_needs_claude_ai_oauth_system_marker() {
+            Self::ensure_claude_ai_oauth_system_marker(&mut body);
+        }
+        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+            message: format!("failed to serialize Anthropic request body: {error}"),
+        })?;
+        Ok(Some(
+            meerkat_core::ProviderRequestPressure::new(
+                encoded_body.len() as u64,
+                meerkat_models::approximate_request_byte_cap(self.provider()),
+            )
+            .with_lowered_request_provenance(
+                meerkat_core::LoweredRequestProvenance::from_body(
+                    Provider::Anthropic,
+                    meerkat_core::LoweredRequestEncoding::AnthropicMessagesJson,
+                    &encoded_body,
+                ),
+            ),
+        ))
+    }
+
+    fn authored_cache_breakpoints(
+        &self,
+        request: &LlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        if request.messages.len() != canonical_messages.len() {
+            return Ok(Vec::new());
+        }
+        let policy = anthropic_tag(request)
+            .and_then(|tag| tag.cache_control)
+            .unwrap_or(self.default_cache_control);
+        if !matches!(
+            policy,
+            AnthropicCacheControlPolicy::SystemPrefix
+                | AnthropicCacheControlPolicy::SystemAndConversation
+        ) {
+            return Ok(Vec::new());
+        }
+        let mut body = self.build_request_body(request)?;
+        if self.authorizer_needs_claude_ai_oauth_system_marker() {
+            Self::ensure_claude_ai_oauth_system_marker(&mut body);
+        }
+        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+            message: format!("failed to serialize Anthropic cache evidence body: {error}"),
+        })?;
+        let ttl = match anthropic_tag(request)
+            .and_then(|tag| tag.cache_ttl)
+            .unwrap_or(AnthropicCacheTtl::FiveMinutes)
+        {
+            AnthropicCacheTtl::FiveMinutes => meerkat_core::ProviderCacheTtl::FiveMinutes,
+            AnthropicCacheTtl::OneHour => meerkat_core::ProviderCacheTtl::OneHour,
+        };
+        let mut boundaries = Vec::new();
+        let leading_system_count = request
+            .messages
+            .iter()
+            .take_while(|message| matches!(message, Message::System(_)))
+            .count();
+        if leading_system_count > 0 && body.get("system").is_some_and(Self::contains_cache_control)
+        {
+            boundaries.push(meerkat_core::CacheBreakpointBoundary::SystemProfilePrefix {
+                message_count: leading_system_count as u64,
+            });
+        }
+
+        if matches!(policy, AnthropicCacheControlPolicy::SystemAndConversation) {
+            let source_indices: Vec<usize> = request
+                .messages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    (!(index < leading_system_count && matches!(message, Message::System(_))))
+                        .then_some(index)
+                })
+                .collect();
+            if let Some(lowered_messages) = body.get("messages").and_then(Value::as_array) {
+                for (source_index, lowered) in source_indices.into_iter().zip(lowered_messages) {
+                    if lowered
+                        .get("content")
+                        .is_some_and(Self::contains_cache_control)
+                    {
+                        boundaries.push(meerkat_core::CacheBreakpointBoundary::TranscriptAfter {
+                            message_count: (source_index + 1) as u64,
+                        });
+                    }
+                }
+            }
+        }
+
+        boundaries
+            .into_iter()
+            .map(|boundary| {
+                let lowered_message_count = match boundary {
+                    meerkat_core::CacheBreakpointBoundary::SystemProfilePrefix { .. } => 0,
+                    meerkat_core::CacheBreakpointBoundary::TranscriptAfter { message_count } => {
+                        request
+                            .messages
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, message)| {
+                                !(*index < leading_system_count
+                                    && matches!(message, Message::System(_)))
+                            })
+                            .take_while(|(index, _)| (*index as u64) < message_count)
+                            .count()
+                    }
+                };
+                let lowered_messages = body
+                    .get("messages")
+                    .and_then(Value::as_array)
+                    .and_then(|messages| messages.get(..lowered_message_count))
+                    .ok_or_else(|| LlmError::InvalidRequest {
+                        message: "Anthropic cache breakpoint did not map to lowered messages"
+                            .to_string(),
+                    })?;
+                let rendered_prefix = serde_json::to_vec(&serde_json::json!({
+                    "renderer_mode": "anthropic_messages_cache_prefix_v1",
+                    "model": body.get("model"),
+                    "tools": body.get("tools"),
+                    "tool_choice": body.get("tool_choice"),
+                    "cache_control": body.get("cache_control"),
+                    "system": body.get("system"),
+                    "messages": lowered_messages,
+                }))
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!(
+                        "failed to serialize Anthropic rendered cache prefix: {error}"
+                    ),
+                })?;
+                meerkat_core::provider_cache_breakpoint_claim(
+                    meerkat_core::ProviderCacheBreakpointClaimRequest {
+                        provider: Provider::Anthropic,
+                        model: &request.model,
+                        messages: canonical_messages,
+                        boundary,
+                        ttl,
+                        rendered_prefix: &rendered_prefix,
+                        lowered_request_encoding:
+                            meerkat_core::LoweredRequestEncoding::AnthropicMessagesJson,
+                        lowered_request_body: &encoded_body,
+                    },
+                )
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!("invalid Anthropic cache-breakpoint evidence: {error}"),
+                })
+            })
+            .collect()
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_with_authorization(request, None)
+    }
+
+    fn stream_prepared<'a>(
+        &'a self,
+        request: &'a meerkat_llm_core::PreparedLlmRequest,
+    ) -> LlmStream<'a> {
+        self.stream_with_authorization(request.request(), Some(request))
     }
 
     fn provider(&self) -> Provider {
@@ -4546,6 +4669,110 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    /// What a redirect target saw: one `(method, x-api-key)` per request.
+    type RedirectTargetHits = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    async fn record_redirect_target_hit(
+        State(hits): State<RedirectTargetHits>,
+        method: axum::http::Method,
+        headers: axum::http::HeaderMap,
+    ) -> impl IntoResponse {
+        let api_key = headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        hits.lock()
+            .expect("redirect target lock")
+            .push((method.to_string(), api_key));
+        StatusCode::OK
+    }
+
+    /// A configured endpoint that answers every request with `status` and a
+    /// `Location` on another host (another port of the loopback address, which
+    /// reqwest treats as cross-host), plus that other host, which records
+    /// whatever reaches it.
+    async fn spawn_redirecting_endpoint(
+        status: StatusCode,
+    ) -> (String, RedirectTargetHits, Vec<tokio::task::JoinHandle<()>>) {
+        let hits = RedirectTargetHits::default();
+        let target = Router::new()
+            .fallback(record_redirect_target_hit)
+            .with_state(Arc::clone(&hits));
+        let target_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let target_addr = target_listener.local_addr().expect("target addr");
+        let location = format!("http://{target_addr}/v1/messages");
+        let origin = Router::new().fallback(move || {
+            let location = location.clone();
+            async move { (status, [("location", location)]) }
+        });
+        let origin_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirecting endpoint");
+        let origin_addr = origin_listener.local_addr().expect("origin addr");
+        let servers = vec![
+            tokio::spawn(async move {
+                axum::serve(target_listener, target)
+                    .await
+                    .expect("serve target");
+            }),
+            tokio::spawn(async move {
+                axum::serve(origin_listener, origin)
+                    .await
+                    .expect("serve origin");
+            }),
+        ];
+        (format!("http://{origin_addr}"), hits, servers)
+    }
+
+    /// A model request goes only to the configured endpoint: a redirect is
+    /// not followed (so neither the API key header, which reqwest does not
+    /// strip on a cross-host redirect, nor the request reaches another host)
+    /// and the request fails with a typed error.
+    #[tokio::test]
+    async fn messages_do_not_follow_a_redirect_off_the_configured_endpoint() {
+        for status in [StatusCode::FOUND, StatusCode::TEMPORARY_REDIRECT] {
+            let (base_url, hits, servers) = spawn_redirecting_endpoint(status).await;
+            let client = AnthropicClient::builder("sk-redirect-probe".to_string())
+                .base_url(base_url)
+                .build()
+                .expect("client");
+            let request = LlmRequest::new(
+                "claude-sonnet-4-5",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let mut stream = client.stream(&request);
+            let mut error = None;
+            while let Some(event) = stream.next().await {
+                match event {
+                    Err(e)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error: e },
+                    }) => {
+                        error = Some(e);
+                        break;
+                    }
+                    Ok(_) => {}
+                }
+            }
+            let reached = hits.lock().expect("redirect target lock").clone();
+            assert!(
+                reached.is_empty(),
+                "HTTP {status}: the redirect was followed to another host, which received \
+                 (method, x-api-key) {reached:?}"
+            );
+            let error = error.unwrap_or_else(|| panic!("HTTP {status}: the request fails"));
+            assert!(
+                matches!(&error, LlmError::InvalidConfig { message } if message.contains("redirect")),
+                "HTTP {status}: a typed redirect refusal, got {error:?}"
+            );
+            for server in servers {
+                server.abort();
+            }
+        }
     }
 
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so

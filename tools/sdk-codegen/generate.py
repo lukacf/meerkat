@@ -673,6 +673,24 @@ SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES = [
     "SourceUuid",
 ]
 
+# Canonical core principal vocabulary re-exported by the wire contracts.
+# These are identity/policy inputs, not evidence of authenticated authority.
+AUTH_PRINCIPAL_OBJECT_TYPES = [
+    "PrincipalRef",
+    "ActingOnBehalfOf",
+    "AuthGrant",
+]
+
+AUTH_PRINCIPAL_ALIAS_TYPES = [
+    "PrincipalId",
+    "TrustDomainId",
+    "PrincipalKind",
+    "PrincipalQualification",
+    "GrantScope",
+    "GrantAction",
+    "VisibilityClass",
+]
+
 # K8a: canonical typed tool identity. `ToolName` is a transparent string
 # newtype on the wire; promote and alias it so `PublicTurnToolOverlay`
 # (and the deferred-catalog delta event payloads) keep `string`-shaped SDK
@@ -931,6 +949,8 @@ def _promote_nested_schema_def(name: str) -> bool:
         *SKILL_LIST_RPC_CONTRACT_HELPER_TYPES,
         *SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES,
         *TOOL_IDENTITY_ALIAS_TYPES,
+        *AUTH_PRINCIPAL_OBJECT_TYPES,
+        *AUTH_PRINCIPAL_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_TYPES,
         *WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_HELPER_TYPES,
@@ -1628,6 +1648,8 @@ def _sdk_contract_type_roster() -> list[str]:
     """Every schema-named contract type emitted by the SDK generators."""
     roster: list[str] = []
     for group in (
+        AUTH_PRINCIPAL_OBJECT_TYPES,
+        AUTH_PRINCIPAL_ALIAS_TYPES,
         K20_CATALOG_CONTRACT_TYPES,
         MCP_LIVE_CONTRACT_TYPES,
         MCP_CONFIG_HELPER_TYPES,
@@ -3281,6 +3303,28 @@ def _contract_version_string(schemas: dict) -> str:
     return version_info.get("contract_version", "0.2.0")
 
 
+def _wire_tool_result_settlement_contract(schemas: dict) -> tuple[dict, dict, list[str]] | None:
+    """Read the additive result companion and its exact dependency closure."""
+    wire = schemas.get("wire-types", {})
+    result = _lookup_named_schema(wire, "WireToolResult")
+    field = result.get("properties", {}).get("settlement_failures")
+    if field is None:
+        # Historical schema bundles have no companion field.
+        return None
+    if (
+        not isinstance(field, dict)
+        or field.get("type") != "array"
+        or "settlement_failures" in result.get("required", [])
+    ):
+        raise ValueError("WireToolResult.settlement_failures must be an optional array")
+    root = _schema_root_with_local_defs(wire, result)
+    refs = _schema_ref_names(field)
+    if not refs or any(not _lookup_named_schema(root, name) for name in refs):
+        raise ValueError("WireToolResult.settlement_failures must reference a named schema")
+    order = _named_schema_dependency_order(root, refs)
+    return root, field, order
+
+
 def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = True, has_skills: bool = True) -> None:
     """Generate Python type definitions from schemas."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3349,7 +3393,15 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += '    """Tool result transcript item."""\n'
     types_content += "    tool_use_id: str = ''\n"
     types_content += "    content: Optional[WireToolResultContent] = None\n"
-    types_content += "    is_error: Optional[bool] = None\n\n\n"
+    types_content += "    is_error: Optional[bool] = None\n"
+    result_settlement = _wire_tool_result_settlement_contract(schemas)
+    if result_settlement is not None:
+        root, field, _ = result_settlement
+        field_type, optional_by_shape = _python_type_from_schema(root, field)
+        if optional_by_shape:
+            raise ValueError("WireToolResult settlement field has an unsupported Python shape")
+        types_content += f"    settlement_failures: {field_type} = field(default_factory=list)\n"
+    types_content += "\n\n"
 
     types_content += "@dataclass\nclass WireSessionHistory:\n"
     types_content += '    """Paginated transcript page."""\n'
@@ -3666,6 +3718,18 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += f"\n{doc_block}\n{name} = {alias_type}\n"
         emitted_python_named_types.add(name)
 
+    if result_settlement is not None:
+        root, _, dependencies = result_settlement
+        for name in dependencies:
+            if "properties" in _lookup_named_schema(root, name):
+                append_python_dataclass(name, root, f"Tool result companion contract for {name}.")
+            else:
+                append_python_alias(name, root, f"Tool result companion contract for {name}.")
+
+    for name in AUTH_PRINCIPAL_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Canonical principal contract for {name}.")
+    for name in AUTH_PRINCIPAL_OBJECT_TYPES:
+        append_python_contract_dataclass(name)
     for name in MCP_CONFIG_HELPER_TYPES:
         append_python_contract_dataclass(name)
     types_content += "\nclass McpStdioServerConfig(TypedDict, total=False):\n"
@@ -4313,6 +4377,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  tool_use_id: string;\n"
     types_content += "  content: WireToolResultContent;\n"
     types_content += "  is_error?: boolean;\n"
+    result_settlement = _wire_tool_result_settlement_contract(schemas)
+    if result_settlement is not None:
+        root, field, _ = result_settlement
+        field_type, optional_by_shape = _typescript_type_from_schema(root, field)
+        if optional_by_shape:
+            raise ValueError("WireToolResult settlement field has an unsupported TypeScript shape")
+        types_content += f"  settlement_failures?: {field_type};\n"
     types_content += "}\n\n"
 
     types_content += "export interface WireSessionHistory {\n"
@@ -4527,6 +4598,18 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         types_content += f"\nexport type {name} = {alias_type};\n"
         emitted_typescript_named_types.add(name)
 
+    if result_settlement is not None:
+        root, _, dependencies = result_settlement
+        for name in dependencies:
+            if "properties" in _lookup_named_schema(root, name):
+                append_typescript_interface(name, root)
+            else:
+                append_typescript_alias(name, root)
+
+    for name in AUTH_PRINCIPAL_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in AUTH_PRINCIPAL_OBJECT_TYPES:
+        append_typescript_contract_interface(name)
     for name in MCP_CONFIG_HELPER_TYPES:
         append_typescript_contract_interface(name)
     types_content += (

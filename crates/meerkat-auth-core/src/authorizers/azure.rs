@@ -25,7 +25,7 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{LeaseFreshnessObserver, oauth_endpoint_failure_observation};
+use super::{LeaseFreshnessObserver, LeaseRefreshMode, oauth_endpoint_failure_observation};
 use meerkat_core::RefreshFailureObservation;
 use meerkat_core::handles::{GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
@@ -212,10 +212,9 @@ impl AzureAdAuthorizer {
             .and_then(LeaseFreshnessObserver::expires_at)
     }
 
-    fn fresh_cached_token(
+    async fn fresh_cached_token(
         &self,
         observer: &LeaseFreshnessObserver,
-        now: DateTime<Utc>,
     ) -> Result<Option<String>, AuthError> {
         let Some((access_token, expires_at, lease_generation)) = ({
             let guard = self.cache.lock();
@@ -225,45 +224,52 @@ impl AzureAdAuthorizer {
         }) else {
             return Ok(None);
         };
-        if observer.cached_token_is_fresh(&self.label, expires_at, lease_generation, now)? {
+        if observer
+            .cached_token_is_fresh(&self.label, expires_at, lease_generation, Utc::now)
+            .await?
+        {
             return Ok(Some(access_token));
         }
         Ok(None)
     }
 
-    async fn get_token(&self) -> Result<String, AuthError> {
+    async fn get_token(&self, mode: LeaseRefreshMode) -> Result<String, AuthError> {
         let Some(observer) = &self.lease_observer else {
             return Err(AuthError::HostOwnedUnavailable);
         };
 
         // Check cache without taking the refresh path.
-        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
+        if let Some(access_token) = self.fresh_cached_token(observer).await? {
             return Ok(access_token);
         }
 
         let _refresh_guard = self.refresh_lock.lock().await;
-        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
+        if let Some(access_token) = self.fresh_cached_token(observer).await? {
             return Ok(access_token);
         }
 
-        let lifecycle = observer.begin_refresh(&self.label).await?;
+        let lifecycle = observer.begin_refresh(&self.label, mode).await?;
 
         // Miss — fetch a fresh token.
         let mut new_token = match self.fetch_token().await {
             Ok(token) => token,
             Err(err) => {
-                observer.refresh_failed(
-                    &self.label,
-                    lifecycle,
-                    azure_refresh_failure_observation(&err),
-                )?;
+                observer
+                    .refresh_failed(
+                        &self.label,
+                        lifecycle,
+                        azure_refresh_failure_observation(&err),
+                    )
+                    .await?;
                 return Err(err.into());
             }
         };
         let access = new_token.access_token.clone();
         let expires_at = new_token.expires_at;
-        new_token.lease_generation =
-            Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
+        let (generation, _lease_guard) = observer
+            .complete_refresh(&self.label, lifecycle, expires_at, Utc::now)
+            .await?;
+        new_token.lease_generation = Some(generation);
         *self.cache.lock() = Some(new_token);
         Ok(access)
     }
@@ -283,8 +289,14 @@ fn azure_refresh_failure_observation(err: &AzureAuthError) -> RefreshFailureObse
 
 #[async_trait]
 impl HttpAuthorizer for AzureAdAuthorizer {
+    async fn prepare_request(&self) -> Result<(), AuthError> {
+        self.get_token(LeaseRefreshMode::ExistingCredential)
+            .await
+            .map(|_| ())
+    }
+
     async fn authorize(&self, req: &mut HttpAuthorizationRequest<'_>) -> Result<(), AuthError> {
-        let token = self.get_token().await?;
+        let token = self.get_token(LeaseRefreshMode::AcquireOrRefresh).await?;
         req.headers
             .push(("Authorization".into(), format!("Bearer {token}")));
         Ok(())

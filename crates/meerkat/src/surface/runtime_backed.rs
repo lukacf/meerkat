@@ -142,6 +142,12 @@ pub fn build_runtime_backed_service_with_capacities_and_default_reconfigure_host
             config_state_path,
             Arc::new(std::sync::RwLock::new(builder.default_llm_client.clone())),
         );
+    #[cfg(not(target_arch = "wasm32"))]
+    let delivery_owner = persistence.runtime_delivery_owner();
+    #[cfg(not(target_arch = "wasm32"))]
+    let delivery_realm = persistence
+        .manifest()
+        .map(|manifest| manifest.realm.to_string());
     let (service, adapter) = build_runtime_backed_service_with_capacities(
         builder,
         active_session_capacity,
@@ -149,6 +155,15 @@ pub fn build_runtime_backed_service_with_capacities_and_default_reconfigure_host
         persistence,
     );
     let service = Arc::new(service);
+    // Every surface built through this composition applies durable job
+    // deliveries; a surface that silently does not is a defect, not a mode.
+    #[cfg(not(target_arch = "wasm32"))]
+    super::runtime_delivery::arm_default_runtime_delivery(
+        delivery_owner,
+        &service,
+        &adapter,
+        delivery_realm,
+    );
     blueprint.install(
         &adapter,
         Arc::clone(&service)
@@ -502,6 +517,73 @@ pub async fn materialize_attached_session_actor_only<B: SessionAgentBuilder + 's
         reserved_admission,
     )
     .await
+}
+
+/// Prepare the real lazy actor and retain its selected controller before
+/// authenticated native input admission. The existing attachment and reserved
+/// capacity remain the lifecycle owners; no second agent or client is built.
+///
+/// Only an empty deferred create is accepted. This function cannot submit a
+/// prompt, stage injected content, or start a turn. The trusted ingress owner
+/// must subsequently bind the returned actual pin to its final input and
+/// authenticate that association before calling native input acceptance.
+///
+/// This setup entry does not replace ordinary lazy creation. For an already
+/// materialized actor, use the service's exact-actor pin query under its turn
+/// boundary. An unsupported custom client yields a setup refusal; the
+/// registered deferred actor remains managed by its existing lifecycle owner.
+pub async fn materialize_attached_session_controller_with_reserved_admission<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    witness: RuntimeExecutorAttachmentWitness,
+    session: Session,
+    request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+) -> Result<meerkat_core::ControllerModelClient, SurfaceRuntimeMaterializeError> {
+    if request.initial_turn != InitialTurnPolicy::Defer
+        || request.deferred_prompt_policy != DeferredPromptPolicy::Discard
+        || !matches!(&request.prompt, meerkat_core::ContentInput::Text(text) if text.is_empty())
+        || !request.injected_context.is_empty()
+        || request
+            .build
+            .as_ref()
+            .is_some_and(|build| build.initial_work_authorization.is_some())
+    {
+        return Err(SessionError::Unsupported(
+            "controller setup requires an empty deferred create before input admission".to_owned(),
+        )
+        .into());
+    }
+    let session_id = session.id().clone();
+    let _boundary = service
+        .acquire_runtime_turn_finalization_guard(&session_id)
+        .await;
+    if service
+        .live_session_actor_witness(&session_id)
+        .await
+        .is_some()
+    {
+        return Err(SessionError::Busy { id: session_id }.into());
+    }
+    materialize_attached_session_actor_only_with_admission_and_boundary_mode(
+        service,
+        adapter,
+        witness,
+        session,
+        request,
+        reserved_admission,
+        AttachedActorMaterializationMode::under_turn_boundary(None),
+    )
+    .await?;
+    let actor = service
+        .live_session_actor_witness(&session_id)
+        .await
+        .ok_or_else(|| SessionError::NotFound { id: session_id })?;
+    Ok(service
+        .pin_controller_client_for_actor_under_runtime_turn_boundary(&actor)
+        .await?)
 }
 
 /// Reserved-admission variant of [`materialize_attached_session_actor_only`].
@@ -1951,12 +2033,20 @@ fn start_turn_request_from_primitive(
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::new(HandlingMode::Queue, None, metadata.cloned())
+            .with_work_authorization(
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.work_authorization.clone()),
+            )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
     })
 }
 
 #[async_trait::async_trait]
 impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecutor<B> {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(PersistentRuntimeBoundaryHandle {
             service: Arc::clone(&self.service),
@@ -2439,7 +2529,8 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
                 as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::new(MemoryBlobStore::new()),
-        ))
+        )
+        .expect("construct runtime authority"))
     }
 
     async fn build_test_service(
@@ -2516,6 +2607,313 @@ mod tests {
         )));
         let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
         (Arc::new(service), runtime_adapter)
+    }
+
+    // This fixture supplies selected-client data only. Native authentication
+    // and grant admission are deliberately not exercised by actor setup.
+    struct ControllerSetupClient {
+        inner: TestClient,
+        selection: Option<meerkat_core::ControllerModelSelection>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for ControllerSetupClient {
+        fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+            self.selection.clone()
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            self.inner.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    type CapturedControllerClient =
+        Arc<std::sync::Mutex<Option<Arc<dyn meerkat_core::AgentLlmClient>>>>;
+
+    async fn build_controller_setup_service(
+        temp: &TempDir,
+        supported: bool,
+        calls: Arc<AtomicUsize>,
+        constructions: Arc<AtomicUsize>,
+        captured: CapturedControllerClient,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+    ) {
+        let persistence = build_default_persistence(temp.path().join("sessions"))
+            .await
+            .expect("build default persistence");
+        let mut config = crate::Config::default();
+        config.model_fallback.enabled = Some(false);
+        let mut builder = FactoryAgentBuilder::new(
+            crate::AgentFactory::new(temp.path().join("sessions")),
+            config,
+        );
+        builder.default_llm_client = Some(Arc::new(ControllerSetupClient {
+            inner: TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            selection: supported.then(|| {
+                meerkat_core::ControllerModelSelection::new(
+                    meerkat_core::SessionLlmIdentity {
+                        model: "gpt-5.4".to_owned(),
+                        provider: meerkat_core::Provider::OpenAI,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding: None,
+                    },
+                    meerkat_core::AuthCredentialIdentity::Binding(meerkat_core::AuthBindingRef {
+                        realm: meerkat_core::RealmId::parse("controller-fixture").expect("realm"),
+                        binding: meerkat_core::BindingId::parse("fixture-only").expect("binding"),
+                        profile: None,
+                        origin: meerkat_core::BindingOrigin::Configured,
+                    }),
+                    "fixture-only".to_owned(),
+                    "openai".to_owned(),
+                )
+            }),
+            calls,
+        }));
+        *builder
+            .default_agent_llm_client_decorator
+            .write()
+            .expect("decorator lock") = Some(Arc::new(move |client| {
+            constructions.fetch_add(1, Ordering::SeqCst);
+            *captured.lock().expect("capture lock") = Some(Arc::clone(&client));
+            client
+        }));
+        let (service, adapter) = build_runtime_backed_service(builder, 4, persistence);
+        (Arc::new(service), adapter)
+    }
+
+    async fn attach_empty_controller_runtime(
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+    ) -> RuntimeExecutorAttachmentWitness {
+        adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare canonical runtime bindings before attaching lazy fixture executor");
+        adapter
+            .ensure_session_with_executor(
+                session_id.clone(),
+                default_persistent_executor(
+                    Arc::clone(service),
+                    Arc::clone(adapter),
+                    session_id.clone(),
+                ),
+            )
+            .await
+            .expect("attach existing native executor before lazy actor setup");
+        adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .expect("attachment")
+    }
+
+    #[tokio::test]
+    async fn lazy_controller_setup_builds_once_and_pins_the_actual_actor_before_input() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let captured = CapturedControllerClient::default();
+        let (service, adapter) = build_controller_setup_service(
+            &temp,
+            true,
+            Arc::clone(&calls),
+            Arc::clone(&constructions),
+            Arc::clone(&captured),
+        )
+        .await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let attachment = attach_empty_controller_runtime(&service, &adapter, &session_id).await;
+        let admission = service
+            .reserve_create_session_admission()
+            .await
+            .expect("capacity");
+        let controller = Box::pin(
+            materialize_attached_session_controller_with_reserved_admission(
+                &service,
+                &adapter,
+                attachment.clone(),
+                session,
+                make_request(SessionBuildOptions::default()),
+                admission,
+            ),
+        )
+        .await
+        .expect("prepare actual lazy actor controller");
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "setup must not call the model"
+        );
+        assert!(Arc::ptr_eq(
+            controller.client(),
+            captured.lock().expect("capture").as_ref().expect("client")
+        ));
+        let lease = service
+            .acquire_live_session_actor_turn_boundary_lease(&session_id)
+            .await
+            .expect("actor lease");
+        let again = service
+            .pin_controller_client_for_actor(&lease)
+            .await
+            .expect("same actor pin");
+        assert!(Arc::ptr_eq(controller.client(), again.client()));
+        drop(lease);
+        assert_eq!(
+            adapter
+                .current_executor_attachment_witness(&session_id)
+                .await,
+            Some(attachment)
+        );
+        let durable = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load")
+            .expect("session");
+        assert!(!durable.messages().iter().any(|message| matches!(
+            message,
+            meerkat_core::Message::User(_) | meerkat_core::Message::BlockAssistant(_)
+        )));
+        expect_prompt_completion(&adapter, &session_id, "first admitted legacy fixture input")
+            .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        expect_unregister_completion(&adapter, &session_id).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_controller_setup_refuses_work_before_building_or_publishing_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let (service, adapter) = build_controller_setup_service(
+            &temp,
+            true,
+            Arc::clone(&calls),
+            Arc::clone(&constructions),
+            CapturedControllerClient::default(),
+        )
+        .await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let attachment = attach_empty_controller_runtime(&service, &adapter, &session_id).await;
+        for case in 0..4 {
+            let mut request = make_request(SessionBuildOptions::default());
+            match case {
+                0 => request.initial_turn = InitialTurnPolicy::RunImmediately,
+                1 => request.deferred_prompt_policy = DeferredPromptPolicy::Stage,
+                2 => request.prompt = "must not be published".to_owned().into(),
+                _ => request
+                    .injected_context
+                    .push("must not be staged".to_owned().into()),
+            }
+            let admission = service
+                .reserve_create_session_admission()
+                .await
+                .expect("capacity");
+            let error = Box::pin(
+                materialize_attached_session_controller_with_reserved_admission(
+                    &service,
+                    &adapter,
+                    attachment.clone(),
+                    session.clone(),
+                    request,
+                    admission,
+                ),
+            )
+            .await
+            .expect_err("nonempty or eager setup must refuse");
+            assert!(matches!(
+                error,
+                SurfaceRuntimeMaterializeError::Session(SessionError::Unsupported(_))
+            ));
+        }
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            service
+                .live_session_actor_witness(&session_id)
+                .await
+                .is_none()
+        );
+        expect_unregister_completion(&adapter, &session_id).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_controller_setup_custom_client_refusal_does_not_start_or_destroy_actor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let (service, adapter) = build_controller_setup_service(
+            &temp,
+            false,
+            Arc::clone(&calls),
+            Arc::clone(&constructions),
+            CapturedControllerClient::default(),
+        )
+        .await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let attachment = attach_empty_controller_runtime(&service, &adapter, &session_id).await;
+        let admission = service
+            .reserve_create_session_admission()
+            .await
+            .expect("capacity");
+        let error = Box::pin(
+            materialize_attached_session_controller_with_reserved_admission(
+                &service,
+                &adapter,
+                attachment,
+                session,
+                make_request(SessionBuildOptions::default()),
+                admission,
+            ),
+        )
+        .await
+        .expect_err("custom client cannot silently fabricate a pin");
+        assert!(matches!(
+            error,
+            SurfaceRuntimeMaterializeError::Session(SessionError::Agent(
+                meerkat_core::AgentError::OperationRefused { .. }
+            ))
+        ));
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            service
+                .live_session_actor_witness(&session_id)
+                .await
+                .is_some()
+        );
+        expect_prompt_completion(
+            &adapter,
+            &session_id,
+            "ordinary ungoverned path is unchanged",
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        expect_unregister_completion(&adapter, &session_id).await;
     }
 
     struct BlockingClient {
@@ -3048,6 +3446,19 @@ mod tests {
             .await
             .expect("actor B witness");
         assert_ne!(actor_a, actor_b_witness);
+        let boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        assert!(
+            matches!(
+                service
+                    .pin_controller_client_for_actor_under_runtime_turn_boundary(&actor_a)
+                    .await,
+                Err(SessionError::NotFound { .. })
+            ),
+            "a stale actor query must not return the replacement actor's client"
+        );
+        drop(boundary);
 
         let error = cleanup
             .cleanup_after_durability_reload_required()

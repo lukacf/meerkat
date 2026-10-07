@@ -94,8 +94,9 @@ pub mod workgraph_attention;
 pub mod workgraph_flow;
 
 pub use member_creation::{
-    MemberCreationError, MemberCreationId, MemberCreationProvenance, MemberCreationRecord,
-    MemberCreationSnapshot, MemberCreationSource, MemberCreationSourceWitness,
+    CreationSourceCapture, MemberCreationAbsence, MemberCreationError, MemberCreationId,
+    MemberCreationProvenance, MemberCreationRecord, MemberCreationSnapshot, MemberCreationSource,
+    MemberCreationSourceWitness,
 };
 
 // Re-exports for convenience
@@ -300,16 +301,16 @@ pub use runtime::{
     MobSessionService, MobShutdownReport, MobSpawnManyFailure, MobState, MobUnreachablePeer,
     MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt, PeerTarget,
     PreviousMemberCleanupReport, ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality,
-    RetirementSettlement, RetirementSettlementWatch, RetirementStage, SessionResumeAuthority,
-    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
-    SessionResumeRejection, SessionResumeVerdict, ShutdownOptions, SpawnContinuityIntent,
-    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
-    SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec,
-    SpawnSystemPromptOverride, SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult,
-    WorkDeliveryReceipt, WorkTurnHandle, materialize_nonpersistent_session_resume_verdict,
-    mob_error_wire_code, observe_live_durable_source_via_projection_visibility,
-    observe_member_status_view_via_read, profile_to_wire, render_bounded_delegation_task,
-    stored_realm_profile_to_wire,
+    ResumedMemberView, RetirementSettlement, RetirementSettlementWatch, RetirementStage,
+    SessionResumeAuthority, SessionResumeLifecycle, SessionResumeMaterialization,
+    SessionResumePreparationReceipt, SessionResumeRejection, SessionResumeVerdict, ShutdownOptions,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberCustomizerChain,
+    SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
+    SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt,
+    WorkTurnHandle, materialize_nonpersistent_session_resume_verdict, mob_error_wire_code,
+    observe_live_durable_source_via_projection_visibility, observe_member_status_view_via_read,
+    profile_to_wire, render_bounded_delegation_task, stored_realm_profile_to_wire,
 };
 #[cfg(feature = "openai-live")]
 pub use runtime::{

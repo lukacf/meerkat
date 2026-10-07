@@ -32,8 +32,8 @@ impl super::MobHandle {
         session_id: &SessionId,
     ) -> Result<MemberCreationSourceWitness, MemberCreationError> {
         if !self.session_service.supports_persistent_sessions() {
-            return Err(MemberCreationError::Unavailable(
-                "source service has no persisted metadata authority",
+            return Err(MemberCreationError::Absent(
+                crate::MemberCreationAbsence::NonDurableService,
             ));
         }
         let snapshot = self.member_creation_for_session(session_id).await?.ok_or(
@@ -55,8 +55,8 @@ impl super::MobHandle {
         let creation_id = snapshot
             .creation
             .creation_id
-            .ok_or(MemberCreationError::Unavailable(
-                "legacy member has no creation token",
+            .ok_or(MemberCreationError::Absent(
+                crate::MemberCreationAbsence::LegacyCreation,
             ))?;
         let metadata = self
             .session_service

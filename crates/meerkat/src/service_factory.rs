@@ -269,22 +269,16 @@ impl SessionAgent for FactoryAgent {
         self.agent.set_runtime_execution_kind(input.execution_kind);
         self.agent
             .set_active_turn_request_contexts(input.request_contexts);
-        if input.typed_turn_appends.is_empty()
-            && input.transcript_identity.is_none()
-            && input.injected_context.is_empty()
-        {
-            self.agent.run_with_events(input.prompt, event_tx).await
-        } else {
-            self.agent
-                .run_with_events_and_typed_turn_appends(
-                    input.prompt,
-                    input.typed_turn_appends,
-                    input.injected_context,
-                    input.transcript_identity,
-                    event_tx,
-                )
-                .await
-        }
+        self.agent
+            .run_with_events_and_work_authorization(
+                input.prompt,
+                input.typed_turn_appends,
+                input.injected_context,
+                input.transcript_identity,
+                event_tx,
+                input.work_authorization,
+            )
+            .await
     }
 
     async fn run_pending_with_events(
@@ -292,6 +286,7 @@ impl SessionAgent for FactoryAgent {
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+        work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.set_runtime_execution_kind(execution_kind);
@@ -299,7 +294,13 @@ impl SessionAgent for FactoryAgent {
             .set_active_transcript_identity(transcript_identity);
         self.agent
             .set_active_turn_request_contexts(request_contexts);
-        self.agent.run_pending_with_events(event_tx).await
+        self.agent
+            .run_pending_with_events_and_work_authorization(event_tx, work_authorization)
+            .await
+    }
+
+    fn clear_work_authorization(&mut self) {
+        self.agent.clear_work_authorization();
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -332,6 +333,17 @@ impl SessionAgent for FactoryAgent {
             .session_mut()
             .push(Message::tool_results(results));
         Ok(())
+    }
+
+    fn pin_controller_client(&self) -> Option<meerkat_core::ControllerModelClient> {
+        let controller = self.agent.pin_controller_client()?;
+        let identity = self.agent.session().session_metadata()?.llm_identity();
+        let selection = controller.selection();
+        (selection.model() == identity.model
+            && selection.provider() == identity.provider
+            && selection.self_hosted_server_id() == identity.self_hosted_server_id.as_deref()
+            && selection.auth_binding() == identity.auth_binding.as_ref())
+        .then_some(controller)
     }
 
     fn replace_client(
@@ -391,13 +403,18 @@ impl SessionAgent for FactoryAgent {
     {
         self.agent
             .session_mut()
-            .append_system_message_idempotent(
+            .append_system_message_control_idempotent(
                 req.content.render_text(),
                 req.source,
                 req.idempotency_key,
                 meerkat_core::types::message_timestamp_now(),
             )
-            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+            .map_err(|error| match error {
+                meerkat_core::session::SystemMessageAppendError::CallbackBatchPending => {
+                    meerkat_core::error::AgentError::ControlAppendBlockedByCallbackBatch
+                }
+                other => meerkat_core::error::AgentError::ConfigError(other.to_string()),
+            })
     }
 
     fn append_system_notice_control(
@@ -1117,6 +1134,10 @@ pub struct FactoryAgentBuilder {
     /// Persistence-owned realm used when a session request does not carry an
     /// explicit realm override.
     pub default_realm_id: Option<meerkat_core::RealmId>,
+    /// Every agent this builder makes waits for its pending MCP server
+    /// connections to settle before its first turn
+    /// (`AgentBuildConfig::wait_for_mcp`). Off by default.
+    pub wait_for_mcp: bool,
     /// Persistent detached-job store injected into shell-capable builds.
     #[cfg(not(target_arch = "wasm32"))]
     pub default_detached_job_store: Option<Arc<dyn meerkat_jobs::DetachedJobStore>>,
@@ -1152,6 +1173,7 @@ impl FactoryAgentBuilder {
             default_workgraph_namespace_grant: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
             default_realm_id: None,
+            wait_for_mcp: false,
             #[cfg(not(target_arch = "wasm32"))]
             default_detached_job_store: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1187,6 +1209,7 @@ impl FactoryAgentBuilder {
             default_workgraph_namespace_grant: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
             default_realm_id: None,
+            wait_for_mcp: false,
             #[cfg(not(target_arch = "wasm32"))]
             default_detached_job_store: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1399,7 +1422,46 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<FactoryAgent, SessionError> {
+        let external_tools = req
+            .build
+            .as_ref()
+            .and_then(|build| build.external_tools.clone());
+        self.build_agent_with_external_tools(req, external_tools, event_tx)
+            .await
+    }
+
+    async fn build_agent_taking_tools(
+        &self,
+        req: &mut CreateSessionRequest,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<FactoryAgent, SessionError> {
+        let external_tools = req
+            .build
+            .as_mut()
+            .and_then(|build| build.external_tools.take());
+        self.build_agent_with_external_tools(req, external_tools, event_tx)
+            .await
+    }
+}
+
+impl FactoryAgentBuilder {
+    /// Build the agent for `req`, with `external_tools` as the request's
+    /// external tool dispatcher.
+    ///
+    /// The caller decides how the dispatcher is held. When it was moved out
+    /// of an owned request, the composed tool surface owns it exclusively and
+    /// session-time binding (owner session, ops registry) reaches it.
+    async fn build_agent_with_external_tools(
+        &self,
+        req: &CreateSessionRequest,
+        external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<FactoryAgent, SessionError> {
         let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
+        build_config.external_tools = external_tools;
+        if self.wait_for_mcp {
+            build_config.wait_for_mcp = true;
+        }
 
         // Inject default LLM client if none provided.
         if build_config.llm_client_override.is_none()
@@ -2526,6 +2588,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "initialize policy probe tool visibility".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::HandlingMode::Queue,
@@ -2689,6 +2752,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             &mut agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "initialize durable member tool visibility"
                     .to_string()
                     .into(),
@@ -2813,6 +2877,7 @@ mod tests {
             SessionAgent::run_turn_with_events(
                 &mut agent,
                 meerkat_session::ephemeral::SessionAgentTurnInput {
+                    work_authorization: None,
                     prompt: "ordinary turn overlapping live bridge".to_string().into(),
                     injected_context: Vec::new(),
                     handling_mode: meerkat_core::HandlingMode::Queue,
@@ -2927,6 +2992,7 @@ mod tests {
         let result = SessionAgent::run_turn_with_events(
             &mut agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "ordinary durable turn".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::HandlingMode::Queue,
@@ -3654,6 +3720,239 @@ mod tests {
         Ok(())
     }
 
+    /// Ops-capable external dispatcher whose observations live outside it, so
+    /// the test holds no handle to the dispatcher itself.
+    struct ObservedOpsProbe {
+        seen: Arc<Mutex<Option<(Arc<dyn OpsLifecycleRegistry>, SessionId)>>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentToolDispatcher for ObservedOpsProbe {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "noop".to_string(), false).into())
+        }
+
+        fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+            meerkat_core::agent::DispatcherCapabilities {
+                ops_lifecycle: true,
+            }
+        }
+
+        fn bind_ops_lifecycle(
+            self: Arc<Self>,
+            registry: Arc<dyn OpsLifecycleRegistry>,
+            owner_bridge_session_id: SessionId,
+        ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError>
+        {
+            let this = Arc::try_unwrap(self)
+                .map_err(|_| meerkat_core::agent::OpsLifecycleBindError::SharedOwnership)?;
+            *this.seen.lock().expect("probe lock") = Some((registry, owner_bridge_session_id));
+            Ok(meerkat_core::agent::BindOutcome::Bound(Arc::new(this)))
+        }
+    }
+
+    struct OwnedRequestFixture {
+        _temp: TempDir,
+        builder: FactoryAgentBuilder,
+        request: CreateSessionRequest,
+        session_id: SessionId,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+    }
+
+    async fn owned_request_fixture(
+        external: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    ) -> Result<OwnedRequestFixture, String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "ok" }));
+        let runtime_adapter = MeerkatMachine::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| format!("prepare bindings: {err}"))?;
+        let registry = Arc::clone(bindings.ops_lifecycle());
+        let request = CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "hello".to_string().into(),
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                resume_session: Some(session),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                external_tools: Some(external),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        };
+        Ok(OwnedRequestFixture {
+            _temp: temp,
+            builder,
+            request,
+            session_id,
+            registry,
+        })
+    }
+
+    /// The owned-request build moves the request's external dispatcher into
+    /// the agent, so an ops-capable one is genuinely bound: to the session's
+    /// own registry and the session as owner. The request keeps every other
+    /// field.
+    #[tokio::test]
+    async fn owned_request_binds_an_external_ops_dispatcher_to_owner_and_registry()
+    -> Result<(), String> {
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let mut fixture = owned_request_fixture(external).await?;
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let agent = fixture
+            .builder
+            .build_agent_taking_tools(&mut fixture.request, event_tx)
+            .await
+            .map_err(|err| err.to_string())?;
+        drop(agent);
+
+        let build = fixture.request.build.as_ref().expect("build options stay");
+        assert!(
+            build.external_tools.is_none(),
+            "the external dispatcher moved into the agent"
+        );
+        assert!(
+            matches!(
+                build.runtime_build_mode,
+                meerkat_core::RuntimeBuildMode::SessionOwned(_)
+            ),
+            "the rest of the request stays readable"
+        );
+        let (registry, owner) = seen
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "the external dispatcher was not bound".to_string())?;
+        assert!(Arc::ptr_eq(&registry, &fixture.registry));
+        assert_eq!(owner, fixture.session_id);
+        Ok(())
+    }
+
+    /// A host that still holds a second handle to an ops-capable external
+    /// dispatcher cannot have it rebound. The build fails with the typed
+    /// shared-ownership refusal instead of running with it silently unbound.
+    #[tokio::test]
+    async fn retained_external_ops_dispatcher_fails_the_build_with_shared_ownership()
+    -> Result<(), String> {
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let retained = Arc::clone(&external);
+        let mut fixture = owned_request_fixture(external).await?;
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let error = match fixture
+            .builder
+            .build_agent_taking_tools(&mut fixture.request, event_tx)
+            .await
+        {
+            Ok(_) => return Err("a shared ops-capable dispatcher must not build".to_string()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("shared ownership"),
+            "the refusal names shared ownership: {error}"
+        );
+        assert!(seen.lock().expect("probe lock").is_none());
+        drop(retained);
+        Ok(())
+    }
+
+    /// The borrowed build leaves the request holding its handle, so the same
+    /// dispatcher is refused there too rather than silently left unbound.
+    #[tokio::test]
+    async fn borrowed_request_build_refuses_an_ops_dispatcher_it_cannot_own() -> Result<(), String>
+    {
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let fixture = owned_request_fixture(external).await?;
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let error = match fixture
+            .builder
+            .build_agent(&fixture.request, event_tx)
+            .await
+        {
+            Ok(_) => return Err("a borrowed shared dispatcher must not build".to_string()),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("shared ownership"), "{error}");
+        assert!(seen.lock().expect("probe lock").is_none());
+        Ok(())
+    }
+
+    /// The ephemeral create path moves only the external dispatcher out of the
+    /// request: the eager initial turn still applies the request's initial
+    /// turn metadata after the owned build, and the moved ops-capable
+    /// dispatcher is bound.
+    #[tokio::test]
+    async fn eager_initial_turn_metadata_survives_the_owned_request_build() -> Result<(), String> {
+        const MARKER: &str = "EAGER-INITIAL-SYSTEM-MARKER";
+        let seen = Arc::new(Mutex::new(None));
+        let external: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(ObservedOpsProbe {
+            seen: Arc::clone(&seen),
+        });
+        let fixture = owned_request_fixture(external).await?;
+        let mut request = fixture.request;
+        request.initial_turn = meerkat_core::service::InitialTurnPolicy::RunImmediately;
+        if let Some(build) = request.build.as_mut() {
+            build.initial_turn_metadata = Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+                    system_prompts: vec![MARKER.to_string()],
+                    ..Default::default()
+                },
+            );
+        }
+        let service = EphemeralSessionService::new(fixture.builder, 1);
+        let created = service
+            .create_session(request)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(created.session_id, fixture.session_id);
+        let snapshot = service
+            .export_session(&fixture.session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            snapshot.messages().iter().any(|message| match message {
+                meerkat_core::Message::System(system) => system.content.contains(MARKER),
+                _ => false,
+            }),
+            "the eager turn applied the initial turn metadata's system prompt"
+        );
+        let (_, owner) = seen
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "the moved external dispatcher was not bound".to_string())?;
+        assert_eq!(owner, fixture.session_id);
+        Ok(())
+    }
+
     fn mock_input_cmd(session_id: &SessionId) -> CommsCommand {
         CommsCommand::Input {
             session_id: session_id.clone(),
@@ -3860,6 +4159,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             &mut agent,
             SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "inspect".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
@@ -3933,6 +4233,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             &mut agent,
             SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "inspect".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,

@@ -17,7 +17,9 @@ impl RealDirectBindReceiver {
         store: Arc<InMemoryRuntimeStore>,
         session_id: SessionId,
     ) -> Self {
-        let machine = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+        let machine = Arc::new(
+            MeerkatMachine::persistent_without_blobs(store).expect("construct runtime authority"),
+        );
         machine
             .register_session(session_id.clone())
             .await

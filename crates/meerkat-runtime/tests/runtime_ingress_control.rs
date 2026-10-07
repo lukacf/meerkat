@@ -28,6 +28,8 @@ fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Operator,
@@ -279,6 +281,8 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
 
     let operation = Input::Operation(OperationInput {
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::System,

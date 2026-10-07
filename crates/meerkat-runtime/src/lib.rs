@@ -65,6 +65,9 @@ pub mod host_stack;
 pub mod identifiers;
 pub mod ingress_types;
 pub mod input;
+pub mod input_admission_custody;
+pub mod input_audit;
+pub mod input_authority;
 pub mod input_ledger;
 pub mod input_scope;
 pub mod input_state;
@@ -535,7 +538,8 @@ pub use completion::{
 };
 pub use delivery_inbox::{
     RuntimeDeliveryAcknowledgement, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
-    RuntimeDeliveryKind, RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
+    RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership,
+    RuntimeDeliveryReceipt, RuntimeDeliveryRecord, RuntimeDeliverySubmission,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use exact_operation::{
@@ -569,6 +573,8 @@ pub use input_state::{
 pub use meerkat_core::types::HandlingMode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_machine::ProviderAuthRuntimeAuthority;
+#[cfg(feature = "test-support")]
+pub use meerkat_machine::UnregisterTeardownWaitWitness;
 pub use meerkat_machine::{
     AdmittedWork, ArchivedSessionActorMaterializationAuthorization,
     AuthorizedArchivedResumeCommitLease, CommittedRuntimeExecutorAttachmentPublicationLease,
@@ -997,6 +1003,8 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
     let transition = meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         meerkat_machine::dsl::MeerkatMachineInput::ResolveAdmissionPlan {
+            authority_binding: None,
+            authority_batch_key: None,
             input_id: input.id().to_string(),
             input_kind: meerkat_machine::dsl::AdmissionInputKind::from(input.kind()),
             requested_lane: input

@@ -193,7 +193,13 @@ pub use job_delivery::{
     JobDeliveryContent, JobDeliverySink, JobNotificationDeliveryPayload, JobOutboxProjectionError,
     JobOutboxProjectionPass, JobOutboxProjector, JobRuntimeDeliveryApplier,
     JobTerminalDeliveryPayload, PreparedJobDelivery, ProjectedJobDelivery, RuntimeJobDeliveryDrain,
-    SkippedJobOutboxEntry,
+    SkippedJobOutboxEntry, job_delivery_event_input, job_delivery_notification_request,
+};
+#[cfg(not(target_arch = "wasm32"))]
+mod runtime_delivery_owner;
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime_delivery_owner::{
+    RuntimeDeliveryHost, RuntimeDeliveryOwner, RuntimeDeliveryOwnerHandle, RuntimeDeliveryPass,
 };
 mod job_composition;
 pub use job_composition::{
@@ -435,10 +441,11 @@ pub use meerkat_jobs::{
     CheckpointRef, DetachedJobError, DetachedJobService, DetachedJobStore, ExecutionIntentId,
     FenceToken, InteractionLineageId, JobDeliveryKind, JobDescription, JobFailureCode,
     JobHealthCondition, JobHealthCoverage, JobHealthReading, JobHealthSnapshot, JobId,
-    JobNotification, JobOutboxEntry, JobPhase, JobProgress, JobProgressKind, JobReceipt,
-    JobReference, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey, JobSubscription,
-    JobSubscriptionId, JobTerminalKind, JobTerminalResult, MemoryDetachedJobStore, OriginMemberId,
-    RestartClass, RunnerHandleRef, RunnerIdentity, RunnerSpecificationRef, ToolIdentity, WorkerId,
+    JobNotification, JobOutboxCommitSignal, JobOutboxEntry, JobPhase, JobProgress, JobProgressKind,
+    JobReceipt, JobReference, JobResultRef, JobSnapshot, JobSpec, JobSubmissionKey,
+    JobSubscription, JobSubscriptionId, JobTerminalApplication, JobTerminalKind, JobTerminalResult,
+    MemoryDetachedJobStore, OriginMemberId, RestartClass, RunnerHandleRef, RunnerIdentity,
+    RunnerSpecificationRef, ToolIdentity, WorkerId,
 };
 pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]

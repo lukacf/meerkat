@@ -193,6 +193,8 @@ fn keyed_external_event(key: &str) -> Input {
     Input::ExternalEvent(crate::input::ExternalEventInput {
         objective_id: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::External {
@@ -531,6 +533,8 @@ fn response_progress(label: &str) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: crate::input::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
@@ -864,7 +868,8 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
     // Persistent machine: the same store read registered and unregistered.
     let store: Arc<dyn crate::store::RuntimeStore> =
         Arc::new(crate::store::InMemoryRuntimeStore::new());
-    let attached = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    let attached =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     let session_id = SessionId::new();
     attached
         .register_session(session_id.clone())
@@ -888,7 +893,8 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
             .is_none()
     );
 
-    let detached = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    let detached =
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
     assert!(
         read(&detached, &session_id, &unknown)
             .await
@@ -933,7 +939,8 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
         MeerkatMachine::persistent(
             Arc::clone(&store),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ),
+        )
+        .expect("persistent machine"),
         Vec::new(),
     )
     .await;
@@ -951,7 +958,8 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
     let restarted = MeerkatMachine::persistent(
         restarted_store,
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("persistent machine");
     let read = restarted
         .input_terminal_receipt(
             &session_id,

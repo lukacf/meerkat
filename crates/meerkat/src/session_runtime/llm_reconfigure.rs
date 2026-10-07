@@ -1265,6 +1265,75 @@ mod tests {
         AuthBindingRef, BindingId, BindingOrigin, ConfigStore as _, Provider, RealmId,
     };
 
+    fn stock_service_with_installed_reconfigure_host() -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<meerkat_runtime::MeerkatMachine>,
+        tempfile::TempDir,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let builder = FactoryAgentBuilder::new(AgentFactory::minimal(), Config::default());
+        let bundle = crate::PersistenceBundle::new(
+            Arc::new(crate::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(crate::MemoryBlobStore::new()),
+        )
+        .unwrap();
+        let (service, machine) =
+            crate::surface::build_runtime_backed_service_with_default_reconfigure_host(
+                builder,
+                2,
+                bundle,
+                directory.path().join("reconfigure.json"),
+            );
+        (service, machine, directory)
+    }
+
+    #[tokio::test]
+    async fn embedded_installed_host_releases_dropped_stock_service() {
+        let (service, _machine, _directory) = stock_service_with_installed_reconfigure_host();
+        let weak = Arc::downgrade(&service);
+        drop(service);
+        assert!(
+            weak.upgrade().is_none(),
+            "machine-owned installed host must not keep its stock service alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn weak_host_finalization_guard_retains_exact_stock_service_until_drop() {
+        let (service, machine, _directory) = stock_service_with_installed_reconfigure_host();
+        let weak = Arc::downgrade(&service);
+        let service_owner: Arc<dyn SessionRuntimeLlmReconfigureService> = service.clone();
+        let host = SessionRuntimeLlmReconfigureHost {
+            service: Arc::downgrade(&service_owner),
+            staged_sessions: Arc::new(StagedSessionRegistry::new()),
+            factory: AgentFactory::minimal(),
+            auth_lease: machine.generated_auth_lease_handle(),
+            default_llm_client: Arc::new(std::sync::RwLock::new(None)),
+            agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
+            config_runtime: Arc::new(std::sync::RwLock::new(None)),
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
+        };
+        drop(service_owner);
+        let session_id = SessionId::new();
+        let guard = host
+            .acquire_turn_finalization_boundary(&session_id)
+            .await
+            .unwrap();
+        drop(service);
+        assert!(
+            weak.upgrade().is_some(),
+            "returned transaction guard must retain the exact stock service"
+        );
+        assert!(host.service().is_ok());
+        drop(guard);
+        assert!(
+            weak.upgrade().is_none(),
+            "dropping the returned boundary must release its final service owner"
+        );
+        assert!(matches!(host.service(), Err(RuntimeDriverError::Destroyed)));
+    }
+
     struct RealmOnlyService {
         realm_id: Option<RealmId>,
     }

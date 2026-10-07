@@ -228,6 +228,30 @@ impl CreationSourceCapture {
     }
 }
 
+/// Read a creation source's committed metadata from the retained metadata
+/// authority, and only from there.
+///
+/// The source is the session that dispatched the spawn, so its turn is
+/// usually waiting for this read to finish. A metadata read derived from the
+/// live session (an in-memory service asks that session's own task) would
+/// wait for the same turn and never return. The retained seam never
+/// substitutes a live-session read: a service without a retained metadata
+/// authority reports `Unsupported`, which is a legitimate absence here.
+///
+/// # Errors
+/// A read fault of the retained authority, or the absence of one.
+pub async fn load_creation_source_metadata(
+    service: &dyn crate::MobSessionService,
+    session_id: &SessionId,
+) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, MemberCreationError> {
+    match service.load_retained_session_metadata(session_id).await {
+        Err(meerkat_core::service::SessionError::Unsupported(_)) => Err(
+            MemberCreationError::Absent(MemberCreationAbsence::NonDurableService),
+        ),
+        result => result.map_err(MemberCreationError::from),
+    }
+}
+
 /// Read index of immutable journal facts. Only committed event projection
 /// populates this index; it is never a second persistence or write authority.
 #[derive(Debug, Default)]

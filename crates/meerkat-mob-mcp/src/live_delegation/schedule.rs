@@ -512,11 +512,21 @@ impl VoiceWorkGraph {
             .map_err(|error| format!("voice work item {item} claim failed: {error}"))
     }
 
-    /// Classify the item after its worker's bounded turn ended.
+    /// Classify the item after its worker's bounded turn ended. The four
+    /// simple statuses come from the item alone; only Open and Blocked need
+    /// the namespace snapshot, whose readiness (child joins, time windows,
+    /// blockers) is one coherent observation of the item and its graph.
     pub(super) async fn disposition_after_worker_turn(
         &self,
         item: &WorkItemId,
     ) -> Result<WorkItemDisposition, String> {
+        match self.get(item).await?.status {
+            WorkStatus::Completed => return Ok(WorkItemDisposition::Completed),
+            WorkStatus::Failed => return Ok(WorkItemDisposition::Failed),
+            WorkStatus::Cancelled => return Ok(WorkItemDisposition::Cancelled),
+            WorkStatus::InProgress => return Ok(WorkItemDisposition::InProgress),
+            WorkStatus::Open | WorkStatus::Blocked => {}
+        }
         let snapshot = self
             .service
             .snapshot(WorkGraphSnapshotFilter {

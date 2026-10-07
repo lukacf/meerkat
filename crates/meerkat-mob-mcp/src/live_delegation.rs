@@ -1378,6 +1378,10 @@ pub struct ExperimentalLiveDelegationCoordinator {
     /// own rows): `Some` answers every release with these members.
     #[cfg(test)]
     awaiting_peer_replies_for_test: Arc<std::sync::Mutex<Option<Vec<String>>>>,
+    /// Test gate on the next deferred WorkGraph close: `(entered, resume)`.
+    #[cfg(test)]
+    deferred_close_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1680,6 +1684,8 @@ impl ExperimentalLiveDelegationCoordinator {
             post_close_merges: Arc::default(),
             #[cfg(test)]
             awaiting_peer_replies_for_test: Arc::default(),
+            #[cfg(test)]
+            deferred_close_gate_for_test: Arc::default(),
         }
     }
 
@@ -5099,13 +5105,16 @@ impl ExperimentalLiveDelegationCoordinator {
                     )
                 })
                 .await;
-                let _ = realize_terminal(
+                let realized = realize_terminal(
                     &cleanup_coordinator,
                     &cleanup_retained,
                     &service,
                     execution.await_terminal().await,
                 )
                 .await;
+                if let Some(close) = realized.deferred_close {
+                    close.settle().await;
+                }
                 cleanup_tasks.lock().await.remove(&cleanup_operation_id);
             });
             self.failed_start_cleanups.lock().await.insert(
@@ -5165,13 +5174,14 @@ impl ExperimentalLiveDelegationCoordinator {
                     "steer deliveries settled at the worker's terminal"
                 );
             }
-            let terminal = realize_terminal(
+            let mut terminal = realize_terminal(
                 task_coordinator.as_ref(),
                 &task_retained,
                 &service,
                 worker_terminal,
             )
             .await;
+            let deferred_close = terminal.deferred_close.take();
             tracing::debug!(
                 operation_id = %task_retained.operation.operation_id(),
                 result_present = terminal.result_text.is_some(),
@@ -5183,6 +5193,27 @@ impl ExperimentalLiveDelegationCoordinator {
             task_coordinator
                 .record_terminal_realization(&task_channel_key, &task_retained, terminal)
                 .await;
+            // The result's release now runs on its own task; the item's close
+            // settles here, independent of it, and its dependents are
+            // scheduled once it lands.
+            if let Some(close) = deferred_close {
+                #[cfg(test)]
+                {
+                    let gate = task_coordinator
+                        .deferred_close_gate_for_test
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let Some((entered, resume)) = gate {
+                        let _ = entered.send(());
+                        let _ = resume.await;
+                    }
+                }
+                close.settle().await;
+                task_coordinator
+                    .pump_channel_schedule(&task_channel_key)
+                    .await;
+            }
         });
         self.active.lock().await.insert(
             retained.operation.operation_id().clone(),
@@ -6393,13 +6424,16 @@ async fn cleanup_started_execution_after_publication_failure(
             tracing::warn!(%error, "cancellation observation publication was not replayed; terminal observation remains authoritative");
         }
     }
-    let _ = realize_terminal(
+    let realized = realize_terminal(
         coordinator,
         retained,
         service,
         execution.await_terminal().await,
     )
     .await;
+    if let Some(close) = realized.deferred_close {
+        close.settle().await;
+    }
 }
 
 struct RealizedDelegationTerminal {
@@ -6414,6 +6448,36 @@ struct RealizedDelegationTerminal {
     /// The session the worker's completed turn ran in, read again at result
     /// release for peer requests still awaiting an answer.
     worker_session: Option<SessionId>,
+    /// The WorkGraph close the worker's item still needs. Settled by the
+    /// delegation task after the terminal is recorded, never on the result's
+    /// provider path; see [`DeferredWorkItemClose`].
+    deferred_close: Option<DeferredWorkItemClose>,
+}
+
+/// Closing a voice work item its worker left open: best-effort WorkGraph
+/// maintenance (a failure is logged and the classified terminal stands), so
+/// it is settled after the terminal is recorded rather than before the
+/// result's release. It does not depend on whether or when a result is
+/// dispatched: failed and cancelled workers, and completed work whose channel
+/// closed, settle it too. Its close is what lets dependent items become
+/// ready, so the channel's schedule is pumped again after it.
+struct DeferredWorkItemClose {
+    workgraph: schedule::VoiceWorkGraph,
+    item: meerkat::WorkItemId,
+    status: meerkat::WorkStatus,
+    summary: Option<String>,
+}
+
+impl DeferredWorkItemClose {
+    async fn settle(self) {
+        if let Err(error) = self
+            .workgraph
+            .close(&self.item, self.status, self.summary.as_deref())
+            .await
+        {
+            tracing::warn!(%error, "voice work item could not be closed after its worker ended");
+        }
+    }
 }
 
 /// Retry a binding-fenced step while the worker's channel is still bound.
@@ -6490,52 +6554,54 @@ async fn classify_worker_terminal(
     LiveDelegationWorkerTerminalKind,
     Vec<(meerkat::WorkItemId, String)>,
     bool,
+    Option<DeferredWorkItemClose>,
 ) {
     let (Some(workgraph), Some(work)) = (retained.workgraph.as_ref(), retained.work.as_ref())
     else {
-        return (mob_terminal, Vec::new(), false);
+        return (mob_terminal, Vec::new(), false, None);
     };
     let disposition = match workgraph.disposition_after_worker_turn(&work.id).await {
         Ok(disposition) => disposition,
         Err(error) => {
             tracing::warn!(%error, "voice work item state unavailable; using the Mob terminal alone");
-            return (mob_terminal, Vec::new(), false);
+            return (mob_terminal, Vec::new(), false, None);
         }
     };
     let close = |status: meerkat::WorkStatus, summary: Option<&str>| {
-        let workgraph = workgraph.clone();
-        let item = work.id.clone();
-        let summary = summary.map(str::to_string);
-        async move {
-            if let Err(error) = workgraph.close(&item, status, summary.as_deref()).await {
-                tracing::warn!(%error, "voice work item could not be closed after its worker ended");
-            }
-        }
+        Some(DeferredWorkItemClose {
+            workgraph: workgraph.clone(),
+            item: work.id.clone(),
+            status,
+            summary: summary.map(str::to_string),
+        })
     };
     match (mob_terminal, disposition) {
         (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Completed) => (
             LiveDelegationWorkerTerminalKind::Completed,
             Vec::new(),
             false,
+            None,
         ),
         (
             LiveDelegationWorkerTerminalKind::Completed,
             WorkItemDisposition::InProgress | WorkItemDisposition::ReleasedReady,
-        ) => {
-            close(meerkat::WorkStatus::Completed, result_text).await;
-            (
-                LiveDelegationWorkerTerminalKind::Completed,
-                Vec::new(),
-                false,
-            )
-        }
-        (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Failed) => {
-            (LiveDelegationWorkerTerminalKind::Failed, Vec::new(), false)
-        }
+        ) => (
+            LiveDelegationWorkerTerminalKind::Completed,
+            Vec::new(),
+            false,
+            close(meerkat::WorkStatus::Completed, result_text),
+        ),
+        (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Failed) => (
+            LiveDelegationWorkerTerminalKind::Failed,
+            Vec::new(),
+            false,
+            None,
+        ),
         (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Cancelled) => (
             LiveDelegationWorkerTerminalKind::Cancelled,
             Vec::new(),
             false,
+            None,
         ),
         (
             LiveDelegationWorkerTerminalKind::Completed,
@@ -6547,17 +6613,20 @@ async fn classify_worker_terminal(
             LiveDelegationWorkerTerminalKind::Blocked,
             blockers,
             explicit_block,
+            None,
         ),
         (terminal, disposition) => {
-            if !disposition.is_terminal() {
+            let deferred = if disposition.is_terminal() {
+                None
+            } else {
                 let status = if terminal == LiveDelegationWorkerTerminalKind::Cancelled {
                     meerkat::WorkStatus::Cancelled
                 } else {
                     meerkat::WorkStatus::Failed
                 };
-                close(status, None).await;
-            }
-            (terminal, Vec::new(), false)
+                close(status, None)
+            };
+            (terminal, Vec::new(), false, deferred)
         }
     }
 }
@@ -6592,7 +6661,7 @@ async fn realize_terminal(
         DelegationTurnTerminal::Completed(turn) => Some(turn.result().session_id().clone()),
         _ => None,
     };
-    let (terminal_kind, blockers, explicit_block) =
+    let (terminal_kind, blockers, explicit_block, deferred_close) =
         classify_worker_terminal(retained, mob_terminal, mob_result_text.as_deref()).await;
     if runtime
         .live_channel_is_active_for_session(binding.session_id(), binding.channel_id())
@@ -6649,6 +6718,7 @@ async fn realize_terminal(
                 explicit_block,
                 channel_closed: false,
                 worker_session,
+                deferred_close,
             };
         }
     }
@@ -6659,6 +6729,7 @@ async fn realize_terminal(
         blockers,
         explicit_block,
         mob_result_text,
+        deferred_close,
     )
     .await
 }
@@ -6674,6 +6745,7 @@ async fn realize_terminal_after_channel_close(
     blockers: Vec<(meerkat::WorkItemId, String)>,
     explicit_block: bool,
     mob_result_text: Option<String>,
+    deferred_close: Option<DeferredWorkItemClose>,
 ) -> RealizedDelegationTerminal {
     let runtime = coordinator.runtime.as_ref();
     let session_id = retained.runtime_binding.session_id();
@@ -6728,6 +6800,7 @@ async fn realize_terminal_after_channel_close(
         explicit_block,
         channel_closed: true,
         worker_session: None,
+        deferred_close,
     }
 }
 

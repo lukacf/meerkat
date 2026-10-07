@@ -850,13 +850,16 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
         }
     }
 
-    let items = fx.voice_items().await;
-    assert_eq!(items.len(), 2);
-    assert!(
-        items
+    // Each item's close settles after its result's release, off that path.
+    wait_until(WAIT, || async {
+        fx.voice_items()
+            .await
             .iter()
             .all(|item| item.status == meerkat::WorkStatus::Completed)
-    );
+    })
+    .await;
+    let items = fx.voice_items().await;
+    assert_eq!(items.len(), 2);
     assert!(items.iter().all(|item| {
         item.evidence_refs
             .iter()
@@ -1114,10 +1117,169 @@ async fn blocked_worker_is_retired_and_requeued_with_the_dependency_result() {
         ],
         "{second_narrations:?}"
     );
+    wait_until(WAIT, || async {
+        fx.voice_item_titled("write the summary from the numbers")
+            .await
+            .status
+            == meerkat::WorkStatus::Completed
+    })
+    .await;
+    fx.close().await;
+}
+
+/// #1820: an item's WorkGraph close is maintenance, not the result's release
+/// path. With the first item's close held, its result still reaches the
+/// provider, and the item that waits on it stays parked. Once the close
+/// settles, the item carries its evidence and the waiting operation restarts
+/// with no new user event.
+#[tokio::test]
+async fn a_result_is_released_before_its_work_item_close_settles() {
+    let mut fx = fixture(true).await;
+    let first = fx.delegate("first", "collect the quarterly numbers").await;
+    let second = fx
+        .delegate("second", "write the summary from the numbers")
+        .await;
+    let first_call = fx.next_call().await;
+    let second_call = fx.next_call().await;
+    let first_call_index = if first_call.task_text.contains("quarterly") {
+        first_call.index
+    } else {
+        second_call.index
+    };
+    let second_call_index = 1 - first_call_index;
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
     let second_item = fx
         .voice_item_titled("write the summary from the numbers")
         .await;
-    assert_eq!(second_item.status, meerkat::WorkStatus::Completed);
+    workgraph
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: first_item.id.clone(),
+            to_id: second_item.id.clone(),
+        })
+        .await
+        .expect("blocks edge");
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: second_item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: second_item.revision,
+        })
+        .await
+        .expect("release behind the blocker");
+    fx.client.release(second_call_index);
+    fx.wait_for_schedule_state(
+        &second,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked,
+    )
+    .await;
+
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    *fx.coordinator
+        .deferred_close_gate_for_test
+        .lock()
+        .expect("gate") = Some((entered_tx, resume_rx));
+    fx.client.release(first_call_index);
+    tokio::time::timeout(WAIT, entered_rx)
+        .await
+        .expect("the first item's close reached its gate")
+        .expect("gate sender");
+    wait_until(WAIT, || async {
+        fx.control
+            .releases
+            .lock()
+            .await
+            .iter()
+            .any(|(key, _)| key == "first-delegation")
+    })
+    .await;
+    assert_eq!(
+        fx.voice_item_titled("collect the quarterly numbers")
+            .await
+            .status,
+        meerkat::WorkStatus::InProgress,
+        "the result was released while its item's close was held"
+    );
+    fx.expect_no_call().await;
+
+    resume_tx.send(()).expect("release the close");
+    let restarted = fx.next_call().await;
+    assert!(
+        restarted
+            .user_text
+            .contains("write the summary from the numbers"),
+        "{}",
+        restarted.user_text
+    );
+    let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
+    assert_eq!(first_item.status, meerkat::WorkStatus::Completed);
+    assert!(
+        first_item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "live_delegation_result")
+    );
+    fx.client.release(restarted.index);
+    fx.wait_for_completed(&[first, second]).await;
+    fx.close().await;
+}
+
+/// An item its worker leaves Open with no Blocks edge is ready only when the
+/// WorkGraph says so: a not-before time still in the future keeps it
+/// waiting, and nothing is released for it.
+#[tokio::test]
+async fn an_open_item_not_yet_due_keeps_its_worker_waiting() {
+    let mut fx = fixture(true).await;
+    let operation = fx.delegate("later", "call the venue tomorrow").await;
+    let call = fx.next_call().await;
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let item = fx.voice_item_titled("call the venue tomorrow").await;
+    let item = workgraph
+        .update(meerkat::UpdateWorkItemRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: item.revision,
+            title: None,
+            description: None,
+            priority: None,
+            completion_policy: None,
+            labels: None,
+            due_at: None,
+            not_before: Some(chrono::Utc::now() + chrono::Duration::days(1)),
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect("defer the item");
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: item.revision,
+        })
+        .await
+        .expect("release the deferred item");
+    fx.client.release(call.index);
+    fx.wait_for_schedule_state(
+        &operation,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked,
+    )
+    .await;
+    assert!(fx.control.releases.lock().await.is_empty());
+    assert_eq!(
+        fx.voice_item_titled("call the venue tomorrow").await.status,
+        meerkat::WorkStatus::Open
+    );
     fx.close().await;
 }
 
@@ -1191,11 +1353,13 @@ async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the
         fx.control.releases.lock().await.is_empty(),
         "nothing reaches the closed provider channel"
     );
+    // Completed work whose channel closed never dispatches a result; its
+    // item still settles.
     for title in (0..4).map(|index| format!("long task {index}")) {
-        assert_eq!(
-            fx.voice_item_titled(&title).await.status,
-            meerkat::WorkStatus::Completed
-        );
+        wait_until(WAIT, || async {
+            fx.voice_item_titled(&title).await.status == meerkat::WorkStatus::Completed
+        })
+        .await;
     }
     fx.assert_nothing_cancelled();
     fx.handle.shutdown().await.expect("shutdown");

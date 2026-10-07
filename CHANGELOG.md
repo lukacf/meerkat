@@ -403,6 +403,19 @@ them.
 
 ### Fixed
 
+- Live delegation: a finished worker's result no longer waits on WorkGraph
+  maintenance before it can reach the voice (#1820). The item's
+  classification reads the single item for Completed, Failed, Cancelled and
+  InProgress, and keeps the coherent namespace snapshot (blockers, child
+  joins, time windows) only for Open and Blocked. Closing an item the worker
+  left open (its result evidence, then the close) now settles on the
+  delegation's task after the terminal is recorded, independent of whether
+  or when a result is dispatched: failed and cancelled workers, and
+  completed work whose channel closed, settle it too, and the channel's
+  schedule is pumped again once it lands. The durable terminal receipt and
+  the generated release and delivery guards still come before any dispatch.
+  A production host measured about 5.7 s of WorkGraph round trips on that
+  path.
 - GPT Live: a typed row delivered late behind a history summary, together
   with newer speech that corrected part of it, is now framed as newer than the
   summary (#1800). The summary was snapshotted before the row was typed, so it

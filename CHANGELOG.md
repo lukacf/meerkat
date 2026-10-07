@@ -732,6 +732,12 @@ them.
   is refused before it is sent, and one the server refuses with `401` fails
   with the typed `McpError::AuthorizationRequired`; neither is replayed.
 
+### Known issues
+
+- A catalog refresh that re-identifies a tool name that is still active can
+  make the new identity visible to the active filter before the next boundary
+  commit.
+
 ### Testing
 
 - The xtask machine workflow test

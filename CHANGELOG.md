@@ -149,9 +149,10 @@ them.
   classified against its WorkGraph item, terminal realized, result release
   and delivery authorized, pending peer-request read started and finished
   (with `rows`), result dispatched, and result acknowledged. The runtime loop
-  also logs a run's finalization at INFO with `run_id` and `elapsed_ms`:
-  finalization started, commit persisted, finalization ended, and terminal
-  receipt persisted. No behaviour changes.
+  logs one INFO line per finished run, "runtime run finalization ended", with
+  `run_id`, `commit_ms`, `receipt_ms` and `total_ms`; its steps (finalization
+  started, commit persisted, terminal receipt persisted) are at DEBUG. No
+  behaviour changes.
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
   runtime delivery inbox's exclusive delivery ownership
   (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is

@@ -54,6 +54,17 @@ them.
   expires the session too: a server that answers an unsupported GET with
   `404` instead of the specified `405` will see its sessions treated as
   expired and must be fixed to answer `405`.
+  `ToolDispatchTerminalErrorKind::OutcomeUncertain` is appended after every
+  released variant, so existing ordinals are unchanged. It serializes as
+  `outcome_uncertain` in tool-dispatch diagnostics and settlement
+  companions; the event, parameter, OpenAPI and wire schemas and the
+  generated TypeScript, Web and Python types now expose it, and the
+  TypeScript client accepts it as a settlement failure kind. Update
+  exhaustive handling and closed client validators, and upgrade SDK and
+  runtime pins together: existing named values still decode with the
+  updated contract, but older closed readers can reject the new value.
+  `WireToolErrorClass` is unchanged. An uncertain outcome does not
+  establish that the call never ran, and does not authorize a replay.
 
 - Behaviour-only (not measured by the gate): MCP Streamable HTTP and
   legacy SSE connections and HTTP skills sources follow only same-origin

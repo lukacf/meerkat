@@ -113,7 +113,6 @@ pub enum ToolDispatchTerminalErrorKind {
     ExecutionFailed,
     Timeout,
     AccessDenied,
-    OutcomeUncertain,
     AuthorizationRefused,
     OperationObservationUnavailable,
     OperationAuthorizationUnavailable,
@@ -123,6 +122,8 @@ pub enum ToolDispatchTerminalErrorKind {
     CallbackPending,
     ConfinementRefused,
     HookDenied,
+    /// Appended so released ordinals stay stable.
+    OutcomeUncertain,
 }
 
 impl From<&ToolError> for ToolDispatchTerminalErrorKind {

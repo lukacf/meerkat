@@ -865,7 +865,7 @@ export interface ToolDispatchSettlementFailure {
   physical_outcome: LiveBridgeEffectOutcome;
 }
 
-export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "outcome_uncertain" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending" | "confinement_refused" | "hook_denied";
+export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending" | "confinement_refused" | "hook_denied" | "outcome_uncertain";
 
 export type ToolName = string;
 

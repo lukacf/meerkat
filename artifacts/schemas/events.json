@@ -4672,25 +4672,33 @@
         "type": "object"
       },
       "ToolDispatchTerminalErrorKind": {
-        "enum": [
-          "not_found",
-          "unavailable",
-          "invalid_arguments",
-          "execution_failed",
-          "timeout",
-          "access_denied",
-          "outcome_uncertain",
-          "authorization_refused",
-          "operation_observation_unavailable",
-          "operation_authorization_unavailable",
-          "policy_denied",
-          "policy_indeterminate",
-          "other",
-          "callback_pending",
-          "confinement_refused",
-          "hook_denied"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "not_found",
+              "unavailable",
+              "invalid_arguments",
+              "execution_failed",
+              "timeout",
+              "access_denied",
+              "authorization_refused",
+              "operation_observation_unavailable",
+              "operation_authorization_unavailable",
+              "policy_denied",
+              "policy_indeterminate",
+              "other",
+              "callback_pending",
+              "confinement_refused",
+              "hook_denied"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "outcome_uncertain",
+            "description": "Appended so released ordinals stay stable.",
+            "type": "string"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -12988,25 +12996,33 @@
         "type": "object"
       },
       "ToolDispatchTerminalErrorKind": {
-        "enum": [
-          "not_found",
-          "unavailable",
-          "invalid_arguments",
-          "execution_failed",
-          "timeout",
-          "access_denied",
-          "outcome_uncertain",
-          "authorization_refused",
-          "operation_observation_unavailable",
-          "operation_authorization_unavailable",
-          "policy_denied",
-          "policy_indeterminate",
-          "other",
-          "callback_pending",
-          "confinement_refused",
-          "hook_denied"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "not_found",
+              "unavailable",
+              "invalid_arguments",
+              "execution_failed",
+              "timeout",
+              "access_denied",
+              "authorization_refused",
+              "operation_observation_unavailable",
+              "operation_authorization_unavailable",
+              "policy_denied",
+              "policy_indeterminate",
+              "other",
+              "callback_pending",
+              "confinement_refused",
+              "hook_denied"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "outcome_uncertain",
+            "description": "Appended so released ordinals stay stable.",
+            "type": "string"
+          }
+        ]
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",

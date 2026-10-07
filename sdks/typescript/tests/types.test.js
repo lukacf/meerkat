@@ -6283,7 +6283,7 @@ it("hook failed legacy string wire remains compatible", () => {
 });
 
 it("native refusal terminal kinds remain valid settlement companions", () => {
-  for (const failure_kind of ["confinement_refused", "hook_denied"]) {
+  for (const failure_kind of ["confinement_refused", "hook_denied", "outcome_uncertain"]) {
     const row = settlementHistoryWireRow();
     row.results[0].settlement_failures = [{ admission_source: "configured_gate", effect_kind: "tool_dispatch", physical_outcome: "failed", failure_kind }];
     const event = MeerkatClient.parseSessionMessage(row).results[0];

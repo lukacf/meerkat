@@ -145,4 +145,13 @@ fn confinement_terminal_class_appends_after_released_ordinals() {
         ToolDispatchTerminalErrorKind::ConfinementRefused as usize,
         released.len()
     );
+    // Later additions append after every released ordinal.
+    assert_eq!(
+        ToolDispatchTerminalErrorKind::HookDenied as usize,
+        released.len() + 1
+    );
+    assert_eq!(
+        ToolDispatchTerminalErrorKind::OutcomeUncertain as usize,
+        released.len() + 2
+    );
 }

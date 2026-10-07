@@ -254,6 +254,9 @@ pub enum ConnectorLoginError {
     TokenStore(String),
     #[error("connector OAuth credential lifecycle error: {0}")]
     AuthLifecycle(String),
+    /// The redirect-free credential HTTP client could not be built.
+    #[error(transparent)]
+    HttpClientUnavailable(#[from] crate::mcp_oauth::CredentialHttpClientUnavailable),
 }
 
 impl ConnectorLoginError {
@@ -272,6 +275,7 @@ impl ConnectorLoginError {
             | Self::TokenExchangeFailed
             | Self::RefreshFailed(_)
             | Self::TokenStore(_)
+            | Self::HttpClientUnavailable(_)
             | Self::AuthLifecycle(_) => false,
         }
     }
@@ -332,7 +336,7 @@ impl ConnectorOAuthAuthority {
         flows: Arc<dyn OAuthFlowAuthority>,
         strategies: ConnectorStrategies,
     ) -> Result<Self, ConnectorLoginError> {
-        Self::with_http(persistence, flows, strategies, no_redirect_client())
+        Self::with_http(persistence, flows, strategies, no_redirect_client()?)
     }
 
     /// `http` must not follow redirects.
@@ -367,6 +371,11 @@ impl ConnectorOAuthAuthority {
         redirect_uri: &str,
     ) -> Result<ConnectorLoginStart, ConnectorLoginError> {
         require_loopback_redirect(redirect_uri)?;
+        // A connector credential is always account-verified; the unverified
+        // resource grant is an MCP-only host opt-in.
+        if target.account.is_unverified() {
+            return Err(ConnectorOAuthRefusal::InvalidDescriptor.into());
+        }
         let strategy = self.strategies.get(&target.strategy_id)?;
         let descriptor: ConnectorOAuthDescriptor = ConnectorOAuthParameters {
             issuer: target.issuer.clone(),

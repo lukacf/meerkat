@@ -25,9 +25,11 @@ pub struct ConnectorOAuthParameters {
     pub resource: String,
     pub scopes: BTreeSet<String>,
     pub redirect_uri: String,
-    /// Which provider account the attempt must prove: a known account, or
-    /// discovery of the account the provider verifies. Wire form: the account
-    /// string for `Known`, `null` for `Discover`.
+    /// Which provider account the attempt must prove: a known account,
+    /// discovery of the account the provider verifies, or none at all for an
+    /// explicitly unverified resource grant. Wire form: the account string
+    /// for `Known`, `null` for `Discover`, `{"mode":"unverified"}` for
+    /// `Unverified`.
     pub expected_account: AccountSelection,
     pub strategy_id: String,
 }
@@ -37,11 +39,15 @@ pub struct ConnectorOAuthParameters {
 /// `Known` binds the provider account before the attempt starts and refuses
 /// any other verified account. `Discover` admits the attempt with no account;
 /// the provider-verified account is bound to the credential at the commit,
-/// which publishes only into an empty credential slot.
+/// which publishes only into an empty credential slot. `Unverified` is an
+/// explicit host opt-in for a resource-bound grant without account
+/// evidence: no account is observed, bound or reported, and its commit
+/// publishes only into an empty credential slot.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum AccountSelection {
     Known(String),
     Discover,
+    Unverified,
 }
 
 impl AccountSelection {
@@ -49,12 +55,16 @@ impl AccountSelection {
     pub fn known(&self) -> Option<&str> {
         match self {
             Self::Known(account) => Some(account),
-            Self::Discover => None,
+            Self::Discover | Self::Unverified => None,
         }
     }
 
     pub fn is_discover(&self) -> bool {
         matches!(self, Self::Discover)
+    }
+
+    pub fn is_unverified(&self) -> bool {
+        matches!(self, Self::Unverified)
     }
 }
 
@@ -75,22 +85,46 @@ impl fmt::Debug for AccountSelection {
         match self {
             Self::Known(_) => f.write_str("Known(..)"),
             Self::Discover => f.write_str("Discover"),
+            Self::Unverified => f.write_str("Unverified"),
         }
     }
 }
 
+/// Object form of the selections that are neither an account nor `null`.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum AccountSelectionMarker {
+    Unverified,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AccountSelectionRepr {
+    Known(String),
+    Marker(AccountSelectionMarker),
+}
+
 impl Serialize for AccountSelection {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.known().serialize(serializer)
+        match self {
+            Self::Known(account) => serializer.serialize_some(account),
+            Self::Discover => serializer.serialize_none(),
+            Self::Unverified => AccountSelectionMarker::Unverified.serialize(serializer),
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for AccountSelection {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match Option::<String>::deserialize(deserializer)? {
-            Some(account) => Self::Known(account),
-            None => Self::Discover,
-        })
+        Ok(
+            match Option::<AccountSelectionRepr>::deserialize(deserializer)? {
+                Some(AccountSelectionRepr::Known(account)) => Self::Known(account),
+                Some(AccountSelectionRepr::Marker(AccountSelectionMarker::Unverified)) => {
+                    Self::Unverified
+                }
+                None => Self::Discover,
+            },
+        )
     }
 }
 
@@ -98,6 +132,9 @@ impl<'de> Deserialize<'de> for AccountSelection {
 /// contains a control character, which no valid account can, so a Discover
 /// key never equals a Known key.
 const DISCOVER_KEY_TAG: &str = "\u{0}connector-account-discover-v1";
+/// Framed into the attempt key in place of an account for `Unverified`;
+/// distinct from every Known and Discover key for the same reason.
+const UNVERIFIED_KEY_TAG: &str = "\u{0}connector-account-unverified-v1";
 
 /// Immutable validated facts bound to one browser attempt. These are host
 /// inputs, not a provider selected by agent text and not verified account data.
@@ -153,7 +190,10 @@ impl TryFrom<ConnectorOAuthParameters> for ConnectorOAuthDescriptor {
                 .known()
                 .is_some_and(|account| !valid_atom(account))
             || !valid_atom(&value.strategy_id)
-            || value.scopes.is_empty()
+            // An unverified resource grant may request no scope: the
+            // resource need not publish any, and no account evidence scope
+            // is requested for it.
+            || (value.scopes.is_empty() && !value.expected_account.is_unverified())
             || value.scopes.len() > 256
             || value
                 .scopes
@@ -186,7 +226,11 @@ impl ConnectorOAuthDescriptor {
             &self.0.client,
             &self.0.resource,
             &self.0.redirect_uri,
-            self.0.expected_account.known().unwrap_or(DISCOVER_KEY_TAG),
+            match &self.0.expected_account {
+                AccountSelection::Known(account) => account.as_str(),
+                AccountSelection::Discover => DISCOVER_KEY_TAG,
+                AccountSelection::Unverified => UNVERIFIED_KEY_TAG,
+            },
             &self.0.strategy_id,
         ]
         .into_iter()
@@ -257,6 +301,35 @@ impl ConnectorOAuthDescriptor {
         })
     }
 
+    /// Accept a token response for an explicitly `Unverified` descriptor.
+    /// Nothing about an account is observed or claimed: the grant only
+    /// records the scopes the owner's own exchange parsed, which must cover
+    /// the descriptor's required scopes.
+    pub fn accept_unverified_grant(
+        &self,
+        exchanged: &crate::auth_oauth::OAuthTokenResult,
+    ) -> Result<UnverifiedResourceGrant, ConnectorOAuthRefusal> {
+        if !self.0.expected_account.is_unverified() {
+            return Err(ConnectorOAuthRefusal::InvalidDescriptor);
+        }
+        if exchanged.access_token.is_empty() {
+            return Err(ConnectorOAuthRefusal::CredentialMismatch);
+        }
+        let granted_scopes = self.granted_scopes_from_response(exchanged);
+        if !self.0.scopes.is_subset(&granted_scopes) {
+            return Err(ConnectorOAuthRefusal::MissingScopes);
+        }
+        Ok(UnverifiedResourceGrant {
+            descriptor: self.clone(),
+            granted_scopes,
+            credential_fingerprint: secret_fingerprint(
+                Some(&exchanged.access_token),
+                exchanged.refresh_token.as_deref(),
+                exchanged.id_token.as_deref(),
+            ),
+        })
+    }
+
     fn verify_observation(
         &self,
         observation: &ConnectorAccountObservation,
@@ -270,6 +343,10 @@ impl ConnectorOAuthDescriptor {
                 return Err(ConnectorOAuthRefusal::VerificationUnavailable);
             }
             AccountSelection::Discover => {}
+            // No observation verifies a descriptor that admits no account.
+            AccountSelection::Unverified => {
+                return Err(ConnectorOAuthRefusal::VerificationUnavailable);
+            }
         }
         if !self.0.scopes.is_subset(&observation.granted_scopes) {
             return Err(ConnectorOAuthRefusal::MissingScopes);
@@ -310,6 +387,54 @@ pub struct ConnectorStableContext(String);
 impl ConnectorStableContext {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Whether an MCP credential's account was verified by an account strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountVerification {
+    /// A Known or Discover login verified the bound account.
+    Verified,
+    /// An explicitly unverified resource grant: no account is bound.
+    Unverified,
+}
+
+/// Account binding of an `McpOauth` credential, stored under the
+/// `account_binding` member of its token metadata by the native MCP owner.
+/// It decides slot compatibility for later logins and is preserved by
+/// refresh. A credential without it predates account binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpCredentialBinding {
+    pub verification: AccountVerification,
+    pub strategy_id: String,
+    pub stable_context: ConnectorStableContext,
+}
+
+impl McpCredentialBinding {
+    /// The binding a credential admitted under `descriptor` is stored with.
+    pub fn for_descriptor(descriptor: &ConnectorOAuthDescriptor) -> Self {
+        Self {
+            verification: if descriptor.parameters().expected_account.is_unverified() {
+                AccountVerification::Unverified
+            } else {
+                AccountVerification::Verified
+            },
+            strategy_id: descriptor.parameters().strategy_id.clone(),
+            stable_context: descriptor.stable_context(),
+        }
+    }
+
+    /// The binding of an `McpOauth` credential, if it carries one.
+    pub fn from_tokens(tokens: &PersistedTokens) -> Option<Self> {
+        if tokens.auth_mode != crate::auth_store::PersistedAuthMode::McpOauth {
+            return None;
+        }
+        tokens
+            .metadata
+            .get("account_binding")
+            .and_then(|binding| serde_json::from_value(binding.clone()).ok())
     }
 }
 
@@ -448,6 +573,12 @@ impl VerifiedConnectorAccount {
                 return Err(ConnectorOAuthRefusal::CredentialMismatch);
             }
         }
+        if tokens.auth_mode == crate::auth_store::PersistedAuthMode::McpOauth
+            && McpCredentialBinding::from_tokens(tokens)
+                != Some(McpCredentialBinding::for_descriptor(&self.descriptor))
+        {
+            return Err(ConnectorOAuthRefusal::CredentialMismatch);
+        }
         let scopes = tokens.scopes.iter().cloned().collect::<BTreeSet<_>>();
         if tokens.account_id.as_deref() != Some(self.account())
             || scopes != self.observation.granted_scopes
@@ -466,6 +597,65 @@ impl VerifiedConnectorAccount {
 impl fmt::Debug for VerifiedConnectorAccount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VerifiedConnectorAccount")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Completion evidence of an explicitly `Unverified` attempt: the admitted
+/// descriptor, the scopes the owner's own exchange parsed, and the exact
+/// credential bytes. It carries no account and is not account evidence; it
+/// cannot be converted into [`VerifiedConnectorAccount`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct UnverifiedResourceGrant {
+    descriptor: ConnectorOAuthDescriptor,
+    granted_scopes: BTreeSet<String>,
+    credential_fingerprint: [u8; 32],
+}
+
+impl UnverifiedResourceGrant {
+    pub fn descriptor(&self) -> &ConnectorOAuthDescriptor {
+        &self.descriptor
+    }
+    pub fn granted_scopes(&self) -> &BTreeSet<String> {
+        &self.granted_scopes
+    }
+
+    fn verify_scopes(&self) -> Result<(), ConnectorOAuthRefusal> {
+        let facts = self.descriptor.parameters();
+        if !facts.expected_account.is_unverified() {
+            return Err(ConnectorOAuthRefusal::InvalidDescriptor);
+        }
+        if !facts.scopes.is_subset(&self.granted_scopes) {
+            return Err(ConnectorOAuthRefusal::MissingScopes);
+        }
+        Ok(())
+    }
+
+    /// The persisted credential is exactly the unverified grant: an
+    /// `McpOauth` credential with no account, the granted scopes, the
+    /// exchanged bytes and the unverified binding of this descriptor.
+    fn verify_tokens(&self, tokens: &PersistedTokens) -> Result<(), ConnectorOAuthRefusal> {
+        let scopes = tokens.scopes.iter().cloned().collect::<BTreeSet<_>>();
+        if tokens.auth_mode != crate::auth_store::PersistedAuthMode::McpOauth
+            || tokens.account_id.is_some()
+            || scopes != self.granted_scopes
+            || McpCredentialBinding::from_tokens(tokens)
+                != Some(McpCredentialBinding::for_descriptor(&self.descriptor))
+            || secret_fingerprint(
+                tokens.primary_secret.as_deref(),
+                tokens.refresh_token.as_deref(),
+                tokens.id_token.as_deref(),
+            ) != self.credential_fingerprint
+        {
+            return Err(ConnectorOAuthRefusal::CredentialMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for UnverifiedResourceGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnverifiedResourceGrant")
             .finish_non_exhaustive()
     }
 }
@@ -527,13 +717,15 @@ impl fmt::Debug for OAuthBrowserFlowIdentity {
     }
 }
 
-/// Completion carries either the original LLM-provider contract or checked
-/// connector evidence. There is no conversion from an unverified connector
-/// identity to completion.
+/// Completion carries the original LLM-provider contract, checked
+/// connector account evidence, or an explicitly unverified resource grant.
+/// There is no conversion from an unverified connector identity to account
+/// evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OAuthBrowserFlowCompletion {
     Provider(OAuthProviderIdentity),
     Connector(VerifiedConnectorAccount),
+    UnverifiedResource(UnverifiedResourceGrant),
 }
 
 impl OAuthBrowserFlowCompletion {
@@ -545,6 +737,7 @@ impl OAuthBrowserFlowCompletion {
             Self::Connector(evidence) => evidence
                 .descriptor
                 .verify_observation(&evidence.observation),
+            Self::UnverifiedResource(grant) => grant.verify_scopes(),
         }
     }
 
@@ -552,6 +745,7 @@ impl OAuthBrowserFlowCompletion {
         match self {
             Self::Provider(provider) => (*provider).into(),
             Self::Connector(evidence) => evidence.descriptor.clone().into(),
+            Self::UnverifiedResource(grant) => grant.descriptor.clone().into(),
         }
     }
 
@@ -559,6 +753,7 @@ impl OAuthBrowserFlowCompletion {
         match self {
             Self::Provider(_) => Ok(()),
             Self::Connector(evidence) => evidence.verify_tokens(tokens),
+            Self::UnverifiedResource(grant) => grant.verify_tokens(tokens),
         }
     }
 
@@ -571,6 +766,11 @@ impl OAuthBrowserFlowCompletion {
     ///   connector completion for the same verified account and stable
     ///   context. A `Discover` completion never replaces anything, even the
     ///   same account and context with an independent grant.
+    /// - An `McpOauth` credential published by a connector-shaped
+    ///   completion follows the same rules: `Discover` and unverified
+    ///   completions never replace anything; a `Known` completion replaces
+    ///   only a verified `McpOauth` credential with the same stable context
+    ///   and verified account.
     /// - Other modes keep their existing replacement rules, but never
     ///   replace a `ConnectorOauth` credential.
     pub fn admit_into_slot(
@@ -584,15 +784,29 @@ impl OAuthBrowserFlowCompletion {
         {
             return Err(CredentialSlotRefusal::UnverifiedConnectorPublication);
         }
+        if let Self::UnverifiedResource(_) = self
+            && tokens.auth_mode != PersistedAuthMode::McpOauth
+        {
+            return Err(CredentialSlotRefusal::ModeMismatch);
+        }
         let Some(previous) = previous else {
             return Ok(());
         };
+        match self {
+            // Replacing an unverified grant needs an explicit disconnect:
+            // without an account a re-login could switch accounts silently.
+            Self::UnverifiedResource(_) => return Err(CredentialSlotRefusal::Occupied),
+            Self::Connector(evidence) if tokens.auth_mode == PersistedAuthMode::McpOauth => {
+                return admit_mcp_replacement(evidence, previous);
+            }
+            Self::Provider(_) | Self::Connector(_) => {}
+        }
         let previous_is_connector = previous.auth_mode == PersistedAuthMode::ConnectorOauth;
         let connector = match self {
             Self::Connector(evidence) if tokens.auth_mode == PersistedAuthMode::ConnectorOauth => {
                 evidence
             }
-            Self::Provider(_) | Self::Connector(_) => {
+            Self::Provider(_) | Self::Connector(_) | Self::UnverifiedResource(_) => {
                 return if previous_is_connector {
                     Err(CredentialSlotRefusal::ModeMismatch)
                 } else {
@@ -618,6 +832,42 @@ impl OAuthBrowserFlowCompletion {
         Ok(())
     }
 }
+/// The `McpOauth` arm of [`OAuthBrowserFlowCompletion::admit_into_slot`]
+/// for an occupied slot.
+fn admit_mcp_replacement(
+    evidence: &VerifiedConnectorAccount,
+    previous: &PersistedTokens,
+) -> Result<(), crate::auth_store::CredentialSlotRefusal> {
+    use crate::auth_store::{CredentialSlotRefusal, PersistedAuthMode};
+    let AccountSelection::Known(account) = &evidence.descriptor.parameters().expected_account
+    else {
+        // A Discover commit publishes only into a still-empty slot, even
+        // when the racing occupant has the same subject.
+        return Err(CredentialSlotRefusal::Occupied);
+    };
+    if previous.auth_mode != PersistedAuthMode::McpOauth {
+        return Err(CredentialSlotRefusal::ModeMismatch);
+    }
+    let Some(binding) = McpCredentialBinding::from_tokens(previous) else {
+        return Err(CredentialSlotRefusal::ContextMismatch);
+    };
+    if binding.verification != AccountVerification::Verified
+        || binding.stable_context != evidence.descriptor.stable_context()
+    {
+        return Err(CredentialSlotRefusal::ContextMismatch);
+    }
+    if previous.account_id.as_deref() != Some(account.as_str()) {
+        return Err(CredentialSlotRefusal::AccountMismatch);
+    }
+    Ok(())
+}
+
+impl From<UnverifiedResourceGrant> for OAuthBrowserFlowCompletion {
+    fn from(value: UnverifiedResourceGrant) -> Self {
+        Self::UnverifiedResource(value)
+    }
+}
+
 impl From<OAuthProviderIdentity> for OAuthBrowserFlowCompletion {
     fn from(value: OAuthProviderIdentity) -> Self {
         Self::Provider(value)
@@ -639,6 +889,10 @@ impl OAuthBrowserActionRef {
             "oauth-action:{:x}",
             Sha256::digest(state.as_bytes())
         ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -859,5 +1113,176 @@ mod tests {
         let mut invalid = json;
         invalid["scopes"] = serde_json::json!([]);
         assert!(serde_json::from_value::<ConnectorOAuthDescriptor>(invalid).is_err());
+    }
+
+    fn mcp_tokens(
+        descriptor: &ConnectorOAuthDescriptor,
+        account: Option<&str>,
+        exchanged: &crate::auth_oauth::OAuthTokenResult,
+    ) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: crate::auth_store::PersistedAuthMode::McpOauth,
+            primary_secret: Some(exchanged.access_token.clone()),
+            refresh_token: exchanged.refresh_token.clone(),
+            id_token: exchanged.id_token.clone(),
+            expires_at: None,
+            last_refresh: None,
+            scopes: vec!["mcp.read".into()],
+            account_id: account.map(str::to_owned),
+            metadata: serde_json::json!({
+                "account_binding": McpCredentialBinding::for_descriptor(descriptor),
+            }),
+        }
+    }
+
+    fn with_selection(selection: AccountSelection) -> ConnectorOAuthDescriptor {
+        let mut value = parameters();
+        value.expected_account = selection;
+        value.try_into().unwrap()
+    }
+
+    #[test]
+    fn unverified_selection_has_its_own_wire_form_and_key() {
+        let unverified = with_selection(AccountSelection::Unverified);
+        let json = serde_json::to_value(&unverified).unwrap();
+        assert_eq!(
+            json["expected_account"],
+            serde_json::json!({"mode": "unverified"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ConnectorOAuthDescriptor>(json).unwrap(),
+            unverified
+        );
+        let discover = with_selection(AccountSelection::Discover);
+        let known = with_selection(AccountSelection::Known("account-a".into()));
+        assert_ne!(unverified.binding_key(), discover.binding_key());
+        assert_ne!(unverified.binding_key(), known.binding_key());
+        // Only an unverified descriptor may request no scope.
+        let mut empty = parameters();
+        empty.scopes.clear();
+        assert_eq!(
+            ConnectorOAuthDescriptor::try_from(empty.clone()),
+            Err(ConnectorOAuthRefusal::InvalidDescriptor)
+        );
+        empty.expected_account = AccountSelection::Unverified;
+        assert!(ConnectorOAuthDescriptor::try_from(empty).is_ok());
+    }
+
+    #[test]
+    fn unverified_grant_is_never_account_evidence() {
+        let unverified = with_selection(AccountSelection::Unverified);
+        // No observation verifies it, whatever account it names.
+        assert_eq!(
+            unverified.verify_account(
+                ConnectorAccountObservation {
+                    account: "account-a".into(),
+                    granted_scopes: ["mcp.read".into()].into(),
+                },
+                &exchanged()
+            ),
+            Err(ConnectorOAuthRefusal::VerificationUnavailable)
+        );
+        // Only an unverified descriptor yields a grant, and only with the
+        // required scopes granted.
+        assert_eq!(
+            with_selection(AccountSelection::Discover).accept_unverified_grant(&exchanged()),
+            Err(ConnectorOAuthRefusal::InvalidDescriptor)
+        );
+        let mut narrow = exchanged();
+        narrow.scope = Some("other".into());
+        assert_eq!(
+            unverified.accept_unverified_grant(&narrow),
+            Err(ConnectorOAuthRefusal::MissingScopes)
+        );
+        let grant = unverified.accept_unverified_grant(&exchanged()).unwrap();
+        let completion = OAuthBrowserFlowCompletion::from(grant);
+        completion.verify_account_and_scopes().unwrap();
+        completion
+            .verify_tokens(&mcp_tokens(&unverified, None, &exchanged()))
+            .unwrap();
+        // The persisted credential may not claim an account or another mode.
+        assert_eq!(
+            completion.verify_tokens(&mcp_tokens(&unverified, Some("account-a"), &exchanged())),
+            Err(ConnectorOAuthRefusal::CredentialMismatch)
+        );
+        let discover = with_selection(AccountSelection::Discover);
+        assert_eq!(
+            completion.verify_tokens(&mcp_tokens(&discover, None, &exchanged())),
+            Err(ConnectorOAuthRefusal::CredentialMismatch)
+        );
+    }
+
+    #[test]
+    fn mcp_slot_rules_match_the_connector_race_controls() {
+        use crate::auth_store::CredentialSlotRefusal;
+        let known = with_selection(AccountSelection::Known("account-a".into()));
+        let discover = with_selection(AccountSelection::Discover);
+        let unverified = with_selection(AccountSelection::Unverified);
+        let observation = |account: &str| ConnectorAccountObservation {
+            account: account.into(),
+            granted_scopes: ["mcp.read".into()].into(),
+        };
+        let occupant = mcp_tokens(&known, Some("account-a"), &exchanged());
+        let tokens = |descriptor| mcp_tokens(descriptor, Some("account-a"), &exchanged());
+
+        // Discover publishes only into a still-empty slot, even for the
+        // same subject.
+        let discovered = OAuthBrowserFlowCompletion::from(
+            discover
+                .verify_account(observation("account-a"), &exchanged())
+                .unwrap(),
+        );
+        assert_eq!(discovered.admit_into_slot(None, &tokens(&discover)), Ok(()));
+        assert_eq!(
+            discovered.admit_into_slot(Some(&occupant), &tokens(&discover)),
+            Err(CredentialSlotRefusal::Occupied)
+        );
+
+        // Known replaces only the same verified subject in the same context.
+        let reconnect = OAuthBrowserFlowCompletion::from(
+            known
+                .verify_account(observation("account-a"), &exchanged())
+                .unwrap(),
+        );
+        assert_eq!(
+            reconnect.admit_into_slot(Some(&occupant), &tokens(&known)),
+            Ok(())
+        );
+        let mut other_subject = occupant.clone();
+        other_subject.account_id = Some("account-b".into());
+        assert_eq!(
+            reconnect.admit_into_slot(Some(&other_subject), &tokens(&known)),
+            Err(CredentialSlotRefusal::AccountMismatch)
+        );
+        let mut other_client = parameters();
+        other_client.client = "fresh-registration".into();
+        let other_context: ConnectorOAuthDescriptor = other_client.try_into().unwrap();
+        let other_occupant = mcp_tokens(&other_context, Some("account-a"), &exchanged());
+        assert_eq!(
+            reconnect.admit_into_slot(Some(&other_occupant), &tokens(&known)),
+            Err(CredentialSlotRefusal::ContextMismatch)
+        );
+        let mut unbound = occupant;
+        unbound.metadata = serde_json::json!({});
+        assert_eq!(
+            reconnect.admit_into_slot(Some(&unbound), &tokens(&known)),
+            Err(CredentialSlotRefusal::ContextMismatch)
+        );
+        let unverified_occupant = mcp_tokens(&unverified, None, &exchanged());
+        assert_eq!(
+            reconnect.admit_into_slot(Some(&unverified_occupant), &tokens(&known)),
+            Err(CredentialSlotRefusal::ContextMismatch)
+        );
+
+        // An unverified grant never replaces anything.
+        let grant = OAuthBrowserFlowCompletion::from(
+            unverified.accept_unverified_grant(&exchanged()).unwrap(),
+        );
+        let grant_tokens = mcp_tokens(&unverified, None, &exchanged());
+        assert_eq!(grant.admit_into_slot(None, &grant_tokens), Ok(()));
+        assert_eq!(
+            grant.admit_into_slot(Some(&unverified_occupant), &grant_tokens),
+            Err(CredentialSlotRefusal::Occupied)
+        );
     }
 }

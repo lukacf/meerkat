@@ -226,6 +226,7 @@ async fn enumerate(
                 service: service.into(),
                 stdio_child: None,
                 session_expiry: Default::default(),
+                oauth_target: None,
             };
             let result = tokio::time::timeout(
                 Duration::from_secs(30),

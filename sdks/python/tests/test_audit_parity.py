@@ -500,6 +500,33 @@ async def test_python_auth_helpers_send_binding_scoped_params():
     )
 
 
+@pytest.mark.asyncio
+async def test_python_mcp_auth_helpers_cancel_by_reference_and_log_out():
+    client = MeerkatClient()
+    client._request = AsyncMock(return_value={})
+    mcp = {
+        "server_name": "glean",
+        "server_url": "https://glean.example/mcp",
+        "oauth_account": "subject-7",
+    }
+
+    await client.auth_mcp_login_cancel_by_attempt_ref(
+        "glean",
+        "https://glean.example/mcp",
+        "oauth-action:00ff",
+        oauth_account="subject-7",
+    )
+    client._request.assert_called_with(
+        "auth/login/cancel",
+        {"mcp": mcp, "attempt_ref": "oauth-action:00ff"},
+    )
+
+    await client.auth_mcp_logout(
+        "glean", "https://glean.example/mcp", oauth_account="subject-7"
+    )
+    client._request.assert_called_with("auth/logout", {"mcp": mcp})
+
+
 def test_typescript_auth_status_logout_helpers_send_profile_scoped_params():
     import pathlib
 

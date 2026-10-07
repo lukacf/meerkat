@@ -11,22 +11,25 @@
 //! the typed `AuthorizationRequired` host status, and the host decides when
 //! to ask its user.
 //!
-//! # Host obligation: an unobservable browser context
+//! # Host obligation: keep the attempt out of agent channels
 //!
 //! The authorize URL and `state` returned by a login start, and the `code`
 //! and `state` delivered to the loopback callback, are bearer material for
 //! one attempt: whoever holds them can complete it. The host must:
 //!
-//! - open the authorize URL only in a browser context that no agent-drivable
-//!   tool can observe or control (not a browser, shell, screenshot, MCP or
-//!   computer-use tool available to any agent of this host);
 //! - bind the loopback callback itself and deliver `state`/`code` only to the
 //!   matching login complete call;
 //! - never place the authorize URL, `state`, `code` or callback data in a
 //!   tool result, transcript, agent event, elicitation result or log.
 //!
+//! The host opens the authorize URL in the user's own browser (the system
+//! browser by default). An ordinary host is supported: no agent-unreachable
+//! host is required. A host whose agents have a browser or computer-use tool
+//! should not open the URL in a browser such a tool drives.
+//!
 //! Login start, callback and completion types redact these values in `Debug`;
-//! completion projections are secret-free.
+//! completion projections are secret-free, and the attempt status carries
+//! only a non-secret reference.
 //!
 //! Wire callers (RPC, REST) are host-privileged by contract: a start that
 //! joins an attempt already pending for the same configured server returns
@@ -55,9 +58,9 @@ use meerkat_providers::connector_login::{
 };
 use meerkat_providers::connector_oauth::{AccountSelection, ScopeEvidence};
 use meerkat_providers::mcp_oauth::{
-    McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback, McpOAuthError,
-    McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin, McpServerIdentity,
-    OidcUserInfoAccountStrategy,
+    McpAccountSelection, McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback,
+    McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin,
+    McpOAuthPendingAttempt, McpServerIdentity, OidcUserInfoAccountStrategy,
 };
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_resolution,
@@ -154,7 +157,14 @@ pub struct HostMcpAuthStatus {
     pub target: McpServerIdentity,
     pub phase: HostMcpAuthPhase,
     pub expires_at: Option<DateTime<Utc>>,
+    /// The verified subject; always `None` for an unverified grant.
     pub account_id: Option<String>,
+    /// The target's account verification mode; `None` for a legacy
+    /// (unselected) target.
+    pub account_verification: Option<meerkat_providers::connector_oauth::AccountVerification>,
+    /// The login attempt pending for the target, if any: a non-secret
+    /// reference and its expiry, never its authorize URL or state.
+    pub attempt: Option<McpOAuthPendingAttempt>,
 }
 
 impl HostMcpAuthStatus {
@@ -171,9 +181,35 @@ impl HostMcpAuthStatus {
                     meerkat_contracts::WireMcpAuthPhase::AuthorizationRequired
                 }
             },
+            account_verification: mcp_account_verification_to_wire(self.account_verification),
             expires_at: self.expires_at.map(|at| at.to_rfc3339()),
             account_id: self.account_id.clone(),
+            attempt: self
+                .attempt
+                .as_ref()
+                .map(|attempt| meerkat_contracts::WireMcpAuthAttempt {
+                    attempt_ref: attempt.attempt_ref.as_str().to_owned(),
+                    phase: meerkat_contracts::WireMcpAuthAttemptPhase::Pending,
+                    expires_at: attempt.expires_at.to_rfc3339(),
+                }),
         }
+    }
+}
+
+/// Wire projection of an MCP target's account verification mode (`None`:
+/// a legacy target).
+pub fn mcp_account_verification_to_wire(
+    verification: Option<meerkat_providers::connector_oauth::AccountVerification>,
+) -> meerkat_contracts::WireMcpAccountVerification {
+    use meerkat_providers::connector_oauth::AccountVerification;
+    match verification {
+        Some(AccountVerification::Verified) => {
+            meerkat_contracts::WireMcpAccountVerification::Verified
+        }
+        Some(AccountVerification::Unverified) => {
+            meerkat_contracts::WireMcpAccountVerification::Unverified
+        }
+        None => meerkat_contracts::WireMcpAccountVerification::Legacy,
     }
 }
 
@@ -288,8 +324,18 @@ pub async fn resolve_configured_mcp_target(
         }
         .into());
     }
-    if let Some(requested) = target.oauth_account.as_deref()
-        && http.oauth_account.as_deref() != Some(requested)
+    // The caller only names the configured selection; a different value is
+    // refused and never selects or downgrades the mode.
+    let configured_selection = http
+        .oauth_account_selection
+        .map(mcp_account_selection_to_wire);
+    if target
+        .oauth_account
+        .as_deref()
+        .is_some_and(|requested| http.oauth_account.as_deref() != Some(requested))
+        || target
+            .oauth_account_selection
+            .is_some_and(|requested| configured_selection != Some(requested))
     {
         return Err(HostMcpTargetRefusal::AccountMismatch {
             server_name: server_name(),
@@ -299,12 +345,33 @@ pub async fn resolve_configured_mcp_target(
     Ok(McpServerIdentity::from_config(&server)?)
 }
 
+fn mcp_account_selection_to_wire(
+    selection: meerkat_core::mcp_config::McpOAuthAccountSelection,
+) -> meerkat_contracts::WireMcpAccountSelection {
+    use meerkat_core::mcp_config::McpOAuthAccountSelection;
+    match selection {
+        McpOAuthAccountSelection::Discover => meerkat_contracts::WireMcpAccountSelection::Discover,
+        McpOAuthAccountSelection::Unverified => {
+            meerkat_contracts::WireMcpAccountSelection::Unverified
+        }
+    }
+}
+
 /// Wire projection of a native MCP target.
 pub fn mcp_auth_target_to_wire(target: &McpServerIdentity) -> meerkat_contracts::WireMcpAuthTarget {
     meerkat_contracts::WireMcpAuthTarget {
         server_name: target.server_name().to_owned(),
         server_url: target.server_url().to_owned(),
         oauth_account: target.expected_account().map(str::to_owned),
+        oauth_account_selection: match target.selection() {
+            McpAccountSelection::Discover => {
+                Some(meerkat_contracts::WireMcpAccountSelection::Discover)
+            }
+            McpAccountSelection::Unverified => {
+                Some(meerkat_contracts::WireMcpAccountSelection::Unverified)
+            }
+            McpAccountSelection::Legacy | McpAccountSelection::Known(_) => None,
+        },
     }
 }
 
@@ -589,8 +656,8 @@ impl HostAuthService {
     }
 
     /// Admit one host-driven MCP OAuth attempt. The returned projection is
-    /// host-only (see the module docs): open its authorize URL in an
-    /// unobservable browser context and deliver the loopback callback to
+    /// host-only (see the module docs): open its authorize URL in the user's
+    /// browser and deliver the loopback callback to
     /// [`Self::mcp_login_complete`]. If an attempt is already pending for the
     /// target, its projection is returned with `disposition = Joined`; no
     /// second attempt is admitted.
@@ -654,8 +721,29 @@ impl HostAuthService {
         Ok(self.mcp_oauth_authority()?.cancel_attempt(target, state)?)
     }
 
+    /// Typed cancel by the non-secret `attempt_ref` that [`Self::mcp_status`]
+    /// reports, for hosts that no longer hold the attempt's state (for
+    /// example after a host restart): retire that attempt for `target`.
+    pub fn mcp_login_cancel_by_attempt_ref(
+        &self,
+        target: &McpServerIdentity,
+        attempt_ref: &str,
+    ) -> Result<(), HostAuthError> {
+        Ok(self
+            .mcp_oauth_authority()?
+            .cancel_attempt_by_ref(target, attempt_ref)?)
+    }
+
+    /// Disconnect one MCP target: remove its stored credential and release
+    /// the credential lifecycle. A pending attempt is unaffected, and nothing
+    /// is revoked at the provider.
+    pub async fn mcp_logout(&self, target: &McpServerIdentity) -> Result<(), HostAuthError> {
+        Ok(self.mcp_oauth_authority()?.logout(target).await?)
+    }
+
     /// Secret-free authorization status of one MCP target, projected from
-    /// its durable credential. It performs no refresh and no network I/O.
+    /// its durable credential and its pending attempt. It performs no
+    /// refresh and no network I/O.
     pub async fn mcp_status(
         &self,
         target: &McpServerIdentity,
@@ -668,16 +756,27 @@ impl HostAuthService {
             .filter(|tokens| {
                 tokens.auth_mode == meerkat_providers::auth_store::PersistedAuthMode::McpOauth
                     && tokens.primary_secret.is_some()
-                    && target
-                        .expected_account()
-                        .is_none_or(|account| tokens.account_id.as_deref() == Some(account))
+                    && meerkat_providers::mcp_oauth::stored_credential_matches_selection(
+                        target, tokens,
+                    )
             });
+        let attempt = match self.mcp_oauth_authority() {
+            Ok(authority) => authority.pending_attempt(target)?,
+            // Without an AuthMachine-owned flow owner no attempt can have
+            // been admitted, so none is pending.
+            Err(HostAuthError::McpOAuth(McpOAuthError::Verification(
+                meerkat_providers::connector_oauth::ConnectorOAuthRefusal::VerificationUnavailable,
+            ))) => None,
+            Err(error) => return Err(error),
+        };
         let Some(tokens) = stored else {
             return Ok(HostMcpAuthStatus {
                 target: target.clone(),
                 phase: HostMcpAuthPhase::AuthorizationRequired,
                 expires_at: None,
                 account_id: None,
+                account_verification: target.account_verification(),
+                attempt,
             });
         };
         let expired = tokens.expires_at.is_some_and(|at| at <= Utc::now());
@@ -691,6 +790,8 @@ impl HostAuthService {
             phase,
             expires_at: tokens.expires_at,
             account_id: tokens.account_id,
+            account_verification: target.account_verification(),
+            attempt,
         })
     }
 
@@ -1221,6 +1322,7 @@ mod tests {
             server_name: name.into(),
             server_url: url.into(),
             oauth_account: account.map(Into::into),
+            oauth_account_selection: None,
         }
     }
 
@@ -1239,6 +1341,115 @@ headers = { Authorization = "Bearer fixed" }
 name = "local"
 command = "true"
 "#;
+
+    const SELECTED_MCP: &str = r#"
+[[servers]]
+name = "legacy"
+url = "https://legacy.example/mcp"
+
+[[servers]]
+name = "discover"
+url = "https://discover.example/mcp"
+oauth_account_selection = "discover"
+
+[[servers]]
+name = "unverified"
+url = "https://unverified.example/mcp"
+oauth_account_selection = "unverified"
+"#;
+
+    #[tokio::test]
+    async fn only_host_configuration_selects_discover_or_unverified() {
+        use meerkat_contracts::WireMcpAccountSelection as Wire;
+        let root = tempfile::tempdir().unwrap();
+        write_project_mcp(root.path(), SELECTED_MCP);
+        let resolve = |name: &str, url: &str, selection: Option<Wire>| {
+            let mut target = wire_target(name, url, None);
+            target.oauth_account_selection = selection;
+            let root = root.path().to_path_buf();
+            async move { resolve_configured_mcp_target(&target, Some(&root), None).await }
+        };
+        // The configured mode resolves whether or not the caller names it.
+        for named in [None, Some(Wire::Unverified)] {
+            let target = resolve("unverified", "https://unverified.example/mcp", named)
+                .await
+                .unwrap();
+            assert_eq!(target.selection(), &McpAccountSelection::Unverified);
+            assert_eq!(
+                mcp_auth_target_to_wire(&target).oauth_account_selection,
+                Some(Wire::Unverified)
+            );
+        }
+        let discover = resolve("discover", "https://discover.example/mcp", None)
+            .await
+            .unwrap();
+        assert_eq!(discover.selection(), &McpAccountSelection::Discover);
+        // A request can neither opt a legacy target in nor change a mode.
+        for (name, url, requested) in [
+            ("legacy", "https://legacy.example/mcp", Wire::Unverified),
+            ("legacy", "https://legacy.example/mcp", Wire::Discover),
+            ("discover", "https://discover.example/mcp", Wire::Unverified),
+            (
+                "unverified",
+                "https://unverified.example/mcp",
+                Wire::Discover,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    resolve(name, url, Some(requested)).await,
+                    Err(HostAuthError::McpTarget(
+                        HostMcpTargetRefusal::AccountMismatch { .. }
+                    ))
+                ),
+                "{name} accepted a requested {requested:?}"
+            );
+        }
+        let legacy = resolve("legacy", "https://legacy.example/mcp", None)
+            .await
+            .unwrap();
+        assert_eq!(legacy.selection(), &McpAccountSelection::Legacy);
+    }
+
+    #[test]
+    fn mcp_status_reports_account_verification_and_never_an_unverified_account() {
+        use meerkat_contracts::WireMcpAccountVerification as Wire;
+        use meerkat_core::mcp_config::McpOAuthAccountSelection as Selection;
+        let base = McpServerIdentity::from_server_config("s", "https://s.example/mcp");
+        let configured = |selection| {
+            let mut config = meerkat_core::McpServerConfig::streamable_http(
+                "s",
+                "https://s.example/mcp",
+                std::collections::HashMap::new(),
+            );
+            if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport
+            {
+                http.oauth_account_selection = Some(selection);
+            }
+            McpServerIdentity::from_config(&config).unwrap()
+        };
+        for (target, expected) in [
+            (base.clone(), Wire::Legacy),
+            (
+                base.with_expected_account("subject-7").unwrap(),
+                Wire::Verified,
+            ),
+            (configured(Selection::Discover), Wire::Verified),
+            (configured(Selection::Unverified), Wire::Unverified),
+        ] {
+            let status = HostMcpAuthStatus {
+                account_verification: target.account_verification(),
+                target,
+                phase: HostMcpAuthPhase::Authorized,
+                expires_at: None,
+                account_id: None,
+                attempt: None,
+            };
+            let wire = serde_json::to_value(status.to_wire()).unwrap();
+            assert_eq!(wire["account_verification"], serde_json::json!(expected));
+            assert!(wire.get("account_id").is_none());
+        }
+    }
 
     #[tokio::test]
     async fn configured_mcp_target_resolves_from_config_not_request() {

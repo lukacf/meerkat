@@ -316,6 +316,7 @@ class McpHttpConfig:
     url: str
     headers: Optional[dict[str, str]] = None
     oauth_account: Optional[str] = None
+    oauth_account_selection: Optional[Any] = None
     transport: Optional[McpHttpTransport] = None
 
 
@@ -667,12 +668,26 @@ class WireMcpAuthTarget:
 
 `server_name` and `server_url` identify the configured server;
 `oauth_account` is the selected account the login must prove (the OIDC
-subject for the default account strategy). Login is host-driven: the
+subject for the default account strategy), and `oauth_account_selection`
+the configured `discover` or `unverified` mode. Both only name the host
+configuration: a value that differs from it is refused, and neither can
+select or downgrade a mode. Login is host-driven: the
 authorize URL and state are host-channel data and must never reach an
 agent, tool result, transcript or log."""
     server_name: str
     server_url: str
     oauth_account: Optional[str] = None
+    oauth_account_selection: Optional[Literal['discover', 'unverified']] = None
+
+
+@dataclass
+class WireMcpAuthAttempt:
+    """A login attempt pending for an MCP server: a non-secret reference and
+its expiry, never the authorize URL or state. The reference names the
+attempt for `auth/login/cancel` and grants no flow access."""
+    expires_at: str
+    phase: Literal['pending']
+    ref: str
 
 
 @dataclass
@@ -858,6 +873,18 @@ class WireDeviceCompleteResultReady(TypedDict, total=False):
 
 WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady
 
+# Request payload for `auth/logout`: a provider binding (the original flat
+# fields) or an MCP server (`{"mcp": {...}}`).
+class AuthLogoutParamsBindingIdParams(TypedDict, total=False):
+    binding_id: Required[str]
+    profile_id: NotRequired[Optional[str]]
+    realm_id: Required[str]
+
+class AuthLogoutParamsMcpLoginTarget(TypedDict, total=False):
+    mcp: Required[WireMcpAuthTarget]
+
+AuthLogoutParams = AuthLogoutParamsBindingIdParams | AuthLogoutParamsMcpLoginTarget
+
 # Request payload for `auth/status/get`: a provider binding (the original
 # flat fields), an MCP server (`{"mcp": {...}}`) or a connector slot
 # (`{"connector": {...}}`).
@@ -876,16 +903,22 @@ AuthStatusParams = AuthStatusParamsBindingIdParams | AuthStatusParamsMcpLoginTar
 
 # Request payload for `auth/login/cancel`: retire the pending attempt
 # admitted under `state` for a configured MCP server (`{"mcp": {...}}`) or
-# a connector slot (`{"connector": {...}}`).
+# a connector slot (`{"connector": {...}}`), or the MCP attempt named by
+# the non-secret `attempt_ref` that `auth/status/get` reports
+# (`{"mcp": {...}, "attempt_ref": ...}`).
 class LoginCancelParamsMcpLoginCancelParams(TypedDict, total=False):
     mcp: Required[WireMcpAuthTarget]
     state: Required[str]
+
+class LoginCancelParamsMcpLoginCancelAttemptParams(TypedDict, total=False):
+    attempt_ref: Required[str]
+    mcp: Required[WireMcpAuthTarget]
 
 class LoginCancelParamsConnectorLoginCancelParams(TypedDict, total=False):
     connector: Required[WireConnectorSlot]
     state: Required[str]
 
-LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCancelParamsConnectorLoginCancelParams
+LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCancelParamsMcpLoginCancelAttemptParams | LoginCancelParamsConnectorLoginCancelParams
 
 # Request payload for `auth/login/complete`. For an MCP target, issuer,
 # client and resource come from the admitted attempt named by `state`;
@@ -931,6 +964,20 @@ class LoginStartParamsConnectorLoginTarget(TypedDict, total=False):
 
 LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget | LoginStartParamsConnectorLoginTarget
 
+# `auth/logout` result: a provider binding or an MCP server target.
+class WireAuthLogoutResultAuthProfileCleared(TypedDict, total=False):
+    auth_binding: Required[WireAuthBindingRef]
+    binding_id: Required[str]
+    cleared: Required[bool]
+    profile_id: Required[str]
+    realm_id: Required[str]
+
+class WireAuthLogoutResultMcpLoggedOut(TypedDict, total=False):
+    cleared: Required[bool]
+    mcp: Required[WireMcpAuthTarget]
+
+WireAuthLogoutResult = WireAuthLogoutResultAuthProfileCleared | WireAuthLogoutResultMcpLoggedOut
+
 # `auth/status/get` result: a provider binding status or an MCP status.
 class WireAuthStatusResultAuthStatusDetail(TypedDict, total=False):
     account_id: NotRequired[Optional[str]]
@@ -947,6 +994,8 @@ class WireAuthStatusResultAuthStatusDetail(TypedDict, total=False):
 
 class WireAuthStatusResultMcpAuthStatus(TypedDict, total=False):
     account_id: NotRequired[Optional[str]]
+    account_verification: Required[Literal['verified', 'unverified', 'legacy']]
+    attempt: NotRequired[Optional[WireMcpAuthAttempt]]
     expires_at: NotRequired[Optional[str]]
     mcp: Required[WireMcpAuthTarget]
     phase: Required[Literal['authorized', 'reauth_required'] | Literal['authorization_required']]
@@ -6213,9 +6262,11 @@ class WireAuthProfileCleared:
 @dataclass
 class WireMcpAuthStatus:
     """`auth/status/get` result for an MCP server target."""
+    account_verification: Literal['verified', 'unverified', 'legacy']
     mcp: WireMcpAuthTarget
     phase: Literal['authorized', 'reauth_required'] | Literal['authorization_required']
     account_id: Optional[str] = None
+    attempt: Optional[WireMcpAuthAttempt] = None
     expires_at: Optional[str] = None
 
 
@@ -6266,6 +6317,7 @@ class WireLoginReadyMcpLoginReady(TypedDict, total=False):
     scopes: Required[list[str]]
     state: NotRequired[Optional[str]]
     account_id: NotRequired[Optional[str]]
+    account_verification: Required[Literal['verified', 'unverified', 'legacy']]
     mcp: Required[WireMcpAuthTarget]
 
 class WireLoginReadyConnectorLoginReady(TypedDict, total=False):

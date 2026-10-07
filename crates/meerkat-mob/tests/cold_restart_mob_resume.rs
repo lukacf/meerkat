@@ -1538,14 +1538,25 @@ async fn mob_destroy_session_children_stack_budget_scenario() {
     );
     for session in &child_sessions {
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session);
-        let archived = runtime_store
+        let retained = runtime_store
             .load_runtime_session_catalog_entry(&runtime_id)
             .await
-            .expect("read canonical child session archive")
-            .expect("destroy preserves archived session authority");
+            .expect("read retained child session catalog")
+            .expect("destroy preserves the child session catalog");
+        assert_eq!(retained.session_id(), session);
+        // Archive authority is the durable lifecycle, not the retained content catalog.
         assert_eq!(
-            archived.lifecycle_terminal(),
-            Some(meerkat_core::SessionLifecycleTerminal::Archived)
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read canonical child runtime state"),
+            Some(meerkat_runtime::RuntimeState::Retired)
+        );
+        assert!(
+            service
+                .session_archived_by_authority_with_terminal(session, None)
+                .await
+                .expect("owning service confirms child archive authority"),
+            "destroyed child must remain archived by runtime authority"
         );
         assert!(
             service.comms_runtime(session).await.is_none(),

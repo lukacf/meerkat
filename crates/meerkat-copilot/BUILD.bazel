@@ -56,6 +56,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -89,6 +90,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -130,6 +132,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],

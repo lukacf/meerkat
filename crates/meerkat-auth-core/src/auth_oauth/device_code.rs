@@ -77,6 +77,7 @@ pub async fn request_device_code(
         .await
         .map_err(|e| OAuthError::Network(e.to_string()))?;
     let status = resp.status();
+    super::refuse_credential_redirect(status)?;
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(OAuthError::TokenEndpoint {
@@ -115,6 +116,7 @@ pub async fn poll_device_code(
         .await
         .map_err(|e| OAuthError::Network(e.to_string()))?;
     let status = resp.status();
+    super::refuse_credential_redirect(status)?;
 
     // Device token endpoints carry typed errors in the body. GitHub returns
     // pending with 200 while RFC-style providers commonly use 4xx, so classify

@@ -515,21 +515,26 @@ impl AgentMobToolSurface {
         state: &MobMcpState,
         owner_bridge_session_id: &SessionId,
     ) -> Result<meerkat_mob::MemberCreationSourceWitness, meerkat_mob::MemberCreationError> {
-        // A nonpersistent service may derive this read through the current
-        // session task, which is waiting for this tool. It has no durable
-        // source authority to capture, so do not enter that read at all.
+        // A nonpersistent service may derive a metadata read through the
+        // current session task, which is waiting for this tool. It has no
+        // durable source authority to capture, so do not enter that read at
+        // all. `supports_persistent_sessions` alone does not prove a durable
+        // metadata authority (a host may run in-memory sessions under the
+        // persistent mob contract), so the read itself goes through the
+        // retained seam, which never derives from the live session.
         if !state.session_service().supports_persistent_sessions() {
             return Err(meerkat_mob::MemberCreationError::Absent(
                 meerkat_mob::MemberCreationAbsence::NonDurableService,
             ));
         }
-        let view = state
-            .session_service()
-            .load_persisted_session_metadata(owner_bridge_session_id)
-            .await?
-            .ok_or(meerkat_mob::MemberCreationError::Unavailable(
-                "source session metadata is missing",
-            ))?;
+        let view = meerkat_mob::load_creation_source_metadata(
+            state.session_service().as_ref(),
+            owner_bridge_session_id,
+        )
+        .await?
+        .ok_or(meerkat_mob::MemberCreationError::Unavailable(
+            "source session metadata is missing",
+        ))?;
         let Some(binding) = view.mob_member_binding() else {
             return Err(meerkat_mob::MemberCreationError::Absent(
                 meerkat_mob::MemberCreationAbsence::SourceNotAMember,
@@ -4851,6 +4856,9 @@ mod tests {
         sessions: tokio::sync::RwLock<HashMap<SessionId, RealCommsSessionActor>>,
         persisted_sessions: tokio::sync::RwLock<HashMap<SessionId, meerkat_core::Session>>,
         persisted_metadata_loads: AtomicU64,
+        /// Report the persistent mob contract while keeping sessions in memory
+        /// without a retained metadata authority, as a CLI run host does.
+        reports_persistent_sessions: std::sync::atomic::AtomicBool,
         actor_registry: meerkat_session::LiveSessionActorRegistry,
         counter: AtomicU64,
         runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -4872,6 +4880,7 @@ mod tests {
                 sessions: tokio::sync::RwLock::new(HashMap::new()),
                 persisted_sessions: tokio::sync::RwLock::new(HashMap::new()),
                 persisted_metadata_loads: AtomicU64::new(0),
+                reports_persistent_sessions: std::sync::atomic::AtomicBool::new(false),
                 actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
                 counter: AtomicU64::new(0),
                 runtime_adapter,
@@ -5367,6 +5376,10 @@ mod tests {
                 .await
                 .get(session_id)
                 .cloned())
+        }
+
+        fn supports_persistent_sessions(&self) -> bool {
+            self.reports_persistent_sessions.load(Ordering::Relaxed)
         }
 
         async fn load_persisted_session_metadata(
@@ -7857,6 +7870,73 @@ mod tests {
             service.persisted_metadata_loads.load(Ordering::Relaxed),
             1,
             "explicit child policy must bypass the parent metadata read"
+        );
+    }
+
+    /// A host may run in-memory sessions under the persistent mob contract, as
+    /// the CLI run host does. Creation-source capture must then never derive
+    /// the source metadata from the dispatching session: that session's turn
+    /// is waiting for this tool, so a read served by its task never returns
+    /// (the spawn hung until the caller's timeout). Capture reads only the
+    /// retained metadata authority, which such a host lacks, so the source is
+    /// a legitimate absence and the child is recorded as unproven.
+    #[tokio::test]
+    async fn creation_source_capture_never_reads_metadata_through_the_dispatching_session() {
+        let service = Arc::new(RealCommsSessionSvc::new());
+        service
+            .reports_persistent_sessions
+            .store(true, Ordering::Relaxed);
+        let source_session_id = SessionId::new();
+        let mut source_session = meerkat_core::Session::with_id(source_session_id.clone());
+        source_session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: meerkat_core::config::default_structured_output_retries(
+                ),
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                    mob_id: "source-mob".to_string(),
+                    role: "worker".to_string(),
+                    member: "source".to_string(),
+                }),
+            })
+            .expect("source metadata must serialize");
+        service.seed_persisted_session(source_session).await;
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
+        let state = Arc::new(
+            MobMcpState::new(session_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+
+        let capture = AgentMobToolSurface::capture_creation_source(state, source_session_id).await;
+
+        assert!(
+            matches!(
+                capture,
+                meerkat_mob::CreationSourceCapture::Absent(
+                    meerkat_mob::MemberCreationAbsence::NonDurableService
+                )
+            ),
+            "a host without a retained metadata authority has no source to capture: {capture:?}"
+        );
+        assert_eq!(
+            service.persisted_metadata_loads.load(Ordering::Relaxed),
+            0,
+            "capture must not take the metadata read a live session can serve"
         );
     }
 

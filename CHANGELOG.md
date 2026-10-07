@@ -37,6 +37,23 @@ them.
 
 ### Breaking
 
+- The credential routes listed under Fixed (token, refresh and
+  device-code exchanges; the Claude, ChatGPT and Code Assist OAuth runtimes;
+  the Google and Azure credential exchanges; Code Assist onboarding; the
+  Copilot token transport and refresh; `HostAuthService`) follow no
+  redirects, which changes these Rust types:
+  - `OAuthError` gains `RedirectRefused { status }` and
+    `HttpClientUnavailable(CredentialHttpClientUnavailable)`;
+  - `GoogleAuthError` and `AzureAuthError` gain `RedirectRefused { status }`
+    and `HttpClientUnavailable`.
+  Behaviour-only (not measured by the gate): a `3xx` answer on one of those
+  routes is now a typed refusal instead of being followed, and a
+  redirect-free client that fails to build fails each request instead of
+  falling back to a default client. Other credential-bearing clients (MCP
+  Streamable HTTP, skills HTTP sources, the doctor self-hosted probe) are
+  not covered by this change. `HostAuthService::with_http_client`
+  must be given a client that follows no redirects.
+
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
   (behavior-only break). Typed MCP dispatch preserves `isError` as a failed
@@ -252,6 +269,22 @@ them.
 
 ### Added
 
+- The loopback OAuth callback can be cancelled during an active wait with a
+  joined cleanup receipt. `LoopbackHandle::wait_until(&mut self, Instant)` is
+  cancel-safe: dropping it loses neither the receiver, a callback already
+  received, nor the server. `LoopbackHandle::close` terminates accepted I/O,
+  awaits the actual connection drain and only then returns `LoopbackClosed`,
+  which reports whether a callback arrived but was never handed out (its code
+  and state are never exposed). `LoopbackHandle::wait_or_cancel` races a
+  caller-owned cancellation future and always joins before it returns
+  `LoopbackWaitEnd` (`Completed`, `Refused`, `TimedOut`, `Cancelled`, or
+  `RetirementFailed` with no receipt). The earliest deadline given to a handle
+  bounds both the callback and the graceful drain and is never renewed; a
+  callback is handed out at most once; a failed retirement stays failed on
+  every later wait or close. Dropping a consuming `wait`, `wait_or_cancel`,
+  or `close` future signals termination without a receipt. Dropping
+  `wait_until` retains the handle for explicit `close`. `wait` and `cancel`
+  are unchanged.
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
   runtime delivery inbox's exclusive delivery ownership
   (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is
@@ -443,6 +476,22 @@ them.
   the inherited ceiling and the live active and staged filters still name,
   drop only those no live filter names, and a stage cannot re-associate a
   ceiling name with another identity.
+- Mob destruction no longer overflows normal 2 MiB worker stacks in debug builds when retiring session-backed children.
+- These credential routes no longer follow redirects: the token and
+  refresh exchange, device-code requests, the Claude, ChatGPT and Code Assist OAuth
+  runtimes (including Claude API-key provisioning), the Google and Azure
+  credential exchanges, the Code Assist onboarding client, the Copilot
+  token exchange and the host auth service each use one redirect-free
+  client (`auth_oauth::credential_http_client`). A `3xx` answer is refused
+  by its status before any header or body is read, so neither `Location`
+  nor the body is kept or rendered, and no grant, refresh token, device
+  code or bearer reaches the redirect target. A client build failure is
+  kept as `CredentialHttpClientUnavailable` instead of falling back to a
+  default client. On the Google default chain, a refused redirect or an
+  unavailable client at the metadata server stays typed and transient
+  instead of becoming `NoCredentialSource`, so a refresh does not retire a
+  valid credential. Browser authorization redirects and loopback callbacks
+  are unchanged.
 - GPT Live: a typed row delivered late behind a history summary, together
   with newer speech that corrected part of it, is now framed as newer than the
   summary (#1800). The summary was snapshotted before the row was typed, so it
@@ -479,6 +528,16 @@ them.
   Cold reads no longer wait on their own guard. Connector logout uses the
   coordinated credential mutation path with an atomic mode check, preserving
   foreign-mode credentials and the existing rollback behavior.
+- An agent's `mob_spawn_member` no longer hangs when its session service keeps
+  sessions in memory while reporting the persistent mob contract (the CLI run
+  host). Creation-source capture read the calling session's metadata through
+  `load_persisted_session_metadata`, which such a service serves from the
+  calling session's own task, and that task was waiting for the tool. Capture
+  now reads only `MobSessionService::load_retained_session_metadata` through
+  the new `meerkat_mob::load_creation_source_metadata`; a service without a
+  retained metadata authority records the child as unproven
+  (`MemberCreationAbsence::NonDurableService`). Durable hosts capture the
+  same source as before.
 
 - Turbo S S106: a reopen whose retained conversation summary was followed by
   more rows than the startup input holds generated a fresh summary, and when

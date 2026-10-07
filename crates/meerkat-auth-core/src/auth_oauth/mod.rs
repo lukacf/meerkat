@@ -22,8 +22,8 @@ pub mod token_exchange;
 
 #[cfg(feature = "oauth")]
 pub use callback::{
-    LoopbackBinding, LoopbackHandle, LoopbackOutcome, bind_loopback_callback,
-    bind_loopback_callback_with_redirect, run_loopback_callback,
+    LoopbackBinding, LoopbackClosed, LoopbackHandle, LoopbackOutcome, LoopbackWaitEnd,
+    bind_loopback_callback, bind_loopback_callback_with_redirect, run_loopback_callback,
 };
 #[cfg(feature = "oauth")]
 pub use device_code::{
@@ -202,6 +202,48 @@ pub enum OAuthError {
     AccessDenied,
     #[error("device flow expired")]
     ExpiredToken,
+    /// A credential endpoint answered with a redirect. It is refused before
+    /// any header or body is read, so neither `Location` nor the body is
+    /// kept or rendered.
+    #[error(
+        "credential endpoint answered with a redirect (status {status}); redirects are refused"
+    )]
+    RedirectRefused { status: u16 },
+    /// The redirect-free credential HTTP client could not be built; no
+    /// request is sent with another client.
+    #[error(transparent)]
+    HttpClientUnavailable(#[from] CredentialHttpClientUnavailable),
+}
+
+/// The redirect-free HTTP client for server-to-server credential requests
+/// could not be built. Nothing falls back to a default client, which would
+/// follow redirects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("the redirect-free credential HTTP client could not be built")]
+pub struct CredentialHttpClientUnavailable;
+
+/// HTTP client for server-to-server credential requests (token, refresh,
+/// device-code and credential-exchange endpoints). It follows no redirects,
+/// same-origin included: a credential request goes only to the endpoint it
+/// names. A build failure is returned, never replaced by a default client.
+/// Browser authorization redirects and loopback callbacks are not requests
+/// of this client and are unaffected.
+pub fn credential_http_client() -> Result<reqwest::Client, CredentialHttpClientUnavailable> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| CredentialHttpClientUnavailable)
+}
+
+/// Refuse a redirect answer from a credential endpoint by its status alone,
+/// before any header or body is read.
+pub fn refuse_credential_redirect(status: reqwest::StatusCode) -> Result<(), OAuthError> {
+    if status.is_redirection() {
+        return Err(OAuthError::RedirectRefused {
+            status: status.as_u16(),
+        });
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for OAuthError {
@@ -227,6 +269,13 @@ impl std::fmt::Debug for OAuthError {
             Self::SlowDown => f.write_str("SlowDown"),
             Self::AccessDenied => f.write_str("AccessDenied"),
             Self::ExpiredToken => f.write_str("ExpiredToken"),
+            Self::RedirectRefused { status } => f
+                .debug_struct("RedirectRefused")
+                .field("status", status)
+                .finish(),
+            Self::HttpClientUnavailable(error) => {
+                f.debug_tuple("HttpClientUnavailable").field(error).finish()
+            }
         }
     }
 }
@@ -278,7 +327,9 @@ pub fn oauth_refresh_observation(error: &OAuthError) -> RefreshFailureObservatio
         | OAuthError::TokenExpiryOutOfRange { .. }
         | OAuthError::Network(_)
         | OAuthError::Timeout
-        | OAuthError::InvalidConfig(_) => RefreshFailureObservation::transient(),
+        | OAuthError::InvalidConfig(_)
+        | OAuthError::RedirectRefused { .. }
+        | OAuthError::HttpClientUnavailable(_) => RefreshFailureObservation::transient(),
         OAuthError::AuthorizationPending => {
             RefreshFailureObservation::oauth_error_code("authorization_pending")
         }
@@ -470,5 +521,82 @@ mod token_endpoint_redaction_tests {
             assert_eq!(error.to_string(), "token endpoint error: status=502");
             assert!(!format!("{error:?}").contains(CANARY));
         }
+    }
+}
+
+/// Test fixture shared by the credential-route redirect regressions.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) mod redirect_fixture {
+    /// A credential endpoint that answers every request with a `302` to a
+    /// second listener, which counts the requests that reach it. The
+    /// `Location` and the body carry canaries that must never be rendered.
+    pub(crate) const LOCATION_CANARY: &str = "redirect-location-secret-canary";
+    pub(crate) const BODY_CANARY: &str = "redirect-body-secret-canary";
+
+    pub(crate) async fn spawn_redirecting_endpoint()
+    -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn read_request(stream: &mut tokio::net::TcpStream) {
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let Ok(read) = stream.read(&mut chunk).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&buffer);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if buffer.len() >= end + 4 + length {
+                        return;
+                    }
+                }
+            }
+        }
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let counted = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = target.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                read_request(&mut stream).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    )
+                    .await;
+            }
+        });
+        let endpoint = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint_addr = endpoint.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = endpoint.accept().await {
+                read_request(&mut stream).await;
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nlocation: http://{target_addr}/token?leak={LOCATION_CANARY}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{BODY_CANARY}",
+                    BODY_CANARY.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{endpoint_addr}/token"), hits)
     }
 }

@@ -1415,7 +1415,10 @@ async fn mob_destroy_session_children_stack_budget_scenario() {
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
     let (service, _store) = persistent_service(&paths, runtime_store.clone());
-    let adapter = service.runtime_adapter().expect("real session runtime");
+    let adapter = service
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
+        .expect("real session runtime");
 
     let mut parent_definition = mob_definition(MobRuntimeMode::TurnDriven);
     parent_definition.orchestrator = None;

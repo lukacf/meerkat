@@ -15756,6 +15756,57 @@ mod tests {
             messages.contains("exceed the budget") && messages.contains("reply past the budget"),
             "the prompt and the reply are durable: {messages}"
         );
+        // The run's input is durably consumed, not left for recovery.
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        let rows = runtime
+            .service
+            .runtime_store()
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("durable input rows are readable");
+        assert!(!rows.is_empty(), "the turn's input is durable");
+        for row in &rows {
+            assert_eq!(
+                row.seed.phase,
+                meerkat_runtime::input_state::InputLifecycleState::Consumed
+            );
+            assert_eq!(
+                row.seed.terminal_outcome,
+                Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed)
+            );
+        }
+
+        // The session serves the next turn, which reaches its waiter as a
+        // typed result as well.
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let next = runtime
+            .start_turn_via_runtime(
+                &id,
+                "and again".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let next = match next {
+            Ok(result) => result,
+            Err(error) => panic!("the next turn must run after a budget terminal, got {error:?}"),
+        };
+        assert_eq!(
+            next.terminal_cause_kind,
+            Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted)
+        );
+        assert!(
+            !runtime
+                .runtime_adapter
+                .session_has_uncommitted_run_input(&id)
+                .await
+                .expect("committed run inputs are readable"),
+            "the next run is committed too"
+        );
         runtime.try_shutdown().await.unwrap();
     }
 

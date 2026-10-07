@@ -6251,9 +6251,13 @@ pub(crate) struct RuntimeLoopRunCommitEffectObligation {
     lifecycle: &'static [&'static str],
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeLoopRunCommitEffect {
     Completed,
+    /// An orderly budget stop: the turn is `Failed / BudgetExhausted /
+    /// BudgetExhausted` for exactly this run, and the run still commits its
+    /// inputs and delivers its typed result.
+    BudgetExhausted,
     Failed,
     Cancelled,
 }
@@ -6407,6 +6411,9 @@ fn preview_authorized_runtime_loop_run_commit(
     let owner_fence_token = state.active_fence_token;
     let owner_runtime_generation = state.active_runtime_generation;
     let owner_runtime_epoch_id = state.active_runtime_epoch_id.clone();
+    // RunCompleted assigns `turn_terminal_run_id`, so the terminal this run
+    // already owns is read before it is applied.
+    let terminal_before_completion = TurnTerminalWitness::of(&state);
     let mut preview = crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
         state,
     )
@@ -6431,16 +6438,19 @@ fn preview_authorized_runtime_loop_run_commit(
             "RunCompleted did not bind runtime completion result to run {run_id}"
         )));
     }
-    let commit_outcome = match preview.state().terminal_outcome {
-        Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed) => {
-            AuthorizedRuntimeLoopRunCommitOutcome {
-                run_id: run_id.clone(),
-                outcome: crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed,
-            }
-        }
-        other => {
+    let commit_outcome = match runtime_loop_commit_outcome(
+        &terminal_before_completion,
+        preview.state().terminal_outcome,
+        &dsl_run_id,
+    ) {
+        Some(outcome) => AuthorizedRuntimeLoopRunCommitOutcome {
+            run_id: run_id.clone(),
+            outcome,
+        },
+        None => {
             return Err(RuntimeDriverError::Internal(format!(
-                "RunCompleted produced unexpected terminal outcome {other:?} for run {run_id}"
+                "RunCompleted produced unexpected terminal outcome {:?} for run {run_id}",
+                preview.state().terminal_outcome
             )));
         }
     };
@@ -6470,6 +6480,59 @@ fn preview_authorized_runtime_loop_run_commit(
     })
 }
 
+/// The generated turn terminal as one snapshot: phase, outcome, cause and
+/// the run that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnTerminalWitness {
+    turn_phase: crate::meerkat_machine::dsl::TurnPhase,
+    terminal_outcome: Option<crate::meerkat_machine::dsl::TurnTerminalOutcome>,
+    terminal_cause_kind: Option<crate::meerkat_machine::dsl::TurnTerminalCauseKind>,
+    turn_terminal_run_id: Option<crate::meerkat_machine::dsl::RunId>,
+}
+
+impl TurnTerminalWitness {
+    fn of(state: &crate::meerkat_machine::dsl::MeerkatMachineState) -> Self {
+        Self {
+            turn_phase: state.turn_phase,
+            terminal_outcome: state.terminal_outcome,
+            terminal_cause_kind: state.terminal_cause_kind,
+            turn_terminal_run_id: state.turn_terminal_run_id.clone(),
+        }
+    }
+
+    /// The coherent budget terminal owned by exactly `run_id`.
+    fn is_budget_terminal_of(&self, run_id: &crate::meerkat_machine::dsl::RunId) -> bool {
+        use crate::meerkat_machine::dsl::{TurnPhase, TurnTerminalCauseKind, TurnTerminalOutcome};
+
+        self.turn_phase == TurnPhase::Failed
+            && self.terminal_outcome == Some(TurnTerminalOutcome::BudgetExhausted)
+            && self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted)
+            && self.turn_terminal_run_id.as_ref() == Some(run_id)
+    }
+}
+
+/// The outcome a runtime-loop run commit may carry. RunCompleted yields
+/// `Completed` for an ordinary run; it preserves an existing terminal, and
+/// only the coherent budget terminal that `run_id` already owned before
+/// RunCompleted is committed this way. Every other outcome is refused.
+fn runtime_loop_commit_outcome(
+    before_completion: &TurnTerminalWitness,
+    after_completion: Option<crate::meerkat_machine::dsl::TurnTerminalOutcome>,
+    run_id: &crate::meerkat_machine::dsl::RunId,
+) -> Option<crate::meerkat_machine::dsl::TurnTerminalOutcome> {
+    use crate::meerkat_machine::dsl::TurnTerminalOutcome;
+
+    match after_completion {
+        Some(TurnTerminalOutcome::Completed) => Some(TurnTerminalOutcome::Completed),
+        Some(TurnTerminalOutcome::BudgetExhausted)
+            if before_completion.is_budget_terminal_of(run_id) =>
+        {
+            Some(TurnTerminalOutcome::BudgetExhausted)
+        }
+        _ => None,
+    }
+}
+
 impl RuntimeLoopRunCommitEffectObligation {
     const LIFECYCLE: &'static [&'static str] = &[
         "Authorized",
@@ -6487,6 +6550,9 @@ impl RuntimeLoopRunCommitEffectObligation {
         let effect = match outcome {
             crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed => {
                 RuntimeLoopRunCommitEffect::Completed
+            }
+            crate::meerkat_machine::dsl::TurnTerminalOutcome::BudgetExhausted => {
+                RuntimeLoopRunCommitEffect::BudgetExhausted
             }
             crate::meerkat_machine::dsl::TurnTerminalOutcome::Cancelled => {
                 RuntimeLoopRunCommitEffect::Cancelled
@@ -9422,9 +9488,29 @@ pub(crate) async fn commit_runtime_loop_run(
         commit_authority.owner_runtime_generation(),
         commit_authority.owner_runtime_epoch_id(),
     );
-    if commit_authority.commit_outcome().run_id() != &completed_run_id
-        || commit_authority.commit_outcome().outcome()
-            != crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed
+    // The live terminal after RunCompleted must still be the outcome that
+    // was authorized: Completed, or the coherent budget terminal of exactly
+    // this run.
+    let live_terminal = {
+        let authority = driver.shared_dsl_authority();
+        let auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        TurnTerminalWitness::of(auth.state())
+    };
+    let completed_dsl_run_id = crate::meerkat_machine::dsl::RunId::from_domain(&completed_run_id);
+    let expected_effect = match commit_authority.commit_outcome().outcome() {
+        crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed => {
+            Some(RuntimeLoopRunCommitEffect::Completed)
+        }
+        crate::meerkat_machine::dsl::TurnTerminalOutcome::BudgetExhausted
+            if live_terminal.is_budget_terminal_of(&completed_dsl_run_id) =>
+        {
+            Some(RuntimeLoopRunCommitEffect::BudgetExhausted)
+        }
+        _ => None,
+    };
+    if commit_authority.commit_outcome().run_id() != &completed_run_id || expected_effect.is_none()
     {
         let error = RuntimeDriverError::Internal(
             "runtime-loop run commit authority carried mismatched commit outcome".to_string(),
@@ -9436,12 +9522,11 @@ pub(crate) async fn commit_runtime_loop_run(
         );
         return Err(RuntimeLoopRunCommitError::Rejected(error));
     }
+    let expected_effect = expected_effect.unwrap_or(RuntimeLoopRunCommitEffect::Completed);
     if !commit_authority
         .effect_closure_obligations()
         .iter()
-        .any(|obligation| {
-            obligation.is_satisfied_by(&completed_run_id, RuntimeLoopRunCommitEffect::Completed)
-        })
+        .any(|obligation| obligation.is_satisfied_by(&completed_run_id, expected_effect))
     {
         let error = RuntimeDriverError::Internal(
             "runtime-loop run commit authority carried no completed-run effect closure obligation"
@@ -11277,6 +11362,154 @@ mod run_failed_cause_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(auth.state().terminal_outcome, None);
         assert_eq!(auth.state().terminal_cause_kind, None);
+    }
+
+    fn witness(
+        turn_phase: crate::meerkat_machine::dsl::TurnPhase,
+        outcome: crate::meerkat_machine::dsl::TurnTerminalOutcome,
+        cause: crate::meerkat_machine::dsl::TurnTerminalCauseKind,
+        terminal_run: Option<&RunId>,
+    ) -> TurnTerminalWitness {
+        TurnTerminalWitness {
+            turn_phase,
+            terminal_outcome: Some(outcome),
+            terminal_cause_kind: Some(cause),
+            turn_terminal_run_id: terminal_run.map(crate::meerkat_machine::dsl::RunId::from_domain),
+        }
+    }
+
+    #[test]
+    fn run_commit_accepts_only_the_coherent_budget_terminal_of_this_run() {
+        use crate::meerkat_machine::dsl::{
+            TurnPhase, TurnTerminalCauseKind as Cause, TurnTerminalOutcome as Outcome,
+        };
+
+        let run_id = RunId::new();
+        let other_run = RunId::new();
+        let dsl_run = crate::meerkat_machine::dsl::RunId::from_domain(&run_id);
+        let coherent = witness(
+            TurnPhase::Failed,
+            Outcome::BudgetExhausted,
+            Cause::BudgetExhausted,
+            Some(&run_id),
+        );
+        assert_eq!(
+            runtime_loop_commit_outcome(&coherent, Some(Outcome::BudgetExhausted), &dsl_run),
+            Some(Outcome::BudgetExhausted)
+        );
+
+        // Ordinary completion is unchanged.
+        let open = TurnTerminalWitness {
+            turn_phase: TurnPhase::ApplyingPrimitive,
+            terminal_outcome: None,
+            terminal_cause_kind: None,
+            turn_terminal_run_id: None,
+        };
+        assert_eq!(
+            runtime_loop_commit_outcome(&open, Some(Outcome::Completed), &dsl_run),
+            Some(Outcome::Completed)
+        );
+
+        let incoherent = [
+            // Another cause with the budget outcome.
+            witness(
+                TurnPhase::Failed,
+                Outcome::BudgetExhausted,
+                Cause::FatalFailure,
+                Some(&run_id),
+            ),
+            // The budget terminal of another run.
+            witness(
+                TurnPhase::Failed,
+                Outcome::BudgetExhausted,
+                Cause::BudgetExhausted,
+                Some(&other_run),
+            ),
+            // No terminal-run witness at all.
+            witness(
+                TurnPhase::Failed,
+                Outcome::BudgetExhausted,
+                Cause::BudgetExhausted,
+                None,
+            ),
+            // Not a failed turn phase.
+            witness(
+                TurnPhase::Completed,
+                Outcome::BudgetExhausted,
+                Cause::BudgetExhausted,
+                Some(&run_id),
+            ),
+        ];
+        for before in &incoherent {
+            assert_eq!(
+                runtime_loop_commit_outcome(before, Some(Outcome::BudgetExhausted), &dsl_run),
+                None,
+                "{before:?}"
+            );
+        }
+
+        // Every other non-Completed outcome keeps the refusal.
+        let time_budget = witness(
+            TurnPhase::Failed,
+            Outcome::TimeBudgetExceeded,
+            Cause::TimeBudgetExceeded,
+            Some(&run_id),
+        );
+        for after in [
+            Some(Outcome::TimeBudgetExceeded),
+            Some(Outcome::Failed),
+            Some(Outcome::Cancelled),
+            None,
+        ] {
+            assert_eq!(
+                runtime_loop_commit_outcome(&time_budget, after, &dsl_run),
+                None,
+                "{after:?}"
+            );
+            assert_eq!(
+                runtime_loop_commit_outcome(&coherent, after, &dsl_run),
+                None,
+                "{after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn budget_commit_carries_its_own_effect_obligation() {
+        use crate::meerkat_machine::dsl::TurnTerminalOutcome as Outcome;
+
+        let run_id = RunId::new();
+        let budget =
+            RuntimeLoopRunCommitEffectObligation::for_outcome(&run_id, Outcome::BudgetExhausted);
+        assert!(
+            budget
+                .iter()
+                .any(|o| o.is_satisfied_by(&run_id, RuntimeLoopRunCommitEffect::BudgetExhausted))
+        );
+        assert!(
+            !budget
+                .iter()
+                .any(|o| o.is_satisfied_by(&run_id, RuntimeLoopRunCommitEffect::Completed))
+        );
+        assert!(!budget.iter().any(|o| {
+            o.is_satisfied_by(&RunId::new(), RuntimeLoopRunCommitEffect::BudgetExhausted)
+        }));
+        for (outcome, effect) in [
+            (Outcome::Completed, RuntimeLoopRunCommitEffect::Completed),
+            (Outcome::Cancelled, RuntimeLoopRunCommitEffect::Cancelled),
+            (
+                Outcome::TimeBudgetExceeded,
+                RuntimeLoopRunCommitEffect::Failed,
+            ),
+            (Outcome::Failed, RuntimeLoopRunCommitEffect::Failed),
+        ] {
+            assert!(
+                RuntimeLoopRunCommitEffectObligation::for_outcome(&run_id, outcome)
+                    .iter()
+                    .any(|o| o.is_satisfied_by(&run_id, effect)),
+                "{outcome:?}"
+            );
+        }
     }
 
     #[test]

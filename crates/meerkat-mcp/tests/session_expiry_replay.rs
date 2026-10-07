@@ -169,3 +169,39 @@ async fn a_call_executed_before_a_session_404_is_never_resent() {
 async fn a_call_refused_with_a_session_404_is_equally_uncertain() {
     expired_call_is_sent_once(false).await;
 }
+
+/// A connection converted into the public protocol wrapper keeps the same
+/// expiry owner and call path: one POST, a typed uncertain outcome, then
+/// later calls refused unsent.
+#[tokio::test]
+async fn the_converted_protocol_wrapper_keeps_the_typed_outcome_and_refusal() {
+    let fixture = Arc::new(Fixture::default());
+    fixture.expire_calls.store(true, Ordering::SeqCst);
+    fixture.execute_then_expire.store(true, Ordering::SeqCst);
+    let url = start(Arc::clone(&fixture)).await;
+    let config = McpServerConfig::streamable_http("session-expiry", url, HashMap::new());
+    let protocol = McpConnection::connect(&config)
+        .await
+        .unwrap()
+        .into_protocol();
+
+    let error = protocol
+        .call_tool("effect", &json!({"n": 1}))
+        .await
+        .expect_err("an expired session is not a success");
+    assert!(
+        matches!(&error, McpError::SessionExpired { server, tool } if server == "session-expiry" && tool == "effect"),
+        "{error:?}"
+    );
+    let refused = protocol
+        .call_tool("effect", &json!({"n": 2}))
+        .await
+        .expect_err("a dead session refuses later calls");
+    assert!(
+        matches!(refused, McpError::ServerUnavailable { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.tool_posts.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.initializes.load(Ordering::SeqCst), 1);
+    let _ = protocol.close().await;
+}

@@ -6,6 +6,9 @@ use crate::transport::protected::{
     ProtectedMetadata, ProtectedMetadataState, ProtectedStdioTransport,
 };
 use crate::transport::sse::{SseClientConfig, SseClientTransport};
+use crate::transport::streamable_http::{
+    RequestDispatch, RequestDisposition, SessionExpiryRecorder,
+};
 use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
 };
@@ -33,7 +36,7 @@ pub struct McpConnection {
     stdio_child: Option<StdioChildCustody>,
     /// Set once a Streamable HTTP server drops this connection's session.
     /// Never set for stdio or SSE connections.
-    session_expiry: crate::transport::streamable_http::SessionExpiryRecorder,
+    session_expiry: SessionExpiryRecorder,
 }
 
 /// After the process group is killed, how long [`StdioChildCustody::terminate`]
@@ -509,7 +512,7 @@ impl McpConnection {
                 auth: Default::default(),
             })?;
         let protected_metadata = ProtectedMetadataState::default();
-        let session_expiry = crate::transport::streamable_http::SessionExpiryRecorder::default();
+        let session_expiry = SessionExpiryRecorder::default();
         let recorder = recorder.unwrap_or_default();
         let http_client =
             ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone())
@@ -650,7 +653,13 @@ impl McpConnection {
     /// Transfer this exact connected owner into the protocol wrapper without
     /// another handshake or host-service selection.
     pub fn into_protocol(self) -> crate::McpProtocol {
-        crate::McpProtocol::from_client(self.service, self.stdio_child)
+        crate::McpProtocol::from_connection(
+            self.service,
+            self.stdio_child,
+            self.config.name,
+            self.protected_metadata,
+            self.session_expiry,
+        )
     }
 
     /// Get the config used to create this connection.
@@ -694,50 +703,16 @@ impl McpConnection {
         args: &Value,
         metadata: Option<serde_json::Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
-        let params = match args.as_object().cloned() {
-            Some(arguments) => {
-                CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
-            }
-            None => CallToolRequestParams::new(name.to_string()),
-        };
-        // A dropped session is never resumed under another session: the
-        // call is refused before it is sent, until the server is reconnected.
-        if self.session_expiry.expired() {
-            return Err(McpError::ServerUnavailable {
-                server: self.config.name.clone(),
-                state: "session expired; reconnect required".into(),
-            });
-        }
-        let mut request = CallToolRequest::new(params);
-        if let Some(metadata) = metadata {
-            self.protected_metadata.register(&metadata)?;
-            request.extensions.insert(ProtectedMetadata(metadata));
-        }
-        let result = self
-            .service
-            .send_request(request.into())
-            .await
-            .map_err(|error| {
-                // The session expired while this call was in flight: it was
-                // sent once and may have taken effect.
-                if self.session_expiry.expired() {
-                    McpError::SessionExpired {
-                        server: self.config.name.clone(),
-                        tool: name.to_string(),
-                    }
-                } else {
-                    McpError::ToolCallFailed {
-                        tool: name.to_string(),
-                        reason: error.to_string(),
-                    }
-                }
-            })?;
-        match result {
-            ServerResult::CallToolResult(result) => Ok(result),
-            _ => Err(McpError::ProtocolError {
-                message: "unexpected MCP tools/call response".into(),
-            }),
-        }
+        call_tool_on(
+            &self.service,
+            &self.config.name,
+            &self.protected_metadata,
+            &self.session_expiry,
+            name,
+            args,
+            metadata,
+        )
+        .await
     }
 
     /// Call a tool, returning only the text content as a concatenated string.
@@ -754,6 +729,80 @@ impl McpConnection {
     /// this returns.
     pub async fn close(self) -> Result<(), McpError> {
         close_connected(self.service, self.stdio_child).await
+    }
+}
+
+/// The one `tools/call` path of a connected service, shared by
+/// [`McpConnection`] and the [`crate::McpProtocol`] it converts into.
+///
+/// A known-dead session refuses the call before it is queued. Otherwise the
+/// call carries its own [`RequestDispatch`] witness through the transport,
+/// and a failure is typed from that witness alone: sent and then answered
+/// `404` for its session is uncertain ([`McpError::SessionExpired`]);
+/// refused at transport entry is unsent ([`McpError::ServerUnavailable`]);
+/// anything else keeps the ordinary [`McpError::ToolCallFailed`].
+pub(crate) async fn call_tool_on(
+    service: &rmcp::service::Peer<rmcp::RoleClient>,
+    server: &str,
+    protected_metadata: &ProtectedMetadataState,
+    session_expiry: &SessionExpiryRecorder,
+    name: &str,
+    args: &Value,
+    metadata: Option<serde_json::Map<String, Value>>,
+) -> Result<CallToolResult, McpError> {
+    let params = match args.as_object().cloned() {
+        Some(arguments) => CallToolRequestParams::new(name.to_string()).with_arguments(arguments),
+        None => CallToolRequestParams::new(name.to_string()),
+    };
+    // A dropped session is never resumed under another session.
+    if session_expiry.expired() {
+        return Err(session_dead(server));
+    }
+    let dispatch = RequestDispatch::default();
+    let mut request = CallToolRequest::new(params);
+    request.extensions.insert(dispatch.clone());
+    if let Some(metadata) = metadata {
+        protected_metadata.register(&metadata)?;
+        request.extensions.insert(ProtectedMetadata(metadata));
+    }
+    let result = service
+        .send_request(request.into())
+        .await
+        .map_err(|error| tool_call_failure(server, name, dispatch.disposition(), &error))?;
+    match result {
+        ServerResult::CallToolResult(result) => Ok(result),
+        _ => Err(McpError::ProtocolError {
+            message: "unexpected MCP tools/call response".into(),
+        }),
+    }
+}
+
+fn session_dead(server: &str) -> McpError {
+    McpError::ServerUnavailable {
+        server: server.to_owned(),
+        state: "session expired; reconnect required".into(),
+    }
+}
+
+/// The typed failure of one `tools/call`, from its own disposition.
+fn tool_call_failure(
+    server: &str,
+    tool: &str,
+    disposition: Option<RequestDisposition>,
+    error: &dyn std::fmt::Display,
+) -> McpError {
+    match disposition {
+        // Sent once, never re-sent, result lost with the session.
+        Some(RequestDisposition::SentSessionExpired) => McpError::SessionExpired {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+        },
+        // Nothing was sent: the session was already known dead.
+        Some(RequestDisposition::RefusedExpired) => session_dead(server),
+        Some(RequestDisposition::Sent) | None => McpError::ToolCallFailed {
+            tool: tool.to_owned(),
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -828,6 +877,29 @@ fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
 pub mod tests {
     use super::*;
     use crate::protocol::{extract_content_blocks, tool_error_reason};
+
+    /// A call's failure is typed from its own disposition only: there is no
+    /// connection-wide input, so a queued call that failed before sending is
+    /// never labelled uncertain because another call expired the session.
+    #[test]
+    fn call_failures_are_typed_from_their_own_request_disposition() {
+        let failure = |disposition| tool_call_failure("srv", "effect", disposition, &"cause");
+        assert!(matches!(
+            failure(Some(RequestDisposition::SentSessionExpired)),
+            McpError::SessionExpired { ref server, ref tool } if server == "srv" && tool == "effect"
+        ));
+        assert!(matches!(
+            failure(Some(RequestDisposition::RefusedExpired)),
+            McpError::ServerUnavailable { .. }
+        ));
+        // Never reached the HTTP send (for example a frame refused by the
+        // bound before sending): ordinary failure, not uncertain.
+        assert!(matches!(failure(None), McpError::ToolCallFailed { .. }));
+        assert!(matches!(
+            failure(Some(RequestDisposition::Sent)),
+            McpError::ToolCallFailed { .. }
+        ));
+    }
     use async_trait::async_trait;
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode};

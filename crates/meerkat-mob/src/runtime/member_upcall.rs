@@ -1449,6 +1449,9 @@ mod tests {
                 (ToolError::AccessDenied { name }, ToolError::AccessDenied { name: rname }) => {
                     assert_eq!(name, rname);
                 }
+                (ToolError::OutcomeUncertain { .. }, _) => {
+                    assert_eq!(&reconstructed, &error, "exact name and reason");
+                }
                 (
                     ToolError::Unavailable { name, reason },
                     ToolError::Unavailable {

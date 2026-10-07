@@ -46,7 +46,10 @@ them.
   Behaviour-only (not measured by the gate): a `tools/call` whose session
   the server drops (`404`) is reported as `outcome_uncertain` instead of
   being re-sent in a new session, and later calls on that connection are
-  refused unsent until the server is reconnected.
+  refused unsent until the server is reconnected. The mob member upcall
+  envelope gains an `outcome_uncertain` class; a member on an older
+  version cannot decode it and fails that upcall with a decode error
+  rather than misreporting it.
 
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
@@ -271,7 +274,12 @@ them.
   exactly once, its outcome is the typed `ToolError::OutcomeUncertain`
   (neither success nor denial, and the dispatch gate settles it as
   `Unknown`), and the dead connection refuses later calls unsent until an
-  explicit reconnect.
+  explicit reconnect. Each call's outcome comes from what the transport did
+  with that call: a call queued behind the expiring one is refused at the
+  transport, unsent, and a call that failed before it was sent stays an
+  ordinary failure. A `404` on the session's GET stream expires the
+  session the same way. `McpConnection::into_protocol` keeps this, so
+  `McpProtocol::call_tool` reports the same outcomes.
 
 - Turbo S S106: a reopen whose retained conversation summary was followed by
   more rows than the startup input holds generated a fresh summary, and when

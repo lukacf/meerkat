@@ -7,7 +7,7 @@ use std::sync::Arc;
 use meerkat_core::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResult, Content, RawContent},
+    model::{CallToolResult, Content, RawContent},
     service::{Peer, RoleClient, RunningService},
 };
 use serde_json::Value;
@@ -18,23 +18,42 @@ pub struct McpProtocol {
     service: crate::client_service::ConnectedClient,
     /// The stdio server's process when built from a connection that owns one.
     stdio_child: Option<crate::connection::StdioChildCustody>,
+    /// Server name for typed call failures.
+    server: String,
+    protected_metadata: crate::transport::protected::ProtectedMetadataState,
+    /// The session-expiry owner of the connection this was converted from,
+    /// so its calls keep the same request-local disposition and refusal.
+    session_expiry: crate::transport::streamable_http::SessionExpiryRecorder,
 }
 
 impl McpProtocol {
     pub fn new(service: RunningService<RoleClient, ()>) -> Self {
+        let server = service
+            .peer_info()
+            .map(|info| info.server_info.name.clone())
+            .unwrap_or_default();
         Self {
             service: service.into(),
             stdio_child: None,
+            server,
+            protected_metadata: Default::default(),
+            session_expiry: Default::default(),
         }
     }
 
-    pub(crate) fn from_client(
+    pub(crate) fn from_connection(
         service: crate::client_service::ConnectedClient,
         stdio_child: Option<crate::connection::StdioChildCustody>,
+        server: String,
+        protected_metadata: crate::transport::protected::ProtectedMetadataState,
+        session_expiry: crate::transport::streamable_http::SessionExpiryRecorder,
     ) -> Self {
         Self {
             service,
             stdio_child,
+            server,
+            protected_metadata,
+            session_expiry,
         }
     }
 
@@ -56,22 +75,16 @@ impl McpProtocol {
     /// content parses to the same JSON value is its serialization and is not
     /// repeated.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let request = match args.as_object().cloned() {
-            Some(arguments) => {
-                CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
-            }
-            None => CallToolRequestParams::new(name.to_string()),
-        };
-
-        let result =
-            self.service
-                .call_tool(request)
-                .await
-                .map_err(|e| McpError::ToolCallFailed {
-                    tool: name.to_string(),
-                    reason: e.to_string(),
-                })?;
-
+        let result = crate::connection::call_tool_on(
+            &self.service,
+            &self.server,
+            &self.protected_metadata,
+            &self.session_expiry,
+            name,
+            args,
+            None,
+        )
+        .await?;
         convert_tool_result(result, name)
     }
 

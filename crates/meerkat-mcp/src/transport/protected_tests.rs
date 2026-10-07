@@ -3,7 +3,9 @@ use super::*;
 use crate::transport::sse::{
     ReqwestSseClient, SseClient, SseClientConfig, SseClientTransport, SseTransportError,
 };
-use crate::transport::streamable_http::ReqwestStreamableHttpClient;
+use crate::transport::streamable_http::{
+    RequestDispatch, RequestDisposition, ReqwestStreamableHttpClient, SessionExpiryRecorder,
+};
 use rmcp::model::{CallToolRequest, CallToolRequestParams, NumberOrString};
 use rmcp::transport::streamable_http_client::{StreamableHttpClient, StreamableHttpError};
 use serde_json::json;
@@ -452,44 +454,217 @@ async fn sse_preserves_messages_across_comments_heartbeats_and_empty_event_types
 #[tokio::test]
 async fn session_expiry_is_typed_and_recorded_for_ordinary_and_protected_posts() {
     // The only transport is built with `reinit_on_expired_session(false)`, so
-    // no 404 is ever re-initialized and re-sent. The typed expiry is
-    // recorded for every post, protected or not, and types the call outcome.
+    // no 404 is ever re-initialized and re-sent. Each case uses a fresh
+    // recorder, so each one really reaches the server and gets its own 404.
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
     let server = HttpFixture::start(axum::Router::new().route(
         "/mcp",
-        axum::routing::post(|| async { axum::http::StatusCode::NOT_FOUND }),
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }),
     ))
     .await;
-    let state = ProtectedMetadataState::default();
-    let expiry = crate::transport::streamable_http::SessionExpiryRecorder::default();
-    let client =
-        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
-            .with_protected_metadata(state.clone())
-            .with_session_expiry(expiry.clone());
-    assert!(!expiry.expired());
-    let ordinary = client
-        .post_message(
-            server.url.clone().into(),
-            message(false),
-            Some("session".into()),
-            None,
-            Default::default(),
-        )
-        .await;
-    assert!(matches!(ordinary, Err(StreamableHttpError::SessionExpired)));
-    assert!(expiry.expired());
-    state.register(&metadata()).unwrap();
-    for selected in [true, false] {
-        let error = client
+    for (case, protected) in [(0, false), (1, true), (2, false)] {
+        let state = ProtectedMetadataState::default();
+        if case > 0 {
+            // Protected calls registered on this connection (case 2: an
+            // unselected post on a connection that carries protected calls).
+            state.register(&metadata()).unwrap();
+        }
+        let expiry = SessionExpiryRecorder::default();
+        let client =
+            ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
+                .with_protected_metadata(state)
+                .with_session_expiry(expiry.clone());
+        let (message, dispatch) = dispatched(protected);
+        let result = client
             .post_message(
                 server.url.clone().into(),
-                message(selected),
+                message,
                 Some("session".into()),
                 None,
                 Default::default(),
             )
             .await;
-        assert!(matches!(error, Err(StreamableHttpError::SessionExpired)));
+        assert!(matches!(result, Err(StreamableHttpError::SessionExpired)));
+        assert!(expiry.expired(), "case {case}");
+        assert_eq!(
+            dispatch.disposition(),
+            Some(RequestDisposition::SentSessionExpired),
+            "case {case}"
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), case + 1, "exactly one POST");
     }
+}
+
+/// A call carrying its request-local disposition witness.
+fn dispatched(protected: bool) -> (ClientJsonRpcMessage, RequestDispatch) {
+    let dispatch = RequestDispatch::default();
+    let mut message = message(protected);
+    let ClientJsonRpcMessage::Request(request) = &mut message else {
+        panic!("expected request")
+    };
+    let ClientRequest::CallToolRequest(call) = &mut request.request else {
+        panic!("expected tool call")
+    };
+    call.extensions.insert(dispatch.clone());
+    (message, dispatch)
+}
+
+/// A request queued before the expiry was recorded still never enters the
+/// dead session: it is refused at transport entry, unsent.
+#[tokio::test]
+async fn known_expiry_refuses_a_queued_request_at_transport_entry() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }),
+    ))
+    .await;
+    let expiry = SessionExpiryRecorder::default();
+    let client =
+        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
+            .with_session_expiry(expiry.clone());
+    let (first, first_dispatch) = dispatched(false);
+    let (queued, queued_dispatch) = dispatched(false);
+    let _ = client
+        .post_message(
+            server.url.clone().into(),
+            first,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert_eq!(
+        first_dispatch.disposition(),
+        Some(RequestDisposition::SentSessionExpired)
+    );
+    let refused = client
+        .post_message(
+            server.url.clone().into(),
+            queued,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(refused, Err(StreamableHttpError::SessionExpired)));
+    assert_eq!(
+        queued_dispatch.disposition(),
+        Some(RequestDisposition::RefusedExpired)
+    );
+    assert_eq!(
+        posts.load(Ordering::SeqCst),
+        1,
+        "the queued request was never sent"
+    );
+}
+
+/// The attached-session GET stream expiring kills the session the same way:
+/// a later call is refused unsent.
+#[tokio::test]
+async fn attached_get_404_records_expiry_and_later_calls_are_refused_unsent() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }).post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::ACCEPTED
+            }
+        }),
+    ))
+    .await;
+    let expiry = SessionExpiryRecorder::default();
+    let client =
+        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
+            .with_session_expiry(expiry.clone());
+    let stream = client
+        .get_stream(
+            server.url.clone().into(),
+            "session".into(),
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(stream, Err(StreamableHttpError::SessionExpired)));
+    assert!(expiry.expired());
+    let (call, dispatch) = dispatched(false);
+    let refused = client
+        .post_message(
+            server.url.clone().into(),
+            call,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(refused, Err(StreamableHttpError::SessionExpired)));
+    assert_eq!(
+        dispatch.disposition(),
+        Some(RequestDisposition::RefusedExpired)
+    );
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
+}
+
+/// A frame refused by the bound before sending leaves no disposition (never
+/// sent), so its failure stays ordinary, never uncertain.
+#[tokio::test]
+async fn a_pre_send_failure_records_no_send() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }),
+    ))
+    .await;
+    let client =
+        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
+    let (mut message, dispatch) = dispatched(false);
+    let ClientJsonRpcMessage::Request(request) = &mut message else {
+        panic!("expected request")
+    };
+    let ClientRequest::CallToolRequest(call) = &mut request.request else {
+        panic!("expected tool call")
+    };
+    call.params.arguments = Some(Map::from_iter([(
+        "payload".into(),
+        Value::String("\\".repeat(MAX_FRAME_BYTES / 2)),
+    )]));
+    let result = client
+        .post_message(
+            server.url.clone().into(),
+            message,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(dispatch.disposition(), None);
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

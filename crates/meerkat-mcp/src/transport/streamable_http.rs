@@ -36,23 +36,76 @@ pub(crate) struct ReqwestStreamableHttpClient {
 }
 
 /// Typed, sticky record that the server dropped this connection's session
-/// (a `404` on a request that carried the session id). The transport never
-/// re-initializes or re-sends after it; the connection reads this record to
-/// type the in-flight call's outcome as uncertain and to refuse later calls
-/// before they are sent.
-#[derive(Clone, Debug, Default)]
+/// (a `404` on a POST or GET that carried the session id). The transport
+/// never re-initializes or re-sends after it, refuses every later request at
+/// its entry, and the connection refuses later calls before queuing them.
+/// It says nothing about any one request; that is [`RequestDispatch`].
+#[derive(Clone, Debug)]
 pub(crate) struct SessionExpiryRecorder {
-    expired: Arc<std::sync::atomic::AtomicBool>,
+    expired: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for SessionExpiryRecorder {
+    fn default() -> Self {
+        Self {
+            expired: Arc::new(tokio::sync::watch::Sender::new(false)),
+        }
+    }
 }
 
 impl SessionExpiryRecorder {
     fn record(&self) {
-        self.expired
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.expired.send_replace(true);
     }
 
     pub(crate) fn expired(&self) -> bool {
-        self.expired.load(std::sync::atomic::Ordering::SeqCst)
+        *self.expired.borrow()
+    }
+}
+
+/// What the transport did with ONE request, recorded on that request
+/// itself (it travels in the request's extensions). A call's outcome is
+/// decided from this, never from connection-wide state or error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequestDisposition {
+    /// Refused at transport entry: the session was already known expired.
+    /// Nothing was sent.
+    RefusedExpired,
+    /// Handed to the HTTP client; the server may have received it.
+    Sent,
+    /// Sent, then answered `404` for its session: it may have taken effect.
+    SentSessionExpired,
+}
+
+/// Request-local disposition witness. Absent a record, the request never
+/// reached the HTTP send (for example its frame failed serialization).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequestDispatch {
+    disposition: Arc<std::sync::OnceLock<RequestDisposition>>,
+}
+
+impl RequestDispatch {
+    pub(crate) fn disposition(&self) -> Option<RequestDisposition> {
+        self.disposition.get().copied()
+    }
+
+    /// Recorded once per request.
+    fn record(&self, disposition: RequestDisposition) {
+        let _ = self.disposition.set(disposition);
+    }
+}
+
+/// The witness a `tools/call` carries, if any.
+fn request_dispatch(message: &ClientJsonRpcMessage) -> Option<RequestDispatch> {
+    use rmcp::model::ClientRequest;
+    match message {
+        ClientJsonRpcMessage::Request(request) => match &request.request {
+            ClientRequest::CallToolRequest(call) => {
+                call.extensions.get::<RequestDispatch>().cloned()
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -259,6 +312,13 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
         }
+        // The stream request always carries the session: a 404 means the
+        // server dropped it, exactly like a POST 404. Later requests are
+        // refused at transport entry; no request's own disposition changes.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            self.session_expiry.record();
+            return Err(StreamableHttpError::SessionExpired);
+        }
         let response = response
             .error_for_status()
             .map_err(StreamableHttpError::Client)?;
@@ -316,6 +376,15 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        let dispatch = request_dispatch(&message);
+        // A known-dead session is never entered again, not even by a request
+        // that was queued before the expiry was recorded.
+        if session_id.is_some() && self.session_expiry.expired() {
+            if let Some(dispatch) = &dispatch {
+                dispatch.record(RequestDisposition::RefusedExpired);
+            }
+            return Err(StreamableHttpError::SessionExpired);
+        }
         let protected_call = has_protected_metadata(&message);
         let client = if protected_call {
             protected_http_client().map_err(|_| {
@@ -349,10 +418,17 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .entry(CONTENT_TYPE)
             .or_insert(HeaderValue::from_static(JSON_MIME_TYPE));
         *request.body_mut() = Some(bytes.into());
-        let response = client
-            .execute(request)
-            .await
-            .map_err(StreamableHttpError::Client)?;
+        let result = client.execute(request).await;
+        // From here the server may have received the request. A session 404
+        // records its own final disposition below instead.
+        if let Some(dispatch) = &dispatch {
+            let session_expired = session_was_attached
+                && matches!(&result, Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND);
+            if !session_expired {
+                dispatch.record(RequestDisposition::Sent);
+            }
+        }
+        let response = result.map_err(StreamableHttpError::Client)?;
         self.auth_challenge.record(&response);
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && let Some(header) = response.headers().get(WWW_AUTHENTICATE)
@@ -399,6 +475,9 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             // twice. The record types the outcome and refuses later calls;
             // only an explicit reconnect starts a new session.
             self.session_expiry.record();
+            if let Some(dispatch) = &dispatch {
+                dispatch.record(RequestDisposition::SentSessionExpired);
+            }
             return Err(StreamableHttpError::SessionExpired);
         }
         let content_type = response

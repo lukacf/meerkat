@@ -43,6 +43,9 @@ pub enum ScriptedTurn {
         name: String,
         args: serde_json::Value,
     },
+    /// Request several calls in one batch, in this order: the turn continues
+    /// with all their results and a further provider call.
+    ToolCalls(Vec<(String, String, serde_json::Value)>),
     /// Emit this exact assistant text.
     Text(String),
     /// Fail the provider call, so the member turn fails terminally.
@@ -191,6 +194,29 @@ impl LlmClient for ScriptedCouncilClient {
                     },
                 },
             ],
+            ScriptedTurn::ToolCalls(calls) => calls
+                .into_iter()
+                .map(|(id, name, args)| LlmEvent::ToolCallComplete {
+                    id,
+                    name,
+                    args,
+                    meta: None,
+                })
+                .chain([
+                    LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            meerkat_core::Provider::Anthropic,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    },
+                    LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
+                        },
+                    },
+                ])
+                .collect(),
             ScriptedTurn::Text(text) => vec![
                 LlmEvent::TextDelta {
                     delta: text,
@@ -464,13 +490,17 @@ pub fn agent_mob_tools_state(
             store_dyn,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
-        ),
+        )
+        .expect("persistence bundle"),
     );
-    let state = Arc::new(configure(MobMcpState::new_with_runtime_adapter(
-        Arc::new(service),
-        Some(runtime),
-        MobControlPrincipal::Owner,
-    )));
+    let state = Arc::new(configure(
+        MobMcpState::new_with_runtime_adapter(
+            Arc::new(service),
+            Some(runtime),
+            MobControlPrincipal::Owner,
+        )
+        .expect("mob state"),
+    ));
     *mob_tools_slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(

@@ -66,6 +66,39 @@ fn builtins_probe() -> FamilyProbe {
     }
 }
 
+const HOST_NOTE: &str = "host_note";
+
+/// A permitted host tool every member mounts (a mob-wide provider), so the
+/// parent sees it and a capped child may call it. Records each call.
+struct HostNote(Arc<Mutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for HostNote {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        Arc::from([Arc::new(
+            meerkat_core::types::ToolDef::new(
+                HOST_NOTE,
+                "Record a note on the host.",
+                serde_json::json!({"type": "object", "properties": {}}),
+            )
+            .with_provenance(meerkat_core::ToolProvenance {
+                kind: meerkat_core::ToolSourceKind::Callback,
+                source_id: HOST_NOTE.into(),
+            }),
+        )])
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        self.0.lock().unwrap().push(call.id.to_string());
+        Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+            meerkat_core::types::ToolResult::new(call.id.to_string(), "noted".to_string(), false),
+        ))
+    }
+}
+
 /// One member whose profile mounts the agent mob tools (so it may delegate
 /// and spawn) and leaves every other family at its default: off, not denied.
 fn parent_definition(mob_id: &MobId) -> MobDefinition {
@@ -142,6 +175,8 @@ struct Observed {
     worker: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
     /// The tools the helper was offered on its first request.
     helper_tools: Arc<Mutex<Option<Vec<String>>>>,
+    /// The call ids of the results the helper's model got back, in order.
+    helper_result_order: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 /// Call `tool` once, then record what came back and answer.
@@ -199,6 +234,36 @@ fn script(
                 HelperTurn::Probe => probe_once(results, "call-helper-probe", &probe, |r| {
                     *seen.lock().unwrap() = Some(r);
                 }),
+                HelperTurn::ProbeWithSibling { hidden_first } => {
+                    if results.contains_key("call-helper-probe") {
+                        if let Some(Message::ToolResults { results: last, .. }) =
+                            request.messages.last()
+                        {
+                            *observed.helper_result_order.lock().unwrap() = Some(
+                                last.iter()
+                                    .map(|result| result.tool_use_id.clone())
+                                    .collect(),
+                            );
+                        }
+                        *seen.lock().unwrap() = Some(results);
+                        return ScriptedTurn::Text("helper done".to_string());
+                    }
+                    let hidden = (
+                        "call-helper-probe".to_string(),
+                        probe.tool.to_string(),
+                        probe.args.clone(),
+                    );
+                    let sibling = (
+                        "call-helper-sibling".to_string(),
+                        HOST_NOTE.to_string(),
+                        serde_json::json!({}),
+                    );
+                    ScriptedTurn::ToolCalls(if hidden_first {
+                        vec![hidden, sibling]
+                    } else {
+                        vec![sibling, hidden]
+                    })
+                }
                 HelperTurn::DelegateFamily => {
                     if results.contains_key("call-helper-delegate") {
                         *seen.lock().unwrap() = Some(results);
@@ -215,10 +280,26 @@ fn script(
             };
         }
         if user.contains(WORKER_TASK) {
-            let seen = Arc::clone(&observed.worker);
-            return probe_once(results, "call-worker-probe", &probe, |r| {
-                seen.lock().unwrap().push(r);
-            });
+            // A durable worker sees its earlier turns too: each turn probes
+            // under its own call id, and records the result it just got.
+            let probes = results
+                .keys()
+                .filter(|id| id.starts_with("call-worker-probe-"))
+                .count();
+            let answered_this_turn =
+                matches!(request.messages.last(), Some(Message::ToolResults { .. }));
+            if answered_this_turn {
+                let latest = format!("call-worker-probe-{}", probes - 1);
+                let mut turn = BTreeMap::new();
+                turn.insert("call-worker-probe".to_string(), results[&latest].clone());
+                observed.worker.lock().unwrap().push(turn);
+                return ScriptedTurn::Text("probed".to_string());
+            }
+            return ScriptedTurn::ToolCall {
+                id: format!("call-worker-probe-{probes}"),
+                name: probe.tool.to_string(),
+                args: probe.args.clone(),
+            };
         }
         if user.contains(DIRECT_PROBE) {
             return ScriptedTurn::ToolCall {
@@ -242,6 +323,9 @@ fn script(
 enum HelperTurn {
     /// The helper calls the family's tool itself.
     Probe,
+    /// The helper calls the family's tool and the permitted host tool in
+    /// one batch, the family's tool first or second.
+    ProbeWithSibling { hidden_first: bool },
     /// The helper delegates on, to a grandchild whose inline profile switches
     /// the family on; the grandchild calls the tool.
     DelegateFamily,
@@ -251,6 +335,8 @@ enum HelperTurn {
 struct ParentMob {
     state: Arc<MobMcpState>,
     mob_id: MobId,
+    /// Every call that reached the permitted host tool.
+    host_calls: Arc<Mutex<Vec<String>>>,
     _temp: tempfile::TempDir,
 }
 
@@ -260,10 +346,17 @@ impl ParentMob {
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
     ) -> Self {
         let temp = tempfile::tempdir().expect("temp dir");
+        let host_calls = Arc::new(Mutex::new(Vec::new()));
+        let host: Arc<dyn meerkat_core::AgentToolDispatcher> =
+            Arc::new(HostNote(Arc::clone(&host_calls)));
         let state = support::agent_mob_tools_state(
             temp.path(),
             Arc::new(ScriptedCouncilClient::new(script)),
-            |state| state,
+            |state| {
+                let provider: meerkat_mob::ExternalToolsProvider =
+                    Arc::new(move || Some(Arc::clone(&host)));
+                state.with_external_tools_provider(Some(provider))
+            },
         );
         state
             .mob_create_definition(parent_definition(&mob_id))
@@ -283,6 +376,7 @@ impl ParentMob {
         Self {
             state,
             mob_id,
+            host_calls,
             _temp: temp,
         }
     }
@@ -323,8 +417,8 @@ impl ParentMob {
         );
     }
 
-    /// Run one worker turn and return how it failed.
-    async fn worker_turn(&self, mob_id: &MobId) -> String {
+    /// Run one worker turn to completion.
+    async fn worker_turn(&self, mob_id: &MobId) {
         let handle = self.state.handle_for(mob_id).await.expect("mob handle");
         let spec = BoundedResultSpec::new("turn", 4096).expect("bounded result spec");
         let work = handle
@@ -339,13 +433,10 @@ impl ParentMob {
             )
             .await
             .expect("start a worker turn");
-        let Err(failure) = tokio::time::timeout(Duration::from_secs(120), work.wait_bounded(spec))
+        tokio::time::timeout(Duration::from_secs(120), work.wait_bounded(spec))
             .await
             .expect("the worker turn completes")
-        else {
-            panic!("the worker's turn ends on its refused call");
-        };
-        format!("{failure:?}")
+            .expect("a refused call does not fail the worker's turn");
     }
 
     async fn teardown(self) {
@@ -364,26 +455,26 @@ fn seen(slot: &Seen, who: &str) -> BTreeMap<String, String> {
         .unwrap_or_else(|| panic!("the {who} turn reached its final request"))
 }
 
-/// The child's call reached its dispatcher and was refused there: the tool
-/// is mounted (its profile switched the family on) but outside its ceiling,
-/// so it is hidden from the child, and calling a tool it was not offered
-/// ends the child's turn. `surfaced` is what the refusal surfaced as.
-fn assert_refused_at_dispatch(surfaced: &str, probe: &FamilyProbe, who: &str) {
+/// The child's call was refused as that call only: the tool is mounted (its
+/// profile switched the family on) but outside its ceiling, so it is hidden
+/// from the child, and the child's model is told it was denied. `result` is
+/// the tool result the child's model saw.
+fn assert_refused_at_dispatch(result: &str, probe: &FamilyProbe, who: &str) {
     assert!(
-        !surfaced.contains(probe.executed_marker),
+        !result.contains(probe.executed_marker),
         "a {who} executed {} from the `{}` family its parent's profile leaves off, by naming \
-         the family in an inline tooling profile: {surfaced}",
+         the family in an inline tooling profile: {result}",
         probe.tool,
         probe.family,
     );
     assert!(
-        surfaced.contains(&format!("Tool '{}' is not allowed by policy", probe.tool)),
-        "the {who}'s {} call is refused as outside its ceiling: {surfaced}",
+        result.contains("\"error\":\"access_denied\""),
+        "the {who}'s {} call is refused as outside its ceiling: {result}",
         probe.tool
     );
 }
 
-async fn assert_delegate_helper_is_capped(probe: FamilyProbe) {
+async fn assert_delegate_helper_is_capped(probe: FamilyProbe, hidden_first: bool) {
     let observed = Observed::default();
     let family = probe.family;
     let mob = ParentMob::new(
@@ -392,7 +483,7 @@ async fn assert_delegate_helper_is_capped(probe: FamilyProbe) {
             observed.clone(),
             probe.clone(),
             move |_| delegate_call("call-spawn", HELPER_TASK, "helper", &[family]),
-            HelperTurn::Probe,
+            HelperTurn::ProbeWithSibling { hidden_first },
         ),
     )
     .await;
@@ -419,21 +510,54 @@ async fn assert_delegate_helper_is_capped(probe: FamilyProbe) {
         "the helper is not offered {}: {offered:?}",
         probe.tool
     );
-    // The helper's refused call ended its turn; the delegate reports it to
-    // the parent, whose own turn carries on.
-    assert!(observed.helper.lock().unwrap().is_none());
-    assert_refused_at_dispatch(&parent["call-spawn"], &probe, "delegate helper");
+    // The refusal is the helper's own model feedback: its turn carries on
+    // to an answer, and the delegate completes.
+    let helper = seen(&observed.helper, "helper");
+    assert_refused_at_dispatch(&helper["call-helper-probe"], &probe, "delegate helper");
+    // The permitted sibling in the same batch ran, exactly once, and its
+    // model got its exact result; the results came back in call order.
+    assert_eq!(helper["call-helper-sibling"], "noted");
+    assert_eq!(
+        *mob.host_calls.lock().unwrap(),
+        ["call-helper-sibling"],
+        "the permitted sibling's effect happened once"
+    );
+    let expected_order = if hidden_first {
+        ["call-helper-probe", "call-helper-sibling"]
+    } else {
+        ["call-helper-sibling", "call-helper-probe"]
+    };
+    assert_eq!(
+        observed
+            .helper_result_order
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap(),
+        expected_order,
+        "the helper's next request carries both results in call order"
+    );
+    assert!(
+        parent["call-spawn"].contains("\"status\":\"completed\""),
+        "the helper ran to completion: {}",
+        parent["call-spawn"]
+    );
     mob.teardown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inline_delegate_profile_cannot_enable_shell_the_parent_leaves_off() {
-    assert_delegate_helper_is_capped(shell_probe()).await;
+    assert_delegate_helper_is_capped(shell_probe(), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_capped_helper_runs_a_permitted_sibling_called_before_the_refused_one() {
+    assert_delegate_helper_is_capped(shell_probe(), false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inline_delegate_profile_cannot_enable_builtins_the_parent_leaves_off() {
-    assert_delegate_helper_is_capped(builtins_probe()).await;
+    assert_delegate_helper_is_capped(builtins_probe(), true).await;
 }
 
 /// The cap is transitive: a helper (itself profile-sourced) that delegates
@@ -459,11 +583,16 @@ async fn a_recursive_inline_delegate_profile_stays_within_the_root_parent() {
         .await
         .expect("a refused grandchild call does not fail the parent's turn");
 
-    // The grandchild's refused call ended its turn; the helper's delegate
-    // reports it, and the helper carries on to its final answer.
+    // The grandchild's model is told its call was denied and answers; the
+    // helper's delegate completes.
     let helper = seen(&observed.helper, "helper");
-    assert!(observed.grandchild.lock().unwrap().is_none());
-    assert_refused_at_dispatch(&helper["call-helper-delegate"], &probe, "grandchild");
+    let grandchild = seen(&observed.grandchild, "grandchild");
+    assert_refused_at_dispatch(&grandchild["call-grandchild-probe"], &probe, "grandchild");
+    assert!(
+        helper["call-helper-delegate"].contains("\"status\":\"completed\""),
+        "the grandchild ran to completion: {}",
+        helper["call-helper-delegate"]
+    );
     mob.teardown().await;
 }
 
@@ -526,9 +655,15 @@ async fn an_inline_spawn_member_profile_cannot_enable_shell_the_parent_leaves_of
         );
     }
 
-    let failure = mob.worker_turn(&child_mob_id).await;
-    assert!(observed.worker.lock().unwrap().is_empty());
-    assert_refused_at_dispatch(&failure, &probe, "spawned member");
+    mob.worker_turn(&child_mob_id).await;
+    // The worker is durable: fresh work in the same session meets the same
+    // ceiling and the same local refusal.
+    mob.worker_turn(&child_mob_id).await;
+    let worker = observed.worker.lock().unwrap().clone();
+    assert_eq!(worker.len(), 2, "both worker turns reached their answers");
+    for turn in &worker {
+        assert_refused_at_dispatch(&turn["call-worker-probe"], &probe, "spawned member");
+    }
     let _ = mob.state.mob_destroy(&child_mob_id).await;
     mob.teardown().await;
 }

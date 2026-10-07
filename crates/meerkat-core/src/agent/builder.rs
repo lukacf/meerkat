@@ -2252,107 +2252,93 @@ mod tests {
         );
     }
 
-    /// A handoff naming a tool the durable state already witnesses under a
-    /// different identity never reinterprets the retained witness: the
-    /// durable identity is kept, the handoff does not admit that name, and a
-    /// permitted same-identity sibling survives the narrowing.
+    /// A conflicting handoff cannot reinterpret a retained identity or
+    /// discard unrelated inherited tools that are still permitted.
     #[tokio::test]
     async fn resumed_builder_keeps_a_retained_witness_against_a_conflicting_handoff() {
-        let client = Arc::new(MockClient);
-        let retained = test_tool_with_provenance("kept", "original-source");
-        let sibling = test_tool_with_provenance("sibling", "sibling-source");
-        let tools = Arc::new(StaticTools::new(
-            vec![Arc::clone(&retained), Arc::clone(&sibling)].into(),
-        ));
-        let store = Arc::new(MockStore);
-        let retained_witness = crate::ToolVisibilityWitness {
-            last_seen_provenance: retained.provenance.clone(),
-        };
-        let sibling_witness = crate::ToolVisibilityWitness {
-            last_seen_provenance: sibling.provenance.clone(),
-        };
-        let mut session = Session::new();
-        session
-            .set_tool_visibility_state(
-                AuthorizedSessionToolVisibilityState::from_generated_authority(
-                    SessionToolVisibilityState {
-                        inherited_base_filter: ToolFilter::Allow(
-                            ["kept".to_string(), "sibling".to_string()]
-                                .into_iter()
-                                .collect(),
-                        ),
-                        filter_witnesses: [
-                            (retained.name.clone(), retained_witness.clone()),
-                            (sibling.name.clone(), sibling_witness.clone()),
-                        ]
-                        .into_iter()
-                        .collect(),
-                        ..Default::default()
-                    },
-                ),
-            )
-            .expect("visibility state should serialize");
-        let other_identity = test_tool_with_provenance("kept", "another-source");
-        // The handoff names the same sibling identity, and `kept` under
-        // another one.
-        let conflicting = InheritedToolVisibilityAuthority::from_generated_composition_authority(
-            ToolFilter::Allow(
-                ["kept".to_string(), "sibling".to_string()]
-                    .into_iter()
-                    .collect(),
-            ),
-            [
-                (
-                    other_identity.name.clone(),
-                    crate::ToolVisibilityWitness {
-                        last_seen_provenance: other_identity.provenance.clone(),
-                    },
-                ),
-                (sibling.name.clone(), sibling_witness.clone()),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
-        let result = AgentBuilder::new()
-            .resume_session(session)
-            .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
-            .with_initial_tool_visibility_state(conflicting)
-            .build_inner(client, tools, store)
-            .await;
+        for include_sibling in [false, true] {
+            let client = Arc::new(MockClient);
+            let retained = test_tool_with_provenance("kept", "original-source");
+            let sibling = test_tool_with_provenance("sibling", "sibling-source");
+            let witness = |tool: &Arc<ToolDef>| crate::ToolVisibilityWitness {
+                last_seen_provenance: tool.provenance.clone(),
+            };
+            let retained_witness = witness(&retained);
+            let mut mounted = vec![Arc::clone(&retained)];
+            let mut names: crate::types::ToolNameSet = ["kept".to_string()].into_iter().collect();
+            let mut retained_witnesses = std::collections::BTreeMap::from([(
+                retained.name.clone(),
+                retained_witness.clone(),
+            )]);
+            if include_sibling {
+                mounted.push(Arc::clone(&sibling));
+                names.insert("sibling".to_string());
+                retained_witnesses.insert(sibling.name.clone(), witness(&sibling));
+            }
+            let tools = Arc::new(StaticTools::new(mounted.into()));
+            let store = Arc::new(MockStore);
+            let mut incoming_witnesses = retained_witnesses.clone();
+            let mut session = Session::new();
+            session
+                .set_tool_visibility_state(
+                    AuthorizedSessionToolVisibilityState::from_generated_authority(
+                        SessionToolVisibilityState {
+                            inherited_base_filter: ToolFilter::Allow(names.clone()),
+                            filter_witnesses: retained_witnesses,
+                            ..Default::default()
+                        },
+                    ),
+                )
+                .expect("visibility state should serialize");
+            let other_identity = test_tool_with_provenance("kept", "another-source");
+            incoming_witnesses.insert(other_identity.name.clone(), witness(&other_identity));
+            let conflicting =
+                InheritedToolVisibilityAuthority::from_generated_composition_authority(
+                    ToolFilter::Allow(names),
+                    incoming_witnesses,
+                );
+            let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+            let result = AgentBuilder::new()
+                .resume_session(session)
+                .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
+                .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
+                .with_initial_tool_visibility_state(conflicting)
+                .build_inner(client, tools, store)
+                .await;
 
-        if let Err(error) = &result {
-            panic!("the resume builds: {error:?}");
+            let agent = match result {
+                Ok(agent) => agent,
+                Err(error) => {
+                    panic!("the resume builds (include_sibling={include_sibling}): {error:?}");
+                }
+            };
+            let state = owner.visibility_state().unwrap();
+            assert_eq!(
+                state.filter_witnesses.get("kept"),
+                Some(&retained_witness),
+                "the retained identity is never overwritten"
+            );
+            let expected_names: crate::types::ToolNameSet = if include_sibling {
+                ["sibling".to_string()].into_iter().collect()
+            } else {
+                crate::types::ToolNameSet::new()
+            };
+            assert_eq!(
+                state.inherited_base_filter,
+                ToolFilter::Allow(expected_names.clone()),
+                "only the conflicting name is removed from the inherited ceiling"
+            );
+            let visible = agent
+                .tool_scope
+                .visible_tools_result()
+                .expect("restored visibility should be readable");
+            let visible_names: crate::types::ToolNameSet =
+                visible.iter().map(|tool| tool.name.clone()).collect();
+            assert_eq!(
+                visible_names, expected_names,
+                "a conflicting handoff leaves a permitted sibling visible"
+            );
         }
-        let state = owner.visibility_state().unwrap();
-        assert_eq!(
-            state.filter_witnesses.get("kept"),
-            Some(&retained_witness),
-            "the retained identity is never overwritten"
-        );
-        assert_eq!(
-            state.filter_witnesses.get("sibling"),
-            Some(&sibling_witness),
-            "the same-identity sibling keeps its witness"
-        );
-        assert_eq!(
-            state.inherited_base_filter,
-            ToolFilter::Allow(["sibling".to_string()].into_iter().collect()),
-            "the conflicting name is not admitted; the permitted sibling survives"
-        );
-        let agent = result.expect("the resume builds");
-        let visible: Vec<String> = agent
-            .tool_scope
-            .visible_tools_result()
-            .expect("visible tools")
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        assert!(
-            visible.contains(&"sibling".to_string()) && !visible.contains(&"kept".to_string()),
-            "only the permitted sibling stays visible: {visible:?}"
-        );
     }
 
     #[tokio::test]

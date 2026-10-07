@@ -556,6 +556,7 @@ mod image_generation_substrate {
         let result = SessionAgent::run_turn_with_events(
             &mut agent,
             SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "make an image".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,

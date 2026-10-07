@@ -977,6 +977,7 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
         command_plans: vec![],
         effect_dispositions: vec![],
         ci_step_limit: None,
+        tlc_model: None,
         deep_domain_overrides: Default::default(),
         input_field_domains: Default::default(),
         named_types: vec![],
@@ -1303,6 +1304,51 @@ fn jdk_java_options_mirror_the_tlc_stack_flag_for_the_launcher_main_thread() {
         super::merge_jdk_java_options("", "-XX:+UseParallelGC"),
         "-Xss256m"
     );
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn explicit_grant_model_requires_real_action_hits_in_both_profiles() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    assert!(machine_requires_transition_coverage(
+        &schema,
+        VerifyProfile::Ci
+    ));
+    assert!(machine_requires_transition_coverage(
+        &schema,
+        VerifyProfile::Deep
+    ));
+    let mut complete = TlcCoverageSummary::default();
+    for transition in &schema.transitions {
+        complete.counts_by_operator.insert(
+            transition.name.to_string(),
+            TlcCoverageCounts {
+                truth_hits: 1,
+                evaluations: 1,
+            },
+        );
+    }
+    ensure_machine_transition_coverage(&schema, &complete).expect("every action generated a state");
+    for transition in &schema.transitions {
+        let mut missing = complete.clone();
+        missing.counts_by_operator.remove(transition.name.as_str());
+        assert!(ensure_machine_transition_coverage(&schema, &missing).is_err());
+        missing
+            .counts_by_operator
+            .insert(transition.name.to_string(), TlcCoverageCounts::default());
+        assert!(ensure_machine_transition_coverage(&schema, &missing).is_err());
+    }
+    // Only top-level generated-state counts matter; inner guard evaluations
+    // cannot turn an action with no successor into coverage.
+    let output = "<IssueChild line 1, col 1 to line 1, col 10 of module model>: 0:0\n  line 2, col 1 to line 2, col 20 of module model: 900\n";
+    let guards_only = parse_tlc_coverage(output);
+    assert!(ensure_machine_transition_coverage(&schema, &guards_only).is_err());
+    let mut implicit = schema;
+    implicit.tlc_model = None;
+    assert!(!machine_requires_transition_coverage(
+        &implicit,
+        VerifyProfile::Ci
+    ));
 }
 
 #[cfg(feature = "machine-authority")]

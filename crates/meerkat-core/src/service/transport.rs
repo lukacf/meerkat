@@ -8,6 +8,7 @@ use super::SessionError;
 /// JSON-RPC error code for a `SessionError`.
 pub fn jsonrpc_code(err: &SessionError) -> i64 {
     match err {
+        SessionError::RuntimeUnavailable { .. } => -32032,
         SessionError::CapabilityUnavailable(_) => -32020,
         SessionError::NotFound { .. } => -32001,
         SessionError::Busy { .. } => -32002,
@@ -29,6 +30,7 @@ pub fn jsonrpc_code(err: &SessionError) -> i64 {
 /// HTTP status code for a `SessionError`.
 pub fn http_status(err: &SessionError) -> u16 {
     match err {
+        SessionError::RuntimeUnavailable { .. } => 503,
         SessionError::NotFound { .. } => 404,
         SessionError::Busy { .. }
         | SessionError::NotRunning { .. }
@@ -51,6 +53,7 @@ pub fn http_status(err: &SessionError) -> u16 {
 /// CLI exit code for a `SessionError` (0 = success, 1 = error).
 pub fn cli_exit_code(err: &SessionError) -> i32 {
     match err {
+        SessionError::RuntimeUnavailable { .. } => 52,
         SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
             // These are informational — stderr message, not hard failure
             0

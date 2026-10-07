@@ -382,7 +382,8 @@ mod tests {
         let runtime_store_for_bundle: Arc<dyn RuntimeStore> = runtime_store.clone();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
-        let bundle = PersistenceBundle::new(session_store, runtime_store_for_bundle, blob_store);
+        let bundle = PersistenceBundle::new(session_store, runtime_store_for_bundle, blob_store)
+            .expect("construct runtime authority");
 
         let factory = AgentFactory::new(root.join("sessions")).memory(true);
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -632,7 +633,8 @@ mod tests {
         let runtime_store_for_bundle: Arc<dyn RuntimeStore> = runtime_store.clone();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
-        let bundle = PersistenceBundle::new(session_store, runtime_store_for_bundle, blob_store);
+        let bundle = PersistenceBundle::new(session_store, runtime_store_for_bundle, blob_store)
+            .expect("construct runtime authority");
 
         let factory = AgentFactory::new(root.join("sessions")).memory(true);
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -1244,7 +1246,8 @@ mod tests {
         let runtime_store: Arc<dyn RuntimeStore> = fault_store.clone();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
-        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store);
+        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store)
+            .expect("construct runtime authority");
 
         let factory = AgentFactory::new(root.join("sessions")).memory(true);
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -2175,7 +2178,8 @@ mod tests {
         );
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
-        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store);
+        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store)
+            .expect("construct runtime authority");
 
         let factory = AgentFactory::new(root.join("sessions"));
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());

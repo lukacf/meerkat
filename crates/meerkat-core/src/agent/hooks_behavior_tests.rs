@@ -491,56 +491,72 @@ async fn pre_tool_deny_blocks_dispatch() {
     .await;
 
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
-    let err = agent
+    let result = agent
         .run_with_events("test".to_string().into(), tx)
         .await
-        .expect_err("PreToolExecution denial should terminalize the run");
-    assert!(matches!(
-        err,
-        AgentError::HookDenied {
-            point: HookPoint::PreToolExecution,
-            ..
-        }
-    ));
-
+        .expect("PreToolExecution denial refuses the call and retains the run");
+    assert_eq!(result.text, "done");
     assert!(seen_args.lock().await.is_empty());
     assert_eq!(
         seen_tokens.lock().await.len(),
-        1,
-        "pre-tool denial must not continue into a follow-up LLM turn"
+        2,
+        "the same controller receives refusal feedback in its next turn"
     );
-    assert!(
-        !agent
-            .session()
-            .messages()
-            .iter()
-            .any(|message| matches!(message, Message::ToolResults { .. })),
-        "pre-tool denial must not fabricate a transcript ToolResult"
+    let results: Vec<_> = agent
+        .session()
+        .messages()
+        .iter()
+        .filter_map(|message| {
+            if let Message::ToolResults { results, .. } = message {
+                Some(results)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].tool_use_id, "tc_1");
+    assert!(results[0].is_error);
+    let feedback: Value = serde_json::from_str(&results[0].text_content()).unwrap();
+    assert_eq!(feedback["error"], "hook_denied");
+    assert_eq!(
+        feedback["data"],
+        serde_json::json!({
+            "hook_id": "deny-pre-tool", "point": "pre_tool_execution",
+            "reason_code": "policy_violation",
+        })
     );
 
     let snapshot = agent
         .execution_snapshot()
         .expect("snapshot projects")
         .expect("test turn-state handle should expose a snapshot");
-    assert_eq!(snapshot.turn_phase, TurnPhase::Failed);
-    assert_eq!(snapshot.terminal_outcome, TurnTerminalOutcome::Failed);
-
-    let mut saw_run_failed = false;
-    let mut saw_tool_result_event = false;
+    assert_eq!(snapshot.turn_phase, TurnPhase::Completed);
+    assert_eq!(snapshot.terminal_outcome, TurnTerminalOutcome::Completed);
+    let mut result_events = 0;
+    let mut completed = false;
     while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, AgentEvent::RunFailed { .. }),
+            "a refused call must not fail the run"
+        );
+        assert!(
+            !matches!(event, AgentEvent::ToolExecutionStarted { .. }),
+            "denied tool must not enter"
+        );
         match event {
-            AgentEvent::RunFailed { .. } => saw_run_failed = true,
-            AgentEvent::ToolExecutionCompleted { .. } | AgentEvent::ToolResultReceived { .. } => {
-                saw_tool_result_event = true;
+            AgentEvent::RunCompleted { .. } => completed = true,
+            AgentEvent::ToolResultReceived { id, is_error, .. } => {
+                assert_eq!(id, "tc_1");
+                assert!(is_error);
+                result_events += 1;
             }
             _ => {}
         }
     }
-    assert!(saw_run_failed, "pre-tool denial should emit RunFailed");
-    assert!(
-        !saw_tool_result_event,
-        "pre-tool denial should not be emitted as a recoverable tool result"
-    );
+    assert!(completed);
+    assert_eq!(result_events, 1);
 }
 
 #[tokio::test]

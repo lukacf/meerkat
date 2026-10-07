@@ -285,7 +285,8 @@ async fn retained_metadata_retirement_then_sqlite_reopen_preserves_exact_source(
             let machine = meerkat_runtime::MeerkatMachine::persistent(
                 runtime,
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
-            );
+            )
+            .expect("construct runtime authority");
             let mut created = Vec::new();
             for policy in [Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly), None] {
                 let result = service

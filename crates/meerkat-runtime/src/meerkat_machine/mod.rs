@@ -1117,6 +1117,13 @@ pub(crate) use driver::{
 pub(crate) mod driver;
 
 mod comms_drain;
+mod controller_custody;
+pub(crate) mod credential_custody;
+#[cfg(feature = "local-authorization")]
+mod local_authorization;
+pub use controller_custody::NativeControllerGrantMutation;
+#[cfg(feature = "local-authorization")]
+pub use local_authorization::{NativeGrantWorkConfiguration, NativeIngressCheck};
 pub mod composition;
 mod dispatch_control;
 mod dispatch_drain;
@@ -1301,6 +1308,19 @@ pub enum RuntimeSessionUnregisterAdmission {
     /// The exact coordinator remains process-owned; poll this observer on a
     /// later caller retry.
     Pending(RuntimeSessionUnregisterObserver),
+}
+
+/// The wait a caller dispatched on after starting or joining an owned
+/// unregister teardown saga, reported to a test that armed
+/// [`MeerkatMachine::test_witness_next_unregister_wait`].
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnregisterTeardownWaitWitness {
+    /// Bounded by the ordinary caller grace: a saga still running when it
+    /// elapses is answered with typed `UnregisterInProgress`.
+    CallerGrace,
+    /// Awaits the saga's terminal result.
+    UntilTerminal,
 }
 
 /// Whether one session's runtime registration can serve, as a single typed
@@ -2608,6 +2628,58 @@ pub(crate) struct OwedInterruptedToolNotice {
 const INTERRUPTED_REQUEST_CONTENT_BOUND: usize = 64 * 1024;
 
 impl MeerkatMachine {
+    /// Install trusted native ingress/policy composition on a storeless machine.
+    /// Persistent profiles must be selected during fallible construction.
+    /// No serialized input can select this component.
+    pub fn with_native_work_authorization_host(
+        self,
+        host: Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>,
+    ) -> Result<Self, RuntimeDriverError> {
+        self.require_storeless_profile_installation()?;
+        self.install_native_work_authorization(|_| host)
+    }
+
+    fn require_storeless_profile_installation(&self) -> Result<(), RuntimeDriverError> {
+        if self.store.is_some() {
+            return Err(execution_custody_error(
+                crate::store::RuntimeStoreExecutionCustodyError::Unsupported,
+            ));
+        }
+        Ok(())
+    }
+
+    fn install_native_work_authorization(
+        mut self,
+        build_host: impl FnOnce(
+            std::sync::Weak<MeerkatMachineShared>,
+        ) -> Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>,
+    ) -> Result<Self, RuntimeDriverError> {
+        {
+            let shared =
+                Arc::get_mut(&mut self.shared).ok_or_else(crate::input_authority::unavailable)?;
+            if !shared.sessions.get_mut().is_empty()
+                || shared.native_work_authorization_host.get().is_some()
+            {
+                return Err(crate::input_authority::unavailable());
+            }
+            shared.require_governed_execution_custody()?;
+        }
+        // Check exclusive installation before constructing either Weak owner.
+        let host = build_host(Arc::downgrade(&self.shared));
+        let attachment = credential_custody::NativeWorkAuthorizationAttachment::new(host, &self);
+        self.native_work_authorization_host
+            .set(attachment)
+            .map_err(|_| crate::input_authority::unavailable())?;
+        self.install_native_credential_observer()?;
+        Ok(self)
+    }
+
+    /// Whether the actual native owner was installed before this machine was
+    /// shared. This is a composition observation, never a permission decision.
+    pub fn has_native_work_authorization_host(&self) -> bool {
+        self.native_work_authorization_host.get().is_some()
+    }
+
     /// Take the interrupted-run notices owed to `session_id`'s model, if any.
     pub(crate) async fn take_interrupted_tool_notices(
         &self,
@@ -6982,13 +7054,11 @@ impl MeerkatMachine {
         crate::handles::RuntimePeerCommsHandle::install_generated_on(handle, runtime)
     }
 
-    fn preview_dsl_input_on_state(
-        state: &dsl::MeerkatMachineState,
+    fn preview_dsl_input_on_authority(
+        mut preview: dsl::MeerkatMachineAuthority,
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
-        let mut preview = dsl::MeerkatMachineAuthority::recover_from_state(state.clone())
-            .map_err(|err| dsl_authority::map_error(err, context))?;
         dsl::MeerkatMachineMutator::apply(&mut preview, input)
             .map(|transition| transition.into_effects())
             .map_err(|err| dsl_authority::map_error(err, context))
@@ -7001,13 +7071,17 @@ impl MeerkatMachine {
         context: &str,
     ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
         let authority = self.session_dsl_authority(session_id).await?;
-        let state = {
-            let authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state().clone()
-        };
-        Self::preview_dsl_input_on_state(&state, input, context)
+        let preview = match authority.lock() {
+            Ok(authority) => Ok(authority.fork()),
+            Err(poisoned) => {
+                // Live forks require a healthy lock. A possibly partial state
+                // still crosses the existing cold-recovery validation boundary.
+                let state = poisoned.into_inner().state().clone();
+                dsl::MeerkatMachineAuthority::recover_from_state(state)
+            }
+        }
+        .map_err(|err| dsl_authority::map_error(err, context))?;
+        Self::preview_dsl_input_on_authority(preview, input, context)
     }
 
     /// The run the machine currently records for `session_id`, if any (`None`
@@ -8966,8 +9040,12 @@ impl LiveChannelStatusAuthority {
 /// implementation detail helpers.
 #[doc(hidden)]
 pub struct MeerkatMachineShared {
+    native_work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    credential_release_observer:
+        std::sync::OnceLock<Arc<credential_custody::NativeCredentialReleaseObserver>>,
     /// Once-per-distinct-payload panic log gate for the attachment
     /// `catch_unwind` boundaries (executor factory, surface activation,
     /// surface publication). See `crate::panic_boundary` for the 2026-07-29
@@ -9000,6 +9078,9 @@ pub struct MeerkatMachineShared {
         StdMutex<HashMap<SessionId, PendingDirectMemberBindAdmission>>,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
+    /// Same actual backend claim retained by exported capabilities, drivers,
+    /// and owned tasks. Failed acquisition never constructs a machine.
+    execution_custody: Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
@@ -9151,6 +9232,11 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// One-shot witness armed by a test: the next caller that waits on an
+    /// unregister teardown saga reports the wait it dispatched on.
+    #[cfg(feature = "test-support")]
+    test_unregister_wait_witness:
+        StdMutex<Option<crate::tokio::sync::oneshot::Sender<UnregisterTeardownWaitWitness>>>,
     /// This machine's user-interrupt acknowledgement bound. Tests scope it
     /// per machine: a short bound would make every success-path interrupt
     /// race the process-global cleanup dispatcher that all in-process tests
@@ -10678,13 +10764,18 @@ impl MeerkatMachine {
         }
     }
 
-    /// Whether both handles are the same live runtime owner: clones share
-    /// every machine-owned session fact, live session map and control plane.
-    /// A separately constructed machine is a different owner even over the
-    /// same runtime store.
+    /// Whether two wrappers retain the same actual machine and execution owner.
+    /// Sharing only a persistence store does not satisfy this identity check.
+    #[must_use]
+    pub fn shares_runtime_execution_owner_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// Whether both handles retain the same live runtime owner. A separately
+    /// constructed machine is a different owner even over the same store.
     #[must_use]
     pub fn is_same_runtime_owner(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
+        self.shares_runtime_execution_owner_with(other)
     }
 
     /// Whether this adapter shares the same runtime persistence authority as
@@ -10736,7 +10827,10 @@ impl MeerkatMachine {
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             shared: Arc::new(MeerkatMachineShared {
+                native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 sessions: RwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 attachment_commits: crate::tokio::sync::watch::Sender::new(0),
@@ -10745,6 +10839,7 @@ impl MeerkatMachine {
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
                 pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
                 store: None,
+                execution_custody: None,
                 blob_store: None,
                 llm_reconfigure_host: StdRwLock::new(None),
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -10793,6 +10888,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "test-support")]
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
+                test_unregister_wait_witness: StdMutex::new(None),
+                #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
@@ -10835,27 +10932,79 @@ impl MeerkatMachine {
         }
     }
 
-    /// Create a persistent adapter with a RuntimeStore.
+    /// Create an ordinary persistent adapter with shared execution custody.
     ///
-    /// One logical runtime id must have exactly one live `MeerkatMachine`
-    /// authority. Separate machines may partition one store across distinct
-    /// runtime ids, but must not concurrently register the same session. Share
-    /// this machine (normally through `Arc`) when composing multiple surfaces.
-    pub fn persistent(store: Arc<dyn RuntimeStore>, blob_store: Arc<dyn BlobStore>) -> Self {
+    /// Separate machines may partition one store across distinct runtime ids,
+    /// but must not concurrently register the same session. Share this machine
+    /// when composing multiple surfaces. Custody refusal returns before any
+    /// provider-auth cache binding or persisted OAuth payload recovery.
+    pub fn persistent(
+        store: Arc<dyn RuntimeStore>,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Result<Self, RuntimeDriverError> {
+        Self::persistent_with_mode(store, Some(blob_store), false)
+    }
+
+    /// Create an ordinary persistent adapter without a blob store.
+    ///
+    /// Session state remains persistent. Blob-backed inputs fail explicitly at
+    /// the blob-store boundary until a real [`BlobStore`] is supplied.
+    pub fn persistent_without_blobs(
+        store: Arc<dyn RuntimeStore>,
+    ) -> Result<Self, RuntimeDriverError> {
+        Self::persistent_with_mode(store, None, false)
+    }
+
+    fn persistent_with_mode(
+        store: Arc<dyn RuntimeStore>,
+        blob_store: Option<Arc<dyn BlobStore>>,
+        governed: bool,
+    ) -> Result<Self, RuntimeDriverError> {
+        let execution_custody = match (store.execution_custody(), governed) {
+            (Some(owner), true) => Some(Arc::new(
+                owner
+                    .try_acquire_governed()
+                    .map_err(execution_custody_error)?,
+            )),
+            (Some(owner), false) => Some(Arc::new(
+                owner
+                    .try_acquire_shared()
+                    .map_err(execution_custody_error)?,
+            )),
+            (None, true) => {
+                return Err(execution_custody_error(
+                    crate::store::RuntimeStoreExecutionCustodyError::Unsupported,
+                ));
+            }
+            (None, false) => None,
+        };
         #[cfg(not(target_arch = "wasm32"))]
         let (auth_lease, oauth_flows) = {
             let authorities = persistent_auth_authorities(&store);
-            (
-                Arc::clone(&authorities.auth_lease),
-                Arc::clone(&authorities.oauth_flows),
-            )
+            let auth_lease = Arc::new(
+                authorities
+                    .auth_lease
+                    .with_execution_custody(execution_custody.clone()),
+            );
+            let oauth_flows = Arc::new(
+                authorities
+                    .oauth_flows
+                    .with_scoped_lifecycle(Arc::clone(&auth_lease)),
+            );
+            (auth_lease, oauth_flows)
         };
         #[cfg(target_arch = "wasm32")]
-        let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
+        let auth_lease = Arc::new(
+            crate::handles::RuntimeAuthLeaseHandle::new()
+                .with_execution_custody(execution_custody.clone()),
+        );
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
-        Self {
+        Ok(Self {
             shared: Arc::new(MeerkatMachineShared {
+                native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
                 sessions: RwLock::new(HashMap::new()),
+                #[cfg(not(target_arch = "wasm32"))]
+                credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 attachment_commits: crate::tokio::sync::watch::Sender::new(0),
@@ -10864,7 +11013,8 @@ impl MeerkatMachine {
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
                 pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
                 store: Some(store),
-                blob_store: Some(blob_store),
+                execution_custody,
+                blob_store: Some(blob_store.unwrap_or_else(|| Arc::new(UnavailableBlobStore))),
                 llm_reconfigure_host: StdRwLock::new(None),
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 member_observation_host: StdRwLock::new(None),
@@ -10912,124 +11062,7 @@ impl MeerkatMachine {
                 #[cfg(feature = "test-support")]
                 test_unregister_saga_hold: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
-                test_unregister_caller_wait_grace: StdMutex::new(None),
-                #[cfg(any(test, feature = "test-support"))]
-                test_user_interrupt_ack_timeout: StdMutex::new(USER_INTERRUPT_ACK_TIMEOUT),
-                #[cfg(test)]
-                test_fenced_accept_after_lease: StdMutex::new(None),
-                #[cfg(test)]
-                test_pending_attachment_before_regate: StdMutex::new(None),
-                #[cfg(test)]
-                test_registration_transaction_contention_probe: StdMutex::new(None),
-                #[cfg(test)]
-                test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
-                #[cfg(test)]
-                test_fail_next_typed_dsl_post_commit_dispatch: std::sync::atomic::AtomicBool::new(
-                    false,
-                ),
-                #[cfg(any(test, feature = "test-support"))]
-                test_runtime_loop_before_terminal_commit: StdMutex::new(None),
-                #[cfg(any(test, feature = "test-support"))]
-                test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
-                #[cfg(any(test, feature = "test-support"))]
-                test_runtime_loop_before_queue_authority: StdMutex::new(None),
-                registration_run_start_holds: std::sync::Mutex::new(HashMap::new()),
-                #[cfg(any(test, feature = "test-support"))]
-                test_runtime_loop_before_executor_apply: StdMutex::new(None),
-                #[cfg(any(test, feature = "test-support"))]
-                test_run_start_held_parks: crate::tokio::sync::watch::Sender::new(0),
-                #[cfg(any(test, feature = "test-support"))]
-                test_runtime_loop_parked: crate::tokio::sync::watch::Sender::new(
-                    std::collections::HashSet::new(),
-                ),
-                #[cfg(any(test, feature = "test-support"))]
-                test_boundary_cancel_dispatches: crate::tokio::sync::watch::Sender::new(0),
-                #[cfg(any(test, feature = "test-support"))]
-                test_reload_required_discard_after_successor_publication: StdMutex::new(None),
-                #[cfg(test)]
-                test_control_command_after_logical_lookup: StdMutex::new(None),
-                #[cfg(test)]
-                test_before_finalized_unregister_removal: StdMutex::new(None),
-            }),
-        }
-    }
-
-    /// Create a persistent adapter with a RuntimeStore but no blob store.
-    ///
-    /// The driver remains persistent for session state. Blob-backed inputs fail
-    /// explicitly at the blob-store boundary until a real [`BlobStore`] is
-    /// supplied. As with [`Self::persistent`], one logical runtime id must have
-    /// exactly one live machine authority.
-    pub fn persistent_without_blobs(store: Arc<dyn RuntimeStore>) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let (auth_lease, oauth_flows) = {
-            let authorities = persistent_auth_authorities(&store);
-            (
-                Arc::clone(&authorities.auth_lease),
-                Arc::clone(&authorities.oauth_flows),
-            )
-        };
-        #[cfg(target_arch = "wasm32")]
-        let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
-        let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
-        Self {
-            shared: Arc::new(MeerkatMachineShared {
-                sessions: RwLock::new(HashMap::new()),
-                boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
-                ),
-                attachment_commits: crate::tokio::sync::watch::Sender::new(0),
-                registration_transaction_slots: StdRwLock::new(HashMap::new()),
-                pending_runless_terminal_publications: StdMutex::new(HashMap::new()),
-                pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
-                pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
-                store: Some(store),
-                blob_store: Some(Arc::new(UnavailableBlobStore)),
-                llm_reconfigure_host: StdRwLock::new(None),
-                reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                member_observation_host: StdRwLock::new(None),
-                member_live_host: StdRwLock::new(None),
-                interrupted_tool_evidence_source: StdRwLock::new(None),
-                #[cfg(feature = "live")]
-                live_context_mirror_host: StdRwLock::new(None),
-                #[cfg(feature = "live")]
-                live_channel_close_publisher: StdRwLock::new(None),
-                #[cfg(feature = "live")]
-                live_channel_closes_in_flight: Arc::default(),
-                #[cfg(feature = "live")]
-                live_context_queued_rows: StdMutex::new(HashMap::new()),
-                #[cfg(feature = "live")]
-                post_close_result_titles: StdMutex::new(HashMap::new()),
-                #[cfg(feature = "live")]
-                live_context_projection_gates: StdMutex::new(HashMap::new()),
-                #[cfg(feature = "live")]
-                live_context_preparation_leases: StdMutex::new(HashMap::new()),
-                #[cfg(feature = "live")]
-                live_context_drain_tasks: StdMutex::new(HashMap::new()),
-                #[cfg(feature = "live")]
-                live_context_projection_tasks: StdMutex::new(HashMap::new()),
-                #[cfg(feature = "live")]
-                live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
-                #[cfg(feature = "live")]
-                live_assistant_output_by_id: StdMutex::new(HashMap::new()),
-                live_commands_served: std::sync::atomic::AtomicU64::new(0),
-                member_incarnation_slots: StdRwLock::new(HashMap::new()),
-                auth_lease: StdRwLock::new(auth_lease),
-                #[cfg(not(target_arch = "wasm32"))]
-                oauth_flows: StdRwLock::new(oauth_flows),
-                #[cfg(feature = "live")]
-                live_unbound_rejection_authority: live_unbound_rejection_authority(),
-                session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-                run_settlements: crate::tokio::sync::watch::Sender::new(0),
-                #[cfg(feature = "test-support")]
-                test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "test-support")]
-                test_pause_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "test-support")]
-                test_executor_after_ensure_pause_reached: crate::tokio::sync::Notify::new(),
-                #[cfg(feature = "test-support")]
-                test_executor_after_ensure_pause_release: crate::tokio::sync::Notify::new(),
-                #[cfg(feature = "test-support")]
-                test_unregister_saga_hold: StdMutex::new(None),
+                test_unregister_wait_witness: StdMutex::new(None),
                 #[cfg(feature = "test-support")]
                 test_unregister_caller_wait_grace: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -11070,7 +11103,7 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_before_finalized_unregister_removal: StdMutex::new(None),
             }),
-        }
+        })
     }
 
     /// Shared auth lifecycle handle used by all runtime-backed session
@@ -11105,13 +11138,25 @@ impl MeerkatMachine {
         }
     }
 
+    fn is_installed_credential_owner(
+        &self,
+        handle: &crate::handles::RuntimeAuthLeaseHandle,
+    ) -> bool {
+        (self.generated_auth_lease_handle().as_handle() as &dyn std::any::Any)
+            .downcast_ref::<crate::handles::RuntimeAuthLeaseHandle>()
+            .is_some_and(|installed| installed.shares_authority_with(handle))
+    }
+
     /// Install the auth lifecycle authority that public surfaces also read.
     ///
-    /// Surfaces construct the adapter before all state fields are available, so
-    /// this setter lets them align the adapter's runtime-backed traffic with
-    /// the surface-visible status handle without creating a competing registry.
-    pub fn set_auth_lease_handle(&self, handle: Arc<crate::handles::RuntimeAuthLeaseHandle>) {
-        self.set_runtime_auth_lease_handle(handle);
+    /// Storeless surfaces can align runtime traffic with their status handle.
+    /// Persistent machines retain their construction-time scoped authority;
+    /// requesting that same actual owner is a no-op and replacement is refused.
+    pub fn set_auth_lease_handle(
+        &self,
+        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.set_runtime_auth_lease_handle(handle)
     }
 
     /// Install the runtime credential lifecycle handle together with an
@@ -11119,31 +11164,16 @@ impl MeerkatMachine {
     ///
     /// The credential side still has to be a generated AuthMachine authority;
     /// the explicit OAuth authority only controls login-flow test seams.
+    /// Once native credential custody is installed, a same-credential request
+    /// with a different OAuth owner is unsupported and leaves the pair unchanged.
     #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     pub fn set_auth_lease_handle_with_oauth_flow_authority(
         &self,
         handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
         oauth_flows: Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>,
-    ) {
-        *self
-            .oauth_flows
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = oauth_flows;
-        let handle = generated_runtime_auth_lease_handle(handle);
-        *self
-            .auth_lease
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
-    }
-
-    /// Install a runtime AuthMachine authority shared by auth leases and OAuth
-    /// login-flow lifecycle transitions.
-    pub fn set_runtime_auth_lease_handle(
-        &self,
-        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
-    ) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
+    ) -> Result<(), RuntimeDriverError> {
+        let mut installed = false;
+        self.with_credential_authority_replacement(&handle, || {
             let mut auth_slot = self
                 .auth_lease
                 .write()
@@ -11152,20 +11182,74 @@ impl MeerkatMachine {
                 .oauth_flows
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *oauth_slot = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                std::time::Duration::from_secs(10 * 60),
-                Arc::clone(&handle),
-            ));
-            *auth_slot = generated_runtime_auth_lease_handle(handle);
+            *oauth_slot = Arc::clone(&oauth_flows);
+            *auth_slot = generated_runtime_auth_lease_handle(handle.clone());
+            installed = true;
+        })?;
+        if !installed {
+            // The credential helper's same-handle no-op does not install a
+            // different OAuth owner. Only the exact existing pair is a no-op.
+            let current = self.provider_auth_runtime_authority();
+            if !self.is_installed_credential_owner(&handle)
+                || !Arc::ptr_eq(&current.oauth_flow_authority(), &oauth_flows)
+            {
+                return Err(credential_custody::unavailable(
+                    crate::traits::ControllerReadinessFailure::UnsupportedScope,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Install a paired generated credential and OAuth authority on a storeless
+    /// machine. Persistent replacement is unsupported; requesting the installed
+    /// concrete owner is a no-op. An unfinished storeless governed controller
+    /// prevents replacement, and temporary contention preserves the pair.
+    pub fn set_runtime_auth_lease_handle(
+        &self,
+        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+    ) -> Result<(), RuntimeDriverError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.with_credential_authority_replacement(&handle, || {
+                let mut auth_slot = self
+                    .auth_lease
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut oauth_slot = self
+                    .oauth_flows
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *oauth_slot =
+                    Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                        std::time::Duration::from_secs(10 * 60),
+                        handle.clone(),
+                    ));
+                *auth_slot = generated_runtime_auth_lease_handle(handle.clone());
+            })
         }
         #[cfg(target_arch = "wasm32")]
-        let handle = generated_runtime_auth_lease_handle(handle);
-        #[cfg(target_arch = "wasm32")]
         {
+            if self.store.is_some() {
+                return if self.is_installed_credential_owner(&handle) {
+                    Ok(())
+                } else {
+                    Err(credential_custody::unavailable(
+                        crate::traits::ControllerReadinessFailure::UnsupportedScope,
+                    ))
+                };
+            }
+            if self.native_work_authorization_host.get().is_some() {
+                return Err(credential_custody::unavailable(
+                    crate::traits::ControllerReadinessFailure::UnsupportedScope,
+                ));
+            }
             *self
                 .auth_lease
                 .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                generated_runtime_auth_lease_handle(handle);
+            Ok(())
         }
     }
 
@@ -11457,27 +11541,35 @@ impl MeerkatMachine {
                         "persistent runtime driver construction requires the registration cold-install durability handle"
                             .to_string(),
                     ))?;
-                let driver = PersistentRuntimeDriver::new_with_control_and_durability_health(
-                    runtime_id,
-                    store.clone(),
-                    blob_store.clone(),
-                    control_projection,
-                    dsl_authority,
-                    durability_health,
-                );
+                let mut driver =
+                    PersistentRuntimeDriver::new_with_control_health_and_execution_custody(
+                        runtime_id,
+                        store.clone(),
+                        blob_store.clone(),
+                        control_projection,
+                        dsl_authority,
+                        durability_health,
+                        Ok(self.execution_custody.clone()),
+                    );
+                driver
+                    .inner_mut()
+                    .set_work_authorization_host(Arc::clone(&self.native_work_authorization_host));
                 Ok(DriverEntry::Persistent(driver))
             }
             _ if durability_health.is_some() => Err(RuntimeDriverError::Internal(
                 "storeless runtime driver construction received a persistent durability handle"
                     .to_string(),
             )),
-            _ => Ok(DriverEntry::Ephemeral(
-                EphemeralRuntimeDriver::new_with_control_and_dsl(
+            _ => {
+                let mut driver = EphemeralRuntimeDriver::new_with_control_and_dsl(
                     runtime_id,
                     control_projection,
                     dsl_authority,
-                ),
-            )),
+                );
+                driver
+                    .set_work_authorization_host(Arc::clone(&self.native_work_authorization_host));
+                Ok(DriverEntry::Ephemeral(driver))
+            }
         }
     }
 
@@ -11708,6 +11800,42 @@ mod durable_steer_tests;
 
 #[cfg(test)]
 mod terminal_receipt_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod oauth_pair_tests;
+
+impl MeerkatMachineShared {
+    fn require_governed_execution_custody(&self) -> Result<(), RuntimeDriverError> {
+        if self.store.is_none()
+            || self
+                .execution_custody
+                .as_ref()
+                .is_some_and(|claim| claim.is_governed())
+        {
+            Ok(())
+        } else {
+            Err(execution_custody_error(
+                crate::store::RuntimeStoreExecutionCustodyError::Unsupported,
+            ))
+        }
+    }
+}
+
+pub(crate) fn execution_custody_error(
+    error: crate::store::RuntimeStoreExecutionCustodyError,
+) -> RuntimeDriverError {
+    use crate::store::RuntimeStoreExecutionCustodyError;
+    let reason = match error {
+        RuntimeStoreExecutionCustodyError::Busy => crate::traits::ControllerReadinessFailure::Busy,
+        RuntimeStoreExecutionCustodyError::Unsupported => {
+            crate::traits::ControllerReadinessFailure::UnsupportedScope
+        }
+        RuntimeStoreExecutionCustodyError::Unavailable => {
+            crate::traits::ControllerReadinessFailure::AuthorityUnavailable
+        }
+    };
+    RuntimeDriverError::ControllerReadinessUnavailable { reason }
+}
 
 /// Close operations executing per live channel (a count: close paths nest).
 #[cfg(feature = "live")]

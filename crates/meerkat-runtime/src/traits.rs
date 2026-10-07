@@ -12,10 +12,26 @@ use crate::input_state::{InputLifecycleState, InputState, StoredInputState};
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 
+pub use meerkat_core::authorization::ControllerReadinessFailure;
+
 /// Errors from RuntimeDriver operations.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeDriverError {
+    /// The native owner declined this input before acceptance.
+    /// This is not a terminal failure for existing admitted work.
+    #[error("input refused")]
+    InputRefused {
+        refusal: meerkat_core::OperationRefused,
+    },
+
+    #[error("controller input is not ready: {reason}")]
+    ControllerReadinessUnavailable { reason: ControllerReadinessFailure },
+
+    /// Administrative replacement cannot remove an unfinished controller.
+    #[error("controller credential authority is still in use")]
+    ControllerInUse,
+
     /// The runtime is not in a state that can accept this operation.
     #[error("Runtime not ready: {state}")]
     NotReady { state: RuntimeState },
@@ -155,6 +171,16 @@ impl RuntimeDriverError {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeControlPlaneError {
+    /// The native owner declined this input before acceptance.
+    /// This is not a terminal failure for existing admitted work.
+    #[error("input refused")]
+    InputRefused {
+        refusal: meerkat_core::OperationRefused,
+    },
+
+    #[error("controller input is not ready: {reason}")]
+    ControllerReadinessUnavailable { reason: ControllerReadinessFailure },
+
     /// Runtime not found.
     #[error("Runtime not found: {0}")]
     NotFound(LogicalRuntimeId),

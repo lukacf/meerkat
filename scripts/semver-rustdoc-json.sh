@@ -115,7 +115,11 @@ rustc_version="$(rustc -V)"
 rustc_commit="$(rustc -Vv | awk '/^commit-hash:/ {print $2}')"
 commit_sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
-doc_root="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["target_directory"])' "$metadata_file")/semver-rustdoc"
+# Linked candidate and baseline checkouts can inherit the same target cache.
+# Separate their complete Cargo build outputs while reusing each checkout's
+# own output on later runs. Do not reuse the old shared semver-rustdoc root.
+source_key="$("$PYTHON" -c 'import hashlib,os,sys; print(hashlib.sha256(os.fsencode(os.path.realpath(sys.argv[1]))).hexdigest())' "$source_root")"
+doc_root="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["target_directory"])' "$metadata_file")/semver-rustdoc/$source_key"
 mkdir -p "$doc_root"
 
 generated=()

@@ -69,6 +69,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
     ] + all_crate_deps(
         package_name = "crates/meerkat-machine-schema",
@@ -103,6 +104,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "crates/meerkat-machine-schema",
@@ -140,6 +142,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//crates/meerkat-authorization:package_runfiles",
         "//crates/meerkat-core:package_runfiles",
         "//crates/meerkat-jobs:package_runfiles",
         "//crates/meerkat-machine-codegen:package_runfiles",
@@ -166,6 +169,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
     ] + all_crate_deps(
         package_name = "crates/meerkat-machine-schema",
@@ -218,6 +222,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -271,6 +276,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -324,6 +330,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -377,6 +384,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -430,6 +438,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -483,6 +492,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -542,6 +552,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -595,6 +606,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -648,6 +660,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -701,6 +714,61 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "grant_tlc_model_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "grant_tlc_model",
+    crate_root = "tests/grant_tlc_model.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+    ],
+    srcs = [
+        "tests/grant_tlc_model.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_BIN_NAME": "grant_tlc_model",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -754,6 +822,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -807,6 +876,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -860,6 +930,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -913,6 +984,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -966,6 +1038,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1019,6 +1092,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1072,6 +1146,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1125,6 +1200,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1178,6 +1254,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1235,6 +1312,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1288,6 +1366,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1341,6 +1420,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -1363,6 +1443,7 @@ test_suite(
         ":draining_registration_fence_test",
         ":forked_participant_lifecycle_machine_test",
         ":gpt_live_authority_contract_test",
+        ":grant_tlc_model_test",
         ":identity_roundtrip_test",
         ":input_field_domains_test",
         ":meerkat_machine_schema_unit_test",

@@ -152,7 +152,8 @@ fn projectionless_runtime(temp: &tempfile::TempDir) -> Arc<SessionRuntime> {
             session_store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             blob_store,
-        ),
+        )
+        .expect("construct runtime authority"),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));

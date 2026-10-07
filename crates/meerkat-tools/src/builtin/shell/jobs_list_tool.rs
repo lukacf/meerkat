@@ -61,7 +61,7 @@ impl BuiltinTool for ShellJobsListTool {
             .job_manager
             .list_jobs()
             .await
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
 
         serde_json::to_value(jobs)
             .map(ToolOutput::Json)

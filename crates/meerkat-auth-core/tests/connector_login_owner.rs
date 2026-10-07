@@ -29,6 +29,7 @@ use meerkat_auth_core::connector_oauth::{
 use meerkat_auth_core::{EphemeralTokenStore, InMemoryCoordinator};
 use meerkat_core::AuthCredentialIdentity;
 use meerkat_core::connection::{CredentialAccountId, CredentialAccountRef, RealmId};
+use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
 use meerkat_runtime::handles::RuntimeOAuthFlowHandle;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -46,6 +47,7 @@ struct Issuer {
     refresh: Mutex<Option<(String, Option<String>, Option<String>)>>,
     /// Refuse the next refresh as a permanent `invalid_grant`.
     refresh_rejected: std::sync::atomic::AtomicBool,
+    refresh_requests: std::sync::atomic::AtomicUsize,
     expires_in: Mutex<u64>,
 }
 
@@ -62,6 +64,11 @@ async fn token(
     State((_, state)): State<(String, Arc<Issuer>)>,
     Form(form): Form<HashMap<String, String>>,
 ) -> (axum::http::StatusCode, Json<Value>) {
+    if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
+        state
+            .refresh_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     if form.get("grant_type").map(String::as_str) == Some("refresh_token")
         && state
             .refresh_rejected
@@ -360,6 +367,69 @@ async fn discover_binds_the_verified_account_and_status_keeps_slot_and_account_a
         fx.authority.bearer_token(&work).await.unwrap().as_deref(),
         Some("access-a")
     );
+}
+
+async fn cold_owner_read_preserves_credential(read_status: bool) {
+    let fx = fixture().await;
+    let work = slot("tenant-a", "drive-cold-owner");
+    fx.grant("code-a", "access-a", "subject-a", Some("files.read"));
+    fx.login(&work, AccountSelection::Discover, "code-a")
+        .await
+        .unwrap();
+    let retained = fx.stored(&work).await.unwrap();
+
+    // Reuse the actual committed credential with a fresh process-local owner.
+    // Neither status nor bearer has warmed this owner's lifecycle projection.
+    let lifecycle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let lease_key =
+        LeaseKey::from_credential_identity(&AuthCredentialIdentity::Account(work.clone()));
+    assert!(!lifecycle.snapshot(&lease_key).credential_present);
+    let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
+        std::time::Duration::from_secs(300),
+        lifecycle,
+    ));
+    let cold = ConnectorOAuthAuthority::with_http(
+        fx.persistence.clone(),
+        flows,
+        ConnectorStrategies::default().with(fx.strategy.clone()),
+        reqwest::Client::new(),
+    )
+    .unwrap();
+
+    if read_status {
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), cold.status(&work))
+            .await
+            .expect("cold status must not reacquire its already-held lifecycle guard")
+            .unwrap();
+        assert_eq!(status.phase, ConnectorAuthPhase::Authorized);
+        assert_eq!(status.slot, work);
+        assert_eq!(status.verified_account.unwrap().subject, "subject-a");
+    } else {
+        let bearer =
+            tokio::time::timeout(std::time::Duration::from_secs(5), cold.bearer_token(&work))
+                .await
+                .expect("cold bearer must not reacquire its already-held lifecycle guard")
+                .unwrap();
+        assert_eq!(bearer.as_deref(), Some("access-a"));
+    }
+    assert_eq!(fx.stored(&work).await, Some(retained));
+    assert_eq!(
+        fx.state
+            .refresh_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "rehydrating an unexpired credential must not refresh it"
+    );
+}
+
+#[tokio::test]
+async fn cold_owner_status_rehydrates_without_refresh_or_credential_change() {
+    cold_owner_read_preserves_credential(true).await;
+}
+
+#[tokio::test]
+async fn cold_owner_bearer_rehydrates_without_refresh_or_credential_change() {
+    cold_owner_read_preserves_credential(false).await;
 }
 
 #[tokio::test]

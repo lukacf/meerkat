@@ -21,7 +21,9 @@ fn service() -> Arc<meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilde
 fn machine_of(
     service: &meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilder>,
 ) -> Arc<meerkat_runtime::MeerkatMachine> {
-    MobSessionService::runtime_adapter(service).expect("an ephemeral service serves a machine")
+    MobSessionService::acquire_runtime_adapter(service, None)
+        .expect("acquire the service runtime owner")
+        .expect("an ephemeral service serves a machine")
 }
 
 #[test]

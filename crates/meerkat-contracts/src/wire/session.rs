@@ -1216,6 +1216,8 @@ pub struct WireToolResult {
     pub content: WireToolResultContent,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_failures: Vec<meerkat_core::ops::ToolDispatchSettlementFailure>,
 }
 
 fn transcript_message_timestamp(
@@ -1331,6 +1333,7 @@ impl TranscriptRewriteMessage {
                             tool_use_id: result.tool_use_id,
                             content,
                             is_error: result.is_error,
+                            settlement_failures: result.settlement_failures,
                         })
                     })
                     .collect::<Result<Vec<_>, crate::wire::error::WireConversionError>>()?;
@@ -1618,6 +1621,7 @@ impl From<Message> for WireSessionMessage {
                             tool_use_id: result.tool_use_id,
                             content,
                             is_error: result.is_error,
+                            settlement_failures: result.settlement_failures,
                         }
                     })
                     .collect(),
@@ -2573,6 +2577,7 @@ mod tests {
                         tool_use_id: "tool-1".to_string(),
                         content: WireToolResultContent::Text("ok".to_string()),
                         is_error: false,
+                        settlement_failures: Vec::new(),
                     }],
                     created_at: "2026-04-27T00:00:04Z".to_string(),
                 },
@@ -3353,6 +3358,40 @@ mod tests {
                     if debug == "WireAssistantBlock::Unknown"
             ),
             "expected WireConversionError::AssistantBlock, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn tool_result_settlement_companion_roundtrips_transcript_wire_and_legacy_bytes() {
+        let marker = meerkat_core::ToolDispatchSettlementFailure {
+            admission_source: meerkat_core::ToolDispatchAdmissionSource::ContextGate,
+            effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Committed,
+            failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        let legacy = r#"{"tool_use_id":"call","content":"done","is_error":false}"#;
+        let mut result: WireToolResult = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&result).unwrap(), legacy);
+        result.settlement_failures.push(marker.clone());
+        let message = TranscriptRewriteMessage::ToolResults {
+            results: vec![result],
+            created_at: None,
+        }
+        .into_core()
+        .unwrap();
+        let Message::ToolResults { results, .. } = &message else {
+            panic!("tool results");
+        };
+        assert_eq!(results[0].settlement_failures, vec![marker.clone()]);
+        let WireSessionMessage::ToolResults { results, .. } = WireSessionMessage::from(message)
+        else {
+            panic!("wire tool results");
+        };
+        assert_eq!(results[0].settlement_failures, vec![marker]);
+        let encoded = serde_json::to_string(&results[0]).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WireToolResult>(&encoded).unwrap(),
+            results[0]
         );
     }
 }

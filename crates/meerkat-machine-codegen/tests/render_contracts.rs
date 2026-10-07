@@ -79,7 +79,7 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
 fn tla_renderer_abstracts_u64_max_literals_for_tlc() {
     let model =
         render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
-    let cfg = render_machine_ci_cfg(&meerkat_machine(), false);
+    let cfg = render_machine_ci_cfg(&meerkat_machine(), false).expect("valid CI CFG");
 
     assert!(
         !model.contains("18446744073709551615"),
@@ -1700,13 +1700,14 @@ fn deep_machine_cfgs_sample_guard_string_literals() {
     // DetachedJobMachine's Apply*Delivery and Observe*DeliveryAlreadyApplied
     // guard on `delivery_id == "terminal"`.
     let detached = schema("DetachedJobMachine");
-    let deep = string_values(&render_machine_ci_cfg(&detached, true));
+    let deep = string_values(&render_machine_ci_cfg(&detached, true).expect("valid deep CFG"));
     assert!(deep.contains("\"terminal\""), "detached_job deep: {deep}");
     // Inequality guards (`attempt_id != ""`) are satisfiable by the generic
     // samples, so they contribute no literal.
     assert!(!deep.contains("\"\""), "detached_job deep: {deep}");
     assert!(
-        !string_values(&render_machine_ci_cfg(&detached, false)).contains("\"terminal\""),
+        !string_values(&render_machine_ci_cfg(&detached, false).expect("valid CI CFG"))
+            .contains("\"terminal\""),
         "CI configs keep the generic samples"
     );
     // The *Malformed rejections guard on an empty request/claim/activation id.
@@ -1714,7 +1715,8 @@ fn deep_machine_cfgs_sample_guard_string_literals() {
         "TemporaryCouncilLifecycleMachine",
         "ForkedParticipantLifecycleMachine",
     ] {
-        let deep = string_values(&render_machine_ci_cfg(&schema(name), true));
+        let deep =
+            string_values(&render_machine_ci_cfg(&schema(name), true).expect("valid deep CFG"));
         assert!(deep.contains("\"\""), "{name} deep: {deep}");
     }
 }

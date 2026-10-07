@@ -188,7 +188,8 @@ async fn make_stack_over(
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
-    let persistence = meerkat::PersistenceBundle::new(store, runtime_store, blob_store);
+    let persistence = meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+        .expect("construct runtime authority");
     let runtime = SessionRuntime::new(
         factory,
         config.clone(),
@@ -212,6 +213,7 @@ async fn make_stack_over(
             Some(runtime.runtime_adapter()),
             meerkat_mob::MobControlPrincipal::Owner,
         )
+        .expect("construct runtime authority")
         .with_default_llm_client(Some(client)),
     );
     *runtime.builder_mob_tools_slot.write().unwrap() = Some(Arc::new(
@@ -494,7 +496,8 @@ async fn e2e_fast_library_host_built_like_mobkit_delivers_detached() {
     let mobkit_shaped = MobMcpState::new(
         stack_state.session_service(),
         meerkat_mob::MobControlPrincipal::Owner,
-    );
+    )
+    .expect("construct runtime authority");
     assert_eq!(
         mobkit_shaped.detached_delivery_blocked_because(),
         None,
@@ -532,7 +535,8 @@ async fn e2e_fast_detached_completion_reaches_owners_that_are_not_live() {
     let (router, mob_state) = make_stack(temp.path(), client).await;
     let runtime = mob_state
         .session_service()
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime adapter")
         .expect("runtime-backed stack");
     let mob_id = format!("not-live-owner-{}", uuid::Uuid::new_v4().simple());
     let mob_id = mob_state
@@ -1077,7 +1081,8 @@ impl AdmissionLane {
         let runtime = self
             .mob_state
             .session_service()
-            .runtime_adapter()
+            .acquire_runtime_adapter(None)
+            .expect("acquire runtime adapter")
             .expect("runtime adapter");
         // Settled: no admitted input across a few consecutive reads, so any
         // wake turn the completion caused has been answered.
@@ -1629,7 +1634,8 @@ async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
         Arc::new(meerkat::MemoryStore::new()),
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let runtime = SessionRuntime::new(
         factory,
         config.clone(),
@@ -1645,7 +1651,8 @@ async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
         runtime_root.join("config_state.json"),
     )));
     let runtime = Arc::new(runtime);
-    let mob_state = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None);
+    let mob_state = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None)
+        .expect("construct runtime authority");
     assert!(mob_state.detached_owner_host().is_some());
     // Councils seat on the RPC host: its session service exposes the
     // persistent service as the forked-participant source runtime.
@@ -2219,7 +2226,8 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
     let (router, mob_state) = make_stack_over(temp.path(), client, runtime_store).await;
     let runtime = mob_state
         .session_service()
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime adapter")
         .expect("runtime-backed stack");
     let mob_id = format!("in-turn-{label}-{}", uuid::Uuid::new_v4().simple());
     let mob_id = mob_state

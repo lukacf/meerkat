@@ -23,8 +23,11 @@ from .types import (  # noqa: F401
     ExternalToolDeltaPhase,
     InterruptedInputKind,
     InterruptedToolRunDisposition,
+    LiveBridgeEffectKind,
+    LiveBridgeEffectOutcome,
     LiveChannelId,
     MeerkatSchema,
+    OperationId,
     PeerId,
     ProfileId,
     Provider,
@@ -45,6 +48,8 @@ from .types import (  # noqa: F401
     ToolConfigChangeDomain,
     ToolConfigChangeOperation,
     ToolConfigChangeStatus,
+    ToolDispatchAdmissionSource,
+    ToolDispatchTerminalErrorKind,
     ToolName,
     ToolProcessCessation,
     ToolProcessSpawner,
@@ -54,7 +59,58 @@ from .types import (  # noqa: F401
 Value = Any
 
 
-AgentErrorClass = Literal['llm', 'store', 'tool', 'policy_indeterminate', 'mcp', 'session_not_found', 'budget', 'max_tokens', 'content_filtered', 'max_turns', 'cancelled', 'invalid_state', 'operation_not_found', 'depth_limit', 'concurrency_limit', 'config', 'internal', 'build', 'auth', 'callback_pending', 'skill', 'structured_output', 'invalid_output_schema', 'hook', 'terminal', 'no_pending_boundary']
+AgentErrorClass = Literal['llm', 'operation_refused', 'store', 'tool', 'policy_indeterminate', 'mcp', 'session_not_found', 'budget', 'max_tokens', 'content_filtered', 'max_turns', 'cancelled', 'invalid_state', 'operation_not_found', 'depth_limit', 'concurrency_limit', 'config', 'internal', 'build', 'auth', 'callback_pending', 'skill', 'structured_output', 'invalid_output_schema', 'hook', 'terminal', 'no_pending_boundary']
+
+
+# Bounded operation-local diagnostics. Never expose an environment value,
+# credential path, gate token, or secret-bearing command line in this error.
+ConfinementRefusal = Literal['invalid_requirement', 'invalid_launch', 'unsupported_requirement', 'backend_unavailable', 'preparation_failed']
+
+
+class HookFailureReasonTimeout(TypedDict, total=False):
+    """The hook runtime did not complete within its configured timeout.
+    """
+    reason_code: Required[Literal['timeout']]
+    timeout_ms: Required[int]
+
+
+class HookFailureReasonExecutionFailed(TypedDict, total=False):
+    """The invocation failed. Entry disposition is retained by its engine error.
+    """
+    message: Required[str]
+    reason_code: Required[Literal['execution_failed']]
+
+
+class HookFailureReasonConfigInvalid(TypedDict, total=False):
+    """The hook configuration was rejected.
+    """
+    message: Required[str]
+    reason_code: Required[Literal['config_invalid']]
+
+
+class HookFailureReasonObserveOnlyViolation(TypedDict, total=False):
+    """A background hook attempted a non-observe action, which is not
+    permitted for observe-only background hooks at any hook point.
+    """
+    reason_code: Required[Literal['observe_only_violation']]
+
+
+class HookFailureReasonConfinementRefused(TypedDict, total=False):
+    """Mechanical requirements prevented the hook from entering.
+    """
+    reason_code: Required[Literal['confinement_refused']]
+    refusal: Required[ConfinementRefusal]
+
+
+# Typed reason a hook execution failed (engine-level fault, not a guardrail
+# denial).
+#
+# Mirrors the [`HookReasonCode`] precedent: the variant is the typed owner of
+# the failure cause; the human-readable string is a [`Display`] derivation,
+# never a separately-stored field.
+#
+# [`Display`]: std::fmt::Display
+HookFailureReason = HookFailureReasonTimeout | HookFailureReasonExecutionFailed | HookFailureReasonConfigInvalid | HookFailureReasonObserveOnlyViolation | HookFailureReasonConfinementRefused
 
 
 # Stable identifier for a configured hook.
@@ -69,7 +125,7 @@ HookPoint = Literal['run_started', 'run_completed', 'run_failed', 'pre_llm_reque
 HookReasonCode = Literal['policy_violation', 'safety_violation', 'schema_violation', 'timeout', 'runtime_error']
 
 
-LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_error', 'server_overloaded', 'connection_reset', 'unknown', 'stream_parse_error', 'incomplete_response'] | Literal['authorization_route_changed'] | Literal['request_too_large'] | Literal['quota_exhausted'] | Literal['policy_stop']
+LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_error', 'server_overloaded', 'connection_reset', 'unknown', 'stream_parse_error', 'incomplete_response'] | Literal['operation_refused'] | Literal['operation_observation_unavailable'] | Literal['operation_authorization_unavailable'] | Literal['authorization_route_changed'] | Literal['request_too_large'] | Literal['quota_exhausted'] | Literal['policy_stop']
 
 
 LlmProviderErrorRetryability = Literal['retryable', 'non_retryable']
@@ -184,7 +240,13 @@ class AgentErrorReasonModelFallbackResumeHeld(TypedDict, total=False):
     reason_type: Required[Literal['model_fallback_resume_held']]
 
 
-AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld
+class AgentErrorReasonHookLaunchRefused(TypedDict, total=False):
+    hook_id: Required[HookId]
+    reason: Required[HookFailureReason]
+    reason_type: Required[Literal['hook_launch_refused']]
+
+
+AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonHookLaunchRefused
 
 
 class AgentErrorReport(TypedDict, total=False):
@@ -602,45 +664,6 @@ class DisputedTurnUsageAccountingIdentity(TypedDict, total=False):
     active_provider: Required[Provider]
     reported_model: Required[str]
     reported_provider: Required[Provider]
-
-
-class HookFailureReasonTimeout(TypedDict, total=False):
-    """The hook runtime did not complete within its configured timeout.
-    """
-    reason_code: Required[Literal['timeout']]
-    timeout_ms: Required[int]
-
-
-class HookFailureReasonExecutionFailed(TypedDict, total=False):
-    """The hook runtime executed but failed.
-    """
-    message: Required[str]
-    reason_code: Required[Literal['execution_failed']]
-
-
-class HookFailureReasonConfigInvalid(TypedDict, total=False):
-    """The hook configuration was rejected.
-    """
-    message: Required[str]
-    reason_code: Required[Literal['config_invalid']]
-
-
-class HookFailureReasonObserveOnlyViolation(TypedDict, total=False):
-    """A background hook attempted a non-observe action, which is not
-    permitted for observe-only background hooks at any hook point.
-    """
-    reason_code: Required[Literal['observe_only_violation']]
-
-
-# Typed reason a hook execution failed (engine-level fault, not a guardrail
-# denial).
-#
-# Mirrors the [`HookReasonCode`] precedent: the variant is the typed owner of
-# the failure cause; the human-readable string is a [`Display`] derivation,
-# never a separately-stored field.
-#
-# [`Display`]: std::fmt::Display
-HookFailureReason = HookFailureReasonTimeout | HookFailureReasonExecutionFailed | HookFailureReasonConfigInvalid | HookFailureReasonObserveOnlyViolation
 
 
 # Typed reason an interaction stream was abandoned before normal terminal
@@ -1114,11 +1137,30 @@ class ModelFallbackSkippedTarget(TypedDict, total=False):
     reason: Required[ModelFallbackSkipReason]
 
 
+# Stage whose observation could not be retained after the real operation.
+# A diagnostic never changes the operation's returned result or permits retry.
+OperationObservationPhase = Literal['outcome']
+
+
+class ToolDispatchSettlementFailure(TypedDict, total=False):
+    """A diagnostic that accompanies, and never replaces, the physical result.
+
+    This contains no error text, tool arguments, credentials or execution
+    authority. The admission owner retains any exact internal failure and the
+    selected physical outcome until its generated settlement succeeds.
+    """
+    admission_source: Required[ToolDispatchAdmissionSource]
+    effect_kind: Required[LiveBridgeEffectKind]
+    failure_kind: Required[ToolDispatchTerminalErrorKind]
+    physical_outcome: Required[LiveBridgeEffectOutcome]
+
+
 class PendingCallbackToolCall(TypedDict, total=False):
     """One externally routed callback tool call inside a suspended assistant
     tool-use batch.
     """
     args: Required[Any]
+    settlement_failures: NotRequired[list[ToolDispatchSettlementFailure]]
     tool_name: Required[str]
     tool_use_id: Required[str]
 
@@ -2191,10 +2233,29 @@ class AgentEventLiveChannelClosed(TypedDict, total=False):
     type: Required[Literal['live_channel_closed']]
 
 
+class AgentEventOperationObservationFailed(TypedDict, total=False):
+    """A real operation returned, but its protected audit outcome could not
+    be retained. This safe diagnostic is nonterminal and grants no retry.
+    """
+    operation_id: Required[OperationId]
+    phase: Required[OperationObservationPhase]
+    type: Required[Literal['operation_observation_failed']]
+
+
+class AgentEventHookLaunchRefused(TypedDict, total=False):
+    """A hook prerequisite was refused before target code entered.
+    """
+    hook_id: Required[HookId]
+    point: Required[HookPoint]
+    reason: Required[HookFailureReason]
+    tool_use_id: NotRequired[Optional[str]]
+    type: Required[Literal['hook_launch_refused']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

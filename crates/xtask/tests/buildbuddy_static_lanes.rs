@@ -1006,3 +1006,76 @@ fn e2e_smoke_lane_launchers_allow_parallel_test_processes() {
         "smoke lane docs must not recommend whole-lane serialization: {serialized_smoke_doc:?}"
     );
 }
+
+#[test]
+fn adr_e1_native_control_has_exact_remote_and_foundation_artifact() {
+    let root = repo_root();
+    let generator = read(root.join("scripts/generate-bazel-rust-builds.mjs"));
+    let build = read(root.join("BUILD.bazel"));
+    let package = read(root.join("crates/meerkat-authorization/BUILD.bazel"));
+    let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let artifact = "//crates/meerkat-authorization:native_governed_loop_test";
+    assert!(generator.contains(
+        "(\"adr_infrastructure_policy_control\", \"adr-infrastructure-policy-control\")"
+    ));
+    assert!(build.contains(
+        "(\"adr_infrastructure_policy_control\", \"adr-infrastructure-policy-control\")"
+    ));
+    let remote_data = find_all_between(&build, "E2E_SMOKE_REMOTE_DATA = [", "E2E_SMOKE_REMOTE_ENV")
+        .expect("remote smoke data");
+    let foundation_data = find_all_between(
+        &build,
+        "name = \"e2e_smoke_remote_test\"",
+        "E2E_SMOKE_REMOTE_DATA",
+    )
+    .expect("generic smoke foundation data");
+    assert!(remote_data.contains(artifact));
+    assert!(foundation_data.contains(artifact));
+    let native_test = find_all_between(&package, "name = \"native_governed_loop_test\"", "\n)\n")
+        .expect("native governed-loop test rule");
+    assert!(native_test.contains("crate_root = \"tests/native_governed_loop.rs\""));
+    assert!(native_test.contains("\"tests/native_governed_loop/e1_policy_control.rs\""));
+    let native_deps = find_all_between(&native_test, "    deps = [", "\n    ]")
+        .expect("native governed-loop dependencies");
+    let runtime_label = "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support";
+    assert!(native_deps.contains(runtime_label));
+    assert!(native_deps.contains("//crates/meerkat:meerkat_with_runtime_test_support"));
+    assert!(!native_deps.contains("//crates/meerkat-runtime:"));
+
+    // Facade-based tests must share its runtime type graph and test-only features.
+    let facade = read(root.join("crates/meerkat/BUILD.bazel"));
+    let runtime_alias = find_all_between(
+        &facade,
+        "name = \"meerkat_runtime_agent_factory_build_test_support\"",
+        "\n)\n",
+    )
+    .expect("facade runtime test-support alias");
+    assert!(runtime_alias.contains(
+        "actual = \"//crates/meerkat-runtime:meerkat_runtime_agent_factory_build_test_support\""
+    ));
+    let facade_test = find_all_between(
+        &facade,
+        "name = \"meerkat_with_runtime_test_support\"",
+        "\n)\n",
+    )
+    .expect("facade test-support rule");
+    let facade_deps = find_all_between(&facade_test, "    deps = [", "\n    ]")
+        .expect("facade test-support dependencies");
+    assert!(facade_deps.contains(runtime_label));
+
+    let runtime = read(root.join("crates/meerkat-runtime/BUILD.bazel"));
+    let runtime_test = find_all_between(
+        &runtime,
+        "name = \"meerkat_runtime_agent_factory_build_test_support\"",
+        "\n)\n",
+    )
+    .expect("actual runtime agent-factory test-support rule");
+    assert!(runtime_test.contains("crate_name = \"meerkat_runtime\""));
+    let runtime_features = find_all_between(&runtime_test, "    crate_features = [", "\n    ]")
+        .expect("runtime test-support features");
+    assert!(runtime_features.contains("\"local-authorization\""));
+    assert!(runtime_features.contains("\"test-support\""));
+    let foundation =
+        find_all_between(&launcher, "e2e-smoke-rbe)", ";;").expect("foundation selector");
+    assert!(foundation.contains(artifact));
+}

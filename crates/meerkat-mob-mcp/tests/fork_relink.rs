@@ -82,7 +82,11 @@ fn is_completion_record(message: &meerkat_core::Message, job_id: &str) -> bool {
 
 /// The runtime that admits detached completions for the fixture's sessions.
 fn relink_runtime(fixture: &CouncilFixture) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-    fixture.state.session_service().runtime_adapter()
+    fixture
+        .state
+        .session_service()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
 }
 
 /// The re-link delivery for the fixture's runtime: no owner hook, and only
@@ -175,10 +179,13 @@ async fn relink_delivers_a_finished_childs_result_exactly_once() {
     // the surviving mob the way MobKit restores it, by inserting its handle.
     // That triggers the re-link automatically.
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-        fixture.service.clone(),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new(
+            fixture.service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -334,10 +341,13 @@ async fn relink_delivers_the_reply_of_a_child_whose_turn_compacted() {
         transcript.messages().len()
     );
 
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-        fixture.service.clone(),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new(
+            fixture.service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(mob_id.clone(), handle.clone())
         .await;
@@ -538,8 +548,10 @@ async fn relink_rearms_max_run_from_the_original_start() {
     gate.wait_entered(1).await;
     end_old_process_supervisor(run).await;
 
-    // The durable record as a restarted host reads it, with a limit that
-    // ends 800 ms from now when measured from the original start.
+    // The durable record as a restarted host reads it. Its original start is
+    // five minutes back, and its limit ends 800 ms from now when measured from
+    // that start; measured from the re-link instead, the same limit would end
+    // five minutes later.
     let mut job = handle
         .roster()
         .await
@@ -550,32 +562,48 @@ async fn relink_rearms_max_run_from_the_original_start() {
         job.prefix_message_count > 0,
         "the fork prefix length is recorded"
     );
-    let now_ms = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    job.max_run_ms = Some(now_ms.saturating_sub(job.started_at_ms) + 800);
+    job.started_at_ms = job.started_at_ms.saturating_sub(300_000);
+    job.max_run_ms = Some(now_ms().saturating_sub(job.started_at_ms) + 800);
+    let deadline_ms = job.started_at_ms + job.max_run_ms.unwrap();
 
-    let rearmed_at = tokio::time::Instant::now();
-    let action = meerkat_mob_mcp::fork_relink::relink_child(
-        fixture.state.session_service(),
-        &relink_delivery(&fixture),
-        &fixture.source_mob_id(),
-        &handle,
-        &child,
-        &job,
-    )
-    .await;
+    // The limit's decision is observed as the job's completion record landing
+    // in the forker's transcript, concurrently with the re-link: delivery
+    // follows the decision, while the re-link goes on to retire the child,
+    // which waits out the member retire grace. That retirement is cleanup,
+    // bounded only by its own hang guard. The record must land within
+    // `await_completion_record`'s 30 s, far inside the five minutes a limit
+    // reset at the re-link would add.
+    let relink = async {
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            meerkat_mob_mcp::fork_relink::relink_child(
+                fixture.state.session_service(),
+                &relink_delivery(&fixture),
+                &fixture.source_mob_id(),
+                &handle,
+                &child,
+                &job,
+            ),
+        )
+        .await
+        .expect("the re-link's retirement settles; the bound is a hang guard only")
+    };
+    let recorded = async {
+        await_completion_record(&fixture, &owner, &job_id).await;
+        now_ms()
+    };
+    let (action, recorded_ms) = tokio::join!(relink, recorded);
     assert_eq!(action, ForkRelinkAction::Delivered);
-    let fired_after = rearmed_at.elapsed();
+    // The record cannot land before the limit decides, and the limit decides
+    // only once its deadline has passed: a record seen earlier means the
+    // limit decided early.
     assert!(
-        fired_after >= Duration::from_millis(500) && fired_after < Duration::from_secs(5),
-        "the limit fired {fired_after:?} after the re-link; it counts from the original start"
+        recorded_ms >= deadline_ms,
+        "the limit's record landed {} ms before its deadline",
+        deadline_ms - recorded_ms
     );
-    await_completion_record(&fixture, &owner, &job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, &job_id).await;
+    assert_eq!(outcome["status"], "max_run_elapsed", "{outcome}");
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
     let persisted = <meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
         fixture.service.as_ref(),
@@ -1057,10 +1085,13 @@ async fn relink_of_several_running_children_delivers_each_real_reply() {
     gate.wait_entered(3).await;
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-        fixture.service.clone(),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new(
+            fixture.service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1144,8 +1175,10 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
         .expect("child session");
     // The fact the re-link settles on, exactly as MeerkatMachine documents
     // it: true for the whole active turn.
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     assert!(
         runtime
             .session_has_uncommitted_run_input(&child_session)
@@ -1157,10 +1190,13 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
         &child_session,
     ));
 
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-        fixture.service.clone(),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new(
+            fixture.service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1250,10 +1286,13 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
     end_old_process_supervisor(run).await;
     gate.wait_entered(1).await;
 
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-        fixture.service.clone(),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new(
+            fixture.service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1377,8 +1416,10 @@ async fn relink_keeps_watching_a_job_input_still_owed_its_receipt() {
         &owner,
     )
     .await;
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     let (entered, release) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     gate.open();
@@ -1480,11 +1521,14 @@ async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
         &child_session,
     ));
 
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-        fixture.service.clone(),
-        fixture.runtime_adapter.clone(),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+            fixture.service.clone(),
+            fixture.runtime_adapter.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -1652,8 +1696,10 @@ async fn a_failed_boundary_commit_makes_the_run_input_read_an_error() {
         .resolve_bridge_session_id(&child)
         .await
         .expect("child session");
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     assert!(
         runtime
             .session_has_uncommitted_run_input(&child_session)
@@ -1721,8 +1767,10 @@ async fn a_receipt_that_lands_during_the_ceiling_status_read_is_delivered() {
         &owner,
     )
     .await;
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     let (commit_entered, release_commit) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     gate.open();
@@ -1832,8 +1880,10 @@ async fn a_receipt_that_lands_during_the_last_ceiling_read_is_delivered() {
         &owner,
     )
     .await;
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     let (commit_entered, release_commit) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     gate.open();
@@ -2053,8 +2103,10 @@ async fn a_commit_taking_the_driver_mid_way_through_the_last_ceiling_read_is_not
     // The finished turn stops before its commit takes the driver (the child
     // reads idle, the input pending); once released, its durable boundary
     // write is held in the store with the driver taken.
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     let (commit_entered, release_commit) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
@@ -2686,8 +2738,10 @@ async fn relink_waits_while_a_finished_turn_s_run_input_awaits_its_boundary() {
         &owner,
     )
     .await;
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     let (entered, release) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     gate.open();
@@ -2777,8 +2831,10 @@ async fn a_ceiling_outcome_is_fixed_only_after_the_job_input_is_fenced() {
         &owner,
     )
     .await;
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     let (commit_entered, release_commit) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     gate.open();
@@ -2896,8 +2952,10 @@ async fn an_unsettled_fence_retires_the_child_and_delivers_a_definitive_outcome(
         &owner,
     )
     .await;
-    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
-        .expect("the service derives its runtime");
+    let runtime =
+        meerkat_mob::MobSessionService::acquire_runtime_adapter(fixture.service.as_ref(), None)
+            .expect("acquire runtime authority")
+            .expect("the service derives its runtime");
     let (commit_entered, release_commit) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     gate.open();
@@ -3131,11 +3189,14 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         .await
         .expect("the forker is not live after the restart");
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-        fixture.service.clone(),
-        Some(Arc::clone(&runtime)),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+            fixture.service.clone(),
+            Some(Arc::clone(&runtime)),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -3293,11 +3354,14 @@ impl PlainOwnerJob {
     }
 
     fn restarted_state(&self) -> Arc<meerkat_mob_mcp::MobMcpState> {
-        Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-            self.fixture.service.clone(),
-            Some(Arc::clone(&self.runtime)),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ))
+        Arc::new(
+            meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                self.fixture.service.clone(),
+                Some(Arc::clone(&self.runtime)),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        )
     }
 
     fn marker(&self) -> String {
@@ -3973,11 +4037,14 @@ async fn a_job_owner_in_a_mob_inserted_later_is_revived_through_it() {
         .expect("the owner is not live after the restart");
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-        fixture.service.clone(),
-        Some(Arc::clone(&runtime)),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+            fixture.service.clone(),
+            Some(Arc::clone(&runtime)),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(fixture.source_mob_id(), handle.clone())
         .await;
@@ -4064,11 +4131,14 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
         .await
         .expect("the owner is not live after the restart");
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-        fixture.service.clone(),
-        Some(Arc::clone(&runtime)),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+            fixture.service.clone(),
+            Some(Arc::clone(&runtime)),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     restarted
         .mob_insert_handle(owner_handle.mob_id().clone(), owner_handle.clone())
         .await;
@@ -4183,11 +4253,14 @@ async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
             .expect("the owner is not live after the restart");
     }
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-        fixture.service.clone(),
-        Some(Arc::clone(&runtime)),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let restarted = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+            fixture.service.clone(),
+            Some(Arc::clone(&runtime)),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
     for owner_mob in [&b_handle, &c_handle] {
         restarted
             .mob_insert_handle(owner_mob.mob_id().clone(), owner_mob.clone())

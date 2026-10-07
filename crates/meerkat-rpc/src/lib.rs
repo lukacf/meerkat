@@ -19,6 +19,8 @@ pub mod callback_dispatcher;
 #[cfg(feature = "mob")]
 pub mod detached_owner;
 pub mod error;
+#[cfg(feature = "local-authorization")]
+pub mod governed_jsonl;
 pub mod handlers;
 pub mod live_projection_sink;
 #[cfg(feature = "openai-realtime")]

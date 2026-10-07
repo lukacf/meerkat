@@ -50,6 +50,8 @@ pub enum PersistenceError {
     #[error(transparent)]
     Runtime(#[from] RuntimeStoreError),
     #[error(transparent)]
+    RuntimeAuthority(#[from] meerkat_runtime::RuntimeDriverError),
+    #[error(transparent)]
     WorkGraph(#[from] meerkat_workgraph::WorkGraphError),
     #[error(transparent)]
     Jobs(#[from] meerkat_jobs::DetachedJobError),
@@ -223,12 +225,35 @@ struct RealmSubsystemStores {
 }
 
 impl PersistenceBundle {
+    /// Construct the governed owner directly, before publishing any adapter.
+    #[cfg(all(feature = "session-store", feature = "local-authorization"))]
+    pub fn new_with_local_grant_authorization(
+        session_store: Arc<dyn SessionStore>,
+        runtime_store: Arc<dyn RuntimeStore>,
+        blob_store: Arc<dyn BlobStore>,
+        configuration: meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        let runtime_adapter = Arc::new(MeerkatMachine::persistent_with_local_grant_authorization(
+            runtime_store.clone(),
+            Some(blob_store.clone()),
+            configuration,
+        )?);
+        Ok(Self::from_runtime_adapter(
+            session_store,
+            runtime_store,
+            blob_store,
+            Arc::new(DisabledScheduleStore),
+            Arc::new(DisabledWorkGraphStore),
+            runtime_adapter,
+        ))
+    }
+
     #[cfg(feature = "session-store")]
     pub fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
-    ) -> Self {
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         Self::new_with_schedule_store(
             session_store,
             runtime_store,
@@ -243,7 +268,7 @@ impl PersistenceBundle {
         runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
         schedule_store: Arc<dyn ScheduleStore>,
-    ) -> Self {
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         Self::new_with_subsystem_stores(
             session_store,
             runtime_store,
@@ -260,14 +285,33 @@ impl PersistenceBundle {
         blob_store: Arc<dyn BlobStore>,
         schedule_store: Arc<dyn ScheduleStore>,
         workgraph_store: Arc<dyn WorkGraphStore>,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        let runtime_adapter = Arc::new(MeerkatMachine::persistent(
+            runtime_store.clone(),
+            blob_store.clone(),
+        )?);
+        Ok(Self::from_runtime_adapter(
+            session_store,
+            runtime_store,
+            blob_store,
+            schedule_store,
+            workgraph_store,
+            runtime_adapter,
+        ))
+    }
+
+    #[cfg(feature = "session-store")]
+    fn from_runtime_adapter(
+        session_store: Arc<dyn SessionStore>,
+        runtime_store: Arc<dyn RuntimeStore>,
+        blob_store: Arc<dyn BlobStore>,
+        schedule_store: Arc<dyn ScheduleStore>,
+        workgraph_store: Arc<dyn WorkGraphStore>,
+        runtime_adapter: Arc<MeerkatMachine>,
     ) -> Self {
         let session_persistence_profile = runtime_store.session_persistence_profile();
         let runtime_delivery_inbox =
             meerkat_runtime::RuntimeDeliveryInbox::new(runtime_store.clone());
-        let runtime_adapter = Arc::new(MeerkatMachine::persistent(
-            runtime_store.clone(),
-            blob_store.clone(),
-        ));
         Self {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             manifest: None,
@@ -340,14 +384,14 @@ impl PersistenceBundle {
         store_path: PathBuf,
         projection_root: PathBuf,
         stores: RealmSubsystemStores,
-    ) -> Self {
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         let mut bundle = Self::new_with_subsystem_stores(
             stores.session_store,
             stores.runtime_store,
             stores.blob_store,
             stores.schedule_store,
             stores.workgraph_store,
-        );
+        )?;
         bundle.job_store = stores.job_store;
         let event_store: Arc<dyn EventStore> = Arc::new(FileEventStore::new(
             projection_root.join(".rkat").join("events"),
@@ -358,7 +402,7 @@ impl PersistenceBundle {
         )));
         bundle.manifest = Some(manifest);
         bundle.store_path = Some(store_path);
-        bundle
+        Ok(bundle)
     }
 
     pub fn session_store(&self) -> Arc<dyn SessionStore> {
@@ -1174,7 +1218,7 @@ pub async fn open_realm_persistence_with_provider(
                 workgraph_store: set.workgraph_store.clone(),
                 job_store: set.job_store.clone(),
             },
-        )
+        )?
     } else {
         let mut bundle = PersistenceBundle::new_with_subsystem_stores(
             set.session_store.clone(),
@@ -1182,7 +1226,7 @@ pub async fn open_realm_persistence_with_provider(
             set.blob_store.clone(),
             set.schedule_store.clone(),
             set.workgraph_store.clone(),
-        );
+        )?;
         bundle.manifest = builtin_manifest;
         bundle.store_path = Some(set.store_path.clone());
         bundle.job_store = set.job_store.clone();
@@ -2806,7 +2850,8 @@ mod tests {
         )?) as Arc<dyn RuntimeStore>;
 
         let bundle =
-            PersistenceBundle::new(wrapped, runtime_store, Arc::new(MemoryBlobStore::new()));
+            PersistenceBundle::new(wrapped, runtime_store, Arc::new(MemoryBlobStore::new()))
+                .expect("construct runtime authority");
 
         assert!(!bundle.blob_store().is_persistent());
         assert!(!bundle.artifact_store().is_persistent());
@@ -3054,7 +3099,7 @@ mod tests {
             store,
             runtime_store.clone(),
             Arc::new(MemoryBlobStore::new()),
-        );
+        )?;
 
         let observer = bundle.runtime_delivery_inbox();
         let producer = bundle.runtime_delivery_inbox();
@@ -3095,7 +3140,8 @@ mod tests {
         let runtime_store: Arc<dyn RuntimeStore> =
             Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
 
-        let bundle = PersistenceBundle::new(store, runtime_store, Arc::new(MemoryBlobStore::new()));
+        let bundle = PersistenceBundle::new(store, runtime_store, Arc::new(MemoryBlobStore::new()))
+            .expect("construct runtime authority");
 
         assert!(!bundle.blob_store().is_persistent());
         let _ = bundle.runtime_store();
@@ -3304,3 +3350,11 @@ mod tests {
         assert!(matches!(refusal, PersistenceError::FirstStart(_)));
     }
 }
+
+#[cfg(all(
+    test,
+    feature = "session-store",
+    feature = "local-authorization",
+    not(target_arch = "wasm32")
+))]
+mod governed_memory_tests;

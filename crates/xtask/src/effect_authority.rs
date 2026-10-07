@@ -131,6 +131,30 @@ impl AgentLlmClientDefaultMethod {
 ///
 /// Adding a default-bodied trait method requires an explicit review here.
 const AGENT_LLM_CLIENT_DEFAULT_METHODS: &[AgentLlmClientDefaultMethod] = &[
+    AgentLlmClientDefaultMethod::fail_closed(
+        "controller_model_selection",
+        "absence exposes no exact selected controller target",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "controller_model_facts",
+        "unsupported clients refuse request-free controller route facts",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "prepare_controller_credential",
+        "unsupported clients refuse existing-controller credential maintenance",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "pin_controller",
+        "absence withholds an actual retained controller client",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "prepare_request_attempt_authorized",
+        "supplied work authorization is refused before preparing an attempt; only None retains legacy behavior",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "stream_response_authorized",
+        "supplied work authorization is refused before streaming; only None retains legacy behavior",
+    ),
     AgentLlmClientDefaultMethod::compatibility(
         "prepare_request_attempt",
         "stable custom clients retain direct single-client request attempts",
@@ -189,6 +213,7 @@ const AGENT_LLM_CLIENT_DEFAULT_METHODS: &[AgentLlmClientDefaultMethod] = &[
 /// decorator. The structural gate below requires the body to remain a single
 /// call to the same method on `self.inner`.
 const CORE_EXECUTOR_PURE_FORWARD_METHODS: &[&str] = &[
+    "supports_work_authorization",
     "boundary_handle",
     "interrupt_handle",
     "publication_handle",

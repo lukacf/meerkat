@@ -4853,20 +4853,28 @@ mod tests {
         persisted_metadata_loads: AtomicU64,
         actor_registry: meerkat_session::LiveSessionActorRegistry,
         counter: AtomicU64,
-        runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         registry: Arc<TestCommsRegistry>,
         injector: Arc<TestInjector>,
     }
 
     impl RealCommsSessionSvc {
         fn new() -> Self {
+            Self::with_optional_runtime(Some(
+                Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+            ))
+        }
+
+        fn with_optional_runtime(
+            runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        ) -> Self {
             Self {
                 sessions: tokio::sync::RwLock::new(HashMap::new()),
                 persisted_sessions: tokio::sync::RwLock::new(HashMap::new()),
                 persisted_metadata_loads: AtomicU64::new(0),
                 actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
                 counter: AtomicU64::new(0),
-                runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                runtime_adapter,
                 registry: Arc::new(TestCommsRegistry::default()),
                 injector: Arc::new(TestInjector),
             }
@@ -5304,11 +5312,28 @@ mod tests {
         }
 
         fn supports_runtime_turn_apply(&self) -> bool {
-            true
+            self.runtime_adapter.is_some()
         }
 
-        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-            Some(self.runtime_adapter.clone())
+        fn acquire_runtime_adapter(
+            &self,
+            explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        ) -> Result<
+            Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            let owner = self.runtime_adapter.clone();
+            if let (Some(owner), Some(requested)) = (owner.as_ref(), explicit.as_ref())
+                && !owner.shares_runtime_execution_owner_with(requested)
+            {
+                return Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason:
+                            meerkat_runtime::traits::ControllerReadinessFailure::AuthorityChanged,
+                    },
+                );
+            }
+            Ok(owner.or(explicit))
         }
 
         async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -6661,10 +6686,11 @@ mod tests {
     #[test]
     fn detached_delivery_follows_runtime_presence() {
         let without_runtime = MobMcpState::new_with_runtime_adapter(
-            Arc::new(crate::LocalSessionService::new()),
+            Arc::new(RealCommsSessionSvc::with_optional_runtime(None)),
             None,
             meerkat_mob::MobControlPrincipal::Owner,
-        );
+        )
+        .expect("construct runtime authority");
         assert_eq!(
             without_runtime.detached_delivery_blocked_because(),
             Some(crate::DetachedDeliveryUnavailable::HostDeclaredUnavailable)
@@ -6676,11 +6702,11 @@ mod tests {
             Some(crate::DetachedDeliveryUnavailable::NoRuntimeAdapter)
         );
 
-        let with_runtime = MobMcpState::new_with_runtime_adapter(
+        let with_runtime = MobMcpState::new(
             Arc::new(crate::LocalSessionService::new()),
-            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
             meerkat_mob::MobControlPrincipal::Owner,
-        );
+        )
+        .expect("construct runtime authority");
         assert_eq!(with_runtime.detached_delivery_blocked_because(), None);
         with_runtime
             .set_detached_completion_delivery(crate::DetachedCompletionDelivery::Unavailable);
@@ -6843,10 +6869,10 @@ mod tests {
     #[tokio::test]
     async fn test_delegate_dispatch_auto_wires_parent_and_helper_peers() {
         let service = Arc::new(RealCommsSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            service.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let parent_name = "parent/lead/l-1".to_string();
         let parent_comms = service.register_external_comms(&parent_name).await;
         let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
@@ -6927,10 +6953,10 @@ mod tests {
     #[tokio::test]
     async fn test_delegate_wiring_links_parent_and_helper_peers_and_emits_peer_added_lifecycle() {
         let service = Arc::new(RealCommsSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(
-            service.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let parent_name = "parent/lead/l-1".to_string();
         let parent_comms = service.register_external_comms(&parent_name).await;
         let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
@@ -7795,10 +7821,10 @@ mod tests {
             .expect("restricted parent metadata must serialize");
         service.seed_persisted_session(parent_session).await;
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
-        let state = Arc::new(MobMcpState::new(
-            session_service,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let state = Arc::new(
+            MobMcpState::new(session_service, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         let surface = AgentMobToolSurface::new(
             state,
             None,

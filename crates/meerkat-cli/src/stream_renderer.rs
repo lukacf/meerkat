@@ -575,6 +575,19 @@ fn render_event(
         }
 
         // ── Budget / retry ─────────────────────────────────────────
+        AgentEvent::OperationObservationFailed {
+            operation_id,
+            phase,
+        } => {
+            chrome_line(
+                mux,
+                scope_id,
+                &format!(
+                    "Operation {operation_id} audit {phase:?} was not retained; physical result unchanged"
+                ),
+            );
+        }
+
         AgentEvent::BudgetWarning {
             budget_type,
             used,
@@ -742,6 +755,23 @@ fn render_event(
                 scope_id,
                 &format!(
                     "{}{}✗ hook failed: {}: {}{}",
+                    style(ansi, RED),
+                    style(ansi, BOLD),
+                    hook_id,
+                    reason,
+                    reset(ansi)
+                ),
+            );
+        }
+
+        AgentEvent::HookLaunchRefused {
+            hook_id, reason, ..
+        } => {
+            chrome_line(
+                mux,
+                scope_id,
+                &format!(
+                    "{}{}hook launch refused: {}: {}{}",
                     style(ansi, RED),
                     style(ansi, BOLD),
                     hook_id,

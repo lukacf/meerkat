@@ -153,6 +153,9 @@ them.
   declaration. A ceiling handed to a resumed session now narrows the
   session's durable inherited ceiling (`ToolFilter::narrowed_by`). It used
   to replace it, so a broader new snapshot could widen a resumed child.
+  Compatibility: a resumed handoff narrows the retained ceiling, and a
+  retained ceiling whose saved identity evidence is incomplete is refused
+  with `MissingInheritedToolVisibilityWitnesses` instead of being erased.
 - Behaviour-only (not measured by the gate), MCP per-request credentials
   (see Fixed):
   - A Streamable HTTP MCP connection with an `McpAuthResolver` reads its

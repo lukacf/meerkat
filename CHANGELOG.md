@@ -155,8 +155,10 @@ them.
   `RetirementFailed` with no receipt). The earliest deadline given to a handle
   bounds both the callback and the graceful drain and is never renewed; a
   callback is handed out at most once; a failed retirement stays failed on
-  every later wait or close. Dropping a wait or close future still only
-  signals termination, without a receipt. `wait` and `cancel` are unchanged.
+  every later wait or close. Dropping a consuming `wait`, `wait_or_cancel`,
+  or `close` future signals termination without a receipt. Dropping
+  `wait_until` retains the handle for explicit `close`. `wait` and `cancel`
+  are unchanged.
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
   runtime delivery inbox's exclusive delivery ownership
   (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is

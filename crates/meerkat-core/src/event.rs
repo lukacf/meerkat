@@ -1085,6 +1085,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::HookCompleted { .. } => "hook_completed",
         AgentEvent::HookFailed { .. } => "hook_failed",
         AgentEvent::HookLaunchRefused { .. } => "hook_launch_refused",
+        AgentEvent::RequestReasoningLowered { .. } => "request_reasoning_lowered",
         AgentEvent::HookDenied { .. } => "hook_denied",
         AgentEvent::TurnStarted { .. } => "turn_started",
         AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
@@ -2159,6 +2160,12 @@ pub enum AgentEvent {
         /// Typed run input: caller content, or the pending tool-results
         /// continuation variant (no fabricated empty prompt).
         input: RunInput,
+        /// The reasoning-effort preference this run's batch requested, when
+        /// it carries one. This is the request only: what each provider
+        /// attempt actually sent is reported per attempt by
+        /// `request_reasoning_lowered`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_reasoning: Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
     },
 
     /// Agent run completed successfully
@@ -2795,6 +2802,33 @@ pub enum AgentEvent {
         /// Exact attempted tool call, when this hook belongs to one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_use_id: Option<String>,
+    },
+    /// One provider attempt of a turn that carries a reasoning-effort
+    /// preference: what the batch requested, what the attempt's baseline
+    /// request already said, and what the attempt actually sent. Emitted per
+    /// prepared request (and again for a model-fallback attempt), so a turn
+    /// whose attempts differ reports each one; never a turn-level claim.
+    RequestReasoningLowered {
+        /// The provider turn this attempt belongs to; absent for a
+        /// model-fallback attempt (see `fallback_attempt`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_number: Option<u32>,
+        /// The failed attempt this model-fallback attempt replaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback_attempt: Option<u32>,
+        /// The selected model's provider, when the registry knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<crate::Provider>,
+        /// The selected model, when the registry knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The batch's resolved preference.
+        requested: crate::lifecycle::run_primitive::ReasoningBatchDisposition,
+        /// What the baseline request said about effort.
+        baseline: crate::lifecycle::run_primitive::ReasoningLoweringBaseline,
+        /// What this attempt sent; absent when the batch applies no level.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<crate::lifecycle::run_primitive::ReasoningLoweringOutcome>,
     },
 }
 
@@ -4068,6 +4102,7 @@ mod tests {
         // Test all event variants serialize correctly
         let events = vec![
             AgentEvent::RunStarted {
+                request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),
                 input: RunInput::Content {
@@ -4470,6 +4505,7 @@ mod tests {
     #[test]
     fn run_started_pending_tail_serializes_typed_variant() {
         let event = AgentEvent::RunStarted {
+            request_reasoning: None,
             identity: Default::default(),
             session_id: SessionId::new(),
             input: RunInput::PendingToolResults,
@@ -4797,6 +4833,7 @@ mod tests {
     fn test_agent_event_type_mapping_is_total_for_all_variants() {
         let events = vec![
             AgentEvent::RunStarted {
+                request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),
                 input: RunInput::Content {

@@ -166,6 +166,7 @@ pub(crate) fn merge_batch_turn_metadata(
 
     let mut acc: Option<RuntimeTurnMetadata> = None;
     let mut transcript_identity = TranscriptIdentityConsensus::default();
+    let mut request_reasoning = ReasoningPreferenceConsensus::default();
     // A batch executes as one turn, so it cannot honor multiple per-input
     // handling modes. The machine has already admitted and ordered every
     // input before this fold; use that admission order as the deterministic
@@ -181,6 +182,12 @@ pub(crate) fn merge_batch_turn_metadata(
         meta.work_authorization = None; // Rebuilt only from accepted contributor rows at staging.
         meta.handling_mode = None;
         transcript_identity.observe(&meta.transcript_identity);
+        // The reasoning preference is folded across the whole batch (set
+        // semantics, never a pairwise conflict), from each contributor's own
+        // preference and its own explicit reasoning settings.
+        request_reasoning.observe(&meta);
+        meta.request_reasoning = None;
+        meta.request_reasoning_disposition = None;
         // Identity consensus needs a sticky conflict state across the whole
         // batch. Feeding the lossy empty result of a pairwise conflict into a
         // later merge would let unrelated causality reseed the accumulator.
@@ -195,6 +202,7 @@ pub(crate) fn merge_batch_turn_metadata(
     if let Some(metadata) = acc.as_mut() {
         metadata.handling_mode = batch_handling_mode;
         metadata.transcript_identity = transcript_identity.finish();
+        metadata.request_reasoning_disposition = request_reasoning.finish();
     }
     // Batch-level peer-reply capability mint: every peer *message* delivery
     // in the admitted batch contributes one typed reply capability. Minted
@@ -219,6 +227,52 @@ pub(crate) fn merge_batch_turn_metadata(
         attach_peer_reply_capabilities(metadata, deliveries)?;
     }
     Ok(acc.filter(|m| !m.is_empty()))
+}
+
+/// Order-independent fold of a batch's reasoning preferences: which levels
+/// were preferred, whether any contributor set reasoning explicitly (its own
+/// params, cleared or touching a reasoning knob), and whether any
+/// contributor went without a preference. A sticky value from an earlier
+/// turn is session baseline, not a contributor's explicit setting.
+#[derive(Debug, Clone, Default)]
+struct ReasoningPreferenceConsensus {
+    levels: std::collections::BTreeSet<meerkat_core::model_profile::capabilities::EffortLevel>,
+    explicit: bool,
+    unpreferred: bool,
+}
+
+impl ReasoningPreferenceConsensus {
+    fn observe(&mut self, meta: &meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata) {
+        let explicit = meta.provider_params.as_ref().is_some_and(
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::decides_reasoning,
+        );
+        let preference = meta.request_reasoning.map(|preference| preference.level());
+        self.explicit |= explicit;
+        match preference {
+            Some(level) => {
+                self.levels.insert(level);
+            }
+            None if !explicit => self.unpreferred = true,
+            None => {}
+        }
+    }
+
+    /// `None` when no contributor preferred a level: the batch takes the
+    /// path it always took.
+    fn finish(self) -> Option<meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition> {
+        use meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition;
+        let mut levels = self.levels.into_iter();
+        let first = levels.next()?;
+        Some(if self.explicit {
+            ReasoningBatchDisposition::SupersededByExplicit
+        } else if levels.next().is_some() {
+            ReasoningBatchDisposition::Conflicting
+        } else if self.unpreferred {
+            ReasoningBatchDisposition::MixedWithUnpreferred
+        } else {
+            ReasoningBatchDisposition::Apply(first)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -9841,6 +9895,151 @@ mod tests {
             Some(InteractionId(interaction_uuid))
         );
         assert_eq!(metadata.transcript_identity.run_id, None);
+    }
+
+    /// One batch contributor for the reasoning-preference fold.
+    #[derive(Debug, Clone, Copy)]
+    enum ReasoningContributor {
+        Prefers(meerkat_core::model_profile::capabilities::EffortLevel),
+        Explicit,
+        ExplicitAndPrefers(meerkat_core::model_profile::capabilities::EffortLevel),
+        UnrelatedKnob,
+        Plain,
+    }
+
+    fn reasoning_contributor(contributor: ReasoningContributor) -> Input {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, ProviderTag, RequestReasoningPreference, RuntimeTurnMetadata,
+            TurnMetadataOverride,
+        };
+        let explicit = || {
+            TurnMetadataOverride::Set(ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(
+                    meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                        reasoning_effort: Some(
+                            meerkat_core::lifecycle::run_primitive::ReasoningEffort::High,
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            })
+        };
+        let prefer = |level| Some(RequestReasoningPreference::set(level).expect("level"));
+        let metadata = match contributor {
+            ReasoningContributor::Prefers(level) => RuntimeTurnMetadata {
+                request_reasoning: prefer(level),
+                ..Default::default()
+            },
+            ReasoningContributor::Explicit => RuntimeTurnMetadata {
+                provider_params: Some(explicit()),
+                ..Default::default()
+            },
+            ReasoningContributor::ExplicitAndPrefers(level) => RuntimeTurnMetadata {
+                provider_params: Some(explicit()),
+                request_reasoning: prefer(level),
+                ..Default::default()
+            },
+            ReasoningContributor::UnrelatedKnob => RuntimeTurnMetadata {
+                provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                    temperature: Some(0.3),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ReasoningContributor::Plain => RuntimeTurnMetadata::default(),
+        };
+        let mut input = make_prompt("batched");
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.turn_metadata = Some(metadata);
+        }
+        input
+    }
+
+    fn reasoning_disposition(
+        contributors: &[ReasoningContributor],
+    ) -> Option<meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition> {
+        let inputs = contributors
+            .iter()
+            .map(|contributor| (InputId::new(), reasoning_contributor(*contributor)))
+            .collect::<Vec<_>>();
+        let semantics = inputs
+            .iter()
+            .map(|(_, input)| admission_semantics(input))
+            .collect::<Vec<_>>();
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .expect("a reasoning preference never aborts the batch")
+            .expect("metadata");
+        assert_eq!(
+            metadata.request_reasoning, None,
+            "the per-input preference is folded, never carried as a scalar"
+        );
+        metadata.request_reasoning_disposition
+    }
+
+    /// #1823: the batch's reasoning preference is a set fold (order never
+    /// matters), an explicit reasoning setting on any contributor supersedes
+    /// it, an unrelated explicit knob does not, and a batch without any
+    /// preference takes the path it always took.
+    #[test]
+    fn batch_reasoning_preference_is_an_order_independent_fold() {
+        use ReasoningContributor::*;
+        use meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition as D;
+        use meerkat_core::model_profile::capabilities::EffortLevel::{High, Low};
+        let cases: Vec<(Vec<ReasoningContributor>, Option<D>)> = vec![
+            (vec![Prefers(Low)], Some(D::Apply(Low))),
+            (vec![Prefers(Low), Prefers(Low)], Some(D::Apply(Low))),
+            (
+                vec![Prefers(Low), UnrelatedKnob],
+                Some(D::MixedWithUnpreferred),
+            ),
+            (vec![Prefers(Low), Plain], Some(D::MixedWithUnpreferred)),
+            (vec![Prefers(Low), Prefers(High)], Some(D::Conflicting)),
+            (vec![Prefers(Low), Explicit], Some(D::SupersededByExplicit)),
+            (vec![ExplicitAndPrefers(Low)], Some(D::SupersededByExplicit)),
+            (
+                vec![Prefers(Low), Prefers(High), Plain],
+                Some(D::Conflicting),
+            ),
+            (
+                vec![Prefers(Low), Prefers(High), Explicit],
+                Some(D::SupersededByExplicit),
+            ),
+            (
+                vec![Prefers(Low), Prefers(Low), Plain],
+                Some(D::MixedWithUnpreferred),
+            ),
+            (vec![Plain], None),
+            (vec![Explicit, Plain], None),
+            (vec![UnrelatedKnob], None),
+        ];
+        for (contributors, expected) in cases {
+            // Every ordering of the contributors folds to the same result.
+            let mut order: Vec<usize> = (0..contributors.len()).collect();
+            loop {
+                let ordered = order
+                    .iter()
+                    .map(|index| contributors[*index])
+                    .collect::<Vec<_>>();
+                assert_eq!(reasoning_disposition(&ordered), expected, "{ordered:?}");
+                if !next_permutation(&mut order) {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn next_permutation(order: &mut [usize]) -> bool {
+        let Some(pivot) = (1..order.len()).rev().find(|&i| order[i - 1] < order[i]) else {
+            return false;
+        };
+        let swap = (pivot..order.len())
+            .rev()
+            .find(|&j| order[j] > order[pivot - 1])
+            .unwrap_or(pivot);
+        order.swap(pivot - 1, swap);
+        order[pivot..].reverse();
+        true
     }
 
     #[test]

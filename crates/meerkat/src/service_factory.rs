@@ -316,6 +316,14 @@ impl SessionAgent for FactoryAgent {
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
+    fn set_turn_request_reasoning(
+        &mut self,
+        disposition: Option<meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.set_active_turn_request_reasoning(disposition);
+        Ok(())
+    }
+
     fn apply_pending_tool_results(
         &mut self,
         results: Vec<meerkat_core::ToolResult>,

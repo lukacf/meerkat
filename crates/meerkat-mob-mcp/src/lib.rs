@@ -4967,6 +4967,7 @@ impl SessionService for LocalSessionService {
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: id.clone(),
                     input: meerkat_core::types::RunInput::Content {

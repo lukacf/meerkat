@@ -220,6 +220,28 @@ them.
 
 ### Added
 
+- Request-local reasoning-effort preference for runtime turns (#1823, first
+  slice; nothing sets it yet). `RuntimeTurnMetadata.request_reasoning`
+  carries an owner-set `RequestReasoningPreference::Set(EffortLevel)`
+  (`minimal` is refused), persisted with the pending input and never
+  accepted from a public wire. The runtime folds a batch's preferences
+  order-independently into a `ReasoningBatchDisposition`: `apply` when every
+  contributor that expressed one agrees and none went without,
+  `superseded_by_explicit` when any contributor set a reasoning knob itself
+  (an unrelated knob such as temperature does not count, nor does a sticky
+  session value), `conflicting`, or `mixed_with_unpreferred`. It is never a
+  merge conflict, and the batch always runs. Each provider attempt lowers an
+  applied level onto its own request copy against the model it actually
+  selected (including a model fallback): OpenAI `reasoning.effort` and
+  Anthropic `effort` when the catalog row accepts the level; Gemini is
+  reported as not applied until the catalog records its levels per model.
+  Otherwise the baseline request is left byte-identical. The durable session
+  identity never changes. `run_started` carries the batch's requested
+  disposition (`request_reasoning`, the request only), and a new
+  `request_reasoning_lowered` event reports each attempt's requested
+  disposition, baseline effort and what it sent.
+  `EffortLevel` now serializes as its wire string, and `ModelProfileWitness`
+  exposes the model's catalog capability row.
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
   runtime delivery inbox's exclusive delivery ownership
   (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is

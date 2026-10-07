@@ -386,6 +386,8 @@ impl SessionRuntime {
                 directed_interaction_ids: Vec::new(),
                 auth_binding: None,
                 transcript_identity: Default::default(),
+                request_reasoning: None,
+                request_reasoning_disposition: None,
             },
         );
         let mut prompt_input =

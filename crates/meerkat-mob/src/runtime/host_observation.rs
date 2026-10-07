@@ -4300,6 +4300,7 @@ mod tests {
 
     fn run_started(session: &SessionId, content: &str) -> AgentEvent {
         AgentEvent::RunStarted {
+            request_reasoning: None,
             identity: Default::default(),
             session_id: session.clone(),
             input: meerkat_core::types::RunInput::Content {

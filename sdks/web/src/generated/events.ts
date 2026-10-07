@@ -292,6 +292,8 @@ export interface DisputedTurnUsageAccountingIdentity {
   reported_provider: Provider;
 }
 
+export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
 
 export type GeminiImageMetadata = {
@@ -577,9 +579,37 @@ export type RealtimeMessageOrigin = {
   session_id: SessionId;
 };
 
+export type ReasoningBatchDisposition = {
+  disposition: "apply";
+  level: EffortLevel;
+} | {
+  disposition: "superseded_by_explicit";
+} | {
+  disposition: "conflicting";
+} | {
+  disposition: "mixed_with_unpreferred";
+};
+
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type ReasoningLoweringBaseline = {
+  kind: "explicit";
+  level: EffortLevel;
+} | {
+  kind: "provider_default";
+};
+
+export type ReasoningLoweringOutcome = {
+  detail: EffortLevel;
+  kind: "applied";
+} | {
+  detail: ReasoningNotAppliedReason;
+  kind: "not_applied";
+};
+
 export type ReasoningMode = "emit" | "silent" | "off";
+
+export type ReasoningNotAppliedReason = "no_catalog_fact" | "unsupported_level" | "unknown_supported_levels" | "budget_conflict" | "thinking_mode_conflict" | "opaque_reasoning_body" | "reasoning_disabled_by_baseline";
 
 export type RevisedPromptDisposition = {
   disposition: "not_requested";
@@ -1005,6 +1035,7 @@ export type Usage = {
 export interface RunStartedEvent {
   identity?: TranscriptMessageIdentity;
   input: RunInput;
+  request_reasoning?: ReasoningBatchDisposition | null;
   session_id: SessionId;
   type: "run_started";
 }
@@ -1354,6 +1385,17 @@ export interface HookLaunchRefusedEvent {
   type: "hook_launch_refused";
 }
 
+export interface RequestReasoningLoweredEvent {
+  baseline: ReasoningLoweringBaseline;
+  fallback_attempt?: number | null;
+  model?: string | null;
+  outcome?: ReasoningLoweringOutcome | null;
+  provider?: Provider | null;
+  requested: ReasoningBatchDisposition;
+  turn_number?: number | null;
+  type: "request_reasoning_lowered";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1404,7 +1446,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "provider_cache_breakpoints_discarded",
   "boundary_append_applied",
   "boundary_appends_discarded",
-  "live_channel_closed"
+  "live_channel_closed",
+  "request_reasoning_lowered"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1459,4 +1502,5 @@ export type AgentEvent =
   BoundaryAppendsDiscardedEvent |
   LiveChannelClosedEvent |
   OperationObservationFailedEvent |
-  HookLaunchRefusedEvent;
+  HookLaunchRefusedEvent |
+  RequestReasoningLoweredEvent;

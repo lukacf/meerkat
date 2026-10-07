@@ -2616,6 +2616,8 @@ impl SessionRuntime {
             peer_response_terminal_apply_intent: None,
             directed_interaction_ids: Vec::new(),
             transcript_identity: Default::default(),
+            request_reasoning: None,
+            request_reasoning_disposition: None,
         };
         (!metadata.is_empty()).then_some(metadata)
     }

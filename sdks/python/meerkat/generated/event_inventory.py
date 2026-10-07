@@ -60,6 +60,7 @@ KNOWN_AGENT_EVENT_TYPES: frozenset[str] = frozenset({
     "boundary_append_applied",
     "boundary_appends_discarded",
     "live_channel_closed",
+    "request_reasoning_lowered",
 })
 
 

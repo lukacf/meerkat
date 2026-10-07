@@ -11,8 +11,8 @@ use super::identifiers::InputId;
 use crate::connection::AuthBindingRef;
 use crate::interaction::InteractionId;
 use crate::model_profile::capabilities::{
-    OpenAiPromptCacheMode, OpenAiPromptCacheTtl, OpenAiReasoningContext, OpenAiReasoningMode,
-    OpenAiTextVerbosity,
+    EffortLevel, OpenAiPromptCacheMode, OpenAiPromptCacheTtl, OpenAiReasoningContext,
+    OpenAiReasoningMode, OpenAiTextVerbosity,
 };
 use crate::provider::Provider;
 use crate::service::TurnToolOverlay;
@@ -828,6 +828,158 @@ pub enum ReasoningMode {
     Off,
 }
 
+/// An opt-in preference for the reasoning effort of one turn's provider
+/// requests, set by the owner that admitted the input (a live channel's
+/// delegated member turns). It is request-local: each request's own copy is
+/// lowered to the selected model's typed effort knob when that model's
+/// catalog row accepts the level, and otherwise left exactly as the baseline
+/// (see the agent's per-attempt lowering). It never becomes durable session
+/// identity, and an explicit reasoning setting on the same input wins.
+///
+/// `Minimal` is refused: no catalog row validates it for this preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestReasoningPreference {
+    /// Request this effort level.
+    Set(EffortLevel),
+}
+
+/// A [`RequestReasoningPreference`] that names a level outside the accepted
+/// subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedReasoningPreference(pub EffortLevel);
+
+impl std::fmt::Display for UnsupportedReasoningPreference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "reasoning preference level `{}` is not accepted",
+            self.0.as_wire_str()
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedReasoningPreference {}
+
+impl RequestReasoningPreference {
+    /// Prefer `level`; `Minimal` is refused.
+    pub fn set(level: EffortLevel) -> Result<Self, UnsupportedReasoningPreference> {
+        match level {
+            EffortLevel::Minimal => Err(UnsupportedReasoningPreference(level)),
+            EffortLevel::None
+            | EffortLevel::Low
+            | EffortLevel::Medium
+            | EffortLevel::High
+            | EffortLevel::Xhigh
+            | EffortLevel::Max => Ok(Self::Set(level)),
+        }
+    }
+
+    /// The preferred level.
+    pub const fn level(self) -> EffortLevel {
+        match self {
+            Self::Set(level) => level,
+        }
+    }
+}
+
+impl Serialize for RequestReasoningPreference {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("set", self.level().as_wire_str())?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestReasoningPreference {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            set: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let level = EffortLevel::from_wire_str(&wire.set).ok_or_else(|| {
+            de::Error::custom(format!("unknown reasoning effort level `{}`", wire.set))
+        })?;
+        Self::set(level).map_err(de::Error::custom)
+    }
+}
+
+/// How one runtime batch resolved its inputs' reasoning preferences. The
+/// fold is order-independent (set semantics over the batch); every outcome
+/// other than [`Self::Apply`] leaves the baseline request unchanged, and the
+/// batch always runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "disposition", content = "level", rename_all = "snake_case")]
+pub enum ReasoningBatchDisposition {
+    /// Every contributor that expressed one preferred this level, and no
+    /// contributor set reasoning explicitly or went without a preference.
+    Apply(EffortLevel),
+    /// A contributor set a reasoning knob explicitly (or cleared its
+    /// params): that setting wins over any preference.
+    SupersededByExplicit,
+    /// Contributors preferred different levels.
+    Conflicting,
+    /// Some contributors preferred a level and others expressed none.
+    MixedWithUnpreferred,
+}
+
+impl ReasoningBatchDisposition {
+    /// The level to request, when the batch applies one.
+    pub const fn applied_level(self) -> Option<EffortLevel> {
+        match self {
+            Self::Apply(level) => Some(level),
+            Self::SupersededByExplicit | Self::Conflicting | Self::MixedWithUnpreferred => None,
+        }
+    }
+}
+
+/// What one provider attempt's baseline request already said about effort,
+/// before any preference was considered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", content = "level", rename_all = "snake_case")]
+pub enum ReasoningLoweringBaseline {
+    /// The baseline carried this effort level explicitly.
+    Explicit(EffortLevel),
+    /// The baseline carried none: the provider's own default applies.
+    ProviderDefault,
+}
+
+/// Why a reasoning preference left one attempt's request unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningNotAppliedReason {
+    /// The selected model has no catalog row (custom, self-hosted or other).
+    NoCatalogFact,
+    /// The catalog row does not accept this level.
+    UnsupportedLevel,
+    /// The catalog does not record which levels the model accepts.
+    UnknownSupportedLevels,
+    /// The baseline sets a thinking budget, which the level cannot replace.
+    BudgetConflict,
+    /// The baseline thinking mode does not admit this level.
+    ThinkingModeConflict,
+    /// The baseline forwards an opaque reasoning body.
+    OpaqueReasoningBody,
+    /// The baseline turns reasoning off.
+    ReasoningDisabledByBaseline,
+}
+
+/// What one provider attempt did with the turn's reasoning preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+pub enum ReasoningLoweringOutcome {
+    /// The request carries this level.
+    Applied(EffortLevel),
+    /// The request is the baseline, unchanged.
+    NotApplied(ReasoningNotAppliedReason),
+}
+
 /// Which tool use the model may or must make on one provider call.
 ///
 /// `Auto` is today's behaviour and the default: the model decides, and the
@@ -898,6 +1050,38 @@ pub struct ProviderParamsOverride {
 }
 
 impl ProviderParamsOverride {
+    /// Whether these params set a reasoning knob explicitly: the generic
+    /// reasoning mode or thinking budget, or any provider tag's effort,
+    /// thinking or reasoning field (nested or flat). Unrelated knobs
+    /// (temperature, sampling, limits, caching, search) do not count; an
+    /// untyped tag bag counts, since it may carry one.
+    #[must_use]
+    pub fn sets_reasoning(&self) -> bool {
+        if self.reasoning.is_some() || self.thinking_budget_tokens.is_some() {
+            return true;
+        }
+        match &self.provider_tag {
+            None => false,
+            Some(ProviderTag::OpenAi(tag)) => {
+                tag.reasoning_effort.is_some()
+                    || tag.reasoning_mode.is_some()
+                    || tag.reasoning.is_some()
+                    || tag.thinking.is_some()
+            }
+            Some(ProviderTag::Anthropic(tag)) => {
+                tag.effort.is_some()
+                    || tag.thinking.is_some()
+                    || tag.thinking_budget_tokens.is_some()
+            }
+            Some(ProviderTag::Gemini(tag)) => {
+                tag.thinking.is_some()
+                    || tag.thinking_level.is_some()
+                    || tag.thinking_budget.is_some()
+            }
+            Some(ProviderTag::Unknown { .. }) => true,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.temperature.is_none()
             && self.top_p.is_none()
@@ -1509,6 +1693,20 @@ pub enum TurnMetadataOverride<T> {
     Clear,
 }
 
+impl TurnMetadataOverride<ProviderParamsOverride> {
+    /// Whether this per-input params override decides reasoning explicitly:
+    /// clearing the params asks for the baseline, and a set override counts
+    /// when it touches a reasoning knob (see
+    /// [`ProviderParamsOverride::sets_reasoning`]).
+    #[must_use]
+    pub fn decides_reasoning(&self) -> bool {
+        match self {
+            Self::Clear => true,
+            Self::Set(params) => params.sets_reasoning(),
+        }
+    }
+}
+
 impl<T> TurnMetadataOverride<T> {
     pub fn set(value: T) -> Self {
         Self::Set(value)
@@ -1694,6 +1892,19 @@ pub struct RuntimeTurnMetadata {
     /// live frames without falling back to message text.
     #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
     pub transcript_identity: TranscriptMessageIdentity,
+    /// This input's opt-in reasoning-effort preference, set only by the
+    /// owner that admitted it (never accepted from a public wire). Persisted
+    /// with the pending input so a retry replays the accepted intent. The
+    /// runtime's batch fold resolves it across contributors into
+    /// [`Self::request_reasoning_disposition`]; pairwise [`Self::merge`]
+    /// never touches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_reasoning: Option<RequestReasoningPreference>,
+    /// The batch's resolved reasoning preference, computed by the runtime
+    /// batch fold from the contributors' preferences and their explicit
+    /// reasoning settings. Rebuilt from the admitted inputs; never serialized.
+    #[serde(skip)]
+    pub request_reasoning_disposition: Option<ReasoningBatchDisposition>,
 }
 
 impl RuntimeTurnMetadata {
@@ -1719,6 +1930,8 @@ impl RuntimeTurnMetadata {
             && self.peer_response_terminal_apply_intent.is_none()
             && self.directed_interaction_ids.is_empty()
             && self.transcript_identity.is_empty()
+            && self.request_reasoning.is_none()
+            && self.request_reasoning_disposition.is_none()
     }
 
     pub fn transcript_message_identity(&self) -> Option<TranscriptMessageIdentity> {
@@ -1761,6 +1974,8 @@ impl RuntimeTurnMetadata {
             peer_response_terminal_apply_intent,
             directed_interaction_ids,
             transcript_identity: _,
+            request_reasoning,
+            request_reasoning_disposition,
         } = self;
         work_authorization.is_none()
             && skill_references.as_ref().is_none_or(Vec::is_empty)
@@ -1778,12 +1993,18 @@ impl RuntimeTurnMetadata {
             && render_metadata.is_none()
             && peer_response_terminal_apply_intent.is_none()
             && directed_interaction_ids.is_empty()
+            && request_reasoning.is_none()
+            && request_reasoning_disposition.is_none()
     }
 
     /// Merge another metadata carrier into this one. Scalar conflicts (two
     /// inputs in a batch disagreeing on `model`, `provider`, `auth_binding`,
     /// etc.) return a typed [`TurnMetadataMergeConflict`] rather than
     /// last-wins. Collection fields accumulate.
+    ///
+    /// The reasoning preference is not merged here: the runtime folds it
+    /// across the whole batch (order-independent, never a conflict), so
+    /// `other`'s preference and disposition are left to that fold.
     pub fn merge(&mut self, other: Self) -> Result<(), TurnMetadataMergeConflict> {
         merge_scalar(
             &mut self.work_authorization,

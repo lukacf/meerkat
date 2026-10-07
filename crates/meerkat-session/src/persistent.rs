@@ -16996,6 +16996,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -17094,6 +17095,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -17195,6 +17197,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
@@ -20521,6 +20524,7 @@ mod tests {
             let session_id = self.inner.session_id();
             let _ = event_tx
                 .send(AgentEvent::RunStarted {
+                    request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {

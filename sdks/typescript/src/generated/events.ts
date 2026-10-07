@@ -55,7 +55,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "provider_cache_breakpoints_discarded",
   "boundary_append_applied",
   "boundary_appends_discarded",
-  "live_channel_closed"
+  "live_channel_closed",
+  "request_reasoning_lowered"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];

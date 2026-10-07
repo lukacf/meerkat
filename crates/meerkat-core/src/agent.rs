@@ -15,6 +15,7 @@ mod extraction;
 mod hook_impl;
 #[cfg(test)]
 mod hooks_behavior_tests;
+pub(crate) mod reasoning_preference;
 mod runner;
 pub mod skills;
 mod state;
@@ -3106,6 +3107,10 @@ where
     /// it immediately before the admitted conversational user message.
     pub(crate) active_turn_request_contexts:
         Vec<crate::lifecycle::run_primitive::TurnRequestContext>,
+    /// The active runtime-owned turn's resolved reasoning preference, lowered
+    /// onto each provider attempt's own request copy; never session state.
+    pub(crate) active_turn_request_reasoning:
+        Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,

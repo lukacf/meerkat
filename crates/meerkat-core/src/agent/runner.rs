@@ -539,6 +539,15 @@ where
         self.active_turn_request_contexts = contexts;
     }
 
+    /// Stage the runtime batch's resolved reasoning preference for the next
+    /// run; `None` clears it.
+    pub fn set_active_turn_request_reasoning(
+        &mut self,
+        disposition: Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
+    ) {
+        self.active_turn_request_reasoning = disposition;
+    }
+
     /// Clear invocation-local authorization after the session owner has
     /// dropped the run future. This is infallible mechanical cleanup only.
     pub fn clear_work_authorization(&mut self) {
@@ -550,6 +559,7 @@ where
         self.runtime_execution_kind = None;
         self.active_transcript_identity = None;
         self.active_turn_request_contexts.clear();
+        self.active_turn_request_reasoning = None;
         self.runtime_started_run_id = None;
     }
 
@@ -1914,6 +1924,7 @@ where
                 session_id: self.session.id().clone(),
                 identity: self.live_run_identity(),
                 input,
+                request_reasoning: self.active_turn_request_reasoning,
             },
         )
         .await;
@@ -2194,6 +2205,7 @@ where
         let saved_active_transcript_identity = self.active_transcript_identity.take();
         let saved_active_turn_request_contexts =
             std::mem::take(&mut self.active_turn_request_contexts);
+        let saved_active_turn_request_reasoning = self.active_turn_request_reasoning.take();
         let saved_latest_run_checkpoint_receipt = self.latest_run_checkpoint_receipt.take();
         let saved_terminal_error_detail = self.terminal_error_detail.take();
         let saved_terminal_error_metadata = self.terminal_error_metadata.take();
@@ -2285,6 +2297,7 @@ where
         self.runtime_terminal_failure_witness = saved_runtime_terminal_failure_witness;
         self.active_transcript_identity = saved_active_transcript_identity;
         self.active_turn_request_contexts = saved_active_turn_request_contexts;
+        self.active_turn_request_reasoning = saved_active_turn_request_reasoning;
         self.latest_run_checkpoint_receipt = saved_latest_run_checkpoint_receipt;
         self.terminal_error_detail = saved_terminal_error_detail;
         self.terminal_error_metadata = saved_terminal_error_metadata;
@@ -3190,6 +3203,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),
+            active_turn_request_reasoning: None,
             external_tool_surface_handle: None,
             auth_lease_handle: None,
             auth_credential_identity: self.auth_credential_identity.clone(),

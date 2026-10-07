@@ -727,6 +727,8 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             directed_interaction_ids: Vec::new(),
             auth_binding: None,
             transcript_identity: Default::default(),
+            request_reasoning: None,
+            request_reasoning_disposition: None,
         };
         // The attention overlay is deliberately NOT composed here: a queued
         // prompt can sit behind a running turn that mutates the work item,

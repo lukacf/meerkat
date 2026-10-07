@@ -3054,6 +3054,21 @@ pub trait SessionAgent: Send {
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError>;
 
+    /// Stage the runtime batch's resolved reasoning-effort preference for the
+    /// next run (`None` clears it). An agent that cannot lower it onto its
+    /// requests refuses a present one rather than dropping it silently.
+    fn set_turn_request_reasoning(
+        &mut self,
+        disposition: Option<meerkat_core::lifecycle::run_primitive::ReasoningBatchDisposition>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        match disposition {
+            None => Ok(()),
+            Some(_) => Err(meerkat_core::error::AgentError::ConfigError(
+                "request reasoning preference is not supported by this session agent".to_string(),
+            )),
+        }
+    }
+
     /// Apply staged callback tool results before the next continuation turn.
     fn apply_pending_tool_results(
         &mut self,
@@ -9017,6 +9032,9 @@ async fn session_task<A: SessionAgent>(
                 let execution_kind = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
+                let request_reasoning = metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.request_reasoning_disposition);
                 let transcript_identity = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.transcript_message_identity());
@@ -9204,6 +9222,15 @@ async fn session_task<A: SessionAgent>(
 
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_turn_tool_overlay(turn_tool_overlay) {
+                    restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
+                    abort_admitted_turn(&control);
+                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                        Err(error),
+                    ));
+                    continue;
+                }
+                if let Err(error) = agent.set_turn_request_reasoning(request_reasoning) {
+                    let _ = agent.set_turn_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(

@@ -896,6 +896,46 @@ where
         true
     }
 
+    /// Lower the active turn's reasoning preference onto one attempt's
+    /// request copy (`profile` is the model this attempt actually selected)
+    /// and describe what the attempt sent. `None` when the turn carries no
+    /// preference, which leaves the request and the event stream untouched.
+    fn lower_turn_reasoning_preference(
+        &self,
+        profile: Option<&crate::ModelProfileWitness>,
+        turn_number: Option<u32>,
+        fallback_attempt: Option<u32>,
+        params: &mut Option<ProviderParamsOverride>,
+    ) -> Option<AgentEvent> {
+        let requested = self.active_turn_request_reasoning?;
+        let provider = profile.map(crate::ModelProfileWitness::provider);
+        let (baseline, outcome) = match requested.applied_level() {
+            Some(level) => {
+                let (baseline, outcome) =
+                    crate::agent::reasoning_preference::lower_reasoning_preference(
+                        profile.and_then(crate::ModelProfileWitness::catalog_capabilities),
+                        provider.unwrap_or(crate::Provider::Other),
+                        level,
+                        params,
+                    );
+                (baseline, Some(outcome))
+            }
+            None => (
+                crate::agent::reasoning_preference::baseline_effort(params.as_ref()),
+                None,
+            ),
+        };
+        Some(AgentEvent::RequestReasoningLowered {
+            turn_number,
+            fallback_attempt,
+            provider,
+            model: profile.map(|profile| profile.model().to_string()),
+            requested,
+            baseline,
+            outcome,
+        })
+    }
+
     fn request_model_profile(
         &self,
         controller_feedback: bool,
@@ -1397,7 +1437,7 @@ where
             .effective_params()
             .map_err(|err| AgentError::ConfigError(err.to_string()))?;
         let provider_params = (!provider_params.is_empty()).then_some(provider_params);
-        let provider_params = Self::apply_extraction_request_overrides(
+        let mut provider_params = Self::apply_extraction_request_overrides(
             switch.new_identity.provider,
             provider_params,
             compiled_extraction_output_schema.as_ref(),
@@ -1406,6 +1446,20 @@ where
             switch.new_identity.provider,
             provider_params.as_ref(),
         )?;
+        // The fallback attempt lowers the turn's reasoning preference again,
+        // against its own target model; extraction keeps its baseline.
+        if extraction_output_schema.is_none()
+            && let Some(event) = self.lower_turn_reasoning_preference(
+                Some(&switch.target_profile),
+                None,
+                Some(request.attempt),
+                &mut provider_params,
+            )
+        {
+            let _ =
+                crate::event_tap::tap_emit(&self.event_tap, self.default_event_tx.as_ref(), event)
+                    .await;
+        }
         let max_tokens = request.max_tokens;
 
         let skipped_targets = switch
@@ -5737,8 +5791,22 @@ where
                 .filter(|choice| !choice.is_auto())
                 .cloned()
         };
-        let typed_provider_params =
+        let mut typed_provider_params =
             Some(effective_provider_params).filter(|params| !params.is_empty());
+        // The turn's reasoning preference, lowered onto this request's own
+        // copy against the model this attempt selected. Extraction is a
+        // separate tool-free request and keeps its baseline.
+        if !in_extraction
+            && let Some(event) = self.lower_turn_reasoning_preference(
+                self.request_model_profile(*ctx.controller_feedback)
+                    .as_ref(),
+                Some(ctx.turn_count),
+                None,
+                &mut typed_provider_params,
+            )
+        {
+            emit_phase_event!(self, ctx, event);
+        }
         Ok(CallingLlmGate::Continue(CallingLlmPrepared {
             in_extraction,
             assistant_message_id,
@@ -15213,6 +15281,153 @@ mod tests {
         }
         assert!(saw_run_started, "tap should receive RunStarted");
         assert!(saw_run_completed, "tap should receive RunCompleted");
+    }
+
+    /// #1823: a turn's reasoning preference lowers only that turn's request
+    /// copies, against the selected model's catalog row, and reports each
+    /// attempt. The next turn without one is the baseline again, and the
+    /// durable session identity never changes.
+    #[tokio::test]
+    async fn reasoning_preference_lowers_only_its_turn_and_never_the_session() {
+        use crate::lifecycle::run_primitive::{
+            OpenAiProviderTag, ProviderParamsOverride, ProviderTag, ReasoningBatchDisposition,
+            ReasoningEffort, ReasoningLoweringBaseline, ReasoningLoweringOutcome,
+        };
+        use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities};
+        use crate::model_profile::test_catalog::{OPENAI_MODEL, TEST_CATALOG};
+
+        let row = TEST_CATALOG
+            .capabilities_for(crate::Provider::OpenAI, OPENAI_MODEL)
+            .expect("test openai row");
+        let capabilities: &'static [ModelCapabilities] = Box::leak(
+            TEST_CATALOG
+                .capabilities
+                .iter()
+                .map(|caps| {
+                    if caps.id == row.id {
+                        ModelCapabilities {
+                            supports_reasoning: true,
+                            effort_levels: &[
+                                EffortLevel::None,
+                                EffortLevel::Low,
+                                EffortLevel::Medium,
+                                EffortLevel::High,
+                            ],
+                            ..*caps
+                        }
+                    } else {
+                        *caps
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let catalog = crate::ModelCatalog {
+            capabilities,
+            ..*TEST_CATALOG
+        };
+        let registry = Arc::new(
+            crate::ModelRegistry::from_config(&crate::Config::default(), catalog)
+                .expect("registry"),
+        );
+        let baseline = || ProviderParamsOverride {
+            temperature: Some(0.2),
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let client = Arc::new(RecordingLlmClient::new());
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new()
+                .model(OPENAI_MODEL)
+                .provider_params(baseline())
+                .with_effective_model_registry(Arc::clone(&registry)),
+            explicit_hot_swap_session(OPENAI_MODEL),
+        )
+        .with_tool_visibility_owner(explicit_test_visibility_owner())
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        agent.config.max_turns = Some(1);
+        let identity_before = agent
+            .session()
+            .session_metadata()
+            .expect("metadata")
+            .llm_identity();
+
+        agent.set_active_turn_request_reasoning(Some(ReasoningBatchDisposition::Apply(
+            EffortLevel::Low,
+        )));
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("voice turn".into(), tx)
+            .await
+            .expect("preferred turn");
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        agent.run("typed turn".into()).await.expect("plain turn");
+
+        let run_started_requests = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::RunStarted {
+                    request_reasoning, ..
+                } => Some(*request_reasoning),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            run_started_requests,
+            vec![Some(ReasoningBatchDisposition::Apply(EffortLevel::Low))],
+            "RunStarted carries the request, never the applied value"
+        );
+        let seen = client.seen_params();
+        assert_eq!(seen.len(), 2);
+        let effort_of = |params: &Option<ProviderParamsOverride>| match params
+            .as_ref()
+            .and_then(|params| params.provider_tag.as_ref())
+        {
+            Some(ProviderTag::OpenAi(tag)) => tag.reasoning_effort,
+            _ => None,
+        };
+        assert_eq!(effort_of(&seen[0]), Some(ReasoningEffort::Low));
+        assert_eq!(
+            seen[0].as_ref().and_then(|params| params.temperature),
+            Some(0.2),
+            "unrelated knobs stay"
+        );
+        assert_eq!(seen[1], Some(baseline()), "the next turn is the baseline");
+        let lowered = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::RequestReasoningLowered {
+                    requested,
+                    baseline,
+                    outcome,
+                    model,
+                    ..
+                } => Some((*requested, *baseline, *outcome, model.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lowered,
+            vec![(
+                ReasoningBatchDisposition::Apply(EffortLevel::Low),
+                ReasoningLoweringBaseline::Explicit(EffortLevel::High),
+                Some(ReasoningLoweringOutcome::Applied(EffortLevel::Low)),
+                Some(OPENAI_MODEL.to_string()),
+            )]
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata")
+                .llm_identity(),
+            identity_before,
+            "the preference never reaches the durable identity"
+        );
     }
 
     #[tokio::test]

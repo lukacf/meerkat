@@ -751,6 +751,7 @@ impl AgentBuilder {
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),
+            active_turn_request_reasoning: None,
             turn_state_handle: self.turn_state_handle,
             model_routing_handle: self.model_routing_handle,
             sticky_model_fallback_commit_coordinator: self.sticky_model_fallback_commit_coordinator,

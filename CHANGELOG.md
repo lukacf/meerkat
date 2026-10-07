@@ -545,6 +545,12 @@ them.
 
 ### Testing
 
+- The xtask machine workflow test
+  (`machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts`)
+  now reserves its whole nextest lane in every profile, so no other test runs
+  beside it. It had hit its 480 s bound when scheduled beside other
+  CPU-heavy cases; the bound is unchanged, and
+  `scripts/test-ci-nextest-archive.sh` now requires the reservation.
 - Five tests that failed only under heavy host load (hooked pushes at load
   30-236) now wait on the owned work they observe instead of a timer that
   also covered cleanup (#1730):

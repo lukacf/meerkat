@@ -198,6 +198,18 @@ assert_file_contains "$NEXTEST_CONFIG" 'inherits = "default"'
 assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 4 }'
 assert_file_contains "$NEXTEST_CONFIG" 'filter = '\''test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'\'''
 assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 8 }'
+# The reservation must sit under a default-profile override: nextest's
+# `inherits` does not carry another profile's overrides, so the same stanza
+# under [[profile.fast.overrides]] would silently not apply to ci-unit/ci-pr.
+workflow_isolation_header="$(awk '
+  /^\[/ { header = $0 }
+  pending && $0 == "threads-required = \"num-cpus\"" { print header }
+  { pending = ($0 == "filter = '\''test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'\''") }
+' "$NEXTEST_CONFIG")"
+[[ "$workflow_isolation_header" == '[[profile.default.overrides]]' ]] || {
+  echo "the machine workflow test must reserve the whole lane (threads-required = \"num-cpus\") under [[profile.default.overrides]], found: ${workflow_isolation_header:-none}" >&2
+  exit 1
+}
 assert_file_contains "$NEXTEST_CONFIG" '[profile.mob-dense-topology]'
 assert_file_contains "$NEXTEST_CONFIG" 'default-filter = '\''package(meerkat-mob) and test(=runtime::tests::test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'\'''
 assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 8 }'

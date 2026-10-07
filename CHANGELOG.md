@@ -242,6 +242,22 @@ them.
   disposition, baseline effort and what it sent.
   `EffortLevel` now serializes as its wire string, and `ModelProfileWitness`
   exposes the model's catalog capability row.
+- The loopback OAuth callback can be cancelled during an active wait with a
+  joined cleanup receipt. `LoopbackHandle::wait_until(&mut self, Instant)` is
+  cancel-safe: dropping it loses neither the receiver, a callback already
+  received, nor the server. `LoopbackHandle::close` terminates accepted I/O,
+  awaits the actual connection drain and only then returns `LoopbackClosed`,
+  which reports whether a callback arrived but was never handed out (its code
+  and state are never exposed). `LoopbackHandle::wait_or_cancel` races a
+  caller-owned cancellation future and always joins before it returns
+  `LoopbackWaitEnd` (`Completed`, `Refused`, `TimedOut`, `Cancelled`, or
+  `RetirementFailed` with no receipt). The earliest deadline given to a handle
+  bounds both the callback and the graceful drain and is never renewed; a
+  callback is handed out at most once; a failed retirement stays failed on
+  every later wait or close. Dropping a consuming `wait`, `wait_or_cancel`,
+  or `close` future signals termination without a receipt. Dropping
+  `wait_until` retains the handle for explicit `close`. `wait` and `cancel`
+  are unchanged.
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
   runtime delivery inbox's exclusive delivery ownership
   (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is
@@ -461,6 +477,16 @@ them.
   Cold reads no longer wait on their own guard. Connector logout uses the
   coordinated credential mutation path with an atomic mode check, preserving
   foreign-mode credentials and the existing rollback behavior.
+- An agent's `mob_spawn_member` no longer hangs when its session service keeps
+  sessions in memory while reporting the persistent mob contract (the CLI run
+  host). Creation-source capture read the calling session's metadata through
+  `load_persisted_session_metadata`, which such a service serves from the
+  calling session's own task, and that task was waiting for the tool. Capture
+  now reads only `MobSessionService::load_retained_session_metadata` through
+  the new `meerkat_mob::load_creation_source_metadata`; a service without a
+  retained metadata authority records the child as unproven
+  (`MemberCreationAbsence::NonDurableService`). Durable hosts capture the
+  same source as before.
 
 - Turbo S S106: a reopen whose retained conversation summary was followed by
   more rows than the startup input holds generated a fresh summary, and when

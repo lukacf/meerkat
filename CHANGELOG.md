@@ -511,7 +511,6 @@ them.
   working; anything the policy does not follow is refused by its status
   before reading any header or body. The doctor's self-hosted probe follows none. A
   client that fails to build is a typed error, never a default client.
-
 - These credential routes no longer follow redirects: the token and
   refresh exchange, device-code requests, the Claude, ChatGPT and Code Assist OAuth
   runtimes (including Claude API-key provisioning), the Google and Azure

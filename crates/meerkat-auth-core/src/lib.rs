@@ -65,12 +65,12 @@ pub use browser_login::{
 #[cfg(feature = "oauth")]
 pub use mcp_oauth::{
     CredentialHttpClientUnavailable, MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH,
-    McpAccountSelection, McpAuthMode, McpOAuthAccountStrategy, McpOAuthAttemptRetirement,
+    McpAccountSelection, McpAuthMode, McpOAuthAccountStrategy, McpOAuthAttemptCleanup,
     McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback, McpOAuthCeremonyContext,
-    McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart,
-    McpOAuthLoopbackBegin, McpOAuthPendingAttempt, McpOAuthPendingClosed, McpOAuthPendingLogin,
-    McpServerIdentity, OidcUserInfoAccountStrategy, UNVERIFIED_RESOURCE_STRATEGY_ID,
-    stored_credential_matches_selection,
+    McpOAuthError, McpOAuthListenerCleanup, McpOAuthLoginComplete, McpOAuthLoginDisposition,
+    McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingAttempt, McpOAuthPendingClose,
+    McpOAuthPendingLogin, McpServerIdentity, OidcUserInfoAccountStrategy,
+    UNVERIFIED_RESOURCE_STRATEGY_ID, stored_credential_matches_selection,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_core::auth::{

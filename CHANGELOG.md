@@ -220,17 +220,27 @@ them.
 
 ### Added
 
-- An MCP OAuth loopback login can be cancelled while it waits, with a joined
-  cleanup receipt. `McpOAuthPendingLogin::complete_until(&mut self, Instant)`
-  waits for the callback, bounded by that deadline and the attempt's own
-  expiry, and is safe to abandon: the attempt and the listener stay with the
-  pending login. `McpOAuthPendingLogin::close` retires the attempt through
-  its flow owner, then awaits the listener's drain, and returns
-  `McpOAuthPendingClosed` (`attempt`: `Retired` or `AlreadyConsumed`;
-  `listener`: the joined `LoopbackClosed`). The deadline does not bound the
-  token exchange: dropping a completion during the exchange publishes
-  nothing and retires the attempt, but cannot recall a token the provider
-  may already have issued. `complete` and `cancel` keep their signatures.
+- An MCP OAuth loopback login can be cancelled while it waits, with both
+  cleanups reported. `McpOAuthPendingLogin::complete_until(&mut self,
+  Instant)` waits for the callback, bounded by that deadline and the
+  attempt's own expiry (a deadline already passed wins over a queued
+  callback), and is safe to abandon: the attempt and the listener stay with
+  the pending login. `McpOAuthPendingLogin::close` retires the attempt
+  through its flow owner on its first poll, then closes the listener and
+  awaits its drain, and returns `McpOAuthPendingClose` with the two
+  outcomes kept apart: `attempt` (`Retired`, `Consumed`, `Absent`, or
+  `RetirementFailed` with the owner's error) and `listener` (`Joined` with
+  its `LoopbackClosed` receipt, or `Failed`). `Absent` is the owner having
+  no such attempt, which does not say whether it was consumed, retired or
+  expired. The deadline bounds only the callback wait: it neither extends
+  the attempt nor bounds the completion after delivery, which has no
+  timeout of its own. Dropping a completion while the token exchange is
+  outstanding prevents local publication by it; once the credential commit
+  was handed to its owner, that owner may still finish after the drop, and
+  `close` then reports the outcome as unobserved. The authorization code is
+  never replayed. `complete` keeps its signature and its tie (it polls a
+  queued callback once even at a zero window); `cancel` keeps its signature
+  and maps the two outcomes onto its original errors.
 - The loopback OAuth callback can be cancelled during an active wait with a
   joined cleanup receipt. `LoopbackHandle::wait_until(&mut self, Instant)` is
   cancel-safe: dropping it loses neither the receiver, a callback already
@@ -433,8 +443,11 @@ them.
 - `McpOAuthPendingLogin::cancel` disarmed its drop guard before it
   awaited the listener, then ignored the listener's result: a cancel dropped
   during the drain never retired the attempt, and a normal return did not
-  prove the drain. It now retires the attempt first, before any await, and
-  returns a listener retirement failure as `McpOAuthError::Callback`.
+  prove the drain. It now retires the attempt before any suspension, always
+  attempts both cleanups, and returns a listener retirement failure as
+  `McpOAuthError::Callback`. A pending login whose completion failed or was
+  abandoned keeps the attempt's cleanup custody instead of assuming the
+  completion retired it.
 - GPT Live: a typed row delivered late behind a history summary, together
   with newer speech that corrected part of it, is now framed as newer than the
   summary (#1800). The summary was snapshotted before the row was typed, so it

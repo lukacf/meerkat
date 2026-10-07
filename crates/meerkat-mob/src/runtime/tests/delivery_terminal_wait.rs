@@ -47,7 +47,11 @@ async fn wait_delivery(
 /// held, so the admitted input is still owed a terminal, which one typed
 /// read confirms.
 async fn admitted_pending(fixture: &Fixture, delivery: &MobDeliveryIdentity) -> InputId {
-    let adapter = fixture.service.runtime_adapter().expect("runtime owner");
+    let adapter = fixture
+        .service
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
+        .expect("runtime owner");
     // The admission is the signal; the deadline only bounds a broken run.
     let input_id = tokio::time::timeout(
         WAIT,
@@ -159,7 +163,8 @@ async fn autonomous_delivery_returns_its_own_run_receipt_and_bounded_answer() {
             .expect("second view of the canonical runtime store"),
         ),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let durable = restarted
         .input_terminal_receipt(
             &fixture.session_id,

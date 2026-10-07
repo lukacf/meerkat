@@ -280,7 +280,12 @@ impl ProviderRuntimeRegistry {
         let runtime = self.runtimes.get(&target.identity().provider).ok_or(
             ProviderClientError::MissingFeature("runtime-not-registered"),
         )?;
-        runtime.build_text_client(target)
+        let authorization_target =
+            crate::request_authorization::ResolvedModelAuthorizationTarget::from_target(&target);
+        let client = runtime.build_text_client(target)?;
+        Ok(Arc::new(
+            crate::request_authorization::SelectedTargetClient::new(client, authorization_target),
+        ))
     }
 
     /// Build a realtime-capable text client through the owning provider

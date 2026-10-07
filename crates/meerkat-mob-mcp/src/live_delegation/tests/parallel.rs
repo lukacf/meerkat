@@ -252,10 +252,14 @@ async fn fixture_with_policy(
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     ));
-    let runtime = service.runtime_adapter().expect("runtime");
+    let runtime = service
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
+        .expect("runtime");
     let session_service = service.clone();
     let mobs = Arc::new(
         crate::MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
+            .expect("construct runtime authority")
             .with_workgraph_service(host_workgraph.clone()),
     );
     let mob_id = mobs

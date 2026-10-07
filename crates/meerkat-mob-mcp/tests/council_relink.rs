@@ -386,6 +386,7 @@ async fn a_mobkit_style_host_recovers_and_relinks_councils_after_restore() {
         fixture.service.clone(),
         meerkat_mob::MobControlPrincipal::Owner,
     )
+    .expect("construct runtime authority")
     .with_temporary_council_store(council_store.clone())
     .into_shared();
     restarted
@@ -502,6 +503,7 @@ async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         Some(std::sync::Arc::clone(&runtime)),
         meerkat_mob::MobControlPrincipal::Owner,
     )
+    .expect("construct runtime authority")
     .with_temporary_council_store(council_store.clone())
     .into_shared();
     restarted
@@ -608,6 +610,7 @@ async fn a_relink_sweep_that_runs_before_the_convener_mob_is_registered_delivers
         Some(std::sync::Arc::clone(&runtime)),
         meerkat_mob::MobControlPrincipal::Owner,
     )
+    .expect("construct runtime authority")
     .with_temporary_council_store(council_store.clone())
     .into_shared();
     let mut sweep_passes = restarted.temporary_council_sweep_passes();
@@ -729,6 +732,7 @@ impl PlainConvenerCouncil {
                 Some(std::sync::Arc::clone(&self.runtime)),
                 meerkat_mob::MobControlPrincipal::Owner,
             )
+            .expect("construct runtime authority")
             .with_temporary_council_store(self.store.clone()),
         )
     }

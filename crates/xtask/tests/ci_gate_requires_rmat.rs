@@ -70,6 +70,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "example-web",
             "fmt-governance",
             "gate",
+            "governed-jsonl",
             "integration",
             "main-unit",
             "main-unit-archive-build",
@@ -212,6 +213,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "clippy",
         "unit",
         "integration",
+        "governed-jsonl",
         "main-unit",
         "main-unit-archive-build",
         "main-unit-archive-run",
@@ -237,6 +239,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "require_ran \"Example web suites\"",
         "require_ran \"WASM timer ownership\"",
         "require_ran \"Integration tests\"",
+        "require_ran \"Governed JSONL\"",
         // Every tests/*.rs binary of an integration suite, unless the suite
         // names its targets (the gpt-live replay suite runs one).
         "test_flags=(--test '*')",

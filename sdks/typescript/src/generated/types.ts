@@ -123,6 +123,7 @@ export interface WireToolResult {
   tool_use_id: string;
   content: WireToolResultContent;
   is_error?: boolean;
+  settlement_failures?: ToolDispatchSettlementFailure[];
 }
 
 export interface WireSessionHistory {
@@ -162,6 +163,100 @@ export interface CommsParams {
 export interface SkillsParams {
   skills_enabled: boolean;
   skill_refs: Array<{ source_uuid: string; skill_name: string }>;
+}
+
+export type LiveBridgeEffectKind = "model_computation" | "read_only_memory_snapshot" | "tool_dispatch" | "durable_memory_mutation" | "comms" | "helper_spawn" | "external_io";
+
+export type LiveBridgeEffectOutcome = "committed" | "failed" | "unknown";
+
+export type ToolDispatchAdmissionSource = "configured_gate" | "context_gate" | "authorization_audit";
+
+export type ToolDispatchTerminalErrorKind = "not_found" | "unavailable" | "invalid_arguments" | "execution_failed" | "timeout" | "access_denied" | "authorization_refused" | "operation_observation_unavailable" | "operation_authorization_unavailable" | "policy_denied" | "policy_indeterminate" | "other" | "callback_pending" | "confinement_refused" | "hook_denied";
+
+export interface ToolDispatchSettlementFailure {
+  admission_source: ToolDispatchAdmissionSource;
+  effect_kind: LiveBridgeEffectKind;
+  failure_kind: ToolDispatchTerminalErrorKind;
+  physical_outcome: LiveBridgeEffectOutcome;
+}
+
+export type PrincipalId = string;
+
+export type TrustDomainId = string;
+
+export type PrincipalKind = "human" | "personal_agent" | "shared_agent" | "runtime_host" | "service_account";
+
+export interface PrincipalQualificationUnqualified {
+  kind: "unqualified";
+}
+
+export interface PrincipalQualificationQualified {
+  kind: "qualified";
+  trust_domain_id: TrustDomainId;
+}
+
+export type PrincipalQualification = PrincipalQualificationUnqualified | PrincipalQualificationQualified;
+
+export interface GrantScopeRealm {
+  realm_id: string;
+  scope_type: "realm";
+}
+
+export interface GrantScopeSession {
+  scope_type: "session";
+  session_id: string;
+}
+
+export interface GrantScopeMob {
+  mob_id: string;
+  scope_type: "mob";
+}
+
+export interface GrantScopeAuthBinding {
+  binding_id: BindingId;
+  profile_id?: ProfileId | null;
+  realm_id: RealmId;
+  scope_type: "auth_binding";
+}
+
+export interface GrantScopeApplication {
+  id: string;
+  namespace: string;
+  scope_type: "application";
+}
+
+export type GrantScope = GrantScopeRealm | GrantScopeSession | GrantScopeMob | GrantScopeAuthBinding | GrantScopeApplication;
+
+export type GrantAction = "observe" | "replay_events" | "request_approval" | "decide_approval" | "use_tool" | "manage_runtime" | "use_auth_binding";
+
+export interface VisibilityClassPrivate {
+  principal: PrincipalRef;
+  visibility: "private";
+}
+
+export interface VisibilityClassScoped {
+  scope: GrantScope;
+  visibility: "scoped";
+}
+
+export type VisibilityClass = VisibilityClassPrivate | VisibilityClassScoped;
+
+export interface PrincipalRef {
+  id: PrincipalId;
+  kind: PrincipalKind;
+  qualification?: PrincipalQualification;
+}
+
+export interface ActingOnBehalfOf {
+  actor: PrincipalRef;
+  subject: PrincipalRef;
+}
+
+export interface AuthGrant {
+  acting_on_behalf_of?: ActingOnBehalfOf | null;
+  actions: GrantAction[];
+  principal: PrincipalRef;
+  scope: GrantScope;
 }
 
 export interface McpStdioConfig {

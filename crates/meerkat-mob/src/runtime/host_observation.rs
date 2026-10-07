@@ -921,13 +921,19 @@ async fn run_pending_recovery_reconciler<F, Fut>(
     mut recover_once: F,
 ) where
     F: FnMut() -> Fut,
-    Fut: Future<Output = usize>,
+    Fut: Future<Output = Result<usize, meerkat_runtime::RuntimeDriverError>>,
 {
     let mut backoff = PENDING_RECOVERY_RETRY_MIN;
     let mut previous_pending_count = 0usize;
     loop {
-        let pending_count = recover_once().await;
-        if pending_count == 0 {
+        let pending_count = match recover_once().await {
+            Ok(count) => Some(count),
+            Err(error) => {
+                tracing::warn!(error = %error, "Pending recovery authority unavailable; retaining Pending");
+                None
+            }
+        };
+        if pending_count == Some(0) {
             if projection.changed().await.is_err() {
                 return;
             }
@@ -936,10 +942,12 @@ async fn run_pending_recovery_reconciler<F, Fut>(
             continue;
         }
 
-        if previous_pending_count != 0 && previous_pending_count != pending_count {
-            backoff = PENDING_RECOVERY_RETRY_MIN;
+        if let Some(pending_count) = pending_count {
+            if previous_pending_count != 0 && previous_pending_count != pending_count {
+                backoff = PENDING_RECOVERY_RETRY_MIN;
+            }
+            previous_pending_count = pending_count;
         }
-        previous_pending_count = pending_count;
 
         // Projection changes are useful shutdown/liveness signals, but are not
         // proof that runtime readiness changed for a durable Pending row. Keep
@@ -1086,11 +1094,13 @@ impl HostMemberObservation {
     /// is re-submitted only to obtain a Deduplicated completion handle;
     /// terminal work is reconstructed from its original durable window.
     #[cfg(feature = "runtime-adapter")]
-    async fn recover_pending_turns_once(&self) -> usize {
+    async fn recover_pending_turns_once(
+        &self,
+    ) -> Result<usize, meerkat_runtime::RuntimeDriverError> {
         use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 
-        let Some(adapter) = self.session_service.runtime_adapter() else {
-            return 0;
+        let Some(adapter) = self.session_service.acquire_runtime_adapter(None)? else {
+            return Ok(0);
         };
         // Project only Pending custody out of the actor watch. Cloning the
         // whole projection here also cloned every retained outcome payload
@@ -1312,7 +1322,7 @@ impl HostMemberObservation {
                 }
             }
         }
-        pending_count
+        Ok(pending_count)
     }
 
     #[cfg(not(feature = "runtime-adapter"))]
@@ -2343,12 +2353,16 @@ impl MemberObservationHost for HostMemberObservation {
         {
             use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 
-            let adapter = self.session_service.runtime_adapter().ok_or_else(|| {
-                MemberObservationError::Unavailable {
+            let adapter = self
+                .session_service
+                .acquire_runtime_adapter(None)
+                .map_err(|error| MemberObservationError::Unavailable {
+                    reason: error.to_string(),
+                })?
+                .ok_or_else(|| MemberObservationError::Unavailable {
                     reason: "host has no runtime adapter for tracked-input cancellation"
                         .to_string(),
-                }
-            })?;
+                })?;
             let runtime_input = adapter
                 .input_state_by_idempotency_key(session, input_id)
                 .await
@@ -2492,11 +2506,15 @@ impl MemberObservationHost for HostMemberObservation {
         {
             use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 
-            let adapter = self.session_service.runtime_adapter().ok_or_else(|| {
-                DirectedTurnReject::unsupported(
-                    "host has no runtime adapter for durable directed-turn attribution",
-                )
-            })?;
+            let adapter = self
+                .session_service
+                .acquire_runtime_adapter(None)
+                .map_err(|error| DirectedTurnReject::ambiguous(error.to_string()))?
+                .ok_or_else(|| {
+                    DirectedTurnReject::unsupported(
+                        "host has no runtime adapter for durable directed-turn attribution",
+                    )
+                })?;
             let stored = adapter
                 .input_state_by_idempotency_key(session, &admission.input_id)
                 .await
@@ -4437,6 +4455,8 @@ mod tests {
             )],
             sender_taint: None,
             header: meerkat_runtime::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::from_uuid(stable),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::input::InputOrigin::Peer {
@@ -6028,9 +6048,16 @@ mod tests {
                 {
                     let _ = tx.send(());
                 }
-                // Pending remains projected on both the transient failure
-                // and successful watcher reattachment passes.
-                1
+                // Readiness failure must retry without a projection change.
+                if attempt == 0 {
+                    Err(
+                        meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                            reason: meerkat_runtime::traits::ControllerReadinessFailure::Busy,
+                        },
+                    )
+                } else {
+                    Ok(1)
+                }
             }
         }));
         tokio::task::yield_now().await;
@@ -6053,7 +6080,7 @@ mod tests {
             let attempts = Arc::clone(&task_attempts);
             async move {
                 attempts.fetch_add(1, Ordering::SeqCst);
-                1
+                Ok(1)
             }
         }));
         tokio::task::yield_now().await;

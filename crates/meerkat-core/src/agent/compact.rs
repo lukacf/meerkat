@@ -623,6 +623,7 @@ fn is_compaction_capacity_error(error: &crate::error::AgentError) -> bool {
 }
 
 pub(crate) struct CompactionInvocation<'a> {
+    pub(crate) authorization: Option<crate::LlmRequestAuthorization>,
     /// Exact model-facing projection. Superseded prompt versions remain in
     /// the durable `window` for rewrite validation but never enter forecasts
     /// or the summarization request.
@@ -690,6 +691,7 @@ where
     C: crate::agent::AgentLlmClient + ?Sized,
 {
     let CompactionInvocation {
+        authorization,
         model_messages,
         observation_source,
         window,
@@ -777,7 +779,14 @@ where
 
         // Call LLM with empty tools, max_summary_tokens
         let llm_result = client
-            .stream_response(&compaction_messages, &[], max_summary_tokens, None, None)
+            .stream_response_authorized(
+                &compaction_messages,
+                &[],
+                max_summary_tokens,
+                None,
+                None,
+                authorization,
+            )
             .await;
 
         match llm_result {
@@ -1293,6 +1302,7 @@ mod tests {
             &compactor,
             None,
             CompactionInvocation {
+                authorization: None,
                 model_messages: &model_messages,
                 observation_source: CompactionObservationSource::from_session(session).unwrap(),
                 window: CompactionWindow {
@@ -1416,6 +1426,7 @@ mod tests {
             &compactor,
             Some(&curator),
             CompactionInvocation {
+                authorization: None,
                 model_messages: &model_messages,
                 observation_source: CompactionObservationSource::from_session(&session).unwrap(),
                 window: CompactionWindow {

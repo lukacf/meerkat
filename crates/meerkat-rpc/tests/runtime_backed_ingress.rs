@@ -94,7 +94,8 @@ fn spawn_test_server() -> (
             store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             blob_store,
-        ),
+        )
+        .expect("construct runtime authority"),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
@@ -114,7 +115,8 @@ fn spawn_test_server() -> (
     let handle = tokio::spawn(async move {
         let _temp = temp;
         let reader = BufReader::new(server_reader);
-        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store)
+            .expect("construct runtime authority");
         server.run().await
     });
 
@@ -308,7 +310,7 @@ async fn runtime_skill_refs_reach_canonical_history_and_provider_bytes() {
                 Arc::new(meerkat::MemoryStore::new()),
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 Arc::new(MemoryBlobStore::new()),
-            ),
+            ).expect("construct runtime authority"),
             meerkat_rpc::router::NotificationSink::noop(),
         ));
         runtime.set_default_llm_client(Some(Arc::new(client)));
@@ -320,7 +322,7 @@ async fn runtime_skill_refs_reach_canonical_history_and_provider_bytes() {
         let mut reader = BufReader::new(reader);
         let server_runtime = runtime.clone();
         let rpc_task = tokio::spawn(async move {
-            RpcServer::new(BufReader::new(server_reader), server_writer, server_runtime, config_store)
+            RpcServer::new(BufReader::new(server_reader), server_writer, server_runtime, config_store).expect("construct runtime authority")
                 .run().await.unwrap();
         });
 

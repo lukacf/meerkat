@@ -50,6 +50,8 @@ pub struct GeminiClient {
     /// build fails each request with that error instead of substituting a
     /// default client, whose redirect policy would follow redirects.
     http: Result<reqwest::Client, LlmError>,
+    #[cfg(not(target_arch = "wasm32"))]
+    checked_http: std::sync::OnceLock<Result<reqwest::Client, LlmError>>,
     wire_mode: GeminiWireMode,
     google_backend_kind: GoogleBackendKind,
     code_assist_project_id: Option<String>,
@@ -321,6 +323,8 @@ impl GeminiClient {
             api_key,
             base_url,
             http,
+            #[cfg(not(target_arch = "wasm32"))]
+            checked_http: std::sync::OnceLock::new(),
             wire_mode: GeminiWireMode::PublicGenerateContent,
             google_backend_kind: GoogleBackendKind::GoogleGenAi,
             code_assist_project_id: None,
@@ -332,6 +336,10 @@ impl GeminiClient {
     pub fn with_base_url(mut self, url: String) -> Self {
         self.http = http::build_http_client_for_base_url(reqwest::Client::builder(), &url);
         self.base_url = url;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.checked_http = std::sync::OnceLock::new();
+        }
         self
     }
 
@@ -765,6 +773,13 @@ impl GeminiClient {
                 outer.insert("request".to_string(), body);
                 Ok(Value::Object(outer))
             }
+        }
+    }
+
+    fn stream_wire_model<'a>(&self, model: &'a str) -> &'a str {
+        match self.wire_mode {
+            GeminiWireMode::PublicGenerateContent => model,
+            GeminiWireMode::CodeAssist => code_assist_model(model),
         }
     }
 
@@ -2097,58 +2112,73 @@ fn join_index(prefix: &str, index: usize) -> String {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl LlmClient for GeminiClient {
-    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        project_gemini_replay_messages(messages)
-    }
-
-    fn request_pressure(
-        &self,
-        request: &LlmRequest,
-    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
-        let mut projected_request = request.clone();
-        projected_request.messages = self.project_replay_messages(&request.messages)?;
-        // Google GenAI rewrites gs:// references through an async Files API
-        // registration step. A synchronous observer cannot prove the resulting
-        // URI bytes, so fail truthfully unavailable instead of reporting a
-        // stale pre-registration body as exact.
-        if self.requires_referenced_video_preparation(&projected_request.messages) {
-            return Ok(None);
-        }
-        let body = self.build_stream_request_body(&projected_request)?;
-        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
-            message: format!("failed to serialize Gemini request body: {error}"),
-        })?;
-        Ok(Some(
-            meerkat_core::ProviderRequestPressure::new(
-                encoded_body.len() as u64,
-                meerkat_models::approximate_request_byte_cap(self.provider()),
-            )
-            .with_lowered_request_provenance(
-                meerkat_core::LoweredRequestProvenance::from_body(
-                    Provider::Gemini,
-                    meerkat_core::LoweredRequestEncoding::GeminiGenerateContentJson,
-                    &encoded_body,
-                ),
-            ),
-        ))
-    }
-
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+impl GeminiClient {
+    fn stream_with_authorization<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        prepared: Option<&'a meerkat_llm_core::PreparedLlmRequest>,
+    ) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
+            if prepared.is_some_and(|value| value.authorization().is_some())
+                && self.requires_referenced_video_preparation(&projected_request.messages)
+            {
+                // Files registration/polling is a separate operation. Do not
+                // send it under only the later inference authorization.
+                Err(LlmError::operation_refused(
+                    meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                ))?;
+            }
             self.prepare_referenced_videos(&mut projected_request.messages).await?;
             let request = &projected_request;
             let body = self.build_stream_request_body(request)?;
             let url = self.stream_generate_content_url(&request.model);
 
+            let check: Option<meerkat_core::authorization::PreparedOperationCheck> =
+                if let Some(prepared) = prepared.filter(|value| value.authorization().is_some()) {
+                    http::validate_authorization_base_url(&self.base_url)?;
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = prepared;
+                        // Browser Fetch redirect ownership is not exposed by
+                        // reqwest. The supported path cannot bypass that fact.
+                        Err(LlmError::operation_refused(
+                            meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                        ))?;
+                        None
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let wire_model = self.stream_wire_model(&request.model);
+                        let lowered = match self.wire_mode {
+                            GeminiWireMode::PublicGenerateContent => &body,
+                            GeminiWireMode::CodeAssist => &body["request"],
+                        };
+                        let capabilities = lowered.get("tools").and_then(Value::as_array)
+                            .into_iter().flatten().filter_map(Value::as_object)
+                            .flat_map(|tool| tool.keys())
+                            .filter(|name| name.as_str() != "functionDeclarations")
+                            .map(|name| match name.as_str() {
+                                "googleSearch" | "googleSearchRetrieval" => ServerToolKind::GoogleSearch,
+                                _ => ServerToolKind::ProviderNative { name: name.clone() },
+                            }).collect();
+                        prepared.prepare_model_authorization(&url, wire_model, capabilities)?
+                    }
+                } else { None };
+            #[cfg(not(target_arch = "wasm32"))]
+            let http = if check.is_some() {
+                self.checked_http.get_or_init(|| http::build_checked_http_client_for_base_url(
+                    reqwest::Client::builder(), &self.base_url,
+                )).as_ref().map_err(Clone::clone)?
+            } else { self.http()? };
+            #[cfg(target_arch = "wasm32")]
+            let http = self.http()?;
+
             // Auth path: if an authorizer is attached (Code Assist /
             // Vertex ADC Bearer flow), collect its headers via the
             // HttpAuthorizer trait; otherwise fall back to x-goog-api-key.
-            let mut req = self.http()?
+            let mut req = http
                 .post(&url)
                 .header("Content-Type", "application/json");
             if let Some(authorizer) = &self.authorizer {
@@ -2170,13 +2200,16 @@ impl LlmClient for GeminiClient {
             } else {
                 req = req.header("x-goog-api-key", &self.api_key);
             }
-            let response = req
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+            let req = req.json(&body).build().map_err(|_| LlmError::InvalidRequest {
+                message: "could not construct model request".to_owned(),
+            })?;
+            let mut diagnostics = Vec::new();
+            let response = http::execute_with_authorization(
+                http, req, check.as_ref(), &mut diagnostics,
+                |_| LlmError::NetworkTimeout { duration_ms: 30000 },
+            ).await;
+            for diagnostic in diagnostics { yield diagnostic; }
+            let response = response?;
 
             let status_code = response.status().as_u16();
             let stream_result = if (200..=299).contains(&status_code) {
@@ -2313,6 +2346,77 @@ impl LlmClient for GeminiClient {
         });
 
         streaming::ensure_terminal_done(inner)
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl LlmClient for GeminiClient {
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        let authorizer = self
+            .authorizer
+            .as_ref()
+            .ok_or(meerkat_core::auth::AuthError::HostOwnedUnavailable)?;
+        authorizer.prepare_request().await
+    }
+
+    fn plain_model_route(
+        &self,
+        logical_model: &str,
+    ) -> Result<meerkat_llm_core::PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
+        http::validate_authorization_base_url(&self.base_url)
+            .map_err(|_| meerkat_core::ControllerFactsUnavailable)?;
+        meerkat_llm_core::PlainModelRoute::new(
+            &self.stream_generate_content_url(logical_model),
+            self.stream_wire_model(logical_model),
+        )
+    }
+
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        project_gemini_replay_messages(messages)
+    }
+
+    fn request_pressure(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages = self.project_replay_messages(&request.messages)?;
+        // Google GenAI rewrites gs:// references through an async Files API
+        // registration step. A synchronous observer cannot prove the resulting
+        // URI bytes, so fail truthfully unavailable instead of reporting a
+        // stale pre-registration body as exact.
+        if self.requires_referenced_video_preparation(&projected_request.messages) {
+            return Ok(None);
+        }
+        let body = self.build_stream_request_body(&projected_request)?;
+        let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+            message: format!("failed to serialize Gemini request body: {error}"),
+        })?;
+        Ok(Some(
+            meerkat_core::ProviderRequestPressure::new(
+                encoded_body.len() as u64,
+                meerkat_models::approximate_request_byte_cap(self.provider()),
+            )
+            .with_lowered_request_provenance(
+                meerkat_core::LoweredRequestProvenance::from_body(
+                    Provider::Gemini,
+                    meerkat_core::LoweredRequestEncoding::GeminiGenerateContentJson,
+                    &encoded_body,
+                ),
+            ),
+        ))
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_with_authorization(request, None)
+    }
+
+    fn stream_prepared<'a>(
+        &'a self,
+        request: &'a meerkat_llm_core::PreparedLlmRequest,
+    ) -> LlmStream<'a> {
+        self.stream_with_authorization(request.request(), Some(request))
     }
 
     fn provider(&self) -> Provider {
@@ -3251,8 +3355,17 @@ mod tests {
         ]
         .join("\n");
         let (base_url, handle) = spawn_code_assist_stream_stub(payload, seen.clone()).await;
-        let client =
-            GeminiClient::new_with_base_url(String::new(), base_url).with_code_assist_wire();
+        let client = GeminiClient::new_with_base_url(String::new(), base_url.clone())
+            .with_code_assist_wire();
+        let plain = client
+            .plain_model_route("gemini-3.1-flash-lite")
+            .expect("request-free CodeAssist lowering");
+        assert!(seen.lock().expect("seen mutex").is_empty());
+        assert_eq!(plain.wire_model(), "gemini-2.5-flash");
+        assert_eq!(
+            plain.endpoint(),
+            client.stream_generate_content_url("gemini-3.1-flash-lite")
+        );
         let request = LlmRequest::new(
             "gemini-3.1-flash-lite",
             vec![Message::User(UserMessage::text("hello".to_string()))],
@@ -3273,6 +3386,7 @@ mod tests {
         let bodies = seen.lock().expect("seen mutex");
         let body = bodies.first().expect("captured Code Assist request");
         assert_eq!(body["model"], "gemini-2.5-flash");
+        assert_eq!(body["model"], plain.wire_model());
         assert!(
             body.get("user_prompt_id").and_then(Value::as_str).is_some(),
             "Code Assist requires a user_prompt_id on generate requests",

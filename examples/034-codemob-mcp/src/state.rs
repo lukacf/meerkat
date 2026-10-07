@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use meerkat::{build_ephemeral_service, AgentFactory, FactoryAgentBuilder};
+use meerkat::{AgentFactory, FactoryAgentBuilder, build_ephemeral_service};
 use meerkat_core::config::Config;
 use meerkat_mob::MobControlPrincipal;
 use meerkat_mob_mcp::MobMcpState;
@@ -58,7 +58,7 @@ impl ForceState {
         let mob_state = Arc::new(MobMcpState::new(
             session_service.clone(),
             MobControlPrincipal::Owner,
-        ));
+        )?);
         let mut pack_registry = PackRegistry::new();
         // Load user packs from disk on startup
         let mobs_dir = workspace.join(".codemob-mcp/mobs");
@@ -121,6 +121,7 @@ impl ForceState {
         state.session_service = Arc::new(EphemeralSessionService::new(builder, 64));
         state.mob_state = Arc::new(
             MobMcpState::new(state.session_service.clone(), MobControlPrincipal::Owner)
+                .expect("construct test runtime authority")
                 .with_default_llm_client(Some(client)),
         );
         state

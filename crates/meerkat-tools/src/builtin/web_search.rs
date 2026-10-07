@@ -100,7 +100,15 @@ impl BuiltinTool for WebSearchTool {
                 context: args.context.filter(|value| !value.trim().is_empty()),
             })
             .await
-            .map_err(|err| BuiltinToolError::execution_failed(err.to_string()))?;
+            .map_err(|err| match err {
+                meerkat_llm_core::LlmError::OperationObservationUnavailable => {
+                    BuiltinToolError::OperationObservationUnavailable
+                }
+                meerkat_llm_core::LlmError::OperationAuthorizationUnavailable => {
+                    BuiltinToolError::OperationAuthorizationUnavailable
+                }
+                other => BuiltinToolError::execution_failed(other.to_string()),
+            })?;
         serde_json::to_value(result)
             .map(ToolOutput::Json)
             .map_err(|err| BuiltinToolError::execution_failed(err.to_string()))

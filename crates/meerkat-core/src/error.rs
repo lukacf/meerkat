@@ -13,6 +13,8 @@ pub struct PendingCallbackToolCall {
     pub tool_use_id: String,
     pub tool_name: String,
     pub args: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +52,14 @@ pub enum LlmFailureReason {
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderErrorKind {
     InvalidRequest,
+    /// The local authorization owner refused this concrete operation before
+    /// dispatch. This is agent feedback, not a provider retry or run failure.
+    OperationRefused,
+    /// Protected observation infrastructure failed before physical entry.
+    /// This is never permission feedback, a retry, or a fallback trigger.
+    OperationObservationUnavailable,
+    /// Current operation authority could not be obtained.
+    OperationAuthorizationUnavailable,
     /// A dynamic authorization refresh changed the concrete provider route
     /// before dispatch. The caller must rebuild provider projections before
     /// retrying.
@@ -120,7 +130,11 @@ impl LlmProviderError {
     }
 
     pub fn is_retryable(&self) -> bool {
-        self.retryability.is_retryable()
+        !matches!(
+            self.kind,
+            LlmProviderErrorKind::OperationObservationUnavailable
+                | LlmProviderErrorKind::OperationAuthorizationUnavailable
+        ) && self.retryability.is_retryable()
     }
 }
 
@@ -195,6 +209,19 @@ pub enum ToolError {
     #[error("Outcome of tool '{name}' is uncertain: {reason}")]
     OutcomeUncertain { name: String, reason: String },
 
+    /// The affected operation was refused by its governed authorization owner.
+    /// This is an ordinary tool result, never a run or session disposition.
+    #[error("{refusal}")]
+    AuthorizationRefused {
+        refusal: crate::authorization::OperationRefused,
+    },
+
+    /// Protected observation infrastructure failed before this tool entered.
+    #[error("operation observation unavailable")]
+    OperationObservationUnavailable,
+    #[error("operation authorization unavailable")]
+    OperationAuthorizationUnavailable,
+
     /// Application consequence policy denied an otherwise statically admitted call.
     #[error("Tool call denied by application policy: {denial:?}")]
     PolicyDenied {
@@ -221,11 +248,104 @@ pub enum ToolError {
         tool_name: String,
         args: serde_json::Value,
     },
+    /// Settlement failed after the primary dispatch result was already known.
+    /// Classification and presentation continue to use the original error.
+    #[error("{error}")]
+    WithSettlementFailures {
+        error: Box<ToolError>,
+        failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    },
+    /// Mechanical launch requirements refused this tool.
+    /// The exact domain cause remains available to tool-feedback owners.
+    #[error("{refusal}")]
+    ConfinementRefused {
+        refusal: crate::confinement::ConfinementRefusal,
+    },
+    /// An entered hook refused this attempted operation by explicit policy.
+    #[error("{denial}")]
+    HookDenied {
+        /// Keep the full denial without enlarging unrelated result values.
+        denial: Box<crate::hooks::HookDenial>,
+    },
+}
+
+impl From<crate::OperationAuthorizationError> for ToolError {
+    fn from(error: crate::OperationAuthorizationError) -> Self {
+        match error {
+            crate::OperationAuthorizationError::Refused(refusal) => {
+                Self::AuthorizationRefused { refusal }
+            }
+            crate::OperationAuthorizationError::Unavailable => {
+                Self::OperationAuthorizationUnavailable
+            }
+            crate::OperationAuthorizationError::ObservationUnavailable(_) => {
+                Self::OperationObservationUnavailable
+            }
+        }
+    }
+}
+
+impl From<crate::authorization::OperationObservationError> for ToolError {
+    fn from(_: crate::authorization::OperationObservationError) -> Self {
+        Self::OperationObservationUnavailable
+    }
 }
 
 impl ToolError {
+    /// The original tool result, independent of admission settlement.
+    #[must_use]
+    pub fn primary_error(&self) -> &Self {
+        let mut current = self;
+        while let Self::WithSettlementFailures { error, .. } = current {
+            current = error;
+        }
+        current
+    }
+
+    pub fn settlement_failures(
+        &self,
+    ) -> impl Iterator<Item = &crate::ops::ToolDispatchSettlementFailure> {
+        std::iter::successors(Some(self), |error| match error {
+            Self::WithSettlementFailures { error, .. } => Some(error.as_ref()),
+            _ => None,
+        })
+        .flat_map(|error| match error {
+            Self::WithSettlementFailures { failures, .. } => failures.as_slice(),
+            _ => &[],
+        })
+    }
+
+    pub fn into_primary_and_settlement_failures(
+        self,
+    ) -> (Self, Vec<crate::ops::ToolDispatchSettlementFailure>) {
+        let mut current = self;
+        let mut retained = Vec::new();
+        while let Self::WithSettlementFailures { error, failures } = current {
+            retained.extend(failures);
+            current = *error;
+        }
+        (current, retained)
+    }
+
+    #[must_use]
+    pub fn with_settlement_failures(
+        self,
+        failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
+    ) -> Self {
+        if failures.is_empty() {
+            return self;
+        }
+        let (error, mut retained) = self.into_primary_and_settlement_failures();
+        retained.extend(failures);
+        Self::WithSettlementFailures {
+            error: Box::new(error),
+            failures: retained,
+        }
+    }
+
     pub fn error_code(&self) -> &'static str {
         match self {
+            Self::WithSettlementFailures { .. } => self.primary_error().error_code(),
             Self::NotFound { .. } => "tool_not_found",
             Self::Unavailable { .. } => "tool_unavailable",
             Self::InvalidArguments { .. } => "invalid_arguments",
@@ -236,6 +356,11 @@ impl ToolError {
             Self::InactivityTimeout { .. } => "inactivity_timeout",
             Self::AccessDenied { .. } => "access_denied",
             Self::OutcomeUncertain { .. } => "outcome_uncertain",
+            Self::AuthorizationRefused { .. } => "operation_refused",
+            Self::ConfinementRefused { .. } => "confinement_refused",
+            Self::HookDenied { .. } => "hook_denied",
+            Self::OperationObservationUnavailable => "operation_observation_unavailable",
+            Self::OperationAuthorizationUnavailable => "operation_authorization_unavailable",
             Self::PolicyDenied { .. } => "policy_denied",
             Self::PolicyIndeterminate { .. } => "policy_indeterminate",
             Self::Other(_) => "tool_error",
@@ -244,12 +369,19 @@ impl ToolError {
     }
 
     pub fn to_error_payload(&self) -> serde_json::Value {
+        // Policy infrastructure details belong to its owner. The public/model
+        // projection preserves the typed class without disclosing those facts.
+        let indeterminate = matches!(self.primary_error(), Self::PolicyIndeterminate { .. });
         let mut payload = serde_json::json!({
             "error": self.error_code(),
-            "message": self.to_string(),
+            "message": if indeterminate { "operation policy unavailable".to_owned() } else { self.to_string() },
         });
-        if let Some(data) = self.structured_data() {
+        if !indeterminate && let Some(data) = self.structured_data() {
             payload["data"] = data;
+        }
+        let failures: Vec<_> = self.settlement_failures().collect();
+        if !failures.is_empty() {
+            payload["settlement_failures"] = serde_json::json!(failures);
         }
         payload
     }
@@ -294,7 +426,20 @@ impl ToolError {
     }
     pub fn structured_data(&self) -> Option<serde_json::Value> {
         match self {
+            Self::WithSettlementFailures { .. } => self.primary_error().structured_data(),
             Self::ExecutionFailedWithData { data, .. } => Some(data.clone()),
+            Self::ConfinementRefused { refusal } => Some(serde_json::json!({"refusal": refusal})),
+            Self::HookDenied { denial } => {
+                let mut data = serde_json::json!({
+                    "hook_id": denial.hook_id,
+                    "point": denial.point,
+                    "reason_code": denial.reason_code,
+                });
+                if let Some(payload) = &denial.payload {
+                    data["payload"] = payload.clone();
+                }
+                Some(data)
+            }
             Self::PolicyDenied { denial } => serde_json::to_value(denial).ok(),
             Self::PolicyIndeterminate { failure } => serde_json::to_value(failure).ok(),
             _ => None,
@@ -341,12 +486,12 @@ impl ToolError {
 
     /// Check if this is a callback pending error
     pub fn is_callback_pending(&self) -> bool {
-        matches!(self, Self::CallbackPending { .. })
+        matches!(self.primary_error(), Self::CallbackPending { .. })
     }
 
     /// Extract callback pending info if this is a CallbackPending error
     pub fn as_callback_pending(&self) -> Option<(&str, &serde_json::Value)> {
-        match self {
+        match self.primary_error() {
             Self::CallbackPending { tool_name, args } => Some((tool_name, args)),
             _ => None,
         }
@@ -403,9 +548,17 @@ pub enum AgentError {
     /// [`ToolError::error_code`] and the wire surface.
     #[error("Tool error: {error}")]
     Tool { error: ToolError },
+    /// An operation-local authorization refusal. The agent loop returns safe
+    /// feedback through its permitted controller instead of failing the run.
+    #[error("{refusal}")]
+    OperationRefused {
+        refusal: crate::authorization::OperationRefused,
+    },
     #[error("Tool consequence policy is indeterminate: {failure}")]
     PolicyIndeterminate {
-        failure: crate::ToolConsequenceFailure,
+        failure: Box<crate::ToolConsequenceFailure>,
+        /// Admission settlement diagnostics accompanying the original policy failure.
+        settlement_failures: Vec<crate::ops::ToolDispatchSettlementFailure>,
     },
     #[error("MCP error: {0}")]
     McpError(String),
@@ -565,9 +718,103 @@ pub enum AgentError {
     /// genuine [`AgentError::ConfigError`].
     #[error("durable session snapshot synchronization is not supported by this session agent")]
     DurableSnapshotSyncUnsupported,
+
+    /// A hook prerequisite failed before target entry. Its calling operation
+    /// owner decides local feedback; the cause is not an authorization denial.
+    #[error("Hook launch refused for '{hook_id}': {reason}")]
+    HookLaunchRefused {
+        hook_id: HookId,
+        reason: crate::hooks::HookFailureReason,
+    },
+}
+
+impl From<crate::OperationAuthorizationError> for AgentError {
+    fn from(error: crate::OperationAuthorizationError) -> Self {
+        match error {
+            crate::OperationAuthorizationError::Refused(refusal) => {
+                Self::OperationRefused { refusal }
+            }
+            crate::OperationAuthorizationError::Unavailable => Self::authorization_unavailable(),
+            crate::OperationAuthorizationError::ObservationUnavailable(_) => {
+                Self::operation_observation_unavailable()
+            }
+        }
+    }
+}
+
+impl From<crate::authorization::OperationObservationError> for AgentError {
+    fn from(_: crate::authorization::OperationObservationError) -> Self {
+        Self::operation_observation_unavailable()
+    }
 }
 
 impl AgentError {
+    pub fn authorization_unavailable() -> Self {
+        Self::llm(
+            "authorization",
+            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::OperationAuthorizationUnavailable,
+                serde_json::Value::Null,
+            )),
+            "operation authorization unavailable",
+        )
+    }
+
+    /// Typed local authority failure, never inferred from a provider message.
+    pub fn operation_authorization_unavailable(&self) -> bool {
+        matches!(self, Self::Llm { reason: LlmFailureReason::ProviderError(error), .. }
+            if error.kind == LlmProviderErrorKind::OperationAuthorizationUnavailable)
+    }
+
+    pub fn operation_observation_unavailable() -> Self {
+        Self::llm(
+            "authorization",
+            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::OperationObservationUnavailable,
+                serde_json::Value::Null,
+            )),
+            "operation observation unavailable",
+        )
+    }
+
+    /// Recover a local refusal across the compatibility provider-error shape.
+    /// Provider retryability and diagnostic text cannot turn it into a terminal
+    /// or retryable provider failure. Missing typed details remain a refusal.
+    pub fn operation_refusal(&self) -> Option<crate::OperationRefused> {
+        match self {
+            Self::OperationRefused { refusal } => Some(*refusal),
+            Self::Llm {
+                reason: LlmFailureReason::ProviderError(error),
+                ..
+            } if error.kind == LlmProviderErrorKind::OperationRefused => {
+                let kind = error
+                    .details
+                    .get("kind")
+                    .cloned()
+                    .and_then(|kind| serde_json::from_value(kind).ok())
+                    .unwrap_or(crate::OperationRefusalKind::MalformedFacts);
+                Some(crate::OperationRefused::new(kind))
+            }
+            _ => None,
+        }
+    }
+
+    /// Preserve the existing single-callback shape unless a typed settlement
+    /// companion needs the complete pending-item carrier.
+    pub fn callback_pending_with_settlement(call: PendingCallbackToolCall) -> Self {
+        if call.settlement_failures.is_empty() {
+            Self::CallbackPending {
+                tool_use_id: call.tool_use_id,
+                tool_name: call.tool_name,
+                args: call.args,
+            }
+        } else {
+            Self::CallbackBatchPending {
+                pending_tool_calls: vec![call],
+            }
+        }
+    }
+
     /// Wrap a typed [`ToolError`] as a terminal agent failure, preserving the
     /// typed cause (and thus its [`ToolError::error_code`]).
     pub fn tool(error: ToolError) -> Self {
@@ -1074,5 +1321,194 @@ mod tests {
                 "TerminalFailure({outcome:?}) should not be graceful"
             );
         }
+    }
+
+    #[test]
+    fn settlement_companion_keeps_primary_classification_and_callback_payload() {
+        let marker = crate::ToolDispatchSettlementFailure {
+            admission_source: crate::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Unknown,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::ExecutionFailed,
+        };
+        for primary in [
+            ToolError::access_denied("tool"),
+            ToolError::inactivity_timeout("tool", 10),
+            ToolError::policy_indeterminate(crate::ToolConsequenceFailure::InvalidProvenance {
+                reason: "primary-policy-failure".into(),
+            }),
+            ToolError::callback_pending("tool", serde_json::json!({"question":"answer"})),
+        ] {
+            let error = primary
+                .clone()
+                .with_settlement_failures(vec![marker.clone()]);
+            assert_eq!(error.primary_error(), &primary);
+            assert_eq!(error.error_code(), primary.error_code());
+            assert_eq!(error.structured_data(), primary.structured_data());
+            assert_eq!(error.is_callback_pending(), primary.is_callback_pending());
+            assert_eq!(error.as_callback_pending(), primary.as_callback_pending());
+            assert_eq!(
+                crate::ToolDispatchTerminalErrorKind::from(&error),
+                crate::ToolDispatchTerminalErrorKind::from(&primary)
+            );
+            let nested = ToolError::WithSettlementFailures {
+                error: Box::new(error),
+                failures: vec![marker.clone()],
+            };
+            assert_eq!(nested.settlement_failures().count(), 2);
+            let (retained, failures) = nested.into_primary_and_settlement_failures();
+            assert_eq!(retained, primary);
+            assert_eq!(failures, vec![marker.clone(), marker.clone()]);
+        }
+        let call = PendingCallbackToolCall {
+            tool_use_id: "callback".into(),
+            tool_name: "tool".into(),
+            args: serde_json::json!({}),
+            settlement_failures: Vec::new(),
+        };
+        assert!(matches!(
+            AgentError::callback_pending_with_settlement(call),
+            AgentError::CallbackPending { .. }
+        ));
+    }
+
+    #[test]
+    fn policy_indeterminate_payload_is_safe_without_erasing_owner_details() {
+        let error =
+            ToolError::policy_indeterminate(crate::ToolConsequenceFailure::EvaluationFailed {
+                reason: "private evaluator canary".into(),
+            });
+        let payload = error.to_error_payload();
+        assert_eq!(payload["error"], "policy_indeterminate");
+        assert_eq!(payload["message"], "operation policy unavailable");
+        assert!(payload.get("data").is_none());
+        assert!(!payload.to_string().contains("private evaluator canary"));
+        assert!(
+            !error
+                .to_transcript_content()
+                .contains("private evaluator canary")
+        );
+        assert!(
+            error
+                .structured_data()
+                .expect("owner data retained")
+                .to_string()
+                .contains("private evaluator canary")
+        );
+        assert!(error.to_string().contains("private evaluator canary"));
+        let ordinary = ToolError::execution_failed_with_data(
+            "ordinary failure",
+            serde_json::json!({"detail": "retained"}),
+        );
+        assert_eq!(
+            ordinary.to_error_payload()["message"],
+            "Tool execution failed: ordinary failure"
+        );
+        assert_eq!(
+            ordinary.to_error_payload()["data"],
+            serde_json::json!({"detail": "retained"})
+        );
+    }
+
+    #[test]
+    fn wrapped_policy_indeterminate_keeps_ordered_settlement_without_private_payload() {
+        let first = crate::ToolDispatchSettlementFailure {
+            admission_source: crate::ToolDispatchAdmissionSource::ConfiguredGate,
+            effect_kind: crate::LiveBridgeEffectKind::ToolDispatch,
+            physical_outcome: crate::LiveBridgeEffectOutcome::Unknown,
+            failure_kind: crate::ToolDispatchTerminalErrorKind::Unavailable,
+        };
+        let second = crate::ToolDispatchSettlementFailure {
+            admission_source: crate::ToolDispatchAdmissionSource::ContextGate,
+            ..first
+        };
+        let primary =
+            ToolError::policy_indeterminate(crate::ToolConsequenceFailure::InvalidProvenance {
+                reason: "private wrapped evaluator canary".into(),
+            });
+        let inner = ToolError::WithSettlementFailures {
+            error: Box::new(primary),
+            failures: vec![first.clone()],
+        };
+        let error = ToolError::WithSettlementFailures {
+            error: Box::new(inner),
+            failures: vec![second.clone()],
+        };
+        let expected = vec![second, first];
+        let payload = error.to_error_payload();
+        assert_eq!(payload["error"], "policy_indeterminate");
+        assert_eq!(payload["message"], "operation policy unavailable");
+        assert!(payload.get("data").is_none());
+        assert_eq!(
+            payload["settlement_failures"],
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert!(
+            !error
+                .to_transcript_content()
+                .contains("private wrapped evaluator canary")
+        );
+        let (retained, failures) = error.into_primary_and_settlement_failures();
+        assert_eq!(failures, expected);
+        assert!(matches!(retained, ToolError::PolicyIndeterminate {
+            failure: crate::ToolConsequenceFailure::InvalidProvenance { reason }
+        } if reason == "private wrapped evaluator canary"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod operation_unavailable_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_is_distinct_safe_and_never_retryable() {
+        let tool = ToolError::from(crate::OperationAuthorizationError::Unavailable);
+        assert_eq!(
+            tool.to_error_payload(),
+            serde_json::json!({
+                "error": "operation_authorization_unavailable",
+                "message": "operation authorization unavailable",
+            })
+        );
+        let cause = crate::ToolDispatchTerminalErrorKind::from(&tool);
+        assert_eq!(
+            cause,
+            crate::ToolDispatchTerminalErrorKind::OperationAuthorizationUnavailable
+        );
+        assert_eq!(
+            serde_json::from_value::<crate::ToolDispatchTerminalErrorKind>(
+                serde_json::to_value(cause).unwrap()
+            )
+            .unwrap(),
+            cause
+        );
+        let agent = AgentError::from(crate::OperationAuthorizationError::Unavailable);
+        assert!(agent.operation_refusal().is_none());
+        assert!(agent.operation_authorization_unavailable());
+        for retryability in [
+            LlmProviderErrorRetryability::Retryable,
+            LlmProviderErrorRetryability::NonRetryable,
+        ] {
+            let provider: LlmProviderError = serde_json::from_value(serde_json::json!({
+                "kind": "operation_authorization_unavailable", "retryability": retryability,
+            }))
+            .unwrap();
+            assert!(!provider.is_retryable());
+            let error = AgentError::llm(
+                "fixture",
+                LlmFailureReason::ProviderError(provider),
+                "private canary",
+            );
+            assert!(error.operation_authorization_unavailable());
+            assert!(crate::retry::LlmRetryFailure::from_agent_error(&error).is_none());
+            assert!(crate::model_fallback::model_fallback_trigger(&error).is_none());
+            let metadata = crate::TurnErrorMetadata::from_agent_error(&error).unwrap();
+            assert_eq!(metadata.retryable, Some(false));
+        }
+        assert!(
+            LlmProviderError::retryable(LlmProviderErrorKind::ServerError, serde_json::Value::Null)
+                .is_retryable()
+        );
     }
 }

@@ -805,6 +805,7 @@
       "AgentErrorClass": {
         "enum": [
           "llm",
+          "operation_refused",
           "store",
           "tool",
           "policy_indeterminate",
@@ -1173,6 +1174,26 @@
               "reason_type",
               "provider",
               "model",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason"
+              },
+              "reason_type": {
+                "const": "hook_launch_refused",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
               "reason"
             ],
             "type": "object"
@@ -2582,6 +2603,59 @@
               "channel_id",
               "reason",
               "reopen_recommended"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A real operation returned, but its protected audit outcome could not\nbe retained. This safe diagnostic is nonterminal and grants no retry.",
+            "properties": {
+              "operation_id": {
+                "$ref": "#/$defs/OperationId"
+              },
+              "phase": {
+                "$ref": "#/$defs/OperationObservationPhase"
+              },
+              "type": {
+                "const": "operation_observation_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "operation_id",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A hook prerequisite was refused before target code entered.",
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason"
+              },
+              "tool_use_id": {
+                "description": "Exact attempted tool call, when this hook belongs to one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "hook_launch_refused",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "reason"
             ],
             "type": "object"
           }
@@ -8106,6 +8180,17 @@
         ],
         "type": "object"
       },
+      "ConfinementRefusal": {
+        "description": "Bounded operation-local diagnostics. Never expose an environment value,\ncredential path, gate token, or secret-bearing command line in this error.",
+        "enum": [
+          "invalid_requirement",
+          "invalid_launch",
+          "unsupported_requirement",
+          "backend_unavailable",
+          "preparation_failed"
+        ],
+        "type": "string"
+      },
       "ConnectionTargetErrorKind": {
         "description": "Wire projection of `meerkat_core::connection::ConnectionTargetError`'s\nvariant set (closed; kinds only — the parameters stay in the diagnostic\n`reason` string).",
         "enum": [
@@ -8878,7 +8963,7 @@
             "type": "object"
           },
           {
-            "description": "The hook runtime executed but failed.",
+            "description": "The invocation failed. Entry disposition is retained by its engine error.",
             "properties": {
               "message": {
                 "description": "Display projection of the underlying execution error.",
@@ -8923,6 +9008,23 @@
             },
             "required": [
               "reason_code"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mechanical requirements prevented the hook from entering.",
+            "properties": {
+              "reason_code": {
+                "const": "confinement_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ConfinementRefusal"
+              }
+            },
+            "required": [
+              "reason_code",
+              "refusal"
             ],
             "type": "object"
           }
@@ -9302,6 +9404,27 @@
           }
         ]
       },
+      "LiveBridgeEffectKind": {
+        "enum": [
+          "model_computation",
+          "read_only_memory_snapshot",
+          "tool_dispatch",
+          "durable_memory_mutation",
+          "comms",
+          "helper_spawn",
+          "external_io"
+        ],
+        "type": "string"
+      },
+      "LiveBridgeEffectOutcome": {
+        "description": "Terminal observation for one consumed live bridge effect authority.\n\n`Unknown` means dispatch began but its physical outcome cannot be proven.\nIt is terminal and must never be retried or relabeled as committed.",
+        "enum": [
+          "committed",
+          "failed",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "LiveChannelCloseReason": {
         "description": "Typed cause of a committed live channel close.",
         "oneOf": [
@@ -9462,6 +9585,21 @@
               "stream_parse_error",
               "incomplete_response"
             ],
+            "type": "string"
+          },
+          {
+            "const": "operation_refused",
+            "description": "The local authorization owner refused this concrete operation before\ndispatch. This is agent feedback, not a provider retry or run failure.",
+            "type": "string"
+          },
+          {
+            "const": "operation_observation_unavailable",
+            "description": "Protected observation infrastructure failed before physical entry.\nThis is never permission feedback, a retry, or a fallback trigger.",
+            "type": "string"
+          },
+          {
+            "const": "operation_authorization_unavailable",
+            "description": "Current operation authority could not be obtained.",
             "type": "string"
           },
           {
@@ -10607,6 +10745,13 @@
         "description": "Unique identifier for an operation",
         "type": "string"
       },
+      "OperationObservationPhase": {
+        "description": "Stage whose observation could not be retained after the real operation.\nA diagnostic never changes the operation's returned result or permits retry.",
+        "enum": [
+          "outcome"
+        ],
+        "type": "string"
+      },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
@@ -10698,6 +10843,12 @@
         "description": "One externally routed callback tool call inside a suspended assistant\ntool-use batch.",
         "properties": {
           "args": true,
+          "settlement_failures": {
+            "items": {
+              "$ref": "#/$defs/ToolDispatchSettlementFailure"
+            },
+            "type": "array"
+          },
           "tool_name": {
             "type": "string"
           },
@@ -13567,6 +13718,60 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolDispatchAdmissionSource": {
+        "description": "Which configured admission reported a settlement failure.",
+        "enum": [
+          "configured_gate",
+          "context_gate",
+          "authorization_audit"
+        ],
+        "type": "string"
+      },
+      "ToolDispatchSettlementFailure": {
+        "additionalProperties": false,
+        "description": "A diagnostic that accompanies, and never replaces, the physical result.\n\nThis contains no error text, tool arguments, credentials or execution\nauthority. The admission owner retains any exact internal failure and the\nselected physical outcome until its generated settlement succeeds.",
+        "properties": {
+          "admission_source": {
+            "$ref": "#/$defs/ToolDispatchAdmissionSource"
+          },
+          "effect_kind": {
+            "$ref": "#/$defs/LiveBridgeEffectKind"
+          },
+          "failure_kind": {
+            "$ref": "#/$defs/ToolDispatchTerminalErrorKind"
+          },
+          "physical_outcome": {
+            "$ref": "#/$defs/LiveBridgeEffectOutcome"
+          }
+        },
+        "required": [
+          "admission_source",
+          "effect_kind",
+          "physical_outcome",
+          "failure_kind"
+        ],
+        "type": "object"
+      },
+      "ToolDispatchTerminalErrorKind": {
+        "enum": [
+          "not_found",
+          "unavailable",
+          "invalid_arguments",
+          "execution_failed",
+          "timeout",
+          "access_denied",
+          "authorization_refused",
+          "operation_observation_unavailable",
+          "operation_authorization_unavailable",
+          "policy_denied",
+          "policy_indeterminate",
+          "other",
+          "callback_pending",
+          "confinement_refused",
+          "hook_denied"
+        ],
+        "type": "string"
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -17069,6 +17274,12 @@
           "is_error": {
             "default": false,
             "type": "boolean"
+          },
+          "settlement_failures": {
+            "items": {
+              "$ref": "#/$defs/ToolDispatchSettlementFailure"
+            },
+            "type": "array"
           },
           "tool_use_id": {
             "type": "string"
@@ -20724,6 +20935,27 @@
           }
         ]
       },
+      "LiveBridgeEffectKind": {
+        "enum": [
+          "model_computation",
+          "read_only_memory_snapshot",
+          "tool_dispatch",
+          "durable_memory_mutation",
+          "comms",
+          "helper_spawn",
+          "external_io"
+        ],
+        "type": "string"
+      },
+      "LiveBridgeEffectOutcome": {
+        "description": "Terminal observation for one consumed live bridge effect authority.\n\n`Unknown` means dispatch began but its physical outcome cannot be proven.\nIt is terminal and must never be retried or relabeled as committed.",
+        "enum": [
+          "committed",
+          "failed",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -21500,6 +21732,60 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolDispatchAdmissionSource": {
+        "description": "Which configured admission reported a settlement failure.",
+        "enum": [
+          "configured_gate",
+          "context_gate",
+          "authorization_audit"
+        ],
+        "type": "string"
+      },
+      "ToolDispatchSettlementFailure": {
+        "additionalProperties": false,
+        "description": "A diagnostic that accompanies, and never replaces, the physical result.\n\nThis contains no error text, tool arguments, credentials or execution\nauthority. The admission owner retains any exact internal failure and the\nselected physical outcome until its generated settlement succeeds.",
+        "properties": {
+          "admission_source": {
+            "$ref": "#/$defs/ToolDispatchAdmissionSource"
+          },
+          "effect_kind": {
+            "$ref": "#/$defs/LiveBridgeEffectKind"
+          },
+          "failure_kind": {
+            "$ref": "#/$defs/ToolDispatchTerminalErrorKind"
+          },
+          "physical_outcome": {
+            "$ref": "#/$defs/LiveBridgeEffectOutcome"
+          }
+        },
+        "required": [
+          "admission_source",
+          "effect_kind",
+          "physical_outcome",
+          "failure_kind"
+        ],
+        "type": "object"
+      },
+      "ToolDispatchTerminalErrorKind": {
+        "enum": [
+          "not_found",
+          "unavailable",
+          "invalid_arguments",
+          "execution_failed",
+          "timeout",
+          "access_denied",
+          "authorization_refused",
+          "operation_observation_unavailable",
+          "operation_authorization_unavailable",
+          "policy_denied",
+          "policy_indeterminate",
+          "other",
+          "callback_pending",
+          "confinement_refused",
+          "hook_denied"
+        ],
+        "type": "string"
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -22630,6 +22916,12 @@
           "is_error": {
             "default": false,
             "type": "boolean"
+          },
+          "settlement_failures": {
+            "items": {
+              "$ref": "#/$defs/ToolDispatchSettlementFailure"
+            },
+            "type": "array"
           },
           "tool_use_id": {
             "type": "string"
@@ -38147,6 +38439,27 @@
           }
         ]
       },
+      "LiveBridgeEffectKind": {
+        "enum": [
+          "model_computation",
+          "read_only_memory_snapshot",
+          "tool_dispatch",
+          "durable_memory_mutation",
+          "comms",
+          "helper_spawn",
+          "external_io"
+        ],
+        "type": "string"
+      },
+      "LiveBridgeEffectOutcome": {
+        "description": "Terminal observation for one consumed live bridge effect authority.\n\n`Unknown` means dispatch began but its physical outcome cannot be proven.\nIt is terminal and must never be retried or relabeled as committed.",
+        "enum": [
+          "committed",
+          "failed",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -38923,6 +39236,60 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "ToolDispatchAdmissionSource": {
+        "description": "Which configured admission reported a settlement failure.",
+        "enum": [
+          "configured_gate",
+          "context_gate",
+          "authorization_audit"
+        ],
+        "type": "string"
+      },
+      "ToolDispatchSettlementFailure": {
+        "additionalProperties": false,
+        "description": "A diagnostic that accompanies, and never replaces, the physical result.\n\nThis contains no error text, tool arguments, credentials or execution\nauthority. The admission owner retains any exact internal failure and the\nselected physical outcome until its generated settlement succeeds.",
+        "properties": {
+          "admission_source": {
+            "$ref": "#/$defs/ToolDispatchAdmissionSource"
+          },
+          "effect_kind": {
+            "$ref": "#/$defs/LiveBridgeEffectKind"
+          },
+          "failure_kind": {
+            "$ref": "#/$defs/ToolDispatchTerminalErrorKind"
+          },
+          "physical_outcome": {
+            "$ref": "#/$defs/LiveBridgeEffectOutcome"
+          }
+        },
+        "required": [
+          "admission_source",
+          "effect_kind",
+          "physical_outcome",
+          "failure_kind"
+        ],
+        "type": "object"
+      },
+      "ToolDispatchTerminalErrorKind": {
+        "enum": [
+          "not_found",
+          "unavailable",
+          "invalid_arguments",
+          "execution_failed",
+          "timeout",
+          "access_denied",
+          "authorization_refused",
+          "operation_observation_unavailable",
+          "operation_authorization_unavailable",
+          "policy_denied",
+          "policy_indeterminate",
+          "other",
+          "callback_pending",
+          "confinement_refused",
+          "hook_denied"
+        ],
+        "type": "string"
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -40092,6 +40459,12 @@
           "is_error": {
             "default": false,
             "type": "boolean"
+          },
+          "settlement_failures": {
+            "items": {
+              "$ref": "#/$defs/ToolDispatchSettlementFailure"
+            },
+            "type": "array"
           },
           "tool_use_id": {
             "type": "string"

@@ -228,10 +228,14 @@ fn pre_retention_session_loads_unchanged_and_re_anchors_on_its_next_rewrite() {
     assert_eq!(whole.commit_count(), 6);
     assert_eq!(whole.retired_count(), 0);
 
-    // Loading alone changes nothing: the document re-encodes to the same value.
+    // Loading preserves the history; an explicit write uses the current envelope.
+    assert_eq!(fixture["version"], 3);
     let reencoded: serde_json::Value =
         serde_json::from_slice(&session.to_persisted_bytes().unwrap()).unwrap();
-    assert_eq!(reencoded, fixture);
+    assert_eq!(reencoded["version"], 4);
+    let mut expected = fixture;
+    expected["version"] = serde_json::json!(4);
+    assert_eq!(reencoded, expected);
 
     // The next compaction re-anchors it under the default retention.
     compaction_cycle(&mut session, 6);

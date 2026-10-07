@@ -1207,7 +1207,8 @@ async fn open_public_live_with(
         Arc::new(meerkat_store::MemoryBlobStore::new()) as Arc<dyn BlobStore>,
         Arc::new(meerkat::DisabledScheduleStore),
         Arc::new(meerkat::MemoryWorkGraphStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let runtime = Arc::new(SessionRuntime::new_with_config_store(
         factory.clone(),
         config.clone(),
@@ -1227,7 +1228,8 @@ async fn open_public_live_with(
     )));
 
     let callback_rx = runtime.init_callback_channel();
-    let mobs = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None);
+    let mobs = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None)
+        .expect("construct runtime authority");
     runtime.set_mob_state(Arc::clone(&mobs));
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
     let (server_read, server_write) = tokio::io::split(server_stream);

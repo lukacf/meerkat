@@ -198,7 +198,7 @@ impl GoogleCodeAssistOAuthRuntime {
                                 return Err(transaction.fail(RefreshError::Observed {
                                     message: "missing refresh_token".into(),
                                     observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(),
-                                }));
+                                }).await);
                             }
                         };
                         let result = match exchange_refresh_token(
@@ -211,7 +211,7 @@ impl GoogleCodeAssistOAuthRuntime {
                         {
                             Ok(result) => result,
                             Err(error) => {
-                                return Err(transaction.fail(oauth_refresh_error(error)));
+                                return Err(transaction.fail(oauth_refresh_error(error)).await);
                             }
                         };
                         let refreshed = match oauth_result_to_persisted(
@@ -221,9 +221,9 @@ impl GoogleCodeAssistOAuthRuntime {
                         ) {
                             Ok(refreshed) => refreshed,
                             Err(error) => {
-                                return Err(
-                                    transaction.fail(RefreshError::Refresh(error.to_string()))
-                                );
+                                return Err(transaction
+                                    .fail(RefreshError::Refresh(error.to_string()))
+                                    .await);
                             }
                         };
                         transaction.commit(refreshed).await

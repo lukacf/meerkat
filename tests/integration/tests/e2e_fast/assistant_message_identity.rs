@@ -200,7 +200,8 @@ fn spawn_server(client: Arc<dyn LlmClient>) -> (RpcClient, tempfile::TempDir) {
             store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             blob_store,
-        ),
+        )
+        .expect("construct runtime authority"),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
@@ -221,7 +222,8 @@ fn spawn_server(client: Arc<dyn LlmClient>) -> (RpcClient, tempfile::TempDir) {
             server_writer,
             runtime,
             config_store,
-        );
+        )
+        .expect("construct runtime authority");
         let _ = server.run().await;
     });
     (

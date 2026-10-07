@@ -1660,6 +1660,8 @@ pub struct LiveBridgeToolExecutionAdmissionGate {
 struct LiveBridgeInFlightEffect {
     dispatch: Arc<LiveBridgeEffectDispatchAuthority>,
     outcome: Option<LiveBridgeEffectOutcome>,
+    // Exact publication failure is private native custody, never model text.
+    settlement_error: Option<Arc<crate::RuntimeDriverError>>,
 }
 
 #[cfg(feature = "live")]
@@ -1761,33 +1763,80 @@ impl LiveBridgeToolExecutionAdmissionGate {
             return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
         }
         self.state_tx.send_replace(LiveBridgeToolGateState::Closed);
-        loop {
-            let next = {
-                let mut in_flight = self.in_flight.lock().await;
-                in_flight.iter_mut().next().map(|(call_id, effect)| {
+        // Take one bounded sweep. A failing record must not prevent the
+        // independent remaining admissions from reporting their exact outcome.
+        let pending = {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight
+                .iter_mut()
+                .map(|(call_id, effect)| {
                     let outcome = *effect
                         .outcome
                         .get_or_insert(LiveBridgeEffectOutcome::Unknown);
                     (call_id.clone(), Arc::clone(&effect.dispatch), outcome)
                 })
-            };
-            let Some((call_id, dispatch, outcome)) = next else {
-                self.reserved_call_ids.lock().await.clear();
-                return Ok(());
-            };
-            self.machine
-                .record_live_bridge_effect_outcome(dispatch.as_ref(), outcome)
+                .collect::<Vec<_>>()
+        };
+        let mut failed = false;
+        for (call_id, dispatch, outcome) in pending {
+            if self
+                .record_selected_outcome(&call_id, dispatch, outcome)
                 .await
-                .map_err(|_| LiveExecutionAuthorityError::BridgeEffectMismatch)?;
-            let mut in_flight = self.in_flight.lock().await;
-            if in_flight
-                .get(&call_id)
-                .is_some_and(|effect| Arc::ptr_eq(&effect.dispatch, &dispatch))
+                .is_err()
             {
-                in_flight.remove(&call_id);
-                self.reserved_call_ids.lock().await.remove(&call_id);
+                failed = true;
             }
         }
+        if failed {
+            Err(LiveExecutionAuthorityError::BridgeEffectMismatch)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn record_selected_outcome(
+        &self,
+        call_id: &str,
+        dispatch: Arc<LiveBridgeEffectDispatchAuthority>,
+        outcome: LiveBridgeEffectOutcome,
+    ) -> Result<(), Arc<crate::RuntimeDriverError>> {
+        let recorded = self
+            .machine
+            .record_live_bridge_effect_outcome(dispatch.as_ref(), outcome)
+            .await;
+        let mut in_flight = self.in_flight.lock().await;
+        if let Err(error) = recorded {
+            let error = Arc::new(error);
+            if let Some(effect) = in_flight.get_mut(call_id)
+                && Arc::ptr_eq(&effect.dispatch, &dispatch)
+            {
+                effect.settlement_error = Some(Arc::clone(&error));
+            }
+            return Err(error);
+        }
+        if in_flight
+            .get(call_id)
+            .is_some_and(|effect| Arc::ptr_eq(&effect.dispatch, &dispatch))
+        {
+            in_flight.remove(call_id);
+            self.reserved_call_ids.lock().await.remove(call_id);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pending_settlement_for_test(
+        &self,
+        call_id: &str,
+    ) -> Option<(
+        Option<LiveBridgeEffectOutcome>,
+        Option<Arc<crate::RuntimeDriverError>>,
+    )> {
+        self.in_flight
+            .lock()
+            .await
+            .get(call_id)
+            .map(|effect| (effect.outcome, effect.settlement_error.clone()))
     }
 }
 
@@ -1869,6 +1918,7 @@ impl ToolDispatchAdmission for LiveBridgeToolExecutionAdmissionGate {
                         LiveBridgeInFlightEffect {
                             dispatch,
                             outcome: None,
+                            settlement_error: None,
                         },
                     );
                     return Ok(());
@@ -1928,24 +1978,14 @@ impl ToolDispatchAdmission for LiveBridgeToolExecutionAdmissionGate {
             effect.outcome = Some(outcome);
             Arc::clone(&effect.dispatch)
         };
-        self.machine
-            .record_live_bridge_effect_outcome(dispatch.as_ref(), outcome)
+        self.record_selected_outcome(call.id, dispatch, outcome)
             .await
             .map_err(|_| {
                 meerkat_core::ToolError::unavailable(
                     call.name,
                     ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
                 )
-            })?;
-        let mut in_flight = self.in_flight.lock().await;
-        if in_flight
-            .get(call.id)
-            .is_some_and(|effect| Arc::ptr_eq(&effect.dispatch, &dispatch))
-        {
-            in_flight.remove(call.id);
-            self.reserved_call_ids.lock().await.remove(call.id);
-        }
-        Ok(())
+            })
     }
 }
 

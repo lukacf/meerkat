@@ -19,7 +19,7 @@ use serde::Deserialize;
 use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
+    ManagedStoreLifecycle, OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
     prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
@@ -29,7 +29,10 @@ use meerkat_auth_core::resolver::{
 use meerkat_auth_core::{
     auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
 };
-#[cfg(all(not(target_arch = "wasm32"), any(feature = "adc", feature = "copilot")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "adc", feature = "copilot", feature = "oauth")
+))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
@@ -43,6 +46,277 @@ use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
 pub use meerkat_core::provider_matrix::google::{GoogleAuthMethod, GoogleBackendKind};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+struct ManagedGoogleOauthCredential {
+    access_token: Arc<str>,
+    publication: meerkat_core::auth::lifecycle::TokenLifecyclePublication,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+struct ManagedGoogleOauthAuthorizer {
+    env: ResolverEnvironment,
+    binding: ValidatedBinding,
+    metadata: AuthMetadata,
+    runtime: oauth::GoogleCodeAssistOAuthRuntime,
+    cached: std::sync::Mutex<Option<ManagedGoogleOauthCredential>>,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+impl ManagedGoogleOauthAuthorizer {
+    async fn new(
+        env: &ResolverEnvironment,
+        binding: &ValidatedBinding,
+        metadata: &AuthMetadata,
+        tokens: &meerkat_core::auth::PersistedTokens,
+    ) -> Result<Self, ProviderAuthError> {
+        let persistence = env
+            .provider_auth_persistence()
+            .cloned()
+            .ok_or(ProviderAuthError::Auth(AuthError::HostOwnedUnavailable))?;
+        let key =
+            meerkat_core::auth::TokenKey::from_credential_identity(binding.credential_identity());
+        let runtime = oauth::GoogleCodeAssistOAuthRuntime::new(
+            persistence,
+            oauth::code_assist_endpoints("http://127.0.0.1:0/callback"),
+            key,
+        );
+        let mut retained_env = env.clone();
+        // Force is a resolution instruction, not a retained per-request policy.
+        retained_env.force_refresh = false;
+        let authorizer = Self {
+            env: retained_env,
+            binding: binding.clone(),
+            metadata: metadata.clone(),
+            runtime,
+            cached: std::sync::Mutex::new(None),
+        };
+        let lease = authorizer.lease_key();
+        let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+        let (snapshot, lifecycle) =
+            meerkat_auth_core::resolver::observe_existing_managed_store_lifecycle_with_guard(
+                &authorizer.env,
+                &authorizer.binding,
+                &guard,
+            )?;
+        if lifecycle != ManagedStoreLifecycle::Authorized {
+            return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
+        }
+        let cached = authorizer
+            .credential_from_tokens(tokens, &snapshot)
+            .map_err(ProviderAuthError::Auth)?;
+        *authorizer
+            .cached
+            .lock()
+            .map_err(|_| ProviderAuthError::Auth(AuthError::HostOwnedUnavailable))? = Some(cached);
+        drop(guard);
+        Ok(authorizer)
+    }
+
+    fn lease_key(&self) -> meerkat_core::handles::LeaseKey {
+        meerkat_core::handles::LeaseKey::from_credential_identity(
+            self.binding.credential_identity(),
+        )
+    }
+
+    fn provider_error(error: ProviderAuthError) -> AuthError {
+        match error {
+            ProviderAuthError::Auth(error) => error,
+            other => AuthError::RefreshFailed(other.to_string()),
+        }
+    }
+
+    fn credential_from_tokens(
+        &self,
+        tokens: &meerkat_core::auth::PersistedTokens,
+        snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+    ) -> Result<ManagedGoogleOauthCredential, AuthError> {
+        use meerkat_core::generated::auth_lease_durable_lifecycle_marker as marker;
+        if marker::marker_relation_for_tokens_and_snapshot(tokens, snapshot, self.runtime.key())
+            != marker::AuthLeaseDurableMarkerRelation::Matches
+        {
+            return Err(AuthError::StaleCredential);
+        }
+        // These providers select account metadata from optional ID-token claims.
+        // An absent optional claim does not change the retained selected route.
+        let claimed_account = tokens
+            .id_token
+            .as_deref()
+            .and_then(|token| meerkat_auth_core::auth_oauth::jwt::decode_payload(token).ok())
+            .and_then(|claims| {
+                let lifted = oauth::GoogleIdClaims::lift_from_claims(&claims.raw);
+                lifted.user_id.or(lifted.email)
+            });
+        if claimed_account.is_some() && claimed_account != self.metadata.account_id {
+            return Err(AuthError::ResolveRequired(
+                "managed Google OAuth credential no longer matches the selected account".into(),
+            ));
+        }
+        let publication =
+            meerkat_core::tokens_lifecycle_publication(tokens).ok_or(AuthError::StaleCredential)?;
+        let access_token = tokens
+            .primary_secret
+            .as_deref()
+            .ok_or(AuthError::MissingSecret)?;
+        Ok(ManagedGoogleOauthCredential {
+            access_token: Arc::from(access_token),
+            publication,
+        })
+    }
+
+    fn cache_matches(
+        cached: &ManagedGoogleOauthCredential,
+        current: &meerkat_core::handles::AuthLeaseSnapshot,
+    ) -> bool {
+        current.credential_present
+            && cached.publication.generation == Some(current.generation)
+            && Some(cached.publication.expires_at) == current.expires_at
+            && cached.publication.credential_published_at_millis
+                == current.credential_published_at_millis
+    }
+
+    // The returned guard keeps the actual owner current through the caller's
+    // synchronous header copy. No cache guard or lifecycle guard spans HTTP.
+    async fn current_credential(
+        &self,
+    ) -> Result<(meerkat_core::AuthLoginLifecycleGuard, Arc<str>), AuthError> {
+        let lease = self.lease_key();
+        let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+        let (snapshot, lifecycle) =
+            match meerkat_auth_core::resolver::observe_existing_managed_store_lifecycle_with_guard(
+                &self.env,
+                &self.binding,
+                &guard,
+            ) {
+                Ok(current) => current,
+                Err(error) => {
+                    *self
+                        .cached
+                        .lock()
+                        .map_err(|_| AuthError::HostOwnedUnavailable)? = None;
+                    return Err(Self::provider_error(error));
+                }
+            };
+        if lifecycle == ManagedStoreLifecycle::Authorized {
+            let cache = self
+                .cached
+                .lock()
+                .map_err(|_| AuthError::HostOwnedUnavailable)?;
+            if let Some(cached) = cache
+                .as_ref()
+                .filter(|cached| Self::cache_matches(cached, &snapshot))
+            {
+                return Ok((guard, Arc::clone(&cached.access_token)));
+            }
+        }
+        drop(guard);
+
+        let mut loaded =
+            meerkat_auth_core::resolver::load_existing_managed_store_tokens_with_lifecycle(
+                &self.env,
+                &self.binding,
+            )
+            .await
+            .map_err(Self::provider_error)?;
+        match resolve_oauth_login_credential_disposition(
+            &self.env,
+            &self.binding,
+            loaded.tokens.primary_secret.is_some(),
+        )
+        .map_err(Self::provider_error)?
+        {
+            OAuthLoginCredentialAdmission::UseCached => {}
+            OAuthLoginCredentialAdmission::BeginRefresh => {
+                loaded.release_prelock_lifecycle_guard();
+                let env = self.env.clone();
+                let binding = self.binding.clone();
+                let prepare: oauth::TokenPrepareFn = Box::new(move |locked, mode| {
+                    Box::pin(async move {
+                        meerkat_auth_core::resolver::prepare_existing_managed_store_oauth_refresh_under_lock(
+                            &env, &binding, loaded, locked, mode,
+                        ).await.map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
+                    })
+                });
+                self.runtime
+                    .refresh_tokens_with_locked_preparation(prepare, false)
+                    .await
+                    .map_err(|error| {
+                        Self::provider_error(google_code_assist_oauth_refresh_error(
+                            error,
+                            String::new(),
+                        ))
+                    })?;
+                // A returned exchange value is not cache authority. Re-read only
+                // on this cold path and bind the exact committed current owner.
+                loaded =
+                    meerkat_auth_core::resolver::load_existing_managed_store_tokens_with_lifecycle(
+                        &self.env,
+                        &self.binding,
+                    )
+                    .await
+                    .map_err(Self::provider_error)?;
+            }
+        }
+        let guard = loaded
+            .lifecycle_guard
+            .take()
+            .ok_or(AuthError::LeaseAbsent)?;
+        let (snapshot, lifecycle) =
+            meerkat_auth_core::resolver::observe_existing_managed_store_lifecycle_with_guard(
+                &self.env,
+                &self.binding,
+                &guard,
+            )
+            .map_err(Self::provider_error)?;
+        if lifecycle != ManagedStoreLifecycle::Authorized {
+            return Err(AuthError::RefreshRequired);
+        }
+        let cached = self.credential_from_tokens(&loaded.tokens, &snapshot)?;
+        let access_token = Arc::clone(&cached.access_token);
+        *self
+            .cached
+            .lock()
+            .map_err(|_| AuthError::HostOwnedUnavailable)? = Some(cached);
+        Ok((guard, access_token))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+#[async_trait]
+impl meerkat_core::HttpAuthorizer for ManagedGoogleOauthAuthorizer {
+    async fn prepare_request(&self) -> Result<(), AuthError> {
+        self.current_credential().await.map(|_| ())
+    }
+
+    async fn authorize(
+        &self,
+        req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+    ) -> Result<(), AuthError> {
+        let (_guard, access_token) = self.current_credential().await?;
+        req.headers
+            .push(("Authorization".into(), format!("Bearer {access_token}")));
+        Ok(())
+    }
+
+    fn label(&self) -> &'static str {
+        "managed-google-oauth"
+    }
+
+    fn persistence_authority_id(&self) -> Option<meerkat_core::auth::ProviderAuthPersistenceId> {
+        self.env
+            .provider_auth_persistence()
+            .map(|persistence| persistence.authority_id())
+    }
+
+    fn expires_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let snapshot = self
+            .env
+            .auth_lease_handle
+            .as_ref()?
+            .snapshot(&self.lease_key());
+        chrono::DateTime::from_timestamp(i64::try_from(snapshot.expires_at?).ok()?, 0)
+    }
+}
 
 fn configured_or_default_base_url(
     backend_kind: GoogleBackendKind,
@@ -142,6 +416,23 @@ impl GeminiCopilotChatClient {
 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
 #[async_trait]
 impl LlmClient for GeminiCopilotChatClient {
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        self.inner.prepare_controller_credential().await
+    }
+
+    fn stream_prepared<'a>(
+        &'a self,
+        request: &'a meerkat_llm_core::PreparedLlmRequest,
+    ) -> meerkat_llm_core::LlmStream<'a> {
+        Box::pin(async_stream::try_stream! {
+            let lowered = request.with_lowered_request(self.lower_request(request.request())?);
+            let mut stream = self.inner.stream_prepared(&lowered);
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                yield event?;
+            }
+        })
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -509,6 +800,14 @@ fn google_code_assist_oauth_refresh_error(
     error: oauth::GoogleCodeAssistOAuthError,
     authmachine_failure: String,
 ) -> ProviderAuthError {
+    if matches!(
+        &error,
+        oauth::GoogleCodeAssistOAuthError::Refresh(
+            meerkat_auth_core::RefreshError::StalePreparation
+        )
+    ) {
+        return ProviderAuthError::Auth(AuthError::StaleCredential);
+    }
     let detail = if authmachine_failure.is_empty() {
         error.to_string()
     } else {
@@ -736,7 +1035,10 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         binding,
                         persisted.primary_secret.is_some(),
                     )? {
-                        OAuthLoginCredentialAdmission::UseCached => persisted,
+                        OAuthLoginCredentialAdmission::UseCached => {
+                            managed.release_prelock_lifecycle_guard();
+                            persisted
+                        }
                         OAuthLoginCredentialAdmission::BeginRefresh => {
                             managed.release_prelock_lifecycle_guard();
                             let persistence = env
@@ -757,8 +1059,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             );
                             let prepare_env = env.clone();
                             let prepare_binding = binding.clone();
-                            let prepare: oauth::TokenPrepareFn =
-                                Box::new(move |locked_baseline, mode| {
+                            let prepare: oauth::TokenPrepareFn = Box::new(
+                                move |locked_baseline, mode| {
                                     Box::pin(async move {
                                         prepare_managed_store_oauth_refresh_under_lock(
                                             &prepare_env,
@@ -768,13 +1070,10 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                             mode,
                                         )
                                         .await
-                                        .map_err(|error| {
-                                            meerkat_auth_core::RefreshError::Refresh(
-                                                error.to_string(),
-                                            )
-                                        })
+                                        .map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                                     })
-                                });
+                                },
+                            );
                             runtime
                                 .refresh_tokens_with_locked_preparation(prepare, env.force_refresh)
                                 .await
@@ -846,10 +1145,16 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             ));
                     }
                     let metadata = finalize_auth_metadata(binding, metadata)?;
-                    Arc::new(StaticLease::inline_secret(
-                        access,
+                    let authorizer = ManagedGoogleOauthAuthorizer::new(
+                        env,
+                        binding,
+                        &metadata,
+                        &effective_tokens,
+                    )
+                    .await?;
+                    Arc::new(DynamicLease::from_authorizer(
+                        Arc::new(authorizer),
                         metadata,
-                        effective_tokens.expires_at,
                         source_label.clone(),
                     ))
                 }
@@ -1312,6 +1617,247 @@ mod tests {
     use meerkat_core::{BackendProfile, HttpAuthorizationRequest, HttpAuthorizer};
     use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    mod managed_authorizer_controls {
+        use super::*;
+        use meerkat_auth_core::{EphemeralTokenStore, InMemoryCoordinator};
+        use meerkat_core::auth::{
+            PersistedTokens, ProviderAuthPersistence, TokenKey, TokenStore, TokenStoreError,
+        };
+        use meerkat_core::handles::{GeneratedAuthLeaseHandle, LeaseKey};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingStore {
+            inner: EphemeralTokenStore,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl TokenStore for CountingStore {
+            async fn load(
+                &self,
+                key: &TokenKey,
+            ) -> Result<Option<PersistedTokens>, TokenStoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.load(key).await
+            }
+            async fn save(
+                &self,
+                key: &TokenKey,
+                tokens: &PersistedTokens,
+            ) -> Result<(), TokenStoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.save(key, tokens).await
+            }
+            async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.clear(key).await
+            }
+            async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.list().await
+            }
+            fn backend_name(&self) -> &'static str {
+                self.inner.backend_name()
+            }
+        }
+
+        pub(super) struct Fixture {
+            pub(super) authorizer: ManagedGoogleOauthAuthorizer,
+            persistence: ProviderAuthPersistence,
+            owner: GeneratedAuthLeaseHandle,
+            identity: meerkat_core::AuthCredentialIdentity,
+            lease: LeaseKey,
+            store: Arc<CountingStore>,
+            tokens: PersistedTokens,
+        }
+
+        pub(super) async fn fixture(name: &str, account: Option<&str>) -> Fixture {
+            let reference = meerkat_core::AuthBindingRef {
+                realm: meerkat_core::RealmId::parse("gemini-authorizer-controls").unwrap(),
+                binding: meerkat_core::BindingId::parse(name).unwrap(),
+                profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
+            };
+            let binding = ProviderRuntimeCatalog::validate_binding(
+                &reference,
+                &meerkat_core::BackendProfile {
+                    id: "managed-control".into(),
+                    provider: Provider::Gemini,
+                    backend_kind: "google_code_assist".into(),
+                    base_url: Some("http://127.0.0.1:9".into()),
+                    options: serde_json::Value::Null,
+                    server: None,
+                },
+                &meerkat_core::AuthProfile {
+                    id: "managed-control".into(),
+                    provider: Provider::Gemini,
+                    auth_method: "google_oauth".into(),
+                    source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                    constraints: Default::default(),
+                    metadata_defaults: Default::default(),
+                },
+                &meerkat_core::BindingPolicy::default(),
+            )
+            .unwrap();
+            let identity = binding.credential_identity().clone();
+            let key = TokenKey::from_credential_identity(&identity);
+            let lease = LeaseKey::from_credential_identity(&identity);
+            let owner = meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+            ).unwrap();
+            let store = Arc::new(CountingStore {
+                inner: EphemeralTokenStore::new(),
+                calls: AtomicUsize::new(0),
+            });
+            let token_store: Arc<dyn TokenStore> = store.clone();
+            let persistence = ProviderAuthPersistence::new(
+                token_store.clone(),
+                Arc::new(InMemoryCoordinator::new()),
+            );
+            let now = chrono::Utc::now();
+            let expiry = now + chrono::Duration::hours(1);
+            let tokens = PersistedTokens {
+                auth_mode: PersistedAuthMode::GoogleOauth,
+                primary_secret: Some("tok-control".into()),
+                refresh_token: Some("refresh-control".into()),
+                id_token: account.map(|_| "header.eyJzdWIiOiJzYW1lLWFjY291bnQifQ.signature".into()),
+                expires_at: Some(expiry),
+                last_refresh: Some(now),
+                scopes: Vec::new(),
+                // These providers project account metadata from optional ID-token claims.
+                account_id: Some("stored-account-is-not-the-selected-claim".into()),
+                metadata: serde_json::Value::Null,
+            };
+            let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+            let transition = owner
+                .acquire_lease(&lease, expiry.timestamp() as u64)
+                .unwrap();
+            let tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &tokens,
+                &transition,
+            )
+            .unwrap();
+            token_store.save(&key, &tokens).await.unwrap();
+            drop(guard);
+            let mut env = ResolverEnvironment::testing()
+                .with_provider_auth_persistence(persistence.clone())
+                .with_auth_lease_handle(owner.clone());
+            env.now = Arc::new(move || now);
+            env.force_refresh = true;
+            let metadata = AuthMetadata {
+                account_id: account.map(str::to_string),
+                ..Default::default()
+            };
+            let mut authorizer =
+                ManagedGoogleOauthAuthorizer::new(&env, &binding, &metadata, &tokens)
+                    .await
+                    .unwrap();
+            // Bound even an erroneous refresh attempt to a local endpoint, without global env.
+            let mut endpoints = oauth::code_assist_endpoints("http://127.0.0.1:0/callback");
+            endpoints.token_url = "http://127.0.0.1:9/token".into();
+            authorizer.runtime =
+                oauth::GoogleCodeAssistOAuthRuntime::new(persistence.clone(), endpoints, key);
+            Fixture {
+                authorizer,
+                persistence,
+                owner,
+                identity,
+                lease,
+                store,
+                tokens,
+            }
+        }
+
+        #[tokio::test]
+        async fn prepare_uses_current_cache_and_refuses_released_owner_without_store_io() {
+            let fixture = fixture("prepare", None).await;
+            assert!(!fixture.authorizer.env.force_refresh);
+            let before = fixture.owner.snapshot(&fixture.lease);
+            let calls = fixture.store.calls.load(Ordering::SeqCst);
+            assert!(
+                calls > 0,
+                "the counter observed the actual initial token save"
+            );
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                fixture.authorizer.prepare_request(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(fixture.store.calls.load(Ordering::SeqCst), calls);
+            assert_eq!(fixture.owner.snapshot(&fixture.lease), before);
+            meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+                fixture.persistence.clone(),
+                fixture.owner.clone(),
+                fixture.identity.clone(),
+            )
+            .await
+            .unwrap();
+            let released = fixture.owner.snapshot(&fixture.lease);
+            assert!(!released.credential_present);
+            let calls = fixture.store.calls.load(Ordering::SeqCst);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                fixture.authorizer.prepare_request(),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, Err(AuthError::LeaseAbsent)));
+            let mut headers = Vec::new();
+            let mut request = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: "http://127.0.0.1:9/model",
+                headers: &mut headers,
+            };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                fixture.authorizer.authorize(&mut request),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, Err(AuthError::LeaseAbsent)));
+            assert!(headers.is_empty());
+            assert_eq!(fixture.store.calls.load(Ordering::SeqCst), calls);
+            assert_eq!(fixture.owner.snapshot(&fixture.lease), released);
+        }
+
+        #[tokio::test]
+        async fn optional_account_claim_may_be_absent_but_cannot_repin_the_authorizer() {
+            let fixture = fixture("claims", Some("same-account")).await;
+            let snapshot = fixture.owner.snapshot(&fixture.lease);
+            assert!(
+                fixture
+                    .authorizer
+                    .credential_from_tokens(&fixture.tokens, &snapshot)
+                    .is_ok()
+            );
+            let mut absent = fixture.tokens.clone();
+            absent.id_token = None;
+            assert!(
+                fixture
+                    .authorizer
+                    .credential_from_tokens(&absent, &snapshot)
+                    .is_ok()
+            );
+            let mut conflict = fixture.tokens.clone();
+            conflict.id_token = Some("header.eyJzdWIiOiJvdGhlci1hY2NvdW50In0.signature".into());
+            assert!(matches!(
+                fixture
+                    .authorizer
+                    .credential_from_tokens(&conflict, &snapshot),
+                Err(AuthError::ResolveRequired(_))
+            ));
+            assert_eq!(
+                fixture.authorizer.metadata.account_id.as_deref(),
+                Some("same-account")
+            );
+            assert_eq!(fixture.owner.snapshot(&fixture.lease), snapshot);
+        }
+    }
+
     #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     struct CapturingCopilotChatClient {
         seen_provider_params:
@@ -1534,3 +2080,22 @@ mod tests {
         assert!(production.contains("credential_http_client()"));
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth"))]
+#[test]
+fn ce_stale_refresh_remains_stale_credential() {
+    let result = google_code_assist_oauth_refresh_error(
+        oauth::GoogleCodeAssistOAuthError::Refresh(
+            meerkat_auth_core::RefreshError::StalePreparation,
+        ),
+        String::new(),
+    );
+    assert!(matches!(
+        result,
+        ProviderAuthError::Auth(AuthError::StaleCredential)
+    ));
+}
+
+#[cfg(all(test, feature = "oauth", not(target_arch = "wasm32")))]
+#[path = "managed_lifetime_tests.rs"]
+mod managed_lifetime_tests;

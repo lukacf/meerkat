@@ -972,8 +972,22 @@ impl MeerkatMachine {
         match err {
             MeerkatMachineCommandError::Control(err) => err,
             MeerkatMachineCommandError::Driver(err) => {
-                RuntimeControlPlaneError::Internal(err.to_string())
+                Self::control_plane_error_from_driver_error(err)
             }
+        }
+    }
+
+    pub(super) fn control_plane_error_from_driver_error(
+        err: RuntimeDriverError,
+    ) -> RuntimeControlPlaneError {
+        match err {
+            RuntimeDriverError::InputRefused { refusal } => {
+                RuntimeControlPlaneError::InputRefused { refusal }
+            }
+            RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
+                RuntimeControlPlaneError::ControllerReadinessUnavailable { reason }
+            }
+            error => RuntimeControlPlaneError::Internal(error.to_string()),
         }
     }
 
@@ -981,6 +995,12 @@ impl MeerkatMachine {
         err: RuntimeControlPlaneError,
     ) -> RuntimeDriverError {
         match err {
+            RuntimeControlPlaneError::InputRefused { refusal } => {
+                RuntimeDriverError::InputRefused { refusal }
+            }
+            RuntimeControlPlaneError::ControllerReadinessUnavailable { reason } => {
+                RuntimeDriverError::ControllerReadinessUnavailable { reason }
+            }
             RuntimeControlPlaneError::NotFound(runtime_id) => {
                 RuntimeDriverError::NotFound { runtime_id }
             }
@@ -3434,7 +3454,8 @@ mod tests {
         let expired = MeerkatMachine::persistent(
             store.clone(),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("persistent machine");
         let expired_error = match expired
             .prepare_session_archive_lease_before(
                 &session_id,
@@ -3457,10 +3478,13 @@ mod tests {
         );
         drop(expired);
         store.block_next_machine_lifecycle_load(Arc::clone(&entered), Arc::clone(&release));
-        let restarted = Arc::new(MeerkatMachine::persistent(
-            store.clone(),
-            Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ));
+        let restarted = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            )
+            .expect("persistent machine"),
+        );
         let first_machine = Arc::clone(&restarted);
         let first_session_id = session_id.clone();
         let first_prepare = crate::tokio::spawn(async move {
@@ -3548,7 +3572,8 @@ mod tests {
         let restarted = MeerkatMachine::persistent(
             store.clone(),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
-        );
+        )
+        .expect("persistent machine");
         let baseline_load_calls = store.machine_lifecycle_load_calls();
         store.panic_next_machine_lifecycle_load();
         let panic_error = match restarted
@@ -3604,10 +3629,13 @@ mod tests {
     #[tokio::test]
     async fn archive_retry_joins_before_wedged_publication_receipt_cas() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let machine = Arc::new(MeerkatMachine::persistent(
-            store.clone(),
-            Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         machine
             .register_session(session_id.clone())
@@ -3976,5 +4004,30 @@ mod tests {
             ),
             "not-found must not be laundered into NotReady{{Destroyed}}"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_projection_roundtrip_tests {
+    use super::*;
+    use meerkat_core::{OperationRefusalKind, OperationRefused};
+
+    #[test]
+    fn direct_control_preserves_input_refusal() {
+        for kind in [
+            OperationRefusalKind::Denied,
+            OperationRefusalKind::MalformedFacts,
+        ] {
+            let control = MeerkatMachine::control_plane_error_from_driver_error(
+                RuntimeDriverError::InputRefused {
+                    refusal: OperationRefused::new(kind),
+                },
+            );
+            assert!(matches!(&control,
+                RuntimeControlPlaneError::InputRefused { refusal } if refusal.kind() == kind));
+            let driver = MeerkatMachine::driver_error_from_control_plane_error(control);
+            assert!(matches!(driver,
+                RuntimeDriverError::InputRefused { refusal } if refusal.kind() == kind));
+        }
     }
 }

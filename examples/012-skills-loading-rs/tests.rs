@@ -230,7 +230,8 @@ async fn documented_builtin_preload_survives_cli_precreated_session_shape() {
         store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
     builder.default_llm_client = Some(client.clone());
     let (service, machine) = build_runtime_backed_service(builder, 4, persistence);

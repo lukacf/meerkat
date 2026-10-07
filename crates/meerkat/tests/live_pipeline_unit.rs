@@ -123,7 +123,8 @@ mod live_pipeline {
             session_store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let temp = tempfile::tempdir().expect("tempdir");
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut config = Config::default();

@@ -373,6 +373,7 @@ impl Stack {
         ));
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
         let state = MobMcpState::new(mob_service, MobControlPrincipal::Owner)
+            .expect("construct runtime authority")
             .with_default_llm_client(Some(client))
             .try_with_persistent_storage_root(Some(root.join("state")))
             .expect("rooted mob custody")

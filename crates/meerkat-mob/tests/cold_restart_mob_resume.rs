@@ -1409,6 +1409,7 @@ fn mob_destroy_session_children_within_production_stack_budget() {
 
 async fn mob_destroy_session_children_stack_budget_scenario() {
     use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
+    use meerkat_mob::store::{MobEventStore as _, SqliteMobStores};
 
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
@@ -1451,9 +1452,11 @@ async fn mob_destroy_session_children_stack_budget_scenario() {
     let mut child_definition = mob_definition(MobRuntimeMode::TurnDriven);
     child_definition.orchestrator = None;
     child_definition.wiring.auto_wire_orchestrator = false;
-    let child_storage =
-        MobStorage::persistent(temp.path().join("child-mob.db")).expect("child mob storage");
-    let child_events = child_storage.events.clone();
+    let child_storage_path = temp.path().join("child-mob.db");
+    let child_storage = MobStorage::persistent(&child_storage_path).expect("child mob storage");
+    let child_events = SqliteMobStores::open(&child_storage_path)
+        .expect("child journal observer")
+        .event_store();
     let child = MobBuilder::new(child_definition, child_storage)
         .with_session_service(service.clone())
         .with_owner_bridge_session_create_authority(owner_session.clone(), true, false)
@@ -1503,6 +1506,13 @@ async fn mob_destroy_session_children_stack_budget_scenario() {
         assert!(!matching[0].terminal, "child operation must still be live");
         child_operations.push(matching[0].id.clone());
     }
+    assert!(
+        !child_events
+            .replay_all()
+            .await
+            .expect("populated child journal")
+            .is_empty()
+    );
 
     let report = child.destroy().await.expect("destroy real child mob");
     assert!(report.errors.is_empty(), "destroy errors: {report:?}");

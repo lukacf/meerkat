@@ -50,7 +50,8 @@ fn spawn_test_server(
             store as Arc<dyn meerkat::SessionStore>,
             runtime_store,
             blob_store,
-        ),
+        )
+        .expect("construct runtime authority"),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
@@ -72,7 +73,8 @@ fn spawn_test_server(
         // Keep temp alive for the duration of the server
         let _temp = temp;
         let reader = BufReader::new(server_reader);
-        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store)
+            .expect("construct runtime authority");
         server.run().await
     });
 

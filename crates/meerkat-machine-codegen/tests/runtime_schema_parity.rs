@@ -99,6 +99,9 @@ fn schema_shape_mismatches_for_schemas(
     if catalog.effect_dispositions != production.effect_dispositions {
         mismatches.push("effect dispositions / handoff metadata".to_owned());
     }
+    if catalog.tlc_model != production.tlc_model {
+        mismatches.push("explicit TLC fixture metadata".to_owned());
+    }
     if catalog.ci_step_limit != production.ci_step_limit {
         mismatches.push("CI semantic-model step-limit metadata".to_owned());
     }
@@ -921,4 +924,15 @@ fn input_only_parity_misses_production_only_effect_drift() -> Result<(), Identit
     );
 
     Ok(())
+}
+
+#[test]
+fn schema_parity_includes_explicit_tlc_fixture_metadata() {
+    let catalog = meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine();
+    let mut changed = catalog.clone();
+    changed.tlc_model = None;
+    assert!(
+        schema_shape_mismatches_for_schemas(&catalog, &changed)
+            .contains(&"explicit TLC fixture metadata".to_owned())
+    );
 }

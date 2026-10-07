@@ -40,7 +40,7 @@ impl WireToolErrorClass {
 impl From<&meerkat_core::error::ToolError> for WireToolErrorClass {
     fn from(value: &meerkat_core::error::ToolError) -> Self {
         use meerkat_core::error::ToolError;
-        match value {
+        match value.primary_error() {
             ToolError::NotFound { .. } => Self::NotFound,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
             ToolError::InvalidArguments { .. } => Self::InvalidArguments,
@@ -115,6 +115,8 @@ pub struct WirePendingToolCall {
     /// Raw arguments the agent passed to the tool.
     #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
     pub args: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_failures: Vec<meerkat_core::ops::ToolDispatchSettlementFailure>,
 }
 
 /// Canonical typed contract for a turn that suspended on external tool
@@ -183,6 +185,7 @@ impl WireCallbackPending {
                 tool_use_id,
                 tool_name,
                 args,
+                settlement_failures: Vec::new(),
             }],
         )
     }
@@ -252,6 +255,7 @@ mod tests {
             tool_use_id: "call-1".to_string(),
             tool_name: "external".to_string(),
             args: serde_json::json!({"question": "approve?"}),
+            settlement_failures: Vec::new(),
         };
         let json = serde_json::to_value(&call)?;
         assert_eq!(json["tool_use_id"], "call-1");
@@ -278,5 +282,21 @@ mod tests {
                 .is_some_and(|required| required.iter().any(|field| field == "tool_use_id"))
         );
         Ok(())
+    }
+
+    #[test]
+    fn wire_classification_preserves_decorated_primary_error() {
+        let error = meerkat_core::ToolError::access_denied("tool").with_settlement_failures(vec![
+            meerkat_core::ToolDispatchSettlementFailure {
+                admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
+                effect_kind: meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+                physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Failed,
+                failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
+            },
+        ]);
+        assert_eq!(
+            WireToolErrorClass::from(&error),
+            WireToolErrorClass::AccessDenied
+        );
     }
 }

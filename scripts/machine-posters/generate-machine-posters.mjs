@@ -640,6 +640,98 @@ const MACHINE_SPECS = [
       ],
     },
   },
+  {
+    id: "grant_authority",
+    title: "GrantAuthorityMachine",
+    canonicalFn: "dsl_grant_authority_machine",
+    subtitle: "Process-local grants / host-authenticated inputs required / no durable recovery / resolution is not an entry permit",
+    tlaPath: path.join(repoRoot, "specs", "machines", "grant_authority", "model.tla"),
+    contractPath: path.join(repoRoot, "specs", "machines", "grant_authority", "contract.md"),
+    catalogPath: path.join(repoRoot, "crates", "meerkat-machine-schema", "src", "catalog", "dsl", "grant_authority.rs"),
+    accent: "#8cbe95",
+    layout: {
+      plate: { width: 1800, height: 850 },
+      phases: {
+        Unconfigured: {
+          x: 710,
+          y: 110,
+          w: 380,
+          h: 100,
+          subtitle: "no configured root or namespace",
+        },
+        Active: {
+          x: 730,
+          y: 430,
+          w: 340,
+          h: 130,
+          subtitle: "retained grant records and revocations",
+          emphasis: true,
+        },
+      },
+      statePanels: {
+        left: [
+          {
+            title: "Configured Owner Identity",
+            note: "The host selects the root, namespace and generation; these fields do not authenticate a caller.",
+            fields: ["root", "namespace", "generation", "revision"],
+          },
+        ],
+        right: [
+          {
+            title: "Immutable Grant Facts",
+            note: "Records remain after revocation; descendants are checked against the retained chain at issue and use.",
+            fields: ["records", "revoked"],
+          },
+        ],
+      },
+      groups: [
+        {
+          id: "configuration",
+          title: "Host-selected Root + Namespace",
+          note: "Configure once from Unconfigured; positive generation is required. This is not an authentication operation.",
+          x: 40,
+          y: 70,
+          w: 510,
+          columns: 1,
+          anchors: ["Unconfigured", "Active"],
+          triggers: ["Configure"],
+        },
+        {
+          id: "issuance",
+          title: "Issuance + Exact Attenuation",
+          note: "IssueRoot binds the configured root. IssueChild checks the actual unrevoked chain at current host time and the checked restriction relation.",
+          x: 1250,
+          y: 70,
+          w: 510,
+          columns: 1,
+          anchors: ["Active"],
+          triggers: ["IssueRoot", "IssueChild"],
+        },
+        {
+          id: "revocation",
+          title: "Revocation / Retained Record Identity",
+          note: "Root or original issuer may revoke an exact retained record; repeated revoke is idempotent. Use checks every ancestor.",
+          x: 40,
+          y: 500,
+          w: 510,
+          columns: 1,
+          anchors: ["Active"],
+          triggers: ["Revoke"],
+        },
+        {
+          id: "resolution",
+          title: "Fresh Full-lineage Use / Not Entry",
+          note: "ResolveUse binds namespace, generation, executor, represented subject and exact retained chain. Other current owner permissions remain separate conjuncts.",
+          x: 1250,
+          y: 500,
+          w: 510,
+          columns: 1,
+          anchors: ["Active"],
+          triggers: ["ResolveUse"],
+        },
+      ],
+    },
+  },
 ];
 
 // Parse the `dsl::dsl_<fn>()` calls inside `canonical_machine_schemas()` in
@@ -1238,6 +1330,11 @@ function parseTla(text) {
 
 function parseEffectDispositions(text) {
   const effectMap = new Map();
+  // Native DSL local dispositions have the same rendering meaning as the
+  // catalog helper form retained below. Read the owner declaration directly.
+  for (const match of text.matchAll(/\bdisposition\s+([A-Za-z][A-Za-z0-9_]*)\s*=>\s*local\s+seam\s+[A-Za-z][A-Za-z0-9_]*\s*,/g)) {
+    effectMap.set(match[1], { kind: "local", consumers: [] });
+  }
   for (const match of text.matchAll(/\blocal_disposition\("([^"]+)"\)/g)) {
     effectMap.set(match[1], { kind: "local", consumers: [] });
   }
@@ -1459,7 +1556,7 @@ function renderPosterHtml(poster) {
   const leftRail = 304;
   const rightRail = 316;
   const railGap = 18;
-  const headerHeight = 172;
+  const headerHeight = 202;
   const footerHeight = 262;
   const canvasWidth =
     outerPad * 2 + leftRail + railGap + poster.layout.plate.width + railGap + rightRail;
@@ -1524,7 +1621,7 @@ function renderPosterPlateSvg(poster, dims) {
     <rect x="0" y="0" width="${canvasWidth}" height="${canvasHeight}" rx="28" fill="${THEME.shell}" stroke="rgba(255,255,255,0.12)" />
     <rect x="1" y="1" width="${canvasWidth - 2}" height="${canvasHeight - 2}" rx="27" fill="url(#pageFade)" opacity="0.9" />
     ${renderSvgHeader(poster, canvasWidth)}
-    ${renderSvgMetricRack(poster, 48, 132)}
+    ${renderSvgMetricRack(poster, 48, 164)}
     ${renderSvgPanelStack(poster.statePanels.left, leftX, plateY + 26, leftRail)}
     ${renderSvgPanelStack(poster.statePanels.right, rightX, plateY + 26, rightRail)}
     <g transform="translate(${plateX}, ${plateY})">
@@ -1719,23 +1816,37 @@ function renderSvgEffectBus(effectBus, x, y, width) {
   let offsetY = y;
   return laneDefs
     .map(([title, color, effects]) => {
+      let chipX = 12;
+      let chipY = 18;
+      const chips = effects.slice(0, 12).map((effect) => {
+        // Conservative width for the existing 7.4px monospace label. Keep the
+        // full semantic name and wrap chips instead of overlapping neighbors.
+        const chipWidth = Math.ceil(effect.name.length * 5.2) + 14;
+        if (chipX > 12 && chipX + chipWidth > width - 12) {
+          chipX = 12;
+          chipY += 18;
+        }
+        const chip = { effect, x: chipX, y: chipY, width: chipWidth };
+        chipX += chipWidth + 6;
+        return chip;
+      });
+      const laneHeight = Math.max(40, chipY + 22);
+      const label = effects.length > chips.length
+        ? `${title} (${chips.length} OF ${effects.length} SHOWN)`
+        : title;
       const lane = `<g transform="translate(${x}, ${offsetY})">
-        <rect x="0" y="0" width="${width}" height="40" rx="10" fill="${THEME.panel}" stroke="rgba(255,255,255,0.08)" />
-        <rect x="0" y="0" width="4" height="40" rx="4" fill="${color}" />
-        <text x="12" y="13" fill="${THEME.faint}" font-size="8" letter-spacing="1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${title}</text>
-        ${effects
-          .slice(0, 12)
-          .map((effect, index) => {
-            const chipX = 12 + index * 82;
-            return `
-              <rect x="${chipX}" y="18" width="76" height="14" rx="7" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.05)" />
-              <text x="${chipX + 6}" y="27.5" fill="${THEME.ink}" font-size="7.4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml(
+        <rect x="0" y="0" width="${width}" height="${laneHeight}" rx="10" fill="${THEME.panel}" stroke="rgba(255,255,255,0.08)" />
+        <rect x="0" y="0" width="4" height="${laneHeight}" rx="4" fill="${color}" />
+        <text x="12" y="13" fill="${THEME.faint}" font-size="8" letter-spacing="1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${label}</text>
+        ${chips
+          .map(({ effect, x: chipX, y: chipY, width: chipWidth }) => `
+              <rect x="${chipX}" y="${chipY}" width="${chipWidth}" height="14" rx="7" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.05)" />
+              <text x="${chipX + 6}" y="${chipY + 9.5}" fill="${THEME.ink}" font-size="7.4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml(
                 effect.name,
-              )}</text>`;
-          })
+              )}</text>`)
           .join("")}
       </g>`;
-      offsetY += 46;
+      offsetY += laneHeight + 6;
       return lane;
     })
     .join("");

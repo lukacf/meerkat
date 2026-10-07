@@ -13703,6 +13703,10 @@ pub struct State {
     pub turn_tool_overlay_allow_active: bool,
     pub turn_tool_overlay_allow_names: std::collections::BTreeSet<ToolName>,
     pub turn_tool_overlay_deny_names: std::collections::BTreeSet<ToolName>,
+    pub input_authority_bindings: std::collections::BTreeMap<String, String>,
+    pub input_authority_batch_keys: std::collections::BTreeMap<String, String>,
+    pub authority_staged_run: Option<RunId>,
+    pub authority_staged_batch: Option<String>,
     pub input_phases: std::collections::BTreeMap<String, InputPhase>,
     pub input_terminal_kind: std::collections::BTreeMap<String, InputTerminalKind>,
     pub input_superseded_by: std::collections::BTreeMap<String, String>,
@@ -14460,6 +14464,25 @@ impl std::fmt::Debug for State {
             .field(
                 "turn_tool_overlay_deny_names",
                 &self.turn_tool_overlay_deny_names,
+            )
+            .field(
+                "input_authority_bindings",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.input_authority_bindings.len()
+                ),
+            )
+            .field(
+                "input_authority_batch_keys",
+                &format_args!(
+                    "<redacted; {} entries>",
+                    self.input_authority_batch_keys.len()
+                ),
+            )
+            .field("authority_staged_run", &self.authority_staged_run)
+            .field(
+                "authority_staged_batch",
+                &self.authority_staged_batch.as_ref().map(|_| "<redacted>"),
             )
             .field("input_phases", &self.input_phases)
             .field("input_terminal_kind", &self.input_terminal_kind)
@@ -16219,9 +16242,26 @@ pub mod inputs {
         pub lane: InputLane,
         pub observation: LiveBoundaryJoinObservation,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindInputAuthority {
+        pub input_id: String,
+        pub authority_binding: String,
+        pub authority_batch_key: String,
+    }
+    impl std::fmt::Debug for BindInputAuthority {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("BindInputAuthority")
+                .field("input_id", &self.input_id)
+                .field("authority_binding", &"<redacted>")
+                .field("authority_batch_key", &"<redacted>")
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionPlan {
         pub input_id: String,
+        pub authority_binding: Option<String>,
+        pub authority_batch_key: Option<String>,
         pub input_kind: AdmissionInputKind,
         pub requested_lane: Option<InputLane>,
         pub continuation_kind: AdmissionContinuationKind,
@@ -16231,6 +16271,36 @@ pub mod inputs {
         pub runtime_running: bool,
         pub active_turn_boundary_available: bool,
         pub without_wake: bool,
+    }
+    impl std::fmt::Debug for ResolveAdmissionPlan {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ResolveAdmissionPlan")
+                .field("input_id", &self.input_id)
+                .field(
+                    "authority_binding",
+                    &self.authority_binding.as_ref().map(|_| "<redacted>"),
+                )
+                .field(
+                    "authority_batch_key",
+                    &self.authority_batch_key.as_ref().map(|_| "<redacted>"),
+                )
+                .field("input_kind", &self.input_kind)
+                .field("requested_lane", &self.requested_lane)
+                .field("continuation_kind", &self.continuation_kind)
+                .field("turn_append_shape", &self.turn_append_shape)
+                .field("silent_intent_match", &self.silent_intent_match)
+                .field(
+                    "existing_superseded_input_id",
+                    &self.existing_superseded_input_id,
+                )
+                .field("runtime_running", &self.runtime_running)
+                .field(
+                    "active_turn_boundary_available",
+                    &self.active_turn_boundary_available,
+                )
+                .field("without_wake", &self.without_wake)
+                .finish()
+        }
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionValidation {
@@ -18335,6 +18405,7 @@ pub enum Input {
     LiveBoundaryUnavailable(inputs::LiveBoundaryUnavailable),
     JoinLiveBoundaryDurableAppend(inputs::JoinLiveBoundaryDurableAppend),
     ResolveLiveBoundaryDurableAppendJoin(inputs::ResolveLiveBoundaryDurableAppendJoin),
+    BindInputAuthority(inputs::BindInputAuthority),
     ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
     ResolveAdmissionValidation(inputs::ResolveAdmissionValidation),
     ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
@@ -18790,6 +18861,7 @@ impl Input {
             Self::ResolveLiveBoundaryDurableAppendJoin(_) => {
                 InputKind::ResolveLiveBoundaryDurableAppendJoin
             }
+            Self::BindInputAuthority(_) => InputKind::BindInputAuthority,
             Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
             Self::ResolveAdmissionValidation(_) => InputKind::ResolveAdmissionValidation,
             Self::ResolveAdmissionIdempotency(_) => InputKind::ResolveAdmissionIdempotency,
@@ -19322,6 +19394,7 @@ pub enum InputKind {
     LiveBoundaryUnavailable,
     JoinLiveBoundaryDurableAppend,
     ResolveLiveBoundaryDurableAppendJoin,
+    BindInputAuthority,
     ResolveAdmissionPlan,
     ResolveAdmissionValidation,
     ResolveAdmissionIdempotency,
@@ -23035,6 +23108,11 @@ pub enum TransitionId {
     RegisterAcceptedIdempotencyRunning,
     RegisterAcceptedIdempotencyRetired,
     RegisterAcceptedIdempotencyStopped,
+    BindInputAuthorityIdle,
+    BindInputAuthorityAttached,
+    BindInputAuthorityRunning,
+    BindInputAuthorityRetired,
+    BindInputAuthorityStopped,
     ResolveAdmissionPlanRequestedTerminalQueueIdle,
     ResolveAdmissionPlanRequestedTerminalQueueAttached,
     ResolveAdmissionPlanRequestedTerminalQueueRunning,
@@ -25013,6 +25091,10 @@ pub fn initial_state() -> State {
         turn_tool_overlay_allow_active: false,
         turn_tool_overlay_allow_names: Default::default(),
         turn_tool_overlay_deny_names: Default::default(),
+        input_authority_bindings: Default::default(),
+        input_authority_batch_keys: Default::default(),
+        authority_staged_run: None,
+        authority_staged_batch: None,
         input_phases: Default::default(),
         input_terminal_kind: Default::default(),
         input_superseded_by: Default::default(),

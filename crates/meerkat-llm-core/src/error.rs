@@ -40,6 +40,20 @@ pub enum ToolChoiceRefusal {
 /// Categorized by whether they're retryable.
 #[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
 pub enum LlmError {
+    /// A local operation refusal, never a provider outage or retry signal.
+    /// The adapter preserves this as `AgentError::OperationRefused` so the
+    /// existing loop can return ordinary feedback through its controller.
+    #[error("operation unavailable under current authorization")]
+    OperationRefused {
+        #[serde(with = "operation_refusal_wire")]
+        refusal: meerkat_core::authorization::OperationRefused,
+    },
+    /// A failed protected observation before physical entry. Never retry or
+    /// feed this back to the model as a permission refusal.
+    #[error("operation observation unavailable")]
+    OperationObservationUnavailable,
+    #[error("operation authorization unavailable")]
+    OperationAuthorizationUnavailable,
     // === Retryable Errors ===
     #[error("Rate limited{}", match .retry_after_ms {
         Some(ms) => format!(", retry after {ms}ms"),
@@ -164,6 +178,26 @@ pub enum LlmError {
         choice: meerkat_core::ToolChoice,
         reason: ToolChoiceRefusal,
     },
+}
+
+// A refusal is an outcome, not a serialized live authorization handle. Keep
+// its existing protected Debug while retaining the typed disposition on wire.
+mod operation_refusal_wire {
+    use meerkat_core::authorization::{OperationRefusalKind, OperationRefused};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &OperationRefused,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.kind().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<OperationRefused, D::Error> {
+        OperationRefusalKind::deserialize(deserializer).map(OperationRefused::new)
+    }
 }
 
 /// Provider error codes that name exhausted quota, prepaid credit, or a spend
@@ -399,6 +433,44 @@ impl ProviderErrorObject {
 }
 
 impl LlmError {
+    pub fn operation_refused(kind: meerkat_core::authorization::OperationRefusalKind) -> Self {
+        Self::OperationRefused {
+            refusal: meerkat_core::authorization::OperationRefused::new(kind),
+        }
+    }
+
+    pub fn from_operation_refused(refusal: meerkat_core::authorization::OperationRefused) -> Self {
+        Self::operation_refused(refusal.kind())
+    }
+
+    pub fn from_operation_authorization(error: meerkat_core::OperationAuthorizationError) -> Self {
+        match error {
+            meerkat_core::OperationAuthorizationError::Refused(refusal) => {
+                Self::from_operation_refused(refusal)
+            }
+            meerkat_core::OperationAuthorizationError::Unavailable => {
+                Self::OperationAuthorizationUnavailable
+            }
+            meerkat_core::OperationAuthorizationError::ObservationUnavailable(error) => {
+                Self::from_operation_observation(error)
+            }
+        }
+    }
+
+    pub fn from_operation_observation(
+        _: meerkat_core::authorization::OperationObservationError,
+    ) -> Self {
+        Self::OperationObservationUnavailable
+    }
+
+    /// Preserve local refusal separately from provider failure/retry policy.
+    pub fn into_agent_error(self, provider: &'static str) -> meerkat_core::AgentError {
+        if let Self::OperationRefused { refusal } = self {
+            return meerkat_core::AgentError::OperationRefused { refusal };
+        }
+        meerkat_core::AgentError::llm(provider, self.failure_reason(), self.to_string())
+    }
+
     pub fn from_authorizer(error: meerkat_core::AuthError) -> Self {
         match error {
             meerkat_core::AuthError::ResolveRequired(message) => {
@@ -638,6 +710,24 @@ impl LlmError {
         }
 
         match self {
+            Self::OperationRefused { refusal } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::OperationRefused,
+                    json!({ "kind": refusal.kind() }),
+                ))
+            }
+            Self::OperationObservationUnavailable => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::OperationObservationUnavailable,
+                    serde_json::Value::Null,
+                ))
+            }
+            Self::OperationAuthorizationUnavailable => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::OperationAuthorizationUnavailable,
+                    serde_json::Value::Null,
+                ))
+            }
             Self::RateLimited { retry_after_ms } => LlmFailureReason::RateLimited {
                 retry_after: retry_after_ms.map(Duration::from_millis),
             },
@@ -1590,5 +1680,27 @@ mod tests {
                 "{body:?} must stay a rate limit: {err:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod authorization_unavailable_wire_tests {
+    use super::*;
+    #[test]
+    fn payload_free_unavailable_roundtrips_without_retry_or_refusal() {
+        let error = LlmError::from_operation_authorization(
+            meerkat_core::OperationAuthorizationError::Unavailable,
+        );
+        let encoded = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!("OperationAuthorizationUnavailable")
+        );
+        let decoded: LlmError = serde_json::from_value(encoded).unwrap();
+        assert!(!decoded.is_retryable());
+        let projected = decoded.into_agent_error("fixture");
+        assert!(projected.operation_authorization_unavailable());
+        assert!(projected.operation_refusal().is_none());
     }
 }

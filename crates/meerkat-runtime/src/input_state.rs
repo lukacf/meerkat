@@ -1116,6 +1116,7 @@ pub(crate) fn interaction_terminal_candidate_matches_event(
                                 tool_use_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone(),
                                 args: args.clone(),
+                                settlement_failures: Vec::new(),
                             }]
                     }
                     // A v0.8.7 candidate pairs with a v0.8.7 finalized event
@@ -1128,6 +1129,7 @@ pub(crate) fn interaction_terminal_candidate_matches_event(
                                     tool_use_id: String::new(),
                                     tool_name: tool_name.clone(),
                                     args: args.clone(),
+                                    settlement_failures: Vec::new(),
                                 }]
                     }
                 }
@@ -1494,11 +1496,23 @@ impl InputStatePersistenceRecord {
     /// Package a store-bound input-state bundle that was read from generated
     /// MeerkatMachine authority. This is intentionally crate-private so
     /// callers cannot mint persistence records from handwritten seed facts.
-    pub(crate) fn from_machine_snapshot(bundle: StoredInputState) -> Result<Self, String> {
+    pub(crate) fn from_machine_snapshot(mut bundle: StoredInputState) -> Result<Self, String> {
         crate::meerkat_machine::authorize_stored_input_state_seed(
             &bundle.state.input_id,
             &bundle.seed,
         )?;
+        bundle.state.authorization_audit = bundle
+            .state
+            .authorization_audit
+            .freeze_for_persistence()
+            .map_err(|error| error.to_string())?;
+        // Memory stores can clone this record without a serde boundary. Never
+        // let a durable candidate retain process authentication or a runnable
+        // client; the actual live input row keeps its separately owned pin.
+        bundle.state.controller_client = None;
+        if let Some(input) = bundle.state.persisted_input.as_mut() {
+            input.header_mut().ingress_context = None;
+        }
         Ok(Self {
             bundle,
             expected_row_digest: None,
@@ -1640,6 +1654,8 @@ impl PromptReplayIdentity {
             turn_metadata,
         } = prompt;
         let crate::input::InputHeader {
+            ingress_context: _,
+            authority_association,
             id: _,
             timestamp: _,
             source,
@@ -1650,6 +1666,7 @@ impl PromptReplayIdentity {
             correlation_id,
         } = header;
         let bytes = serde_json::to_vec(&(
+            authority_association,
             source,
             durability,
             visibility,
@@ -1690,6 +1707,12 @@ impl PromptReplayIdentity {
 
 #[derive(Debug, Clone)]
 pub struct InputState {
+    /// Actual selected client custody. Never encoded by StoredInputState; a
+    /// recovered row needs trusted setup to reattach the exact selected client.
+    pub(crate) controller_client: Option<meerkat_core::ControllerModelClient>,
+    pub(crate) authorization_audit: crate::input_audit::InputAuthorizationAudit,
+    /// Every original association retained on this row. No live permission.
+    pub authority_contributors: Vec<crate::input_authority::RetainedInputAuthority>,
     pub input_id: InputId,
     pub history: Vec<InputStateHistoryEntry>,
     pub updated_at: DateTime<Utc>,
@@ -1736,6 +1759,9 @@ impl InputState {
     pub fn new_accepted(input_id: InputId) -> Self {
         let now = Utc::now();
         Self {
+            controller_client: None,
+            authorization_audit: crate::input_audit::InputAuthorizationAudit::default(),
+            authority_contributors: Vec::new(),
             input_id,
             history: Vec::new(),
             updated_at: now,
@@ -1782,6 +1808,13 @@ fn is_false(value: &bool) -> bool {
 
 #[derive(Serialize, Deserialize)]
 struct InputStateSerde {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::input_audit::InputAuthorizationAudit::is_empty"
+    )]
+    authorization_audit: crate::input_audit::InputAuthorizationAudit,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    authority_contributors: Vec<crate::input_authority::RetainedInputAuthority>,
     stored_input_state_version: u32,
     input_id: InputId,
     current_state: InputLifecycleState,
@@ -1837,6 +1870,8 @@ impl Serialize for StoredInputState {
             ));
         }
         let helper = InputStateSerde {
+            authorization_audit: self.state.authorization_audit.clone(),
+            authority_contributors: self.state.authority_contributors.clone(),
             stored_input_state_version:
                 meerkat_core::generated::session_persistence_version_authority::stored_input_state_version(
                 ),
@@ -1962,6 +1997,9 @@ impl<'de> Deserialize<'de> for StoredInputState {
             .directed_run_started_attribution
             .or(payload_directed_attribution);
         let state = InputState {
+            controller_client: None,
+            authorization_audit: helper.authorization_audit,
+            authority_contributors: helper.authority_contributors,
             input_id: helper.input_id,
             history: helper.history,
             updated_at: helper.updated_at,
@@ -2711,6 +2749,7 @@ mod tests {
             tool_use_id: String::new(),
             tool_name: "external".to_string(),
             args: args.clone(),
+            settlement_failures: Vec::new(),
         }]);
         assert!(interaction_terminal_candidate_matches_event(
             &legacy_candidate,
@@ -2740,6 +2779,7 @@ mod tests {
             tool_use_id: "call-9".to_string(),
             tool_name: "external".to_string(),
             args: args.clone(),
+            settlement_failures: Vec::new(),
         }]);
         assert!(interaction_terminal_candidate_matches_event(
             &modern_candidate,
@@ -2833,6 +2873,8 @@ mod tests {
             state: InputState {
                 persisted_input: Some(Input::Operation(crate::input::OperationInput {
                     header: crate::input::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: InputId::new(),
                         timestamp: Utc::now(),
                         source: crate::input::InputOrigin::System,
@@ -2954,6 +2996,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external".to_string(),
                 args: serde_json::json!({"value": 1}),
+                settlement_failures: Vec::new(),
             }],
         };
         let event = AgentEvent::InteractionFailed {

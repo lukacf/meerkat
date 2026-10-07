@@ -456,7 +456,7 @@ async fn open_replay_host(
         Arc::new(meerkat_store::MemoryBlobStore::new()) as Arc<dyn BlobStore>,
         Arc::new(meerkat::DisabledScheduleStore),
         Arc::new(meerkat::MemoryWorkGraphStore::new()),
-    );
+    )?;
     let runtime = Arc::new(SessionRuntime::new_with_config_store(
         factory.clone(),
         config.clone(),
@@ -477,7 +477,7 @@ async fn open_replay_host(
     // Every executor and worker turn is the scripted LLM.
     runtime.set_default_llm_client(Some(options.llm.clone() as Arc<dyn LlmClient>));
 
-    let mobs = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None);
+    let mobs = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None)?;
     runtime.set_mob_state(Arc::clone(&mobs));
 
     let public_transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());

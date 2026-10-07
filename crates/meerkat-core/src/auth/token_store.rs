@@ -341,6 +341,10 @@ pub enum RefreshError {
     /// selected identity. This is a use refusal, not a freshness classification.
     #[error("stored credential does not match the selected identity")]
     CredentialIdentityMismatch,
+    /// The captured lifecycle or durable predecessor changed. No refresh
+    /// success, failure transition or compensation may use that capture.
+    #[error("refresh preparation is no longer current")]
+    StalePreparation,
     #[error("refresh function failed: {0}")]
     Refresh(String),
     #[error("refresh function failed: {message}")]
@@ -444,7 +448,8 @@ impl RefreshError {
             | Self::CredentialIdentityMismatch
             | Self::RequiredScopesNotGranted
             | Self::Cancelled
-            | Self::LockFailed(_) => RefreshFailureObservation::transient(),
+            | Self::LockFailed(_)
+            | Self::StalePreparation => RefreshFailureObservation::transient(),
         }
     }
 
@@ -461,7 +466,8 @@ impl RefreshError {
             | Self::Observed { .. }
             | Self::ReauthRequired(_)
             | Self::Cancelled
-            | Self::LockFailed(_) => None,
+            | Self::LockFailed(_)
+            | Self::StalePreparation => None,
         }
     }
 }
@@ -477,6 +483,8 @@ pub type RefreshFn =
 /// used by refresh and interactive credential replacement.
 #[derive(Clone, Debug, Error)]
 pub enum CredentialMutationError {
+    #[error("credential preparation is no longer current")]
+    StalePreparation,
     #[error("credential mutation failed: {0}")]
     Operation(String),
     #[error("credential token-store mutation failed: {0}")]

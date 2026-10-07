@@ -293,6 +293,8 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
     let trigger_input = Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: InputOrigin::Operator,
@@ -407,6 +409,8 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
     let trigger_input = Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: InputOrigin::Operator,
@@ -554,6 +558,8 @@ async fn choke_004_completion_during_running_defers_wake() {
     let trigger = Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: InputOrigin::Operator,
@@ -704,6 +710,8 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
     let trigger = Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: InputOrigin::Operator,

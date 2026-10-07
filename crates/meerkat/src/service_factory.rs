@@ -269,22 +269,16 @@ impl SessionAgent for FactoryAgent {
         self.agent.set_runtime_execution_kind(input.execution_kind);
         self.agent
             .set_active_turn_request_contexts(input.request_contexts);
-        if input.typed_turn_appends.is_empty()
-            && input.transcript_identity.is_none()
-            && input.injected_context.is_empty()
-        {
-            self.agent.run_with_events(input.prompt, event_tx).await
-        } else {
-            self.agent
-                .run_with_events_and_typed_turn_appends(
-                    input.prompt,
-                    input.typed_turn_appends,
-                    input.injected_context,
-                    input.transcript_identity,
-                    event_tx,
-                )
-                .await
-        }
+        self.agent
+            .run_with_events_and_work_authorization(
+                input.prompt,
+                input.typed_turn_appends,
+                input.injected_context,
+                input.transcript_identity,
+                event_tx,
+                input.work_authorization,
+            )
+            .await
     }
 
     async fn run_pending_with_events(
@@ -292,6 +286,7 @@ impl SessionAgent for FactoryAgent {
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+        work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.set_runtime_execution_kind(execution_kind);
@@ -299,7 +294,13 @@ impl SessionAgent for FactoryAgent {
             .set_active_transcript_identity(transcript_identity);
         self.agent
             .set_active_turn_request_contexts(request_contexts);
-        self.agent.run_pending_with_events(event_tx).await
+        self.agent
+            .run_pending_with_events_and_work_authorization(event_tx, work_authorization)
+            .await
+    }
+
+    fn clear_work_authorization(&mut self) {
+        self.agent.clear_work_authorization();
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -332,6 +333,17 @@ impl SessionAgent for FactoryAgent {
             .session_mut()
             .push(Message::tool_results(results));
         Ok(())
+    }
+
+    fn pin_controller_client(&self) -> Option<meerkat_core::ControllerModelClient> {
+        let controller = self.agent.pin_controller_client()?;
+        let identity = self.agent.session().session_metadata()?.llm_identity();
+        let selection = controller.selection();
+        (selection.model() == identity.model
+            && selection.provider() == identity.provider
+            && selection.self_hosted_server_id() == identity.self_hosted_server_id.as_deref()
+            && selection.auth_binding() == identity.auth_binding.as_ref())
+        .then_some(controller)
     }
 
     fn replace_client(
@@ -2576,6 +2588,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "initialize policy probe tool visibility".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::HandlingMode::Queue,
@@ -2739,6 +2752,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             &mut agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "initialize durable member tool visibility"
                     .to_string()
                     .into(),
@@ -2863,6 +2877,7 @@ mod tests {
             SessionAgent::run_turn_with_events(
                 &mut agent,
                 meerkat_session::ephemeral::SessionAgentTurnInput {
+                    work_authorization: None,
                     prompt: "ordinary turn overlapping live bridge".to_string().into(),
                     injected_context: Vec::new(),
                     handling_mode: meerkat_core::HandlingMode::Queue,
@@ -2977,6 +2992,7 @@ mod tests {
         let result = SessionAgent::run_turn_with_events(
             &mut agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "ordinary durable turn".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::HandlingMode::Queue,
@@ -4143,6 +4159,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             &mut agent,
             SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "inspect".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
@@ -4216,6 +4233,7 @@ mod tests {
         SessionAgent::run_turn_with_events(
             &mut agent,
             SessionAgentTurnInput {
+                work_authorization: None,
                 prompt: "inspect".to_string().into(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,

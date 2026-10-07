@@ -289,6 +289,26 @@ impl AgentBuilder {
 
     /// Build an agent using the factory resources already set on this builder.
     pub async fn try_build(self) -> Result<DynAgent, BuildAgentError> {
+        self.validate_core_injections()?;
+        self.factory
+            .build_agent(self.build_config, &self.config)
+            .await
+    }
+
+    /// Prepare a runnable agent and its exact controller before native work
+    /// admission. The trusted host must attach the returned pin to the actual
+    /// input association; its selection data alone is not authentication or a
+    /// grant. Unsupported selected clients fail during this setup call.
+    pub async fn try_build_with_controller(
+        self,
+    ) -> Result<(DynAgent, meerkat_core::ControllerModelClient), BuildAgentError> {
+        self.validate_core_injections()?;
+        self.factory
+            .build_agent_with_controller(self.build_config, &self.config)
+            .await
+    }
+
+    fn validate_core_injections(&self) -> Result<(), BuildAgentError> {
         if !self.unsupported_core_injections.is_empty() {
             return Err(BuildAgentError::Config(format!(
                 "public AgentBuilder cannot accept standalone core injection method(s): {}. \
@@ -298,8 +318,6 @@ impl AgentBuilder {
             )));
         }
 
-        self.factory
-            .build_agent(self.build_config, &self.config)
-            .await
+        Ok(())
     }
 }

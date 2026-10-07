@@ -27,21 +27,23 @@
 //
 // Shards are packed by an estimated lane cost, not by crate count: a crate's
 // Rust line count (its lib-test binary compiles every inline test) plus a
-// term per workspace crate in its dependency closure (each top-level crate's
+// term per workspace crate in its build closure (each top-level crate's
 // test binary links the whole graph; the cold hosted-runner shards that
 // bundled several such crates ran 18-25 minutes while the line-count
 // balanced shards of leaf crates ran 7-9). --max-shards bounds a
 // changed-package plan, --workspace-shards a whole-workspace plan.
 //
 // Budget model. A pull-request lane models at
-//   minutes = 1 + (lines + 8000 * dependency_closure) / 35000
-// (calibrated on hosted 4-vCPU runners: meerkat-mob 722k -> 21.6 modelled,
-// 21.8 measured; meerkat-runtime 453k -> 13.9 modelled, 11.7-12.2 measured)
-// and the pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES.
+//   minutes = 1 + (lines + 8000 * build_closure) / 35000
+// The constants came from earlier hosted 4-vCPU runs. Those historical source
+// sizes and recursive closures do not calibrate today's build-closure input;
+// current estimates require comparison with hosted results. On d1dda1482 the
+// runtime unit lane models 15.1 minutes, not a measured completion guarantee.
+// The pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES.
 // Every unit lane that ever exceeded the 1200 s push-to-terminal budget
 // compiled meerkat-mob's 442k lines: mob's own lane, and the lanes of crates
 // that depend on mob and rebuild it under their own feature unification
-// (rkat, rpc, rest, mcp-server, mob-mcp, mob-pack, xtask, ...). Those
+// (rkat, rpc, rest, mcp-server, mob-mcp, mob-pack, ...). Those
 // crates' unit tests therefore run on the push-to-main run (no budget) and
 // on nightly, never in the pull-request unit lane; the chain is computed
 // from cargo metadata, not listed here. Clippy of a changed crate always
@@ -190,6 +192,16 @@ export const INTEGRATION_SUITES = [
       "meerkat-integration-tests",
     ],
     paths: ["tests/integration/fixtures/gpt_live_replay/"],
+  },
+  // The ordinary native governed loops and cost correctness controls live in
+  // tests/*.rs; unit rows only select lib/bin tests. Keep real/perf opt-ins.
+  {
+    package: "meerkat-authorization",
+    triggers: [
+      ...MACHINE_AUTHORITY_PACKAGES,
+      "meerkat-authorization", "meerkat-authorization-contracts", "meerkat-core", "meerkat-runtime",
+      "meerkat", "meerkat-tools", "meerkat-llm-core", "meerkat-anthropic", "meerkat-auth-core", "meerkat-models",
+    ],
   },
 ];
 
@@ -619,41 +631,12 @@ function plan(args) {
     result.example_web = true;
   }
 
-  // Estimated lane cost per package: Rust lines (the lib-test binary
-  // compiles every inline test) plus a link/dependency-graph term per
-  // workspace crate in the package's dependency closure.
-  const depClosure = (pkg) => {
-    const seen = new Set();
-    const queue = [pkg.id];
-    while (queue.length) {
-      const current = byId.get(queue.pop());
-      for (const dep of current.dependencies) {
-        if (dep.source !== null) continue;
-        const depPkg = byName.get(dep.name);
-        if (depPkg && !seen.has(depPkg.id)) {
-          seen.add(depPkg.id);
-          queue.push(depPkg.id);
-        }
-      }
-    }
-    return new Set([...seen].map((id) => byId.get(id).name));
-  };
-  const closures = new Map(packages.map((pkg) => [pkg.name, depClosure(pkg)]));
-  const lineCounts = new Map(packages.map((pkg) => [pkg.name, rustLineCount(resolve(root, packageDir(pkg)))]));
-  const weights = new Map(
-    packages.map((pkg) => [pkg.name, lineCounts.get(pkg.name) + LINK_COST_PER_DEP * closures.get(pkg.name).size]),
-  );
-  const model = { lines: lineCounts, closures };
-  // Crates whose unit lane compiles meerkat-mob (mob itself and everything
-  // that depends on it) run their unit tests on push to main, not in the
-  // pull-request lane. "Compiles" is the unit lane's real build graph: the
-  // package's own dependencies of every kind (its dev-dependencies build its
-  // lib-test), then only normal and build dependencies below that, since
-  // Cargo never builds a dependency's dev-dependencies. The cost-model
-  // closure above follows every kind at every level; using it here put xtask
-  // and machine-dsl-tests in the chain through meerkat-machine-codegen's
-  // dev-dependency on meerkat-mob, so a pull request that changed crates/xtask
-  // merged without its unit tests (#1362 turned main red that way).
+  // A unit lane compiles the package's dependencies of every kind (its
+  // dev-dependencies build its lib-test), then only normal and build
+  // dependencies below that. Cargo never builds a dependency's dev fixtures.
+  // Reuse this graph for both the link-cost estimate and the heavy chain.
+  // Following nested dev edges put xtask in the mob chain (#1362) and priced
+  // runtime as though it built authorization's native facade test fixtures.
   const buildClosure = (pkg) => {
     const seen = new Set();
     const queue = [];
@@ -673,9 +656,19 @@ function plan(args) {
     }
     return seen;
   };
+  // Estimated lane cost per package: Rust lines (the lib-test binary
+  // compiles every inline test) plus a link term per compiled workspace crate.
+  const closures = new Map(packages.map((pkg) => [pkg.name, buildClosure(pkg)]));
+  const lineCounts = new Map(packages.map((pkg) => [pkg.name, rustLineCount(resolve(root, packageDir(pkg)))]));
+  const weights = new Map(
+    packages.map((pkg) => [pkg.name, lineCounts.get(pkg.name) + LINK_COST_PER_DEP * closures.get(pkg.name).size]),
+  );
+  const model = { lines: lineCounts, closures };
+  // Crates whose unit lane compiles meerkat-mob still run their unit tests
+  // on push to main, with no pull-request budget. Their clippy always runs.
   const heavyChain = new Set(
     packages
-      .filter((pkg) => pkg.name === HEAVY_ANCHOR || buildClosure(pkg).has(HEAVY_ANCHOR))
+      .filter((pkg) => pkg.name === HEAVY_ANCHOR || closures.get(pkg.name).has(HEAVY_ANCHOR))
       .map((pkg) => pkg.name),
   );
   result.unit_deferred_chain = [...heavyChain].sort();

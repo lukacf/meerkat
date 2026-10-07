@@ -834,10 +834,13 @@ async fn checkpoint_recovery_after_restart_settles_then_releases_exact_materiali
     let fixture = Fixture::new().await;
     let input_id = old_input_id();
     fixture.checkpoint(input_id.clone()).await;
-    let machine = Arc::new(super::super::MeerkatMachine::persistent(
-        fixture.store.clone(),
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
-    ));
+    let machine = Arc::new(
+        super::super::MeerkatMachine::persistent(
+            fixture.store.clone(),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("persistent machine"),
+    );
     let mut prepared = machine
         .prepare_session_materialization(fixture.session_id.clone())
         .await
@@ -1009,10 +1012,13 @@ async fn checkpoint_receipt_cas_failure_keeps_consumed_candidate_for_cold_retry(
     conn.execute_batch("DROP TRIGGER reject_checkpoint_receipt")
         .unwrap();
     drop(conn);
-    let machine = Arc::new(super::super::MeerkatMachine::persistent(
-        fixture.store.clone(),
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
-    ));
+    let machine = Arc::new(
+        super::super::MeerkatMachine::persistent(
+            fixture.store.clone(),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("persistent machine"),
+    );
     let mut prepared = machine
         .prepare_session_materialization(fixture.session_id.clone())
         .await

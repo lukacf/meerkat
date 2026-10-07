@@ -238,8 +238,14 @@ accurate, and preserve the runtime/session-store persistence-profile pairing:
 realm storage provider** below.
 
 Low-level `PersistenceBundle::new()` and related constructors also accept
-custom stores; callers using them own the corresponding composition. A custom
-`SessionStore` is not a drop-in replacement for the entire persistence bundle.
+custom stores; callers using them own the corresponding composition. With
+`session-store` enabled, these constructors return `Result` and request ordinary
+shared custody when supported by the backend. Handle construction refusal before
+publishing the host.
+For governed composition, select
+`PersistenceBundle::new_with_local_grant_authorization(...)` upfront; see
+[Native governed embedding](/rust/native-authorization). A custom `SessionStore`
+is not a drop-in replacement for the entire persistence bundle.
 </Note>
 </Accordion>
 

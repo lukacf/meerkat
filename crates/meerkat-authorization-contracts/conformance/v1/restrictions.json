@@ -1,0 +1,882 @@
+{
+  "schema_version": 1,
+  "contract_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "atoms": {
+    "actions": {
+      "read": {
+        "feature": "records",
+        "action": "read"
+      },
+      "write": {
+        "feature": "records",
+        "action": "write"
+      },
+      "literal-star": {
+        "feature": "records",
+        "action": "*"
+      }
+    },
+    "resource_domains": {
+      "records-A": {
+        "authority": {
+          "kind": "service_account",
+          "id": "resource-owner",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-A"
+          }
+        },
+        "namespace": "records"
+      },
+      "records-B": {
+        "authority": {
+          "kind": "service_account",
+          "id": "resource-owner",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-B"
+          }
+        },
+        "namespace": "records"
+      }
+    },
+    "processors": {
+      "route-A": {
+        "processor": "route",
+        "authority": {
+          "kind": "service_account",
+          "id": "provider",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-A"
+          }
+        },
+        "route_id": "route-A"
+      },
+      "route-B": {
+        "processor": "route",
+        "authority": {
+          "kind": "service_account",
+          "id": "provider",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-A"
+          }
+        },
+        "route_id": "route-B"
+      }
+    },
+    "audiences": {
+      "alice": {
+        "audience": "principal",
+        "principal": {
+          "kind": "service_account",
+          "id": "alice",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-A"
+          }
+        }
+      },
+      "bob": {
+        "audience": "principal",
+        "principal": {
+          "kind": "service_account",
+          "id": "bob",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-A"
+          }
+        }
+      },
+      "charlie": {
+        "audience": "principal",
+        "principal": {
+          "kind": "service_account",
+          "id": "charlie",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-A"
+          }
+        }
+      },
+      "other-domain-alice": {
+        "audience": "principal",
+        "principal": {
+          "kind": "service_account",
+          "id": "alice",
+          "qualification": {
+            "kind": "qualified",
+            "trust_domain_id": "authority-B"
+          }
+        }
+      }
+    }
+  },
+  "set_cases": [
+    {
+      "id": "empty-never-unrestricted",
+      "dimension": "actions",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [],
+          "unresolved": []
+        },
+        {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [],
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "value": "read",
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "child-cannot-widen-parent",
+      "dimension": "actions",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [
+            "read"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "exact",
+          "values": [
+            "read",
+            "write"
+          ],
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [
+          "read"
+        ],
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "value": "read",
+          "expected": "matches"
+        },
+        {
+          "value": "write",
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "unknown-keeps-known-parent-bound",
+      "dimension": "actions",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [
+            "read"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": [
+            "unknown"
+          ]
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [
+          "read"
+        ],
+        "unresolved": [
+          "unknown"
+        ]
+      },
+      "probes": [
+        {
+          "value": "read",
+          "expected": "unresolved"
+        },
+        {
+          "value": "write",
+          "expected": "unresolved"
+        }
+      ]
+    },
+    {
+      "id": "all-unresolved-facts-survive-empty",
+      "dimension": "audiences",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [],
+          "unresolved": []
+        },
+        {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": [
+            "absent"
+          ]
+        },
+        {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": [
+            "unknown"
+          ]
+        },
+        {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": [
+            "unavailable"
+          ]
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [],
+        "unresolved": [
+          "absent",
+          "unknown",
+          "unavailable"
+        ]
+      },
+      "probes": [
+        {
+          "value": "alice",
+          "expected": "unresolved"
+        }
+      ]
+    },
+    {
+      "id": "authority-qualified-domains-do-not-collapse",
+      "dimension": "resource_domains",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [
+            "records-A"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "exact",
+          "values": [
+            "records-B"
+          ],
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [],
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "value": "records-A",
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "three-input-audience-conflict-stays-empty",
+      "dimension": "audiences",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [
+            "alice",
+            "bob"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "exact",
+          "values": [
+            "bob",
+            "charlie"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "exact",
+          "values": [
+            "alice",
+            "charlie"
+          ],
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [],
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "value": "alice",
+          "expected": "outside_bounds"
+        },
+        {
+          "value": "bob",
+          "expected": "outside_bounds"
+        },
+        {
+          "value": "charlie",
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "literal-star-does-not-mean-every-action",
+      "dimension": "actions",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [
+            "literal-star"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "exact",
+          "values": [
+            "read"
+          ],
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [],
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "value": "read",
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "processor-route-is-exact",
+      "dimension": "processors",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [
+            "route-A"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "exact",
+          "values": [
+            "route-B"
+          ],
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [],
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "value": "route-A",
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "same-name-other-principal-domain-is-distinct",
+      "dimension": "audiences",
+      "inputs": [
+        {
+          "bound": "exact",
+          "values": [
+            "alice"
+          ],
+          "unresolved": []
+        },
+        {
+          "bound": "exact",
+          "values": [
+            "other-domain-alice"
+          ],
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "exact",
+        "values": [],
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "value": "alice",
+          "expected": "outside_bounds"
+        }
+      ]
+    }
+  ],
+  "lifetime_cases": [
+    {
+      "id": "requested-lifetime-cannot-extend-parent",
+      "inputs": [
+        {
+          "bound": "window",
+          "not_before_ms": 100,
+          "expires_at_ms": 200,
+          "unresolved": []
+        },
+        {
+          "bound": "window",
+          "not_before_ms": 0,
+          "expires_at_ms": 999,
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "window",
+        "not_before_ms": 100,
+        "expires_at_ms": 200,
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "now_ms": 99,
+          "expected": "outside_bounds"
+        },
+        {
+          "now_ms": 100,
+          "expected": "matches"
+        },
+        {
+          "now_ms": 199,
+          "expected": "matches"
+        },
+        {
+          "now_ms": 200,
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "touching-lifetimes-have-empty-intersection",
+      "inputs": [
+        {
+          "bound": "window",
+          "not_before_ms": 100,
+          "expires_at_ms": 200,
+          "unresolved": []
+        },
+        {
+          "bound": "window",
+          "not_before_ms": 200,
+          "expires_at_ms": 300,
+          "unresolved": []
+        }
+      ],
+      "expected": {
+        "bound": "empty",
+        "unresolved": []
+      },
+      "probes": [
+        {
+          "now_ms": 200,
+          "expected": "outside_bounds"
+        }
+      ]
+    },
+    {
+      "id": "unavailable-lifetime-keeps-parent-window",
+      "inputs": [
+        {
+          "bound": "window",
+          "not_before_ms": 100,
+          "expires_at_ms": 200,
+          "unresolved": []
+        },
+        {
+          "bound": "unrestricted",
+          "unresolved": [
+            "unavailable"
+          ]
+        }
+      ],
+      "expected": {
+        "bound": "window",
+        "not_before_ms": 100,
+        "expires_at_ms": 200,
+        "unresolved": [
+          "unavailable"
+        ]
+      },
+      "probes": [
+        {
+          "now_ms": 150,
+          "expected": "unresolved"
+        }
+      ]
+    }
+  ],
+  "depth_cases": [
+    {
+      "id": "child-consumes-exactly-one-parent-edge",
+      "parent": {
+        "bound": "remaining",
+        "remaining": 2,
+        "unresolved": []
+      },
+      "requested": {
+        "bound": "unrestricted",
+        "unresolved": []
+      },
+      "expected": {
+        "bound": "remaining",
+        "remaining": 1,
+        "unresolved": []
+      }
+    },
+    {
+      "id": "child-cannot-reset-depth",
+      "parent": {
+        "bound": "remaining",
+        "remaining": 1,
+        "unresolved": []
+      },
+      "requested": {
+        "bound": "remaining",
+        "remaining": 4294967295,
+        "unresolved": []
+      },
+      "expected": {
+        "bound": "remaining",
+        "remaining": 0,
+        "unresolved": []
+      }
+    },
+    {
+      "id": "zero-depth-refuses-child",
+      "parent": {
+        "bound": "remaining",
+        "remaining": 0,
+        "unresolved": []
+      },
+      "requested": {
+        "bound": "unrestricted",
+        "unresolved": []
+      },
+      "expected_error": "exhausted"
+    },
+    {
+      "id": "unknown-depth-refuses-child",
+      "parent": {
+        "bound": "unrestricted",
+        "unresolved": [
+          "unknown"
+        ]
+      },
+      "requested": {
+        "bound": "remaining",
+        "remaining": 1,
+        "unresolved": []
+      },
+      "expected_error": "unresolved"
+    },
+    {
+      "id": "requested-unavailable-depth-stays-unavailable",
+      "parent": {
+        "bound": "remaining",
+        "remaining": 2,
+        "unresolved": []
+      },
+      "requested": {
+        "bound": "unrestricted",
+        "unresolved": [
+          "unavailable"
+        ]
+      },
+      "expected": {
+        "bound": "remaining",
+        "remaining": 1,
+        "unresolved": [
+          "unavailable"
+        ]
+      }
+    }
+  ],
+  "attenuation_cases": [
+    {
+      "id": "all-child-bounds-retain-parent-ceiling",
+      "parent": {
+        "actions": {
+          "bound": "exact",
+          "values": [
+            "read"
+          ],
+          "unresolved": []
+        },
+        "resource_domains": {
+          "bound": "exact",
+          "values": [
+            "records-A"
+          ],
+          "unresolved": []
+        },
+        "processors": {
+          "bound": "exact",
+          "values": [
+            "route-A"
+          ],
+          "unresolved": []
+        },
+        "audiences": {
+          "bound": "exact",
+          "values": [
+            "alice"
+          ],
+          "unresolved": []
+        },
+        "lifetime": {
+          "bound": "window",
+          "not_before_ms": 100,
+          "expires_at_ms": 200,
+          "unresolved": []
+        },
+        "delegation_depth": {
+          "bound": "remaining",
+          "remaining": 1,
+          "unresolved": []
+        }
+      },
+      "requested": {
+        "actions": {
+          "bound": "exact",
+          "values": [
+            "read",
+            "write"
+          ],
+          "unresolved": []
+        },
+        "resource_domains": {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": []
+        },
+        "processors": {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": []
+        },
+        "audiences": {
+          "bound": "exact",
+          "values": [
+            "alice",
+            "bob"
+          ],
+          "unresolved": []
+        },
+        "lifetime": {
+          "bound": "window",
+          "not_before_ms": 0,
+          "expires_at_ms": 999,
+          "unresolved": []
+        },
+        "delegation_depth": {
+          "bound": "unrestricted",
+          "unresolved": []
+        }
+      },
+      "expected": {
+        "actions": {
+          "bound": "exact",
+          "values": [
+            "read"
+          ],
+          "unresolved": []
+        },
+        "resource_domains": {
+          "bound": "exact",
+          "values": [
+            "records-A"
+          ],
+          "unresolved": []
+        },
+        "processors": {
+          "bound": "exact",
+          "values": [
+            "route-A"
+          ],
+          "unresolved": []
+        },
+        "audiences": {
+          "bound": "exact",
+          "values": [
+            "alice"
+          ],
+          "unresolved": []
+        },
+        "lifetime": {
+          "bound": "window",
+          "not_before_ms": 100,
+          "expires_at_ms": 200,
+          "unresolved": []
+        },
+        "delegation_depth": {
+          "bound": "remaining",
+          "remaining": 0,
+          "unresolved": []
+        }
+      }
+    },
+    {
+      "id": "unknown-child-cannot-remove-exact-parent",
+      "parent": {
+        "actions": {
+          "bound": "exact",
+          "values": [
+            "read"
+          ],
+          "unresolved": []
+        },
+        "resource_domains": {
+          "bound": "exact",
+          "values": [
+            "records-A"
+          ],
+          "unresolved": []
+        },
+        "processors": {
+          "bound": "exact",
+          "values": [
+            "route-A"
+          ],
+          "unresolved": []
+        },
+        "audiences": {
+          "bound": "exact",
+          "values": [
+            "alice"
+          ],
+          "unresolved": []
+        },
+        "lifetime": {
+          "bound": "window",
+          "not_before_ms": 100,
+          "expires_at_ms": 200,
+          "unresolved": []
+        },
+        "delegation_depth": {
+          "bound": "remaining",
+          "remaining": 2,
+          "unresolved": []
+        }
+      },
+      "requested": {
+        "actions": {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": [
+            "unknown"
+          ]
+        },
+        "resource_domains": {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": []
+        },
+        "processors": {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": [
+            "unavailable"
+          ]
+        },
+        "audiences": {
+          "bound": "unrestricted",
+          "values": [],
+          "unresolved": []
+        },
+        "lifetime": {
+          "bound": "unrestricted",
+          "unresolved": []
+        },
+        "delegation_depth": {
+          "bound": "unrestricted",
+          "unresolved": []
+        }
+      },
+      "expected": {
+        "actions": {
+          "bound": "exact",
+          "values": [
+            "read"
+          ],
+          "unresolved": [
+            "unknown"
+          ]
+        },
+        "resource_domains": {
+          "bound": "exact",
+          "values": [
+            "records-A"
+          ],
+          "unresolved": []
+        },
+        "processors": {
+          "bound": "exact",
+          "values": [
+            "route-A"
+          ],
+          "unresolved": [
+            "unavailable"
+          ]
+        },
+        "audiences": {
+          "bound": "exact",
+          "values": [
+            "alice"
+          ],
+          "unresolved": []
+        },
+        "lifetime": {
+          "bound": "window",
+          "not_before_ms": 100,
+          "expires_at_ms": 200,
+          "unresolved": []
+        },
+        "delegation_depth": {
+          "bound": "remaining",
+          "remaining": 1,
+          "unresolved": []
+        }
+      }
+    }
+  ],
+  "corpus": "bounded-authorization-restrictions",
+  "evidence_status": "pure-contract-conformance-only; no runtime or external-owner acceptance"
+}

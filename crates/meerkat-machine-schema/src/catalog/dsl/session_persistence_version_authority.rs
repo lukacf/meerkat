@@ -16,6 +16,7 @@ machine! {
         state {
             lifecycle_phase: SessionPersistenceVersionAuthorityPhase,
             session_envelope_version: u64,
+            session_envelope_released_v3: u64,
             stored_input_state_version: u64,
             stored_input_state_migration_v4: u64,
             stored_input_state_released_v3: u64,
@@ -23,7 +24,8 @@ machine! {
         }
 
         init(Ready) {
-            session_envelope_version = 3,
+            session_envelope_version = 4,
+            session_envelope_released_v3 = 3,
             stored_input_state_version = 5,
             stored_input_state_migration_v4 = 4,
             stored_input_state_released_v3 = 3,
@@ -56,6 +58,20 @@ machine! {
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && persisted_version == self.session_envelope_version
+            }
+            update {}
+            to Ready
+            emit VersionRestoreAuthorized {
+                field: SessionPersistenceVersionField::SessionEnvelope,
+                version: self.session_envelope_version
+            }
+        }
+
+        transition MigrateReleasedSessionEnvelopeV3ToV4 {
+            on input RestoreSessionEnvelopeVersion { persisted_version }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && persisted_version == self.session_envelope_released_v3
             }
             update {}
             to Ready

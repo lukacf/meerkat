@@ -331,6 +331,48 @@ pub struct CompositionCoverageManifest {
 pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
     vec![
         machine_manifest_from_schema(
+            &super::dsl::dsl_grant_authority_machine(),
+            &[machine_anchor(
+                "grant_authority", "GrantAuthorityMachine",
+                "crates/meerkat-authorization/src/grants/mod.rs",
+                "generated local grant issuance, revocation and full-lineage resolution; no persistence or caller authentication claim",
+                CoverageClaims::none()
+                    .transitions(&["Configure", "IssueRoot", "IssueChild", "RevokeNew", "RevokeAlready", "ResolveUse"])
+                    .effects(&["Configured", "Issued", "Revoked", "UseResolved"])
+                    .invariants(&["configured_identity_is_present", "revoked_records_remain_present"]),
+            )],
+            &[
+                scenario(
+                    "grant-three-level-attenuation",
+                    "grants/tests.rs::three_levels_use_exact_attenuation_and_zero_depth_only_forbids_children configures the real owner, issues root/child/leaf, resolves exact narrowed use and rejects another child at exhausted depth",
+                    CoverageClaims::none()
+                        .transitions(&["Configure", "IssueRoot", "IssueChild", "ResolveUse"])
+                        .effects(&["Configured", "Issued", "UseResolved"]),
+                ),
+                scenario(
+                    "grant-revoked-ancestor",
+                    "grants/tests.rs::revoked_ancestor_refuses_descendant_and_invalidates_existing_publication revokes an actual root and refuses descendant use and further child issuance",
+                    CoverageClaims::none()
+                        .transitions(&["RevokeNew", "ResolveUse", "IssueChild"])
+                        .effects(&["Revoked"]),
+                ),
+                scenario(
+                    "grant-immutable-id-and-idempotent-revoke",
+                    "grants/tests.rs::issuance_and_revocation_are_immutable_with_no_id_reuse rejects duplicate issuance before and after revocation and verifies repeated revoke does not advance revision",
+                    CoverageClaims::none()
+                        .transitions(&["IssueRoot", "RevokeNew", "RevokeAlready"])
+                        .effects(&["Issued", "Revoked"]),
+                ),
+                scenario(
+                    "grant-fresh-chain-lifetime",
+                    "grants/tests.rs::full_chain_is_checked_at_fresh_time_without_cached_valid_state tests actual root/child lifetime boundaries with a changed owner clock and no cached valid state",
+                    CoverageClaims::none()
+                        .transitions(&["IssueChild", "ResolveUse"])
+                        .effects(&["Issued", "UseResolved"]),
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
             &dsl_meerkat_machine(),
             &[
                 machine_anchor(

@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -198,6 +197,7 @@ pub enum CancelJobDisposition {
 /// Mechanical shell runner. It never derives lifecycle transitions.
 pub struct JobManager {
     config: ShellConfig,
+    confinement: super::custody_spawn::ConfinementBinding,
     resolved_shell_path: Arc<Mutex<Option<PathBuf>>>,
     ops_registry: Arc<dyn OpsLifecycleRegistry>,
     owner_bridge_session_id: SessionId,
@@ -231,8 +231,10 @@ impl std::fmt::Debug for JobManager {
 
 impl JobManager {
     pub fn new(config: ShellConfig) -> Self {
+        let confinement = super::custody_spawn::ConfinementBinding::new(&config.confinement);
         Self {
             config,
+            confinement,
             resolved_shell_path: Arc::new(Mutex::new(None)),
             ops_registry: Arc::new(RuntimeOpsLifecycleRegistry::new()),
             owner_bridge_session_id: SessionId::new(),
@@ -246,6 +248,18 @@ impl JobManager {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             process_custody: std::sync::OnceLock::new(),
         }
+    }
+
+    /// A foreground tool must use the same host requirement as its manager.
+    pub(super) fn confinement_binding(
+        &self,
+        requested: &super::config::ShellConfinement,
+    ) -> Result<&super::custody_spawn::ConfinementBinding, meerkat_sandbox::ConfinementRefusal>
+    {
+        if requested != &self.config.confinement {
+            return Err(meerkat_sandbox::ConfinementRefusal::InvalidRequirement);
+        }
+        Ok(&self.confinement)
     }
 
     /// Bind durable process custody for foreground shell calls.
@@ -881,6 +895,19 @@ impl JobManager {
                 job_id: public_job_id.to_string(),
             }
         };
+        let mut environment = super::custody_spawn::environment(&self.config, &resolved_dir);
+        if monitor.is_some() {
+            environment.insert(
+                "MEERKAT_MONITOR_SUBMISSION_KEY".into(),
+                submission_key.into(),
+            );
+            if let Some(checkpoint) = &claim.resume_checkpoint {
+                environment.insert(
+                    "MEERKAT_MONITOR_CHECKPOINT".into(),
+                    checkpoint.as_str().into(),
+                );
+            }
+        }
         let spawned = super::custody_spawn::spawn_in_custody(
             &self.custody_binding(),
             super::custody_spawn::SpawnIdentity {
@@ -888,26 +915,15 @@ impl JobManager {
                 tool_call_id: Some(tool_call_id),
                 run_id,
             },
-            shell_path.as_os_str(),
-            &[
-                std::ffi::OsString::from("-c"),
-                std::ffi::OsString::from(command),
-            ],
-            |command_builder| {
-                command_builder.current_dir(&resolved_dir);
-                command_builder.env("PWD", &resolved_dir);
-                command_builder.envs(&self.config.env_vars);
-                if monitor.is_some() {
-                    command_builder.env("MEERKAT_MONITOR_SUBMISSION_KEY", &submission_key);
-                    if let Some(checkpoint) = &claim.resume_checkpoint {
-                        command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
-                    }
-                }
-                command_builder.stdout(Stdio::piped());
-                command_builder.stderr(Stdio::piped());
-                command_builder.kill_on_drop(true);
-                #[cfg(unix)]
-                command_builder.process_group(0);
+            &self.confinement,
+            super::custody_spawn::ShellLaunch {
+                program: shell_path.as_os_str(),
+                args: &[
+                    std::ffi::OsString::from("-c"),
+                    std::ffi::OsString::from(command),
+                ],
+                directory: &resolved_dir,
+                environment: &environment,
             },
             OwnedProcessGroup::new,
         )
@@ -1047,6 +1063,17 @@ impl JobManager {
         let write = AttemptWriteAuthority::from(&claim);
         let operation_id = self.register_operation(&public_job_id)?;
         let redactions = configured_redactions(&self.config);
+        let mut environment = super::custody_spawn::environment(&self.config, &resolved_dir);
+        environment.insert(
+            "MEERKAT_MONITOR_SUBMISSION_KEY".into(),
+            stored.spec.submission_key.as_str().into(),
+        );
+        if let Some(checkpoint) = &claim.resume_checkpoint {
+            environment.insert(
+                "MEERKAT_MONITOR_CHECKPOINT".into(),
+                checkpoint.as_str().into(),
+            );
+        }
         let spawned = super::custody_spawn::spawn_in_custody(
             &self.custody_binding(),
             super::custody_spawn::SpawnIdentity {
@@ -1056,27 +1083,15 @@ impl JobManager {
                 tool_call_id: None,
                 run_id: None,
             },
-            shell_path.as_os_str(),
-            &[
-                std::ffi::OsString::from("-c"),
-                std::ffi::OsString::from(&runner_spec.command),
-            ],
-            |command_builder| {
-                command_builder.current_dir(&resolved_dir);
-                command_builder.env("PWD", &resolved_dir);
-                command_builder.envs(&self.config.env_vars);
-                command_builder.env(
-                    "MEERKAT_MONITOR_SUBMISSION_KEY",
-                    stored.spec.submission_key.as_str(),
-                );
-                if let Some(checkpoint) = &claim.resume_checkpoint {
-                    command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
-                }
-                command_builder.stdout(Stdio::piped());
-                command_builder.stderr(Stdio::piped());
-                command_builder.kill_on_drop(true);
-                #[cfg(unix)]
-                command_builder.process_group(0);
+            &self.confinement,
+            super::custody_spawn::ShellLaunch {
+                program: shell_path.as_os_str(),
+                args: &[
+                    std::ffi::OsString::from("-c"),
+                    std::ffi::OsString::from(&runner_spec.command),
+                ],
+                directory: &resolved_dir,
+                environment: &environment,
             },
             OwnedProcessGroup::new,
         )
@@ -1404,7 +1419,7 @@ struct AttemptTask {
     public_job_id: JobId,
     write: AttemptWriteAuthority,
     timeout_secs: u64,
-    child: tokio::process::Child,
+    child: meerkat_sandbox::ProcessChild,
     process_group: OwnedProcessGroup,
     cancel: Arc<Notify>,
     durable: DurableShellJobRuntime,
@@ -1418,7 +1433,7 @@ struct AttemptTask {
     /// Caps on the stdout and stderr an ordinary shell attempt retains.
     output_caps: OutputCaps,
     /// Durable custody of the attempt's process group; settled once
-    /// containment is proven.
+    /// group exit is observed.
     custody: super::custody_spawn::CustodyHold,
 }
 
@@ -1453,14 +1468,14 @@ fn spawn_monitor_attempt_task(
         } = task;
         let started = Instant::now();
         let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel(64);
-        let stdout_task = child.stdout.take().map(|stdout| {
+        let stdout_task = child.take_stdout().map(|stdout| {
             tokio::spawn(read_monitor_lines(
                 stdout,
                 monitor.limits.max_line_bytes,
                 stdout_tx,
             ))
         });
-        let stderr_task = child.stderr.take().map(|stderr| {
+        let stderr_task = child.take_stderr().map(|stderr| {
             tokio::spawn(read_stream_with_limit(
                 stderr,
                 monitor.limits.max_retained_diagnostic_bytes,
@@ -1813,9 +1828,9 @@ fn spawn_monitor_attempt_task(
         loop {
             match process_group.terminate(&mut child).await {
                 Ok(()) => {
-                    // Containment proven: the custody record has nothing
-                    // left to guard.
-                    custody.settle().await;
+                    // The execution fence permits operation settlement. The
+                    // existing exit watcher owns durable record release.
+                    custody.retain();
                     break;
                 }
                 Err(error) => {
@@ -2356,8 +2371,8 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
             custody,
         } = task;
         let started = Instant::now();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let stdout = child.take_stdout();
+        let stderr = child.take_stderr();
         let stdout_side_bytes = capture_bytes_for_chars(output_caps.stdout_chars);
         let stderr_side_bytes = capture_bytes_for_chars(output_caps.stderr_chars);
         let stdout_task = tokio::spawn(async move {
@@ -2439,9 +2454,9 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
         loop {
             match process_group.terminate(&mut child).await {
                 Ok(()) => {
-                    // Containment proven: the custody record has nothing
-                    // left to guard.
-                    custody.settle().await;
+                    // The execution fence permits operation settlement. The
+                    // existing exit watcher owns durable record release.
+                    custody.retain();
                     break;
                 }
                 Err(error) => {

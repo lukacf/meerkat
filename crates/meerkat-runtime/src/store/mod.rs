@@ -4,6 +4,11 @@
 //! atomically with their session and input-state effects.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+mod execution_custody;
+pub use execution_custody::{
+    RuntimeStoreExecutionClaim, RuntimeStoreExecutionCustody, RuntimeStoreExecutionCustodyError,
+};
+
 pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
@@ -1718,8 +1723,21 @@ fn head_canonical_activation_predecessor_matches(
     predecessor: &meerkat_core::session_store::SessionHead,
     successor: &meerkat_core::session_store::SessionHead,
 ) -> Result<bool, RuntimeStoreError> {
+    let version_matches = predecessor
+        .restored_session_version()
+        .and_then(|version| {
+            successor
+                .restored_session_version()
+                .map(|successor_version| version == successor_version)
+        })
+        .map_err(
+            |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: predecessor.id.to_string(),
+                detail: format!("HeadCanonical activation envelope cannot be restored: {error}"),
+            },
+        )?;
     if predecessor.id != successor.id
-        || predecessor.version != successor.version
+        || !version_matches
         || predecessor.strand != successor.strand
         || predecessor.head_revision != successor.head_revision
         || predecessor.message_count != successor.message_count
@@ -2191,9 +2209,12 @@ impl PreparedDurableTailRecoverySource {
                     "committed recovery metadata identity is invalid: {error}"
                 ))
             })?;
+        let committed_version = boundary_head.restored_session_version().map_err(|error| {
+            conflict(format!("committed recovery envelope is invalid: {error}"))
+        })?;
         if committed_session.messages().len() as u64 != boundary_head.message_count
             || committed_revision != boundary_head.head_revision
-            || committed_session.version() != boundary_head.version
+            || committed_session.version() != committed_version
             || committed_session.created_at() != boundary_head.created_at
             || committed_session.updated_at() != boundary_head.updated_at
             || committed_session.total_usage() != boundary_head.usage
@@ -2204,7 +2225,7 @@ impl PreparedDurableTailRecoverySource {
                      (message_count={}, revision={}, version={}, created_at={}, updated_at={}, usage={}, metadata={})",
                 committed_session.messages().len() as u64 == boundary_head.message_count,
                 committed_revision == boundary_head.head_revision,
-                committed_session.version() == boundary_head.version,
+                committed_session.version() == committed_version,
                 committed_session.created_at() == boundary_head.created_at,
                 committed_session.updated_at() == boundary_head.updated_at,
                 committed_session.total_usage() == boundary_head.usage,
@@ -2221,9 +2242,12 @@ impl PreparedDurableTailRecoverySource {
                 "physical recovery metadata identity is invalid: {error}"
             ))
         })?;
+        let physical_version = physical_head
+            .restored_session_version()
+            .map_err(|error| conflict(format!("physical recovery envelope is invalid: {error}")))?;
         if physical_session.messages().len() as u64 != physical_head.message_count
             || physical_revision != physical_head.head_revision
-            || physical_session.version() != physical_head.version
+            || physical_session.version() != physical_version
             || physical_session.created_at() != physical_head.created_at
             || physical_session.updated_at() != physical_head.updated_at
             || physical_session.total_usage() != physical_head.usage
@@ -8006,6 +8030,13 @@ pub async fn load_input_states_for_recovery(
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeSessionAuthorityOps: Send + Sync {
+    /// Mechanical lifetime custody of this actual backend. Decorators forward
+    /// this carrier; a backend without this capability cannot enable governed
+    /// execution. Ordinary operation on unsupported backends is unchanged.
+    fn execution_custody(&self) -> Option<&RuntimeStoreExecutionCustody> {
+        None
+    }
+
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile;
 
     fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost;
@@ -8246,6 +8277,11 @@ pub trait RuntimeStore: Send + Sync {
     /// a runtime `Unsupported` surprise.
     #[doc(hidden)]
     fn session_authority_ops(&self) -> &dyn RuntimeSessionAuthorityOps;
+
+    /// Actual backend execution owner, never the wrapper's pointer identity.
+    fn execution_custody(&self) -> Option<&RuntimeStoreExecutionCustody> {
+        self.session_authority_ops().execution_custody()
+    }
 
     /// Durable session representation owned by this store.
     ///
@@ -9769,6 +9805,37 @@ mod runtime_store_write_fence_tests {
         )
         .expect_err("only snapshot boundaries may carry an external write fence");
         assert!(matches!(error, RuntimeStoreError::Unsupported(_)));
+    }
+
+    #[test]
+    fn decorator_forwards_same_backend_execution_custody_in_both_orders() {
+        let inner = InMemoryRuntimeStore::new();
+        let decorated = DefaultFenceDecorator {
+            inner: inner.clone(),
+        };
+        let direct_owner = RuntimeStore::execution_custody(&inner).unwrap();
+        let decorated_owner = RuntimeStore::execution_custody(&decorated).unwrap();
+        let direct = direct_owner.try_acquire_shared().unwrap();
+        let mut wrapped = decorated_owner.try_acquire_shared().unwrap();
+        assert_eq!(
+            wrapped.try_upgrade_to_governed(),
+            Err(RuntimeStoreExecutionCustodyError::Busy)
+        );
+        drop(direct);
+        wrapped.try_upgrade_to_governed().unwrap();
+        assert!(matches!(
+            direct_owner.try_acquire_shared(),
+            Err(RuntimeStoreExecutionCustodyError::Busy)
+        ));
+        drop(wrapped);
+        let mut direct = direct_owner.try_acquire_shared().unwrap();
+        direct.try_upgrade_to_governed().unwrap();
+        assert!(matches!(
+            decorated_owner.try_acquire_shared(),
+            Err(RuntimeStoreExecutionCustodyError::Busy)
+        ));
+        drop(direct);
+        decorated_owner.try_acquire_shared().unwrap();
     }
 
     #[tokio::test]

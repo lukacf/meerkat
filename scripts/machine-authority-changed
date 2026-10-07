@@ -89,7 +89,7 @@ machine_authority_path() {
     docs/reference/machine-authority.mdx)
       return 0
       ;;
-    crates/meerkat-machine-codegen/*|crates/meerkat-machine-derive/*|crates/meerkat-machine-dsl/*|crates/meerkat-machine-dsl-core/*|crates/meerkat-machine-kernels/*|crates/meerkat-machine-schema/*)
+    crates/meerkat-machine-codegen/*|crates/meerkat-machine-derive/*|crates/meerkat-machine-dsl/*|crates/meerkat-machine-dsl-core/*|crates/meerkat-machine-kernels/*|crates/meerkat-machine-schema/*|crates/meerkat-authorization/*|crates/meerkat-authorization-contracts/*)
       return 0
       ;;
     crates/meerkat-runtime/src/meerkat_machine/*|crates/meerkat-runtime/src/auth_machine/*|crates/meerkat-mob/src/ids.rs|crates/meerkat-mob/src/machines/*|crates/meerkat-mob/src/runtime/*|crates/meerkat-schedule/src/machines/*)

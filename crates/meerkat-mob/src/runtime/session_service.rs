@@ -942,6 +942,22 @@ fn build_runtime_receipt(
     })
 }
 
+/// Preserve acquisition readiness while retaining the existing internal-error
+/// classification for unrelated runtime failures at this session boundary.
+#[cfg(feature = "runtime-adapter")]
+pub(crate) fn runtime_acquisition_session_error(
+    error: meerkat_runtime::RuntimeDriverError,
+) -> SessionError {
+    match error {
+        meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
+            SessionError::RuntimeUnavailable { reason }
+        }
+        // The legacy session boundary carries unrelated runtime failures as
+        // internal diagnostic text. Do not apply that loss to readiness.
+        other => SessionError::Agent(meerkat_core::AgentError::InternalError(other.to_string())),
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 pub(crate) async fn retire_runtime_session_for_archive(
     runtime_adapter: &meerkat_runtime::MeerkatMachine,
@@ -1430,8 +1446,12 @@ pub trait MobSessionService:
     }
 
     #[cfg(feature = "runtime-adapter")]
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        None
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<Option<Arc<meerkat_runtime::MeerkatMachine>>, meerkat_runtime::RuntimeDriverError>
+    {
+        Ok(explicit)
     }
 
     /// Whether this service implements the runtime-owned turn application
@@ -1847,7 +1867,11 @@ pub trait MobSessionService:
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
         #[cfg(feature = "runtime-adapter")]
-        if self.runtime_adapter().is_some() {
+        if self
+            .acquire_runtime_adapter(None)
+            .map_err(runtime_acquisition_session_error)?
+            .is_some()
+        {
             return Err(SessionError::Unsupported(format!(
                 "archive for runtime-backed mob session {session_id} must be implemented by the machine-owned session service"
             )));
@@ -2438,8 +2462,15 @@ where
 
     /// The machine this service instance owns.
     #[cfg(feature = "runtime-adapter")]
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        Some(meerkat_session::EphemeralSessionService::<B>::canonical_runtime_adapter(self))
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<Option<Arc<meerkat_runtime::MeerkatMachine>>, meerkat_runtime::RuntimeDriverError>
+    {
+        meerkat_session::EphemeralSessionService::<B>::acquire_canonical_runtime_adapter(
+            self, explicit,
+        )
+        .map(Some)
     }
 
     #[cfg(feature = "runtime-adapter")]
@@ -2514,7 +2545,10 @@ where
     ) -> Result<(), SessionError> {
         <Self as SessionService>::read(self, session_id).await?;
         #[cfg(feature = "runtime-adapter")]
-        if let Some(runtime_adapter) = self.runtime_adapter() {
+        if let Some(runtime_adapter) = self
+            .acquire_runtime_adapter(None)
+            .map_err(runtime_acquisition_session_error)?
+        {
             retire_runtime_session_for_archive(runtime_adapter.as_ref(), session_id).await?;
         }
 
@@ -3208,17 +3242,15 @@ where
     }
 
     #[cfg(feature = "runtime-adapter")]
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            None
-        }
-        // The machine the surface composition built and bound into this
-        // service (a directly constructed service owns one of its own).
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Some(meerkat_session::PersistentSessionService::<B>::canonical_runtime_adapter(self))
-        }
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<Option<Arc<meerkat_runtime::MeerkatMachine>>, meerkat_runtime::RuntimeDriverError>
+    {
+        meerkat_session::PersistentSessionService::<B>::acquire_canonical_runtime_adapter(
+            self, explicit,
+        )
+        .map(Some)
     }
 
     #[cfg(feature = "runtime-adapter")]
@@ -3449,7 +3481,10 @@ where
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
         #[cfg(feature = "runtime-adapter")]
-        if let Some(runtime_adapter) = self.runtime_adapter() {
+        if let Some(runtime_adapter) = self
+            .acquire_runtime_adapter(None)
+            .map_err(runtime_acquisition_session_error)?
+        {
             return meerkat_session::PersistentSessionService::<B>::archive_with_machine_protocol(
                 self,
                 session_id,
@@ -3470,7 +3505,10 @@ where
         deadline: meerkat_core::time_compat::Instant,
         post_commit_hook: Option<Arc<dyn meerkat_runtime::MachineSessionArchivePostCommitHook>>,
     ) -> Result<(), SessionError> {
-        if let Some(runtime_adapter) = self.runtime_adapter() {
+        if let Some(runtime_adapter) = self
+            .acquire_runtime_adapter(None)
+            .map_err(runtime_acquisition_session_error)?
+        {
             return meerkat_session::PersistentSessionService::<B>::archive_with_machine_protocol_under_runtime_turn_boundary_and_hook_before(
                 self,
                 session_id,
@@ -3495,7 +3533,10 @@ where
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
         #[cfg(feature = "runtime-adapter")]
-        if let Some(runtime_adapter) = self.runtime_adapter() {
+        if let Some(runtime_adapter) = self
+            .acquire_runtime_adapter(None)
+            .map_err(runtime_acquisition_session_error)?
+        {
             return meerkat_session::PersistentSessionService::<B>::archive_with_machine_protocol_under_runtime_turn_boundary(
                 self,
                 session_id,
@@ -3515,7 +3556,10 @@ where
         deadline: meerkat_core::time_compat::Instant,
     ) -> Result<(), SessionError> {
         #[cfg(feature = "runtime-adapter")]
-        if let Some(runtime_adapter) = self.runtime_adapter() {
+        if let Some(runtime_adapter) = self
+            .acquire_runtime_adapter(None)
+            .map_err(runtime_acquisition_session_error)?
+        {
             return meerkat_session::PersistentSessionService::<B>::archive_with_machine_protocol_under_runtime_turn_boundary_before(
                 self,
                 session_id,

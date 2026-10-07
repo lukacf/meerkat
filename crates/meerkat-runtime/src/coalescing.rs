@@ -113,6 +113,8 @@ mod tests {
 
     fn make_header_with_supersession(key: Option<&str>) -> InputHeader {
         InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::External {

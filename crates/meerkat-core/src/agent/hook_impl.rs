@@ -118,16 +118,30 @@ where
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
         err: &HookEngineError,
     ) {
+        if let HookEngineError::LaunchRefused { hook_id, reason } = err {
+            // Project the attempted call directly. No hook body entered, so
+            // no started, failed, or completed hook event is truthful here.
+            crate::event_tap::tap_emit(
+                &self.event_tap,
+                event_tx,
+                AgentEvent::HookLaunchRefused {
+                    hook_id: hook_id.clone(),
+                    point: invocation.point,
+                    reason: reason.clone(),
+                    tool_use_id: invocation
+                        .tool_call
+                        .as_ref()
+                        .map(|call| call.tool_use_id.clone()),
+                },
+            )
+            .await;
+            return;
+        }
         if let Some(hook_id) = err.hook_id() {
-            // A `HookEngineError` carrying a hook_id means that hook actually
-            // began executing (Timeout / adapter-runtime ExecutionFailed both
-            // originate from `execute_one` after start; pre-start config breaks
-            // surface as `InvalidConfiguration`, hook_id == None). The partial
-            // `HookExecutionReport` — including the id pushed into `started` —
-            // is discarded when `execute()` returns `Err`, so emit the
-            // `HookStarted` here, before the terminal `HookFailed`, to preserve
-            // the invariant that every terminal hook event is preceded by its
-            // start (observability for timed-out / hard-failed hooks).
+            // Preserve the legacy start/failure projection for the remaining
+            // runtime errors. Explicit no-entry launch failures returned above.
+            // The partial report is discarded on an engine error, so emit the
+            // start before its corresponding terminal failure observation.
             crate::event_tap::tap_emit(
                 &self.event_tap,
                 event_tx,

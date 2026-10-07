@@ -15752,9 +15752,12 @@ mod tests {
         );
         let session = runtime.load_persisted_session(&id).await.unwrap().unwrap();
         let messages = serde_json::to_string(session.messages()).unwrap();
+        // The prompt is durable. The reply whose usage crossed the budget is
+        // not appended: the agent loop stops at the budget observation
+        // before recording that response's blocks.
         assert!(
-            messages.contains("exceed the budget") && messages.contains("reply past the budget"),
-            "the prompt and the reply are durable: {messages}"
+            messages.contains("exceed the budget"),
+            "the prompt is durable: {messages}"
         );
         // The run's input is durably consumed, not left for recovery.
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);

@@ -33861,7 +33861,10 @@ async fn time_budget_terminal_run_commit_is_refused_before_mutation() {
 }
 
 #[tokio::test]
-async fn budget_terminal_commit_retries_after_a_failed_atomic_apply() {
+async fn budget_terminal_commit_failure_publishes_no_durable_terminal_state() {
+    // A failed durable apply of a budget run commit is an ordinary
+    // finalization failure: nothing durable is published and the budget
+    // terminal is not rewritten.
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store: Arc<dyn RuntimeStore> = Arc::new(
         RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
@@ -33869,12 +33872,12 @@ async fn budget_terminal_commit_retries_after_a_failed_atomic_apply() {
     let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
     mark_staged_run_budget_terminal(&driver, &run_id, false).await;
 
-    let first = commit_staged_run(&driver, &runtime_id, &run_id, &input_id)
+    let error = commit_staged_run(&driver, &runtime_id, &run_id, &input_id)
         .await
-        .expect_err("the injected atomic apply failure refuses the first commit");
+        .expect_err("the injected atomic apply failure refuses the commit");
     assert!(
-        first.contains("synthetic atomic_apply failure"),
-        "unexpected first failure: {first}"
+        error.contains("synthetic atomic_apply failure"),
+        "the durable failure keeps its own cause: {error}"
     );
     assert!(
         inner
@@ -33884,12 +33887,16 @@ async fn budget_terminal_commit_retries_after_a_failed_atomic_apply() {
             .is_none(),
         "the failed commit publishes no receipt"
     );
-    assert_budget_terminal_retained(&driver).await;
-
-    commit_staged_run(&driver, &runtime_id, &run_id, &input_id)
+    let durable = inner
+        .load_input_state(&runtime_id, &input_id)
         .await
-        .expect("the retried commit keeps the budget terminal and succeeds");
-    assert_consumed_once_with_receipt(&driver, &inner, &runtime_id, &run_id, &input_id).await;
+        .unwrap();
+    assert!(
+        durable.is_none_or(|stored| {
+            stored.seed.phase != crate::input_state::InputLifecycleState::Consumed
+        }),
+        "the failed commit does not durably consume its input"
+    );
     assert_budget_terminal_retained(&driver).await;
 }
 

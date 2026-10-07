@@ -584,22 +584,33 @@ pub(crate) struct MobOperatorToolDispatcher {
     handle: MobHandle,
     authority_context: MobToolAuthorityContext,
     tools: Arc<[Arc<ToolDef>]>,
-    owner_bridge_session_id: Option<SessionId>,
 }
 
 impl MobOperatorToolDispatcher {
-    async fn capture_creation_source(&self) -> crate::MemberCreationSourceWitness {
-        let Some(session_id) = self.owner_bridge_session_id.clone() else {
-            return crate::MemberCreationSourceWitness::unavailable();
+    /// Capture the calling member's creation facts from the session that
+    /// dispatched the call. `owner` is the runtime-stamped origin session of
+    /// the dispatch, never an argument.
+    ///
+    /// Creation facts are optional and confer no permission, so the outcome
+    /// never changes spawn admission: an ownerless call or a legitimately
+    /// absent source records the child as unproven, and so does a failed
+    /// read, which is classified as a capture fault and traced at error level
+    /// rather than passed off as an absence.
+    async fn capture_creation_source(
+        &self,
+        owner: Option<&SessionId>,
+    ) -> crate::CreationSourceCapture {
+        let Some(session_id) = owner.cloned() else {
+            return crate::CreationSourceCapture::Absent(
+                crate::MemberCreationAbsence::OwnerlessDispatch,
+            );
         };
         let handle = self.handle.clone();
-        meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
-            handle
-                .capture_member_creation_source(&session_id)
-                .await
-                .unwrap_or_else(|_| crate::MemberCreationSourceWitness::unavailable())
+        let captured = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            handle.capture_member_creation_source(&session_id).await
         })
-        .await
+        .await;
+        crate::CreationSourceCapture::classify(captured)
     }
 
     pub(crate) fn new(
@@ -662,7 +673,6 @@ impl MobOperatorToolDispatcher {
             handle,
             authority_context,
             tools: defs.into(),
-            owner_bridge_session_id: None,
         }
     }
 
@@ -683,9 +693,9 @@ impl MobOperatorToolDispatcher {
         }
     }
 
-    /// The member this dispatcher's owner session is bound to, if any.
-    async fn caller_identity(&self) -> Option<AgentIdentity> {
-        let owner = self.owner_bridge_session_id.as_ref()?;
+    /// The member bound to the session that dispatched the call, if any.
+    async fn caller_identity(&self, owner: Option<&SessionId>) -> Option<AgentIdentity> {
+        let owner = owner?;
         self.handle
             .roster()
             .await
@@ -694,20 +704,43 @@ impl MobOperatorToolDispatcher {
             .map(|entry| entry.agent_identity.clone())
     }
 
+    /// The current member a supplied dispatch origin is bound to.
+    ///
+    /// A context-free call has no origin and stays ownerless. A supplied
+    /// origin that is not the session of a current member of this mob (a
+    /// stale, retired or foreign session) is refused, never downgraded to an
+    /// ownerless call. This reads the live roster only; it adds no
+    /// persistence requirement.
+    async fn validated_caller(
+        &self,
+        owner: Option<&SessionId>,
+        tool_name: &str,
+    ) -> Result<Option<AgentIdentity>, ToolError> {
+        match owner {
+            None => Ok(None),
+            Some(_) => self
+                .caller_identity(owner)
+                .await
+                .map(Some)
+                .ok_or_else(|| ToolError::access_denied(tool_name)),
+        }
+    }
+
     async fn ensure_owned_member_scope(
         &self,
+        owner: Option<&SessionId>,
         tool_name: &str,
         target: &AgentIdentity,
     ) -> Result<(), ToolError> {
+        let validated = self.validated_caller(owner, tool_name).await?;
         let can_manage_mob = self.can_manage_current_mob();
-        let caller = if can_manage_mob {
-            None
-        } else {
-            self.caller_identity().await
-        };
-        // Target presence is observed before ownership (#1234): an absent
-        // member is typed not-found for every caller, and access_denied only
-        // ever means a present member the caller does not own.
+        let caller = if can_manage_mob { None } else { validated };
+        // An invalid supplied origin (a session that is not a current
+        // member's: stale, retired, rebound away or foreign) is denied above,
+        // before the target is looked at. For a valid origin or a context-free
+        // call, target presence is observed before ownership (#1234): an
+        // absent member is typed not-found, and access_denied only ever means
+        // a present member the caller does not own.
         let admission = self
             .handle
             .resolve_owned_member_target_admission(can_manage_mob, caller.as_ref(), target)
@@ -1271,6 +1304,30 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.dispatch_for_owner(call, None).await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.dispatch_for_owner(call, context.origin_session_id())
+            .await
+    }
+}
+
+impl MobOperatorToolDispatcher {
+    /// Dispatch one operator call for the session that issued it.
+    ///
+    /// `owner` is the dispatch context's runtime-stamped origin session: the
+    /// agent sets it from its own session for every turn, and no tool
+    /// argument can name it. A context-free dispatch has no owner.
+    async fn dispatch_for_owner(
+        &self,
+        call: ToolCallView<'_>,
+        owner: Option<&SessionId>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let mut owner_list_view = None;
         if matches!(
             call.name,
@@ -1281,15 +1338,16 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             let args: OwnedMemberTargetArgs = call
                 .parse_args()
                 .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-            self.ensure_owned_member_scope(call.name, &AgentIdentity::from(args.member_id))
+            self.ensure_owned_member_scope(owner, call.name, &AgentIdentity::from(args.member_id))
                 .await?;
         } else if call.name == TOOL_LIST_MEMBERS
             && self.tools.iter().any(|tool| tool.name == call.name)
         {
+            let validated = self.validated_caller(owner, call.name).await?;
             if let Err(denied) = self.ensure_current_mob_scope(call.name).await {
                 // Without manage scope a member sees only the members it
                 // spawned (its fork_off children).
-                owner_list_view = Some(self.caller_identity().await.ok_or(denied)?);
+                owner_list_view = Some(validated.ok_or(denied)?);
             }
         } else if self.tools.iter().any(|tool| tool.name == call.name)
             && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
@@ -1306,7 +1364,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 tracing::debug!(
                     member_id = %args.member_id,
                     profile = %args.profile,
-                    owner_bound = self.owner_bridge_session_id.is_some(),
+                    owner_bound = owner.is_some(),
                     "MobOperatorToolDispatcher::spawn_member dispatch start"
                 );
                 self.ensure_spawn_member_scope(call.name, &args).await?;
@@ -1318,7 +1376,11 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     args.runtime_mode,
                     args.backend,
                 )
-                .with_creation_source(self.capture_creation_source().await);
+                .with_creation_source(
+                    self.capture_creation_source(owner)
+                        .await
+                        .into_admitted_witness(call.name),
+                );
                 // Resolve launch mode: explicit launch_mode takes precedence,
                 // then legacy resume_session_id, then default (Fresh).
                 if let Some(launch_mode) = args.launch_mode {
@@ -1337,31 +1399,30 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 if let Some(placement) = args.placement {
                     spec.placement = Some(crate::machines::mob_machine::HostId::from(placement));
                 }
-                let (result, async_ops) =
-                    if let Some(owner_bridge_session_id) = self.owner_bridge_session_id.clone() {
-                        let receipt = self
-                            .handle
-                            .spawn_spec_receipt_with_generated_owner_context(
-                                spec,
-                                owner_bridge_session_id,
-                            )
-                            .await
-                            .map_err(|error| Self::map_mob_error(call, error))?;
-                        let result = self
-                            .spawn_result_payload_for_identity(&agent_identity)
-                            .await
-                            .map_err(|error| Self::map_mob_error(call, error))?;
-                        (result, vec![AsyncOpRef::detached(receipt.operation_id)])
-                    } else {
-                        let spawn_result = self
-                            .handle
-                            .spawn_spec(spec)
-                            .await
-                            .map_err(|error| Self::map_mob_error(call, error))?;
-                        let result =
-                            Self::spawn_result_payload(&self.handle.definition().id, &spawn_result);
-                        (result, Vec::new())
-                    };
+                let (result, async_ops) = if let Some(owner_bridge_session_id) = owner.cloned() {
+                    let receipt = self
+                        .handle
+                        .spawn_spec_receipt_with_generated_owner_context(
+                            spec,
+                            owner_bridge_session_id,
+                        )
+                        .await
+                        .map_err(|error| Self::map_mob_error(call, error))?;
+                    let result = self
+                        .spawn_result_payload_for_identity(&agent_identity)
+                        .await
+                        .map_err(|error| Self::map_mob_error(call, error))?;
+                    (result, vec![AsyncOpRef::detached(receipt.operation_id)])
+                } else {
+                    let spawn_result = self
+                        .handle
+                        .spawn_spec(spec)
+                        .await
+                        .map_err(|error| Self::map_mob_error(call, error))?;
+                    let result =
+                        Self::spawn_result_payload(&self.handle.definition().id, &spawn_result);
+                    (result, Vec::new())
+                };
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, result, async_ops)
             }
@@ -1377,7 +1438,10 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .iter()
                     .map(|spec| AgentIdentity::from(spec.member_id.as_str()))
                     .collect::<Vec<_>>();
-                let creation_source = self.capture_creation_source().await;
+                let creation_source = self
+                    .capture_creation_source(owner)
+                    .await
+                    .into_admitted_witness(call.name);
                 let specs = args
                     .specs
                     .into_iter()
@@ -1410,60 +1474,59 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         spawn_spec
                     })
                     .collect::<Vec<_>>();
-                let (results, async_ops) =
-                    if let Some(owner_bridge_session_id) = self.owner_bridge_session_id.clone() {
-                        let receipts = self
-                            .handle
-                            .spawn_many_receipts_with_generated_owner_context(
-                                specs,
-                                owner_bridge_session_id,
-                            )
-                            .await
-                            .map_err(|error| Self::map_mob_error(call, error))?;
-                        let async_ops = receipts
-                            .iter()
-                            .filter_map(|result| result.as_ref().ok())
-                            .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
-                            .collect::<Vec<_>>();
-                        let mut results = Vec::with_capacity(receipts.len());
-                        for (result, identity) in receipts.into_iter().zip(identities.into_iter()) {
-                            match result {
-                                Ok(_receipt) => {
-                                    let entry = self
-                                        .spawn_many_result_entry_for_identity(&identity)
-                                        .await
-                                        .map_err(|error| Self::map_mob_error(call, error))?;
-                                    results.push(json!(entry));
-                                }
-                                Err(error) => {
-                                    results.push(json!(mob_spawn_many_failure_entry(&error)));
-                                }
+                let (results, async_ops) = if let Some(owner_bridge_session_id) = owner.cloned() {
+                    let receipts = self
+                        .handle
+                        .spawn_many_receipts_with_generated_owner_context(
+                            specs,
+                            owner_bridge_session_id,
+                        )
+                        .await
+                        .map_err(|error| Self::map_mob_error(call, error))?;
+                    let async_ops = receipts
+                        .iter()
+                        .filter_map(|result| result.as_ref().ok())
+                        .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
+                        .collect::<Vec<_>>();
+                    let mut results = Vec::with_capacity(receipts.len());
+                    for (result, identity) in receipts.into_iter().zip(identities.into_iter()) {
+                        match result {
+                            Ok(_receipt) => {
+                                let entry = self
+                                    .spawn_many_result_entry_for_identity(&identity)
+                                    .await
+                                    .map_err(|error| Self::map_mob_error(call, error))?;
+                                results.push(json!(entry));
+                            }
+                            Err(error) => {
+                                results.push(json!(mob_spawn_many_failure_entry(&error)));
                             }
                         }
-                        (results, async_ops)
-                    } else {
-                        let results = self
-                            .handle
-                            .spawn_many(specs)
-                            .await
-                            .map_err(|error| Self::map_mob_error(call, error))?
-                            .into_iter()
-                            .map(|result| match result {
-                                Ok(spawn_result) => {
-                                    let identity = spawn_result.agent_identity.to_string();
-                                    json!(meerkat_contracts::MobSpawnManyResultEntry::spawned(
-                                        identity.clone(),
-                                        Self::member_ref_payload(
-                                            &self.handle.definition().id,
-                                            &spawn_result.agent_identity,
-                                        ),
-                                    ))
-                                }
-                                Err(error) => json!(mob_spawn_many_failure_entry(&error)),
-                            })
-                            .collect::<Vec<_>>();
-                        (results, Vec::new())
-                    };
+                    }
+                    (results, async_ops)
+                } else {
+                    let results = self
+                        .handle
+                        .spawn_many(specs)
+                        .await
+                        .map_err(|error| Self::map_mob_error(call, error))?
+                        .into_iter()
+                        .map(|result| match result {
+                            Ok(spawn_result) => {
+                                let identity = spawn_result.agent_identity.to_string();
+                                json!(meerkat_contracts::MobSpawnManyResultEntry::spawned(
+                                    identity.clone(),
+                                    Self::member_ref_payload(
+                                        &self.handle.definition().id,
+                                        &spawn_result.agent_identity,
+                                    ),
+                                ))
+                            }
+                            Err(error) => json!(mob_spawn_many_failure_entry(&error)),
+                        })
+                        .collect::<Vec<_>>();
+                    (results, Vec::new())
+                };
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
@@ -1603,29 +1666,6 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             }
             _ => Err(ToolError::not_found(call.name)),
         }
-    }
-
-    fn capabilities(&self) -> DispatcherCapabilities {
-        DispatcherCapabilities {
-            ops_lifecycle: true,
-        }
-    }
-
-    fn bind_ops_lifecycle(
-        self: Arc<Self>,
-        _registry: Arc<dyn OpsLifecycleRegistry>,
-        owner_bridge_session_id: SessionId,
-    ) -> Result<BindOutcome, OpsLifecycleBindError> {
-        if Arc::strong_count(&self) != 1 {
-            return Err(OpsLifecycleBindError::SharedOwnership);
-        }
-        let this = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        Ok(BindOutcome::Bound(Arc::new(Self {
-            handle: this.handle,
-            authority_context: this.authority_context,
-            tools: this.tools,
-            owner_bridge_session_id: Some(owner_bridge_session_id),
-        })))
     }
 }
 

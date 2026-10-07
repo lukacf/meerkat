@@ -14558,10 +14558,12 @@ impl MobHandle {
             },
             source_session_id.clone(),
         );
-        let creation_source = match self.capture_member_creation_source(source_session_id).await {
-            Ok(witness) => witness,
-            Err(_) => crate::MemberCreationSourceWitness::unavailable(),
-        };
+        // Optional proof: a capture fault is classified and traced, and the
+        // fork is still admitted with an unproven source.
+        let creation_source = crate::CreationSourceCapture::classify(
+            self.capture_member_creation_source(source_session_id).await,
+        )
+        .into_admitted_witness("fork_member");
         let mut inheritance = super::ForkBuildInheritance::new(
             source,
             app_context,

@@ -497,45 +497,50 @@ impl AgentMobToolSurface {
 
     /// Capture the authenticated source's immutable creation facts, including
     /// when it delegates into another mob. Arguments never select the source.
+    ///
+    /// Creation facts are optional and confer no permission, so the outcome
+    /// never changes spawn admission. A legitimately absent source and a
+    /// failed read both record the child as unproven, but stay distinct: the
+    /// failure is classified as a capture fault and traced at error level.
     async fn capture_creation_source(
         state: Arc<MobMcpState>,
         owner_bridge_session_id: SessionId,
-    ) -> meerkat_mob::MemberCreationSourceWitness {
-        Self::try_capture_creation_source(&state, &owner_bridge_session_id)
-            .await
-            .unwrap_or_else(|_| meerkat_mob::MemberCreationSourceWitness::unavailable())
+    ) -> meerkat_mob::CreationSourceCapture {
+        meerkat_mob::CreationSourceCapture::classify(
+            Self::try_capture_creation_source(&state, &owner_bridge_session_id).await,
+        )
     }
 
     async fn try_capture_creation_source(
         state: &MobMcpState,
         owner_bridge_session_id: &SessionId,
-    ) -> Result<meerkat_mob::MemberCreationSourceWitness, MobError> {
+    ) -> Result<meerkat_mob::MemberCreationSourceWitness, meerkat_mob::MemberCreationError> {
         // A nonpersistent service may derive this read through the current
         // session task, which is waiting for this tool. It has no durable
         // source authority to capture, so do not enter that read at all.
         if !state.session_service().supports_persistent_sessions() {
-            return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
+            return Err(meerkat_mob::MemberCreationError::Absent(
+                meerkat_mob::MemberCreationAbsence::NonDurableService,
+            ));
         }
         let view = state
             .session_service()
             .load_persisted_session_metadata(owner_bridge_session_id)
-            .await?;
-        let Some(binding) = view.as_ref().and_then(|view| view.mob_member_binding()) else {
-            return Ok(meerkat_mob::MemberCreationSourceWitness::unavailable());
+            .await?
+            .ok_or(meerkat_mob::MemberCreationError::Unavailable(
+                "source session metadata is missing",
+            ))?;
+        let Some(binding) = view.mob_member_binding() else {
+            return Err(meerkat_mob::MemberCreationError::Absent(
+                meerkat_mob::MemberCreationAbsence::SourceNotAMember,
+            ));
         };
         let source = state
             .handle_for(&MobId::from(binding.mob_id.as_str()))
             .await?;
-        match source
+        source
             .capture_member_creation_source(owner_bridge_session_id)
             .await
-        {
-            Ok(witness) => Ok(witness),
-            Err(meerkat_mob::MemberCreationError::Unavailable(_)) => {
-                Ok(meerkat_mob::MemberCreationSourceWitness::unavailable())
-            }
-            Err(error) => Err(MobError::Internal(error.to_string())),
-        }
     }
 
     /// The member this surface's session is bound to, when it belongs to
@@ -1076,7 +1081,8 @@ impl AgentMobToolSurface {
             meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
                 Self::capture_creation_source(source_state, source_session).await
             })
-            .await,
+            .await
+            .into_admitted_witness(call.name),
         );
         member.placement = lower_wire_placement(args.placement);
         member.additional_instructions = args.additional_instructions.map(|value| vec![value]);
@@ -1828,7 +1834,8 @@ impl AgentMobToolSurface {
             move || async move {
                 let source =
                     Self::capture_creation_source(source_state, owner_bridge_session_id.clone())
-                        .await;
+                        .await
+                        .into_admitted_witness("mob_spawn_member");
                 handle
                     .spawn_spec_with_generated_owner_context(
                         spec.with_creation_source(source),

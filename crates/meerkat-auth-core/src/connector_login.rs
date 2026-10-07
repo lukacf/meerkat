@@ -230,6 +230,8 @@ pub struct ConnectorAuthStatus {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectorLoginError {
+    #[error("connector OAuth credential preparation is no longer current")]
+    StalePreparation,
     #[error("connector OAuth strategy is not installed on this host")]
     UnknownStrategy,
     #[error("connector OAuth redirect must be an http loopback URI")]
@@ -268,7 +270,8 @@ impl ConnectorLoginError {
             | Self::Slot(_)
             | Self::ReauthRequired => true,
             Self::Flow(error) => flow_error_is_refusal(error),
-            Self::DiscoveryFailed(_)
+            Self::StalePreparation
+            | Self::DiscoveryFailed(_)
             | Self::TokenExchangeFailed
             | Self::RefreshFailed(_)
             | Self::TokenStore(_)
@@ -605,50 +608,14 @@ impl ConnectorOAuthAuthority {
     /// slot is already disconnected; a slot holding another owner's
     /// credential is refused and left untouched.
     pub async fn logout(&self, slot: &CredentialAccountRef) -> Result<(), ConnectorLoginError> {
-        let identity = AuthCredentialIdentity::Account(slot.clone());
-        let key = TokenKey::from_credential_identity(&identity);
-        let store = self.persistence.token_store();
-        let auth_lease = self.auth_lease.clone();
-        let load_key = key.clone();
-        self.persistence
-            .refresh_coordinator()
-            .with_exclusive_mutation(
-                key,
-                Box::new(move || {
-                    Box::pin(async move {
-                        let lease_key = LeaseKey::from_credential_identity(&identity);
-                        let _guard =
-                            meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-                        let stored = store
-                            .load(&load_key)
-                            .await
-                            .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?;
-                        match stored {
-                            None => {}
-                            Some(tokens) if tokens.auth_mode != PersistedAuthMode::ConnectorOauth => {
-                                return Err(CredentialMutationError::SlotRefused(
-                                    CredentialSlotRefusal::ModeMismatch,
-                                ));
-                            }
-                            Some(_) => {
-                                meerkat_core::clear_tokens_and_publish_lifecycle_released_for_identity(
-                                    store.as_ref(),
-                                    &auth_lease,
-                                    &identity,
-                                )
-                                .await
-                                .map_err(|error| {
-                                    CredentialMutationError::AuthLifecycle(error.to_string())
-                                })?;
-                            }
-                        }
-                        Ok(crate::auth_store::CredentialMutationOutcome::Cleared)
-                    })
-                }),
-            )
-            .await
-            .map(|_| ())
-            .map_err(map_mutation_error)
+        meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_mode(
+            self.persistence.clone(),
+            self.auth_lease.clone(),
+            AuthCredentialIdentity::Account(slot.clone()),
+            PersistedAuthMode::ConnectorOauth,
+        )
+        .await
+        .map_err(map_mutation_error)
     }
 
     /// Secret-free status of `slot`, projected through the same marker,
@@ -664,7 +631,7 @@ impl ConnectorOAuthAuthority {
         let key = TokenKey::from_credential_identity(&identity);
         let lease_key = LeaseKey::from_credential_identity(&identity);
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-        let (phase, tokens) = match self.load_admitted(&identity, &key).await {
+        let (phase, tokens) = match self.load_admitted(&identity, &key, &_guard).await {
             Ok(None) => (ConnectorAuthPhase::AuthorizationRequired, None),
             Ok(Some(admitted)) => {
                 let phase = match admitted.disposition {
@@ -752,7 +719,7 @@ impl ConnectorOAuthAuthority {
         let lease_key = LeaseKey::from_credential_identity(&identity);
         let admitted = {
             let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-            self.load_admitted(&identity, &key).await?
+            self.load_admitted(&identity, &key, &_guard).await?
         };
         let Some(admitted) = admitted else {
             return Ok(None);
@@ -813,9 +780,15 @@ impl ConnectorOAuthAuthority {
         &self,
         identity: &AuthCredentialIdentity,
         key: &TokenKey,
+        guard: &meerkat_core::AuthLoginLifecycleGuard,
     ) -> Result<Option<AdmittedConnectorCredential>, ConnectorLoginError> {
-        let store = self.persistence.token_store();
         let lease_key = LeaseKey::from_credential_identity(identity);
+        if guard.lease_key() != &lease_key {
+            return Err(ConnectorLoginError::AuthLifecycle(
+                "credential lifecycle guard belongs to another lease".into(),
+            ));
+        }
+        let store = self.persistence.token_store();
         let lifecycle = |error: meerkat_core::handles::DslTransitionError| {
             ConnectorLoginError::AuthLifecycle(error.to_string())
         };
@@ -856,12 +829,13 @@ impl ConnectorOAuthAuthority {
                 durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
             )
         {
-            tokens = meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+            tokens = meerkat_core::rehydrate_marked_tokens_for_status_for_identity_with_guard(
                 store.as_ref(),
                 &self.auth_lease,
                 identity,
                 PersistedAuthMode::ConnectorOauth,
                 Utc::now(),
+                guard,
             )
             .await
             .map_err(|error| ConnectorLoginError::AuthLifecycle(error.to_string()))?
@@ -921,7 +895,7 @@ impl ConnectorOAuthAuthority {
         let lease_key = LeaseKey::from_credential_identity(identity);
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
         let admitted = self
-            .load_admitted(identity, key)
+            .load_admitted(identity, key, &_guard)
             .await
             .map_err(refresh_error_from_login)?
             .ok_or_else(|| {
@@ -1147,6 +1121,7 @@ impl ConnectorOAuthAuthority {
         refusal_after_closure(
             self.auth_lease
                 .refresh_failed(lease_key, observation)
+                .map(|_transition| ())
                 .map_err(|error| error.to_string()),
             refusal,
         )
@@ -1157,7 +1132,7 @@ impl ConnectorOAuthAuthority {
     async fn refresh_failed(&self, lease_key: &LeaseKey, reason: &str) -> RefreshError {
         let observation = meerkat_core::RefreshFailureObservation::transient();
         match self.auth_lease.refresh_failed(lease_key, observation) {
-            Ok(()) => RefreshError::Refresh(reason.to_owned()),
+            Ok(_transition) => RefreshError::Refresh(reason.to_owned()),
             Err(error) => RefreshError::Refresh(format!(
                 "{reason}; AuthMachine refresh_failed rejected closure: {error}"
             )),
@@ -1406,6 +1381,7 @@ fn require_loopback_redirect(redirect_uri: &str) -> Result<(), ConnectorLoginErr
 
 fn map_mutation_error(error: CredentialMutationError) -> ConnectorLoginError {
     match error {
+        CredentialMutationError::StalePreparation => ConnectorLoginError::StalePreparation,
         CredentialMutationError::SlotRefused(refusal) => ConnectorLoginError::Slot(refusal),
         CredentialMutationError::TokenStore(reason) => ConnectorLoginError::TokenStore(reason),
         CredentialMutationError::AuthLifecycle(reason)
@@ -1430,6 +1406,7 @@ fn refusal_after_closure(closure: Result<(), String>, refusal: RefreshError) -> 
 
 fn refresh_error_from_login(error: ConnectorLoginError) -> RefreshError {
     match error {
+        ConnectorLoginError::StalePreparation => RefreshError::StalePreparation,
         ConnectorLoginError::Verification(ConnectorOAuthRefusal::AccountMismatch) => {
             RefreshError::CredentialIdentityMismatch
         }
@@ -1442,6 +1419,9 @@ fn refresh_error_from_login(error: ConnectorLoginError) -> RefreshError {
 }
 
 fn map_refresh_error(error: RefreshError) -> ConnectorLoginError {
+    if matches!(error, RefreshError::StalePreparation) {
+        return ConnectorLoginError::StalePreparation;
+    }
     if matches!(error, RefreshError::CredentialIdentityMismatch) {
         return ConnectorOAuthRefusal::AccountMismatch.into();
     }
@@ -1463,6 +1443,18 @@ fn map_refresh_error(error: RefreshError) -> ConnectorLoginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_preparation_preserves_infrastructure_classification() {
+        let error = map_mutation_error(CredentialMutationError::StalePreparation);
+        assert!(matches!(error, ConnectorLoginError::StalePreparation));
+        assert!(!error.is_refusal());
+        let refresh = refresh_error_from_login(error);
+        assert!(matches!(refresh, RefreshError::StalePreparation));
+        let restored = map_refresh_error(refresh);
+        assert!(matches!(restored, ConnectorLoginError::StalePreparation));
+        assert!(!restored.is_refusal());
+    }
 
     #[test]
     fn flow_owner_failures_are_infrastructure_and_attempt_errors_are_refusals() {

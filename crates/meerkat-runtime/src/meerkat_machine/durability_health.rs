@@ -68,12 +68,13 @@ impl DurabilityHealthHandle {
     /// Refuse execution or mutation unless registration published a verified
     /// cold-installed image and no later durability failure degraded it.
     pub(crate) fn require_ready(&self) -> Result<(), DurabilityReloadRequired> {
-        match &self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state
-        {
+        let record = self.inner.lock().map_err(|_| {
+            DurabilityReloadRequired::new(
+                "durability_health_poison",
+                "persistent health owner is not a verified image",
+            )
+        })?;
+        match &record.state {
             DurabilityHealthState::Ready => Ok(()),
             DurabilityHealthState::ReloadRequired(required) => Err(required.clone()),
         }
@@ -125,11 +126,12 @@ pub(super) struct DurabilityRehydrationAuthority {
 
 impl DurabilityRehydrationAuthority {
     pub(super) fn mark_ready(self) -> Result<(), DurabilityReloadRequired> {
-        let mut record = self
-            .handle
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut record = self.handle.inner.lock().map_err(|_| {
+            DurabilityReloadRequired::new(
+                "durability_health_poison",
+                "cold install cannot publish a poisoned health owner",
+            )
+        })?;
         if !record.cold_install_open {
             return match &record.state {
                 DurabilityHealthState::Ready => Ok(()),
@@ -190,5 +192,32 @@ mod tests {
         let error = rehydration.mark_ready().unwrap_err();
         assert_eq!(error.operation(), "recovery_cas");
         assert_eq!(health.require_ready().unwrap_err(), error);
+    }
+    #[test]
+    fn poisoned_ready_owner_cannot_authorize_persistent_operations() {
+        let (health, install) = begin_registration_cold_install();
+        install.mark_ready().unwrap();
+        let _ = std::panic::catch_unwind(|| {
+            let _actual_owner = health.inner.lock().unwrap();
+            panic!("fault while holding actual health owner");
+        });
+        assert!(
+            health.require_ready().is_err(),
+            "poison is not a verified Ready image"
+        );
+    }
+
+    #[test]
+    fn poisoned_cold_owner_cannot_publish_readiness() {
+        let (health, install) = begin_registration_cold_install();
+        let _ = std::panic::catch_unwind(|| {
+            let _actual_owner = health.inner.lock().unwrap();
+            panic!("fault while holding actual cold-install owner");
+        });
+        assert!(
+            install.mark_ready().is_err(),
+            "poison invalidates the cold-install proof"
+        );
+        assert!(health.require_ready().is_err());
     }
 }

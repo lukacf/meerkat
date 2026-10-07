@@ -96,12 +96,13 @@ pub use artifact::{
     ArtifactListResult,
 };
 pub use auth::{
-    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalId, PrincipalKind, PrincipalRef,
-    VisibilityClass,
+    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalId, PrincipalKind,
+    PrincipalQualification, PrincipalRef, TrustDomainId, VisibilityClass,
 };
 pub use error::{
-    WireConversionError, WireHostUnavailableDetail, WireMobErrorDetail, WireStaleCursorDetail,
-    WireStaleFenceDetail,
+    WireControllerReadinessFailure, WireConversionError, WireCredentialUseDisposition,
+    WireHostUnavailableDetail, WireInputAdmissionErrorDetail, WireInputRefusalKind,
+    WireMobErrorDetail, WireStaleCursorDetail, WireStaleFenceDetail,
 };
 pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,

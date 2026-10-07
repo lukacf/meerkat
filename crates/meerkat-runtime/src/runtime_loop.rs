@@ -178,6 +178,7 @@ pub(crate) fn merge_batch_turn_metadata(
         if batch_handling_mode.is_none() {
             batch_handling_mode = meta.handling_mode;
         }
+        meta.work_authorization = None; // Rebuilt only from accepted contributor rows at staging.
         meta.handling_mode = None;
         transcript_identity.observe(&meta.transcript_identity);
         // Identity consensus needs a sticky conflict state across the whole
@@ -791,11 +792,14 @@ impl InteractionTerminalPublicationError {
             // A receipt-less terminal is a legitimate read verdict, but
             // terminal publication expects the receipt its run staged.
             crate::RuntimeDriverError::ValidationFailed { .. }
+            | crate::RuntimeDriverError::InputRefused { .. }
             | crate::RuntimeDriverError::InputIdempotencyConflict { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
             | crate::RuntimeDriverError::InputTerminalWithoutReceipt { .. }
             | crate::RuntimeDriverError::RecoveryRepairBlocked { .. } => Self::Corrupt(detail),
-            crate::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
+            crate::RuntimeDriverError::ControllerReadinessUnavailable { .. }
+            | crate::RuntimeDriverError::ControllerInUse
+            | crate::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
             | crate::RuntimeDriverError::UnregisterInProgress { .. }
             | crate::RuntimeDriverError::RuntimeStopInProgress { .. }
             | crate::RuntimeDriverError::InterruptDispatchOutcomeUnknown { .. }
@@ -809,6 +813,10 @@ impl InteractionTerminalPublicationError {
 
     fn from_generated_authority(context: &str, error: crate::RuntimeDriverError) -> Self {
         match error {
+            crate::RuntimeDriverError::ControllerReadinessUnavailable { .. }
+            | crate::RuntimeDriverError::ControllerInUse => {
+                Self::Retryable(format!("{context}: {error}"))
+            }
             crate::RuntimeDriverError::NotReady { .. }
             | crate::RuntimeDriverError::NotFound { .. }
             | crate::RuntimeDriverError::Destroyed
@@ -5158,8 +5166,13 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     });
     let loop_teardown_slot = std::sync::Arc::clone(&teardown_slot);
     let loop_process_teardown_slot = std::sync::Arc::clone(&teardown_slot);
+    let supports_work_authorization = executor.supports_work_authorization();
     let loop_handoff_guard = RuntimeLoopHandoffGuard::new(loop_teardown_slot, executor);
     let loop_body = async move {
+        driver
+            .lock()
+            .await
+            .set_executor_work_authorization_support(supports_work_authorization);
         let mut loop_handoff_guard = loop_handoff_guard;
         let mut startup_guard = startup_guard;
         let post_commit_hooks = authority_binding.post_commit_hooks().await;
@@ -6502,6 +6515,23 @@ async fn process_queue(
                     },
                 ),
             };
+            let primitive = primitive.and_then(|mut primitive| {
+                let context = d
+                    .batch_work_authorization(&run_id, &contributing_input_ids)
+                    .map_err(|_| {
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                            field: "work_authorization",
+                            reason: "retained native work attribution is unavailable",
+                        }
+                    })?;
+                if let RunPrimitive::StagedInput(staged) = &mut primitive {
+                    staged
+                        .turn_metadata
+                        .get_or_insert_with(Default::default)
+                        .work_authorization = context;
+                }
+                Ok(primitive)
+            });
             RuntimeLoopDequeueOutcome::Ready {
                 input_ids: contributing_input_ids,
                 run_id,
@@ -9013,6 +9043,8 @@ mod tests {
         Input::Prompt(PromptInput {
             injected_context: Vec::new(),
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Operator,
@@ -9043,6 +9075,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9073,6 +9107,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9104,6 +9140,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9146,6 +9184,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9201,6 +9241,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9425,6 +9467,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9498,6 +9542,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9555,6 +9601,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9608,6 +9656,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9676,6 +9726,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -9749,6 +9801,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -10167,6 +10221,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -11643,6 +11699,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -11707,6 +11765,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -11765,6 +11825,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -11822,6 +11884,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -11880,6 +11944,8 @@ mod tests {
         ];
         let input = Input::FlowStep(FlowStepInput {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Flow {
@@ -11935,6 +12001,8 @@ mod tests {
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::External {
@@ -11984,6 +12052,8 @@ mod tests {
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::External {
@@ -12027,6 +12097,8 @@ mod tests {
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::External {
@@ -12091,6 +12163,8 @@ mod tests {
         let direct = Input::ExternalEvent(crate::input::ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::External {
@@ -12126,6 +12200,8 @@ mod tests {
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::External {
@@ -13424,6 +13500,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -13469,6 +13547,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
@@ -14088,5 +14168,29 @@ mod tests {
              failure metadata the generated result class contradicts"
         );
         assert_machine_classifies_cancelled(&driver, &failed_run);
+    }
+}
+
+#[cfg(test)]
+mod controller_readiness_projection_tests {
+    use super::*;
+
+    #[test]
+    fn controller_readiness_is_never_terminal_corruption() {
+        for error in [
+            crate::RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: crate::traits::ControllerReadinessFailure::Busy,
+            },
+            crate::RuntimeDriverError::ControllerInUse,
+        ] {
+            assert!(matches!(
+                InteractionTerminalPublicationError::from_driver("fixture", error.clone()),
+                InteractionTerminalPublicationError::Retryable(_)
+            ));
+            assert!(matches!(
+                InteractionTerminalPublicationError::from_generated_authority("fixture", error),
+                InteractionTerminalPublicationError::Retryable(_)
+            ));
+        }
     }
 }

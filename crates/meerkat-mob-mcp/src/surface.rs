@@ -12,9 +12,9 @@ pub fn wire_mob_tools(
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     persistent_storage_root: Option<PathBuf>,
     console_principal: meerkat_mob::MobControlPrincipal,
-) -> Arc<MobMcpState> {
+) -> Result<Arc<MobMcpState>, meerkat_runtime::RuntimeDriverError> {
     let state = Arc::new(
-        MobMcpState::new_with_runtime_adapter(session_service, runtime_adapter, console_principal)
+        MobMcpState::new_with_runtime_adapter(session_service, runtime_adapter, console_principal)?
             .with_persistent_storage_root(persistent_storage_root),
     );
     *builder_mob_tools_slot
@@ -22,7 +22,7 @@ pub fn wire_mob_tools(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
         AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
     ));
-    state
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -39,7 +39,9 @@ mod tests {
         let slot: Arc<RwLock<Option<Arc<dyn MobToolsFactory>>>> = Arc::new(RwLock::new(None));
         let session_service: Arc<dyn MobSessionService> =
             Arc::new(crate::LocalSessionService::new());
-        let runtime_adapter = Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()));
+        let runtime_adapter = session_service
+            .acquire_runtime_adapter(None)
+            .expect("acquire the local service runtime owner");
 
         let state = wire_mob_tools(
             &slot,
@@ -47,7 +49,8 @@ mod tests {
             runtime_adapter,
             None,
             meerkat_mob::MobControlPrincipal::Owner,
-        );
+        )
+        .expect("wire tools to the same runtime owner");
 
         assert!(
             slot.read()
@@ -66,15 +69,19 @@ mod tests {
         let slot: Arc<RwLock<Option<Arc<dyn MobToolsFactory>>>> = Arc::new(RwLock::new(None));
         let session_service: Arc<dyn MobSessionService> =
             Arc::new(crate::LocalSessionService::new());
+        let runtime_adapter = session_service
+            .acquire_runtime_adapter(None)
+            .expect("acquire the local service runtime owner");
         let root = PathBuf::from("/tmp/meerkat-mob-root");
 
         let state = wire_mob_tools(
             &slot,
             session_service,
-            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
+            runtime_adapter,
             Some(root.clone()),
             meerkat_mob::MobControlPrincipal::Owner,
-        );
+        )
+        .expect("wire tools to the same runtime owner");
 
         assert_eq!(
             state.persistent_storage_root.as_deref(),

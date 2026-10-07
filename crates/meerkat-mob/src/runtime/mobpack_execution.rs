@@ -556,7 +556,7 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         deadline: &crate::adaptive::AdaptiveOperationDeadline,
     ) -> crate::adaptive::AdaptiveLayerProvision<Self::Layer> {
         let requested_members = compiled.spawn_specs.len() as u64;
-        let mut builder = match MobBuilder::from_mobpack(
+        let builder = match MobBuilder::from_mobpack(
             compiled.definition.clone(),
             BTreeMap::new(),
             MobStorage::in_memory(),
@@ -572,9 +572,6 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
                 };
             }
         };
-        if let Some(adapter) = self.session_service.runtime_adapter() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
         let handle = match builder.create().await {
             Ok(handle) => handle,
             Err(error) => {

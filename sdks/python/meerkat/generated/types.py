@@ -58,6 +58,7 @@ class WireToolResult:
     tool_use_id: str = ''
     content: Optional[WireToolResultContent] = None
     is_error: Optional[bool] = None
+    settlement_failures: list[ToolDispatchSettlementFailure] = field(default_factory=list)
 
 
 @dataclass
@@ -171,6 +172,134 @@ def _expect_wire_const(value: Any, expected: Any, context: str) -> Any:
         raise _wire_parse_error(context, f"expected constant `{expected}`")
     return value
 
+
+
+# Tool result companion contract for LiveBridgeEffectKind.
+LiveBridgeEffectKind = Literal['model_computation', 'read_only_memory_snapshot', 'tool_dispatch', 'durable_memory_mutation', 'comms', 'helper_spawn', 'external_io']
+
+# Terminal observation for one consumed live bridge effect authority.
+#
+# `Unknown` means dispatch began but its physical outcome cannot be proven.
+# It is terminal and must never be retried or relabeled as committed.
+LiveBridgeEffectOutcome = Literal['committed', 'failed', 'unknown']
+
+# Which configured admission reported a settlement failure.
+ToolDispatchAdmissionSource = Literal['configured_gate', 'context_gate', 'authorization_audit']
+
+# Tool result companion contract for ToolDispatchTerminalErrorKind.
+ToolDispatchTerminalErrorKind = Literal['not_found', 'unavailable', 'invalid_arguments', 'execution_failed', 'timeout', 'access_denied', 'authorization_refused', 'operation_observation_unavailable', 'operation_authorization_unavailable', 'policy_denied', 'policy_indeterminate', 'other', 'callback_pending', 'confinement_refused', 'hook_denied']
+
+@dataclass
+class ToolDispatchSettlementFailure:
+    """A diagnostic that accompanies, and never replaces, the physical result.
+
+This contains no error text, tool arguments, credentials or execution
+authority. The admission owner retains any exact internal failure and the
+selected physical outcome until its generated settlement succeeds."""
+    admission_source: ToolDispatchAdmissionSource
+    effect_kind: LiveBridgeEffectKind
+    failure_kind: ToolDispatchTerminalErrorKind
+    physical_outcome: LiveBridgeEffectOutcome
+
+
+# Stable, caller-visible principal id.
+#
+# Legacy deserialization preserves previously persisted strings, including
+# those rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization
+# validates the id; migrating unqualified persisted ids is a separate step.
+PrincipalId = str
+
+# Exact, opaque trust-domain namespace for a qualified principal id.
+#
+# Domain ids are not inferred from hostnames or normalized. Constructing one
+# validates its syntax, not the caller's authority to assert that domain.
+TrustDomainId = str
+
+# Generic principal categories. Product-specific role names belong outside
+# core and may be mapped to these typed categories by clients.
+PrincipalKind = Literal['human', 'personal_agent', 'shared_agent', 'runtime_host', 'service_account']
+
+# Whether an identity has an explicit trust-domain namespace.
+#
+# Unqualified identity preserves trusted-embedded and legacy wire contracts;
+# it must not be silently assigned a domain for governed use. Qualification
+# is identity vocabulary, not proof of authentication or authorization.
+class PrincipalQualificationUnqualified(TypedDict, total=False):
+    kind: Required[Literal['unqualified']]
+
+class PrincipalQualificationQualified(TypedDict, total=False):
+    kind: Required[Literal['qualified']]
+    trust_domain_id: Required[TrustDomainId]
+
+PrincipalQualification = PrincipalQualificationUnqualified | PrincipalQualificationQualified
+
+# Generic scope for grants and shared visibility.
+class GrantScopeRealm(TypedDict, total=False):
+    realm_id: Required[str]
+    scope_type: Required[Literal['realm']]
+
+class GrantScopeSession(TypedDict, total=False):
+    scope_type: Required[Literal['session']]
+    session_id: Required[str]
+
+class GrantScopeMob(TypedDict, total=False):
+    mob_id: Required[str]
+    scope_type: Required[Literal['mob']]
+
+class GrantScopeAuthBinding(TypedDict, total=False):
+    binding_id: Required[BindingId]
+    profile_id: NotRequired[Optional[ProfileId]]
+    realm_id: Required[RealmId]
+    scope_type: Required[Literal['auth_binding']]
+
+class GrantScopeApplication(TypedDict, total=False):
+    id: Required[str]
+    namespace: Required[str]
+    scope_type: Required[Literal['application']]
+
+GrantScope = GrantScopeRealm | GrantScopeSession | GrantScopeMob | GrantScopeAuthBinding | GrantScopeApplication
+
+# Actions that grants may allow. Enforcement sites decide which action is
+# needed for a specific operation.
+GrantAction = Literal['observe', 'replay_events', 'request_approval', 'decide_approval', 'use_tool', 'manage_runtime'] | Literal['use_auth_binding']
+
+# Typed visibility class for events, artifacts, approvals, or future records.
+class VisibilityClassPrivate(TypedDict, total=False):
+    principal: Required[PrincipalRef]
+    visibility: Required[Literal['private']]
+
+class VisibilityClassScoped(TypedDict, total=False):
+    scope: Required[GrantScope]
+    visibility: Required[Literal['scoped']]
+
+VisibilityClass = VisibilityClassPrivate | VisibilityClassScoped
+
+@dataclass
+class PrincipalRef:
+    """Typed principal reference.
+
+Public fields preserve the existing data contract, so an in-memory value
+is not proof of valid or authenticated identity. Governed admission must
+call [`Self::validate_qualified`] and separately establish caller authority."""
+    id: PrincipalId
+    kind: PrincipalKind
+    qualification: Optional[PrincipalQualification] = None
+
+
+@dataclass
+class ActingOnBehalfOf:
+    """Explicit acting-on-behalf-of relationship for audit and policy checks."""
+    actor: PrincipalRef
+    subject: PrincipalRef
+
+
+@dataclass
+class AuthGrant:
+    """A typed grant issued to a principal for a single scope."""
+    actions: list[GrantAction]
+    principal: PrincipalRef
+    scope: GrantScope
+    acting_on_behalf_of: Optional[ActingOnBehalfOf] = None
 
 
 @dataclass

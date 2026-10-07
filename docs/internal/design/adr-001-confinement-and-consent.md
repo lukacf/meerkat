@@ -8,6 +8,11 @@ process confinement and a concrete human-consent workflow. The accepted r8
 snapshot and its review evidence remain unchanged. This addendum does not claim
 implementation acceptance or measured performance.
 
+The 2026-10-05 [model review and consent amendment](adr-001-model-review-and-consent.md)
+extends this same consent owner with reviewer policy, closed batches and scoped
+preferences. Its accepted 0.9 scope does not create a second approval subsystem.
+The entry, delivery and recovery requirements below apply to that extension.
+
 Luka authorized bringing the sandbox implementation and the sandbox, human
 approval, on-behalf-of, audit and traceability clarifications into this work.
 Detailed workflow choices below are engineering proposals implementing that
@@ -133,32 +138,51 @@ neither triggers an unrestricted retry.
 
 ## Human consent
 
-The existing approval owner and `ApprovalLifecycleMachine` own consent. A trusted
-application policy declares which otherwise-permitted actions require approval,
-who may approve them, and the authenticated presentation and decision channel.
+Extend the existing approval owner and `ApprovalLifecycleMachine` for consent
+validity and consumption. A trusted application policy declares which
+otherwise-permitted actions require approval, who may approve them, and the
+authenticated presentation and decision channel. Runtime decision storage alone
+does not establish the candidate binding or entry-consumption contract below.
 Consent is a conjunction with agent permission, the original requester's
 authority, delegation, account and resource policy, confinement, and required
 gate routing. It cannot override a nonoverridable ceiling or activate every
 permission held by a connected human account.
 
-The operation owner retains the exact candidate. The presentation identifies its
-concrete action, target and recipient, relevant arguments or effect summary,
-selected account, requester, executing agent and expiry. An audience unable to
-read the required details cannot supply informed approval through a redacted
-placeholder. The agent receives typed action-required feedback and may continue
-other permitted work. No run is parked merely to await consent.
+The operation owner retains the exact candidate or a closed batch manifest. The
+presentation identifies its concrete action, targets and recipients, relevant
+arguments or effect summary, selected account, requester, executing agent and
+expiry. A trusted host tool can form the manifest; it need not originate in a
+console. Any eligible channel that privately and readably presents the required
+details can obtain informed approval. An audience unable to read those details
+cannot approve through a redacted placeholder. The agent receives typed
+action-required feedback and may continue other permitted work. No tool batch,
+run or session is parked merely to await consent.
 
 The host authenticates the decision event and checks current approver
 eligibility. A caller-supplied actor string, model statement, gate reply or
-replayed callback is not authentication. Consent binds the retained candidate,
-actual parties, qualified resource and recipient, selected account and route,
-relevant owner policy generation and finite expiry. Changed binding requires
-fresh consent. Diagnostic counters are not durable policy generations.
+replayed callback is not authentication. Exact-candidate or closed-batch consent
+binds the retained candidate, actual parties, qualified resource and recipient,
+selected account and route, relevant owner policy generation and finite expiry.
+Changed binding requires fresh consent. Diagnostic counters are not durable
+policy generations.
+The host configures that expiry and presents it to the person and agent. Expiry
+while pending or after approval prevents entry and reliably notifies both through
+the existing delivery owners; historical Approved status is not spendable
+consent. The host may configure its own duration without a native fixed timeout.
 For executable actions, the binding includes the actual executable selection
 and prepared artifact or manifest. Unchanged arguments do not preserve consent
 when the selected script, package or executable artifact changes. The launch
 owner must retain and enforce that selection, not merely compare a pathname
 before later executing replaceable content.
+
+Exact-action or closed-batch approval is distinct from a scoped standing-consent
+mandate. A time-bound or explicitly no-expiry mandate satisfies only a separate,
+owner-declared reusable consent requirement after review is satisfied. It cannot
+satisfy R3 fresh human review, an unresolved R2 escalation or an absent required
+reviewer. A scoped, expiring tier change is instead an authenticated policy edit
+with automatic reversion; it never broadens underlying permission. The
+[model review amendment](adr-001-model-review-and-consent.md) defines these
+preferences and their common native ownership.
 
 Approval records a decision; it does not execute or replay the action. A later
 explicit attempt resolves the same retained candidate through its owner and
@@ -173,22 +197,47 @@ completed effect is safe; the existing operation owner must resolve that
 uncertainty or use its own applicable idempotency guarantee before another
 physical attempt. This adds no journal or per-action fsync requirement.
 
-The approval owner delivers approved, declined, expired and cancelled outcomes
-as typed inputs to the owning session through existing admission. The input
-retains the original requester/work association and candidate reference; it can
-arrive after the original run has completed and wakes the session under normal
-turn and admission rules. Delivery does not execute the action. The agent or
-host makes a later explicit attempt, which resolves the retained candidate and
-rechecks current requirements. An expired or lost candidate returns typed
-fresh-consent-required feedback. Missing delivery is observable and retryable
-through the existing delivery owner, not silent success or a new parked run.
+An in-memory restart invalidates old candidate and approval references; it does
+not prove that an earlier effect never happened. Independently admitted new work
+continues under current authority. Recovery or retry of prior logical work still
+needs its owner's recovered disposition, reconciliation or applicable idempotency
+guarantee. There is no global uncertainty quarantine, and matching JSON or an
+omitted old reference cannot convert a retry into new intent.
 
-At the designated physical entry boundary, after waits and preparation, the
-operation owner checks current permissions and consumes the still-valid consent
-through the approval owner's single serialized transition. Nested checks do not
-consume it. Concurrent attempts cannot consume it twice. Consumption is distinct
-from entry and from outcome; a later failure does not silently restore consent,
-rewrite a completed effect, or retry an uncertain effect.
+The approval owner reliably delivers approved, declined, expired and cancelled
+outcomes as typed inputs to the owning session through existing authenticated
+admission. The input retains the original requester/work association and
+candidate reference; it can arrive after the original run has completed. Delivery
+wakes or notifies the owning session under normal turn and admission rules,
+without requiring the person to nudge it. Delivery itself never executes the
+action. The agent or host makes a fresh explicit attempt, resolves the retained
+candidate and rechecks current authority. An expired or lost candidate returns
+typed fresh-consent-required feedback. Missing or refused delivery is visible to
+the host and person; retry uses the existing delivery owner when admission
+permits it. It is not reported as delivered or handled by a new parked run.
+Duplicate delivery adds no authority, while a valid authenticated late decision
+can enable that fresh attempt.
+
+Argument validation, preparation and waits occur before consumption. Failure at
+those pre-entry stages leaves otherwise-valid consent spendable. Immediately at
+the designated physical-entry boundary, before the protected effect, the
+operation owner rechecks current policy, permission, candidate, review and
+consent. The approval owner conditionally consumes the required use budget in
+one serialized transition. A multi-recipient call consumes the corresponding
+manifest units; concurrent attempts cannot each spend the final use. Nested
+checks do not consume again. Consumption, physical entry and outcome remain
+distinct facts. Failure after consumption does not automatically refund consent,
+rewrite a completed effect or permit blind retry of an uncertain effect.
+
+All consumers of one approval or budget, across sessions and processes, use the
+same conditional-commit domain. Independent session CAS does not protect a shared
+budget. Production `FileApprovalStore` persists approval records, but its
+instance-local mutex and unconditional load/put interface do not establish this
+contract. Extend backing mechanics under the existing generated approval owner,
+using native/realm commitment or equivalent conditional storage; do not add a
+mirror ledger. A custom store must enforce the same current-state and conditional
+commit semantics. Any temporary single-owner restriction must be enforced and
+reported as such, not claimed as shared-process coverage.
 
 Decline, expiry before or after approval, cancellation, changed policy, missing
 binding, unavailable service and previous consumption refuse the new entry and
@@ -209,10 +258,13 @@ authority for unrelated callers. A gate executor may have publishing capability
 that its upstream agent lacks while remaining subject to the original requester
 and delegation ceilings.
 
-Mandatory gate routing and human consent are independent requirements. The
-runtime can enforce review of an exact action and recipient; it cannot prove
-that the gate understood the content correctly. Gate review is not human
-consent, and human consent does not bypass a mandatory gate.
+Independently mandatory gate routing and human consent remain separate
+requirements. An R2 review policy may explicitly select fresh qualified-human
+review of the exact candidate or closed batch when its reviewer is unavailable;
+an unattended policy may instead refuse the affected action locally. Neither
+choice bypasses an independently mandatory route. Standing consent does not
+resolve an R2 escalation or R3 review. The runtime enforces the selected review
+contract; it cannot prove that a reviewer understood the content correctly.
 
 Audit joins the existing operation and state owners. It records authorization
 decisions, consent transitions, entry attempts, actual results and uncertainty
@@ -241,9 +293,15 @@ or account, expiry at use, cancellation, simultaneous consumption, restart with
 lost binding, unaffected sibling operations, and preservation of physical
 results after settlement failure. Narrow external-account delegation is tested
 independently of the broader OAuth credential.
-Tests include decisions arriving after run completion and an ineligible member
-clicking a shared-channel approval control. Visibility or channel membership
-does not establish eligibility.
+Tests include reliable wake/notification after run completion, host-configured
+expiry notices to person and agent, and an ineligible member clicking a
+shared-channel approval control. Visibility or channel membership does not
+establish eligibility. Pre-entry validation/preparation failure must leave consent
+spendable; a post-entry lost reply must not cause automatic refund or resend.
+Shared-budget controls span independent consumers in multiple processes, and
+memory-restart controls reject old references while allowing unrelated fresh work.
+Closed-batch review and consent, standing preferences and expiring policy edits
+use the [model review amendment's acceptance contract](adr-001-model-review-and-consent.md).
 Each restriction has a permitted positive control as well as a refused case.
 Tests include executable selection changing behind unchanged arguments and
 package installation or bootstrap attempting effects outside its boundary.

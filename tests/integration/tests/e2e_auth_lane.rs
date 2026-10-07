@@ -564,7 +564,8 @@ impl AuthHarness {
                 store,
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 blob_store,
-            ),
+            )
+            .expect("construct runtime authority"),
             NotificationSink::noop(),
         );
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
@@ -572,7 +573,8 @@ impl AuthHarness {
             temp.path().join("config_state.json"),
         )));
         let runtime = Arc::new(runtime);
-        let router = MethodRouter::new(runtime.clone(), config_store, NotificationSink::noop());
+        let router = MethodRouter::new(runtime.clone(), config_store, NotificationSink::noop())
+            .expect("construct runtime authority");
         Self {
             _temp: temp,
             config,

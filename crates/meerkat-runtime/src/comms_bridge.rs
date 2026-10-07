@@ -66,6 +66,8 @@ pub fn classified_interaction_to_runtime_input(
         };
         return Ok(Input::ExternalEvent(ExternalEventInput {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::External {
@@ -156,6 +158,8 @@ fn peer_input_from_ingress_fact(
         system_prompts: Vec::new(),
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {

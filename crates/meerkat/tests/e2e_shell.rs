@@ -11,7 +11,8 @@ use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 use meerkat_tools::builtin::BuiltinTool;
 use meerkat_tools::builtin::shell::{
-    JobId, JobManager, JobStatus, ShellConfig, ShellError, ShellOutput, ShellTool, ShellToolSet,
+    JobId, JobManager, JobStatus, ShellConfig, ShellConfinement, ShellError, ShellOutput,
+    ShellTool, ShellToolSet,
 };
 #[cfg(unix)]
 use nix::errno::Errno;
@@ -43,6 +44,7 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         security_mode: Default::default(), // Unrestricted for e2e tests
         security_patterns: vec![],
         env_vars: std::collections::HashMap::new(),
+        confinement: ShellConfinement::TrustedHost,
         max_output_chars: 40_000,
     }
 }

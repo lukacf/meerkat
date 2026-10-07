@@ -2637,6 +2637,7 @@ mod tests {
                 },
             ],
             ci_step_limit: None,
+            tlc_model: None,
             deep_domain_overrides: Default::default(),
             input_field_domains: Default::default(),
             effect_dispositions: vec![],

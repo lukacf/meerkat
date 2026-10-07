@@ -366,25 +366,34 @@ fn migration_0003_authenticated_head_sidecars(tx: &Transaction<'_>) -> Result<()
 /// every SQLite session-store composition.
 ///
 /// The existing conversion helper is the authority here. For every supported
-/// current-version head it verifies the stored CAS token, resolves and commits
+/// envelope head it verifies the stored CAS token, resolves and commits
 /// the exact serialized row prefix, validates/backfills the compact rewrite
 /// graph, then installs the component and metadata authorities before replacing
-/// the head. Rows outside the supported current envelope are not candidates for
+/// the head. Rows outside the supported envelope versions are not candidates for
 /// this crossing. All conversion work happens inside this migration transaction,
 /// so a failed proof leaves both the source head and schema version unchanged.
 fn migration_0004_head_canonical_v2_authority(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     let session_ids = {
         let mut statement = tx.prepare(
-            "SELECT session_id
+            "SELECT session_id, version
              FROM session_heads
-             WHERE version = ?1
              ORDER BY session_id",
         )?;
         statement
-            .query_map(params![i64::from(meerkat_core::SESSION_VERSION)], |row| {
-                row.get::<_, String>(0)
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(id, version)| {
+                u32::try_from(version)
+                    .ok()
+                    .and_then(|version| {
+                        meerkat_core::generated::session_persistence_version_authority::restore_session_envelope_version(version).ok()
+                    })
+                    .map(|_| id)
+            })
+            .collect::<Vec<_>>()
     };
 
     for raw_id in session_ids {
@@ -1501,17 +1510,25 @@ mod schema_floor_tests {
         let session = Session::new();
         let mut head = SessionHead::from_session(&session, TranscriptStrandId::root(), 0)
             .expect("project fixture head");
+        let tx = conn.transaction().expect("head fixture transaction");
+        write_head_row_only_in_txn(&tx, &head).expect("insert current session head");
         head.version = embedded_version;
         let head_json = serde_json::to_value(&head).expect("serialize fixture head");
         let token = session_head_cas_token(&head).expect("fixture head token");
         let id = head.id.clone();
-        let tx = conn.transaction().expect("head fixture transaction");
-        write_head_row_only_in_txn(&tx, &head).expect("insert session head");
+        // Synthetic historical/future bytes enter through raw fixture SQL,
+        // never through the current-version production writer.
         tx.execute(
-            "UPDATE session_heads SET version = ?1 WHERE session_id = ?2",
-            params![row_version, id.to_string()],
+            "UPDATE session_heads SET version = ?1, head_json = ?2, cas_token = ?3
+             WHERE session_id = ?4",
+            params![
+                row_version,
+                serde_json::to_vec(&head).expect("fixture head bytes"),
+                token,
+                id.to_string(),
+            ],
         )
-        .expect("set fixture row version");
+        .expect("plant synthetic row and embedded versions");
         tx.commit().expect("commit head fixture");
         (id, head_json, token)
     }
@@ -1548,6 +1565,254 @@ mod schema_floor_tests {
         )
         .expect("ledger");
         conn
+    }
+
+    fn callback_failure_session(applied: bool) -> Session {
+        use meerkat_core::types::{AssistantBlock, ToolResult, TranscriptMessageIdentity};
+
+        let run_id = meerkat_core::lifecycle::RunId::new();
+        let mut session = Session::new();
+        let assistant_message_id = session
+            .append_external_assistant_blocks(
+                ["failed", "callback"]
+                    .into_iter()
+                    .map(|id| AssistantBlock::ToolUse {
+                        id: id.into(),
+                        name: id.into(),
+                        args: serde_json::value::RawValue::from_string(
+                            "{ \"argument\" : [1, 2] }".into(),
+                        )
+                        .expect("exact argument spelling"),
+                        meta: None,
+                    })
+                    .collect(),
+                meerkat_core::StopReason::ToolUse,
+                meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::Other,
+                    "envelope-v3-fixture",
+                    meerkat_core::Usage::default(),
+                ),
+            )
+            .expect("public Session owner mints the assistant occurrence identity");
+        let failure = serde_json::json!({
+            "kind": "operation_observation_unavailable",
+            "source_run_id": run_id,
+            "assistant_message_id": assistant_message_id,
+            "tool_use_order": ["failed", "callback"],
+        });
+        let failed = ToolResult::new("failed".into(), "observation unavailable\n".into(), true);
+        let callback = ToolResult::new("callback".into(), "exact callback result\n".into(), false);
+        if applied {
+            session.push(Message::tool_results(vec![
+                failed.clone(),
+                callback.clone(),
+            ]));
+        }
+        let state = if applied {
+            serde_json::json!({
+                "state": "applied",
+                "tool_use_order": ["callback"],
+                "results": [callback],
+                "post_tool_messages_applied": false,
+                "deferred_failure": failure,
+            })
+        } else {
+            serde_json::json!({
+                "state": "pending",
+                "batch": {
+                    "run_id": run_id,
+                    "tool_use_order": ["failed", "callback"],
+                    "pending_tool_use_ids": ["callback"],
+                    "completed_results": [failed],
+                    "session_effects": [],
+                    "async_ops": [],
+                    "deferred_failure": failure,
+                },
+            })
+        };
+        // Synthetic persisted callback facts, not a released capture. Decode
+        // and classify them through the existing public Session owner.
+        let mut document = serde_json::to_value(&session).expect("fixture document");
+        // The public append owns occurrence identity; this synthetic fixture
+        // supplies the same run binding retained by its deferred failure.
+        document["messages"][0]["identity"] =
+            serde_json::to_value(TranscriptMessageIdentity::default().with_run_id(run_id))
+                .expect("fixture run binding");
+        document["metadata"]["session_pending_callback_batch_v1"] = state;
+        let session: Session = serde_json::from_value(document).expect("fixture Session");
+        assert_eq!(
+            session
+                .classify_callback_result_ingress(&[callback])
+                .expect("synthetic callback facts satisfy the real owner"),
+            if applied {
+                meerkat_core::session::CallbackResultIngress::AlreadyApplied
+            } else {
+                meerkat_core::session::CallbackResultIngress::Pending {
+                    pending_tool_use_ids: vec!["callback".into()],
+                }
+            }
+        );
+        session
+    }
+
+    async fn synthetic_envelope_v3_head(
+        applied: bool,
+    ) -> (tempfile::TempDir, Session, SessionHead) {
+        let directory = tempfile::TempDir::new().expect("v3 envelope fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let store = SqliteSessionStore::open(&path).expect("create current store schema");
+        let session = callback_failure_session(applied);
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session)
+            .expect("prepare authenticated callback fixture");
+        store
+            .apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist exact transcript and authenticated metadata");
+
+        let mut head = root.successor_head().clone();
+        head.version = 3;
+        let token = session_head_cas_token(&head).expect("original v3 CAS");
+        let connection = open_connection(&path).expect("plant old envelope fixture");
+        // This is a synthetic v3 row over real current physical authorities.
+        // Recompute the original CAS after changing the envelope; metadata
+        // cells and exact transcript rows remain the prepared writer's bytes.
+        connection
+            .execute(
+                "UPDATE session_heads SET version = 3, head_json = ?1, cas_token = ?2
+                 WHERE session_id = ?3",
+                params![
+                    serde_json::to_vec(&head).expect("synthetic v3 head bytes"),
+                    token,
+                    session.id().to_string(),
+                ],
+            )
+            .expect("plant physical JSON and SQL v3 with a valid original CAS");
+        (directory, session, head)
+    }
+
+    fn raw_head_bytes(conn: &Connection, id: &SessionId) -> (i64, Vec<u8>, String) {
+        conn.query_row(
+            "SELECT version, head_json, cas_token FROM session_heads WHERE session_id = ?1",
+            params![id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                    row.get(2)?,
+                ))
+            },
+        )
+        .expect("read exact physical head")
+    }
+
+    #[tokio::test]
+    async fn envelope_v3_head_read_preserves_cas_then_real_advance_writes_v4() {
+        for applied in [false, true] {
+            let (directory, original, old_head) = synthetic_envelope_v3_head(applied).await;
+            let path = directory.path().join("sessions.sqlite3");
+            let connection = open_connection(&path).expect("inspect old physical head");
+            let original_row = raw_head_bytes(&connection, original.id());
+            assert_eq!(original_row.0, 3);
+            assert_eq!(
+                original_row.2,
+                session_head_cas_token(&old_head).expect("valid original CAS")
+            );
+            let store = SqliteSessionStore::open(&path).expect("reopen supported old envelope");
+            let observed = store
+                .load_head(original.id())
+                .await
+                .expect("read original physical head")
+                .expect("head exists");
+            assert_eq!(observed.version, 3);
+            let verified = store
+                .materialize_head(&observed)
+                .await
+                .expect("original CAS verifies before semantic version migration");
+            let mut loaded = store
+                .load(original.id())
+                .await
+                .expect("full supported v3 read")
+                .expect("session exists");
+            assert_eq!(loaded.version(), 4);
+            assert_eq!(verified.session().version(), 4);
+            assert_eq!(loaded.metadata(), original.metadata());
+            assert_eq!(
+                serde_json::to_vec(loaded.messages()).expect("loaded exact messages"),
+                serde_json::to_vec(original.messages()).expect("original exact messages")
+            );
+            assert_eq!(raw_head_bytes(&connection, original.id()), original_row);
+
+            if applied {
+                loaded.push(Message::User(meerkat_core::UserMessage::text(
+                    "post-upgrade append",
+                )));
+            } else {
+                loaded.set_metadata("application_checkpoint", serde_json::json!("advanced"));
+            }
+            let successor = PreparedHeadCanonicalMutation::prepare(&loaded, Some(observed))
+                .expect("prepare successor against the original v3 CAS");
+            assert_eq!(
+                successor.predecessor_head_token(),
+                Some(original_row.2.as_str())
+            );
+            let token = store
+                .apply_prepared_head_canonical_mutation(&successor)
+                .await
+                .expect("advance exact old authority to a current successor");
+            assert_ne!(token, original_row.2);
+            assert_eq!(successor.successor_head().version, 4);
+            assert_eq!(
+                token,
+                session_head_cas_token(successor.successor_head()).expect("valid successor CAS")
+            );
+            let (sql_version, head_json, stored_token) = raw_head(&connection, original.id());
+            assert_eq!(sql_version, 4);
+            assert_eq!(head_json["version"], 4);
+            assert_eq!(stored_token, token);
+            drop(store);
+
+            let reopened = SqliteSessionStore::open(&path).expect("reopen advanced store");
+            let saved = reopened
+                .load(original.id())
+                .await
+                .expect("load advanced session")
+                .expect("advanced session exists");
+            assert_eq!(saved.version(), 4);
+            assert_eq!(saved.metadata(), loaded.metadata());
+            assert_eq!(saved.messages(), loaded.messages());
+            let document: serde_json::Value =
+                serde_json::from_slice(&saved.to_persisted_bytes().expect("save full envelope"))
+                    .expect("full envelope JSON");
+            assert_eq!(document["version"], 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn envelope_v3_head_corrupt_original_cas_refuses_without_rewriting() {
+        let (directory, original, old_head) = synthetic_envelope_v3_head(true).await;
+        let path = directory.path().join("sessions.sqlite3");
+        let connection = open_connection(&path).expect("corrupt fixture connection");
+        connection
+            .execute(
+                "UPDATE session_heads SET cas_token = 'corrupt-original-cas' WHERE session_id = ?1",
+                params![original.id().to_string()],
+            )
+            .expect("corrupt only the original physical CAS");
+        let corrupted = raw_head_bytes(&connection, original.id());
+        let store = SqliteSessionStore::open(&path).expect("open does not rewrite historical rows");
+        assert!(matches!(
+            store.load(original.id()).await,
+            Err(SessionStoreError::Corrupted(id)) if &id == original.id()
+        ));
+        assert!(matches!(
+            store.materialize_head(&old_head).await,
+            Err(SessionStoreError::Corrupted(id)) if &id == original.id()
+        ));
+        assert_eq!(
+            raw_head_bytes(&connection, original.id()),
+            corrupted,
+            "rejected original authority cannot be laundered into a current CAS"
+        );
     }
 
     #[test]
@@ -2048,9 +2313,10 @@ mod schema_floor_tests {
             .expect_err("row/header version disagreement is not released 0.8.10");
 
         assert!(
-            error
-                .to_string()
-                .contains("row version is 2 but embedded head version is 3"),
+            error.to_string().contains(&format!(
+                "row version is 2 but embedded head version is {}",
+                meerkat_core::SESSION_VERSION
+            )),
             "unexpected migration error: {error}"
         );
         assert_eq!(
@@ -2249,23 +2515,28 @@ fn head_row_in_txn(
 ) -> Result<Option<(SessionHead, String)>, SessionStoreError> {
     let row = tx
         .query_row(
-            "SELECT head_json, cas_token FROM session_heads WHERE session_id = ?1",
+            "SELECT head_json, cas_token, version FROM session_heads WHERE session_id = ?1",
             params![id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, JsonColumnBytes>(0)?.into_bytes(),
                     row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
                 ))
             },
         )
         .optional()
         .map_err(StoreError::from)
         .map_err(into_session_store_error)?;
-    let Some((head_json, cas_token)) = row else {
+    let Some((head_json, cas_token, row_version)) = row else {
         return Ok(None);
     };
     let head: SessionHead =
         serde_json::from_slice(&head_json).map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+    if i64::from(head.version) != row_version {
+        return Err(SessionStoreError::Corrupted(id.clone()));
+    }
+    head.restored_session_version()?;
     Ok(Some((head, cas_token)))
 }
 
@@ -3520,6 +3791,7 @@ fn write_head_row_only_in_txn(
     tx: &Transaction<'_>,
     head: &SessionHead,
 ) -> Result<String, SessionStoreError> {
+    head.require_current_envelope_for_write()?;
     let cas_token = session_head_cas_token(head)?;
     // `SessionHead` skips the Arc carrier: runtime authority and ordinary CAS
     // rows remain bounded regardless of accumulated user/config metadata.
@@ -6332,7 +6604,7 @@ pub fn verify_physical_head_retains_boundary_prefix_for_runtime_in_txn(
     physical_head: &SessionHead,
 ) -> Result<meerkat_core::VerifiedSessionHeadMaterialization, SessionStoreError> {
     if boundary_head.id != physical_head.id
-        || boundary_head.version != physical_head.version
+        || boundary_head.restored_session_version()? != physical_head.restored_session_version()?
         || boundary_head.created_at != physical_head.created_at
     {
         return Err(SessionStoreError::Corrupted(physical_head.id.clone()));
@@ -6458,7 +6730,7 @@ pub fn derive_runtime_boundary_head_for_activation_in_txn(
     physical_head: &SessionHead,
 ) -> Result<SessionHead, SessionStoreError> {
     if session.id() != &physical_head.id
-        || session.version() != physical_head.version
+        || session.version() != physical_head.restored_session_version()?
         || session.created_at() != physical_head.created_at
     {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
@@ -9333,7 +9605,10 @@ impl IncrementalSessionStore for SqliteSessionStore {
     async fn load_head(&self, id: &SessionId) -> Result<Option<SessionHead>, SessionStoreError> {
         let id = id.clone();
         self.in_read_txn(move |tx| {
-            if let Some((head, _token)) = head_row_in_txn(tx, &id)? {
+            if let Some((head, token)) = head_row_in_txn(tx, &id)? {
+                if session_head_cas_token(&head)? != token {
+                    return Err(SessionStoreError::Corrupted(id));
+                }
                 return Ok(Some(head));
             }
             // Blob-only session: synthesize read-only (no write). The layout
@@ -10187,7 +10462,8 @@ mod tests {
     /// `materialize_head` runs: a moved head is a revision conflict, a
     /// missing head is `NotFound`, and a stored CAS token that no longer
     /// matches the token recomputed from the stored head is `Corrupted`
-    /// (which `load_head`, dropping the stored token, cannot see).
+    /// (as `load_head` also refuses it: session envelope v4 checks the
+    /// stored token on load).
     #[tokio::test]
     async fn verify_current_head_keeps_the_materialize_head_row_checks() {
         let (_dir, store) = temp_store();
@@ -10224,14 +10500,10 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        assert!(
-            incremental(&store)
-                .load_head(session.id())
-                .await
-                .unwrap()
-                .is_some(),
-            "instrument honesty: load_head does not see the stored token"
-        );
+        assert!(matches!(
+            incremental(&store).load_head(session.id()).await,
+            Err(SessionStoreError::Corrupted(id)) if id == *session.id()
+        ));
         assert!(matches!(
             incremental(&store).verify_current_head(&current).await,
             Err(SessionStoreError::Corrupted(id)) if id == *session.id()

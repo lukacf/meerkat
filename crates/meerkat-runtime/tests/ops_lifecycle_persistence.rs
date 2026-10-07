@@ -1070,9 +1070,12 @@ impl RuntimeStore for FailingOpsLifecycleStore {
 #[tokio::test]
 async fn terminal_transition_surfaces_store_write_failure_after_persistence_request_is_accepted() {
     let store = Arc::new(FailingOpsLifecycleStore::new());
-    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
-        Arc::clone(&store) as Arc<dyn RuntimeStore>,
-    ));
+    let adapter = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>
+        )
+        .expect("persistent machine"),
+    );
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
@@ -1211,7 +1214,8 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
     // Phase 2: Cold persistent adapter — register_session path.
     let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
         Arc::clone(&store) as Arc<dyn RuntimeStore>
-    );
+    )
+    .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -1274,7 +1278,8 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_over_more_advanced
 
     let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
         Arc::clone(&store) as Arc<dyn RuntimeStore>
-    );
+    )
+    .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -1324,7 +1329,8 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_when_legacy_alias_
 
     let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
         Arc::clone(&store) as Arc<dyn RuntimeStore>
-    );
+    )
+    .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -1352,7 +1358,8 @@ async fn cold_persistent_adapter_fails_closed_on_canonical_ops_snapshot_load_fai
 
     let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
         Arc::clone(&store) as Arc<dyn RuntimeStore>
-    );
+    )
+    .expect("persistent machine");
 
     let err = adapter
         .prepare_bindings(session_id.clone())
@@ -1382,9 +1389,12 @@ async fn cold_executor_attach_fails_closed_on_canonical_ops_snapshot_load_failur
         canonical_runtime_id,
     ));
 
-    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
-        Arc::clone(&store) as Arc<dyn RuntimeStore>,
-    ));
+    let adapter = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>
+        )
+        .expect("persistent machine"),
+    );
 
     let err = adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
@@ -1436,9 +1446,12 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
         .unwrap();
 
     // Cold attach-first — no prior register_session
-    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
-        Arc::clone(&store) as Arc<dyn RuntimeStore>,
-    ));
+    let adapter = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>
+        )
+        .expect("persistent machine"),
+    );
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
         .await

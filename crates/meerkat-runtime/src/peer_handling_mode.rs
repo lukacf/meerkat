@@ -55,6 +55,8 @@ mod tests {
 
     fn make_header() -> InputHeader {
         InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
@@ -276,6 +278,8 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             injected_context: Vec::new(),
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Operator,

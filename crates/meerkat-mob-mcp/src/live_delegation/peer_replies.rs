@@ -175,6 +175,7 @@ mod tests {
                     text: output.to_string(),
                 }],
                 is_error,
+                settlement_failures: Vec::new(),
             }],
             created_at: meerkat_core::types::message_timestamp_now(),
         }
@@ -242,6 +243,7 @@ mod tests {
                     text: "{\"status\":\"sent\",\"kind\":\"peer_request\"}".to_string(),
                 }],
                 is_error: false,
+                settlement_failures: Vec::new(),
             }],
             created_at: meerkat_core::types::message_timestamp_now(),
         };

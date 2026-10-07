@@ -89,6 +89,8 @@ import {
   type WorkItemsResult,
   type LiveChannelParams,
   type LiveCloseResult,
+  type LiveBridgeEffectKind,
+  type LiveBridgeEffectOutcome,
   type LiveCommitInputParams,
   type LiveOpenParams,
   type LiveOpenResult,
@@ -147,6 +149,9 @@ import {
   type WireNonPortableResourceKind,
   type WireMemberPreviewUnavailable,
   type WireReachability,
+  type ToolDispatchAdmissionSource,
+  type ToolDispatchSettlementFailure,
+  type ToolDispatchTerminalErrorKind,
   type ToolsRegisterParams,
   type ToolsRegisterResult,
   SkillListResponse,
@@ -502,6 +507,55 @@ import {
   type WorkGraphSnapshot,
   type WorkItem,
 } from "./generated/types.js";
+
+// Runtime domains mirror the generated unions, which are erased by TypeScript.
+// Exhaustive tables make canonical additions a compile-time integration check.
+const SETTLEMENT_ADMISSION_SOURCES = {
+  configured_gate: true,
+  context_gate: true,
+  authorization_audit: true,
+} as const satisfies Record<ToolDispatchAdmissionSource, true>;
+
+const SETTLEMENT_EFFECT_KINDS = {
+  model_computation: true,
+  read_only_memory_snapshot: true,
+  tool_dispatch: true,
+  durable_memory_mutation: true,
+  comms: true,
+  helper_spawn: true,
+  external_io: true,
+} as const satisfies Record<LiveBridgeEffectKind, true>;
+
+const SETTLEMENT_PHYSICAL_OUTCOMES = {
+  committed: true,
+  failed: true,
+  unknown: true,
+} as const satisfies Record<LiveBridgeEffectOutcome, true>;
+
+const SETTLEMENT_FAILURE_KINDS = {
+  not_found: true,
+  unavailable: true,
+  invalid_arguments: true,
+  execution_failed: true,
+  timeout: true,
+  access_denied: true,
+  authorization_refused: true,
+  operation_observation_unavailable: true,
+  operation_authorization_unavailable: true,
+  policy_denied: true,
+  policy_indeterminate: true,
+  other: true,
+  callback_pending: true,
+  confinement_refused: true,
+  hook_denied: true,
+} as const satisfies Record<ToolDispatchTerminalErrorKind, true>;
+
+const SETTLEMENT_FIELD_DOMAINS = {
+  admission_source: Object.keys(SETTLEMENT_ADMISSION_SOURCES),
+  effect_kind: Object.keys(SETTLEMENT_EFFECT_KINDS),
+  physical_outcome: Object.keys(SETTLEMENT_PHYSICAL_OUTCOMES),
+  failure_kind: Object.keys(SETTLEMENT_FAILURE_KINDS),
+} as const;
 
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
@@ -5316,6 +5370,58 @@ export class MeerkatClient {
       );
     }
     MeerkatClient.validateOptionalBooleanField(raw, "is_error", context);
+    MeerkatClient.parseToolDispatchSettlementFailures(raw, context);
+  }
+
+  private static parseToolDispatchSettlementFailures(
+    result: Record<string, unknown>,
+    context: string,
+  ): ToolDispatchSettlementFailure[] {
+    if (!Object.prototype.hasOwnProperty.call(result, "settlement_failures")) {
+      return [];
+    }
+    return MeerkatClient.requireRecordArray(
+      result.settlement_failures,
+      `${context}: settlement_failures`,
+    ).map((record, index): ToolDispatchSettlementFailure => {
+      const itemContext = `${context}: settlement_failures[${index}]`;
+      if (
+        Object.keys(record).some(
+          (key) => !Object.prototype.hasOwnProperty.call(SETTLEMENT_FIELD_DOMAINS, key),
+        )
+      ) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${itemContext}: unknown settlement field`,
+        );
+      }
+      return {
+        admission_source: MeerkatClient.requireClosedStringField(
+          record,
+          "admission_source",
+          SETTLEMENT_FIELD_DOMAINS.admission_source,
+          itemContext,
+        ) as ToolDispatchAdmissionSource,
+        effect_kind: MeerkatClient.requireClosedStringField(
+          record,
+          "effect_kind",
+          SETTLEMENT_FIELD_DOMAINS.effect_kind,
+          itemContext,
+        ) as LiveBridgeEffectKind,
+        physical_outcome: MeerkatClient.requireClosedStringField(
+          record,
+          "physical_outcome",
+          SETTLEMENT_FIELD_DOMAINS.physical_outcome,
+          itemContext,
+        ) as LiveBridgeEffectOutcome,
+        failure_kind: MeerkatClient.requireClosedStringField(
+          record,
+          "failure_kind",
+          SETTLEMENT_FIELD_DOMAINS.failure_kind,
+          itemContext,
+        ) as ToolDispatchTerminalErrorKind,
+      };
+    });
   }
 
   private static validateWireHistoryRow(
@@ -7732,6 +7838,10 @@ export class MeerkatClient {
           toolUseId: MeerkatClient.requireStringField(result, "tool_use_id", context),
           content: MeerkatClient.parseContentInput(result.content),
           isError,
+          settlementFailures: MeerkatClient.parseToolDispatchSettlementFailures(
+            result,
+            context,
+          ),
         };
       }),
       raw: { ...data },
@@ -7780,6 +7890,16 @@ export class MeerkatClient {
           tool_use_id: result.toolUseId,
           content: result.content,
           is_error: result.isError,
+          ...(result.settlementFailures?.length
+            ? {
+                settlement_failures: result.settlementFailures.map((failure) => ({
+                  admission_source: failure.admission_source,
+                  effect_kind: failure.effect_kind,
+                  physical_outcome: failure.physical_outcome,
+                  failure_kind: failure.failure_kind,
+                })),
+              }
+            : {}),
         }));
       }
       // SessionMessage.raw was accepted by the fail-closed transcript parser

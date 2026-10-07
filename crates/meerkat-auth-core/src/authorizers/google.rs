@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    EnvLookup, LeaseFreshnessObserver, endpoint_failure_is_transient,
+    EnvLookup, LeaseFreshnessObserver, LeaseRefreshMode, endpoint_failure_is_transient,
     oauth_endpoint_failure_observation,
 };
 use meerkat_core::RefreshFailureObservation;
@@ -222,10 +222,9 @@ impl GoogleAuthAuthorizer {
             .and_then(LeaseFreshnessObserver::expires_at)
     }
 
-    fn fresh_cached_token(
+    async fn fresh_cached_token(
         &self,
         observer: &LeaseFreshnessObserver,
-        now: DateTime<Utc>,
     ) -> Result<Option<String>, AuthError> {
         let Some((access_token, expires_at, lease_generation)) = ({
             let guard = self.cache.lock();
@@ -235,56 +234,65 @@ impl GoogleAuthAuthorizer {
         }) else {
             return Ok(None);
         };
-        if observer.cached_token_is_fresh(&self.label, expires_at, lease_generation, now)? {
+        if observer
+            .cached_token_is_fresh(&self.label, expires_at, lease_generation, Utc::now)
+            .await?
+        {
             return Ok(Some(access_token));
         }
         Ok(None)
     }
 
-    async fn get_token(&self) -> Result<String, AuthError> {
+    async fn get_token(&self, mode: LeaseRefreshMode) -> Result<String, AuthError> {
         let Some(observer) = &self.lease_observer else {
             return Err(AuthError::HostOwnedUnavailable);
         };
 
-        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
+        if let Some(access_token) = self.fresh_cached_token(observer).await? {
             return Ok(access_token);
         }
 
         let _refresh_guard = self.refresh_lock.lock().await;
-        if let Some(access_token) = self.fresh_cached_token(observer, Utc::now())? {
+        if let Some(access_token) = self.fresh_cached_token(observer).await? {
             return Ok(access_token);
         }
 
-        let lifecycle = observer.begin_refresh(&self.label).await?;
+        let lifecycle = observer.begin_refresh(&self.label, mode).await?;
 
         let mut token = match self.chain {
             GoogleAuthChain::ComputeOnly => match self.fetch_from_metadata().await {
                 Ok(token) => token,
                 Err(err) => {
-                    observer.refresh_failed(
-                        &self.label,
-                        lifecycle,
-                        google_refresh_failure_observation(&err),
-                    )?;
+                    observer
+                        .refresh_failed(
+                            &self.label,
+                            lifecycle,
+                            google_refresh_failure_observation(&err),
+                        )
+                        .await?;
                     return Err(err.into());
                 }
             },
             GoogleAuthChain::Default => match self.fetch_full_chain().await {
                 Ok(token) => token,
                 Err(err) => {
-                    observer.refresh_failed(
-                        &self.label,
-                        lifecycle,
-                        google_refresh_failure_observation(&err),
-                    )?;
+                    observer
+                        .refresh_failed(
+                            &self.label,
+                            lifecycle,
+                            google_refresh_failure_observation(&err),
+                        )
+                        .await?;
                     return Err(err.into());
                 }
             },
         };
         let access = token.access_token.clone();
         let expires_at = token.expires_at;
-        token.lease_generation =
-            Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
+        let (generation, _lease_guard) = observer
+            .complete_refresh(&self.label, lifecycle, expires_at, Utc::now)
+            .await?;
+        token.lease_generation = Some(generation);
         *self.cache.lock() = Some(token);
         Ok(access)
     }
@@ -477,8 +485,14 @@ fn default_chain_metadata_error_is_retryable(err: &GoogleAuthError) -> bool {
 
 #[async_trait]
 impl HttpAuthorizer for GoogleAuthAuthorizer {
+    async fn prepare_request(&self) -> Result<(), AuthError> {
+        self.get_token(LeaseRefreshMode::ExistingCredential)
+            .await
+            .map(|_| ())
+    }
+
     async fn authorize(&self, req: &mut HttpAuthorizationRequest<'_>) -> Result<(), AuthError> {
-        let token = self.get_token().await?;
+        let token = self.get_token(LeaseRefreshMode::AcquireOrRefresh).await?;
         req.headers
             .push(("Authorization".into(), format!("Bearer {token}")));
         Ok(())

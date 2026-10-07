@@ -32,7 +32,7 @@ import warnings
 import zipfile
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, NotRequired, TypedDict, cast
+from typing import Any, Callable, Literal, NotRequired, TypedDict, cast, get_args
 from urllib.error import URLError
 
 from .errors import CapabilityUnavailableError, MeerkatError
@@ -67,6 +67,9 @@ from .generated.types import (
     InterruptResult,
     StopRunParams,
     StopRunResult,
+    ToolDispatchAdmissionSource,
+    ToolDispatchSettlementFailure,
+    ToolDispatchTerminalErrorKind,
     WireRunStopReceipt,
     JobArtifactRef,
     JobHealthCoverage,
@@ -94,6 +97,8 @@ from .generated.types import (
     JobsUnsubscribeParams,
     JobsUnsubscribeResult,
     JobTerminalResult,
+    LiveBridgeEffectKind,
+    LiveBridgeEffectOutcome,
     LiveCloseResult,
     LiveCloseStatus,
     LiveOpenResult,
@@ -6464,6 +6469,36 @@ class MeerkatClient:
                 f"{context}: content must be a string or block list",
             )
         MeerkatClient._validate_optional_response_bool(result, "is_error", context)
+        MeerkatClient._validate_tool_dispatch_settlement_failures(result, context)
+
+    @staticmethod
+    def _validate_tool_dispatch_settlement_failures(
+        result: dict[str, Any],
+        context: str,
+    ) -> None:
+        field_domains = {
+            "admission_source": ToolDispatchAdmissionSource,
+            "effect_kind": LiveBridgeEffectKind,
+            "physical_outcome": LiveBridgeEffectOutcome,
+            "failure_kind": ToolDispatchTerminalErrorKind,
+        }
+        for index, raw in enumerate(
+            MeerkatClient._require_list_field(result, "settlement_failures", context)
+        ):
+            item_context = f"{context}: settlement_failures[{index}]"
+            record = MeerkatClient._require_dict(raw, "settlement failure", item_context)
+            if set(record) - field_domains.keys():
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{item_context}: unknown settlement field",
+                )
+            for name, literal_type in field_domains.items():
+                value = MeerkatClient._require_string_field(record, name, item_context)
+                if value not in get_args(literal_type):
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        f"{item_context}: unsupported {name}",
+                    )
 
     @staticmethod
     def _validate_wire_history_row(raw: Any, context: str) -> WireHistoryRow:
@@ -8613,6 +8648,12 @@ class MeerkatClient:
             ),
             content=MeerkatClient._parse_content_input(result["content"]),
             is_error=is_error,
+            settlement_failures=[
+                ToolDispatchSettlementFailure(**item)
+                for item in MeerkatClient._require_list_field(
+                    result, "settlement_failures", context
+                )
+            ],
         )
 
     @staticmethod
@@ -8656,6 +8697,11 @@ class MeerkatClient:
                         "tool_use_id": result.tool_use_id,
                         "content": result.content,
                         "is_error": result.is_error,
+                        **(
+                            {"settlement_failures": _wire_value(result.settlement_failures)}
+                            if result.settlement_failures
+                            else {}
+                        ),
                     }
                     for result in message.results
                 ]

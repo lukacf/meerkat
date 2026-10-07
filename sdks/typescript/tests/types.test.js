@@ -5983,6 +5983,166 @@ describe("Session transcript fail-closed parsing", () => {
   });
 });
 
+
+describe("operation observation wire compatibility", () => {
+  it("preserves infrastructure provider kind and ordinary retryable control", () => {
+    for (const [kind, retryability] of [
+      ["operation_observation_unavailable", "non_retryable"],
+      ["operation_authorization_unavailable", "non_retryable"],
+      ["operation_refused", "non_retryable"],
+      ["server_overloaded", "retryable"],
+    ]) {
+      const event = parseEvent({
+        type: "run_failed",
+        session_id: "s1",
+        terminal_cause_kind: "llm_failure",
+        error_report: {
+          class: "llm",
+          message: "diagnostic",
+          reason: {
+            reason_type: "llm_provider_error",
+            provider_error_kind: kind,
+            provider_error_retryability: retryability,
+            provider_error: null,
+          },
+        },
+      });
+      assert.equal(event.type, "run_failed");
+      assert.equal(event.errorReport.reason.providerErrorKind, kind);
+      assert.equal(event.errorReport.reason.providerErrorRetryability, retryability);
+      assert.equal(event.errorReport.reason.providerError, null);
+    }
+  });
+
+  it("retains the declared safe diagnostic and continues parsing ordinary events", () => {
+    const raw = {
+      type: "operation_observation_failed",
+      operation_id: "01900000-0000-7000-8000-000000000001",
+      phase: "outcome",
+    };
+    // Existing known/raw-event projection is sufficient; a new high-level
+    // class must not be necessary to read this nonterminal diagnostic.
+    assert.deepEqual(parseEvent(raw), raw);
+    const control = parseEvent({ type: "text_delta", delta: "continued" });
+    assert.equal(control.type, "text_delta");
+    assert.equal(control.delta, "continued");
+  });
+});
+
+it("availability wire retains ordered typed settlement companions through raw callback events", () => {
+  const settlements = [
+    { admission_source: "configured_gate", effect_kind: "tool_dispatch", physical_outcome: "failed", failure_kind: "operation_authorization_unavailable" },
+    { admission_source: "authorization_audit", effect_kind: "tool_dispatch", physical_outcome: "committed", failure_kind: "operation_observation_unavailable" },
+    { admission_source: "context_gate", effect_kind: "tool_dispatch", physical_outcome: "unknown", failure_kind: "authorization_refused" },
+  ];
+  const raw = {
+    type: "interaction_callback_pending", interaction_id: "interaction-1", tool_name: "read_record", args: {},
+    pending_tool_calls: [{ tool_use_id: "ordered-wire", tool_name: "read_record", args: {}, settlement_failures: settlements }],
+  };
+  const event = parseEvent(JSON.parse(JSON.stringify(raw)));
+  assert.deepEqual(event, raw);
+  assert.deepEqual(event.pending_tool_calls[0].settlement_failures, settlements);
+});
+
+
+function settlementHistoryWireRow() {
+  return {
+    role: "tool_results", created_at: "2026-10-01T12:00:00Z",
+    results: [{
+      tool_use_id: "observed-effect", content: "physical result retained", is_error: false,
+      settlement_failures: [
+        { admission_source: "configured_gate", effect_kind: "tool_dispatch", physical_outcome: "failed", failure_kind: "operation_authorization_unavailable" },
+        { admission_source: "authorization_audit", effect_kind: "tool_dispatch", physical_outcome: "committed", failure_kind: "operation_observation_unavailable" },
+        { admission_source: "context_gate", effect_kind: "tool_dispatch", physical_outcome: "unknown", failure_kind: "authorization_refused" },
+      ],
+    }],
+  };
+}
+
+describe("settlement history preservation", () => {
+  it("exposes ordered companions on the public decoded result", () => {
+    const row = settlementHistoryWireRow();
+    const result = MeerkatClient.parseSessionMessage(row).results[0];
+    assert.deepEqual(result.settlementFailures, row.results[0].settlement_failures);
+    assert.equal(result.content, "physical result retained");
+    assert.equal(result.isError, false);
+  });
+
+  it("retains observed settlement facts when rewriting decoded history", () => {
+    const row = settlementHistoryWireRow();
+    const message = MeerkatClient.parseSessionMessage(row);
+    assert.deepEqual(MeerkatClient.serializeTranscriptRewriteMessage(message), row);
+  });
+
+  it("keeps a legacy result without settlement facts compatible", () => {
+    const row = settlementHistoryWireRow();
+    delete row.results[0].settlement_failures;
+    const message = MeerkatClient.parseSessionMessage(row);
+    assert.equal((message.results[0].settlementFailures ?? []).length, 0);
+    assert.deepEqual(MeerkatClient.serializeTranscriptRewriteMessage(message), row);
+  });
+});
+
+function settlementHistoryKnownCompanion() {
+  // Existing generated values isolate strict decoding from pending generation.
+  return {
+    admission_source: "configured_gate", effect_kind: "tool_dispatch",
+    physical_outcome: "committed", failure_kind: "operation_observation_unavailable",
+  };
+}
+
+function settlementHistoryMalformedCases() {
+  const cases = [
+    ["null vector", null], ["object vector", {}], ["string vector", "not-a-vector"],
+    ["null entry", [null]], ["array entry", [[]]], ["boolean entry", [false]],
+  ];
+  for (const field of Object.keys(settlementHistoryKnownCompanion())) {
+    const missing = settlementHistoryKnownCompanion();
+    delete missing[field];
+    cases.push([`missing ${field}`, [missing]]);
+    cases.push([`non-string ${field}`, [{ ...settlementHistoryKnownCompanion(), [field]: false }]]);
+    cases.push([`unknown ${field}`, [{ ...settlementHistoryKnownCompanion(), [field]: "not_a_canonical_value" }]]);
+  }
+  cases.push(["unknown record field", [{ ...settlementHistoryKnownCompanion(), invented_authority: true }]]);
+  cases.push(["malformed after valid prefix", [settlementHistoryKnownCompanion(), null]]);
+  return cases;
+}
+
+describe("settlement history strict validation", () => {
+  for (const [name, malformed] of settlementHistoryMalformedCases()) {
+    it(`rejects ${name}`, () => {
+      const row = settlementHistoryWireRow();
+      row.results[0].settlement_failures = malformed;
+      assert.throws(
+        () => MeerkatClient.parseSessionMessage(row),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+  }
+
+  it("preserves known order and duplicates through rewrite", () => {
+    const first = settlementHistoryKnownCompanion();
+    const second = { ...first, physical_outcome: "unknown", failure_kind: "authorization_refused" };
+    const companions = [first, second, { ...first }];
+    const row = settlementHistoryWireRow();
+    row.results[0].settlement_failures = companions;
+    const message = MeerkatClient.parseSessionMessage(row);
+    assert.deepEqual(message.results[0].settlementFailures, companions);
+    assert.deepEqual(MeerkatClient.serializeTranscriptRewriteMessage(message), row);
+  });
+
+  it("keeps an explicit empty vector empty", () => {
+    const row = settlementHistoryWireRow();
+    row.results[0].settlement_failures = [];
+    const message = MeerkatClient.parseSessionMessage(row);
+    assert.equal((message.results[0].settlementFailures ?? []).length, 0);
+    const rewritten = MeerkatClient.serializeTranscriptRewriteMessage(message);
+    assert.deepEqual(rewritten.results[0].settlement_failures ?? [], []);
+    assert.equal(rewritten.results[0].content, "physical result retained");
+    assert.equal(rewritten.results[0].is_error, false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Turn tool-choice plan reaches the wire on every turn path
 // ---------------------------------------------------------------------------
@@ -6062,4 +6222,158 @@ describe("turn tool-choice plan", () => {
     });
     assert.equal("tool_choice_plan" in calls[0].params.turn_tool_overlay, false);
   });
+});
+
+
+it("hook launch refusal raw events retain every cause and exact call ID", () => {
+  for (const refusal of [
+    "invalid_requirement", "invalid_launch", "unsupported_requirement",
+    "backend_unavailable", "preparation_failed",
+  ]) {
+    const raw = {
+      type: "hook_launch_refused", hook_id: "hook-1",
+      point: "pre_tool_execution", tool_use_id: "  call-1  ",
+      reason: { reason_code: "confinement_refused", refusal },
+    };
+    assert.deepEqual(parseEvent(raw), raw);
+    assert.equal(parseEvent({ type: "text_delta", delta: "continued" }).delta, "continued");
+  }
+});
+
+it("hook failed canonical reason is not a malformed event", () => {
+  const reason = { reason_code: "execution_failed", message: "process exited" };
+  const event = parseEvent({
+    type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason,
+  });
+  assert.equal(event.type, "hook_failed");
+  assert.deepEqual(event.reason, reason);
+});
+
+
+it("hook failed preserves all canonical reason variants", () => {
+  const reasons = [
+    { reason_code: "timeout", timeout_ms: 10 },
+    { reason_code: "config_invalid", message: "invalid config" },
+    { reason_code: "observe_only_violation" },
+    ...["invalid_requirement", "invalid_launch", "unsupported_requirement", "backend_unavailable", "preparation_failed"]
+      .map(refusal => ({ reason_code: "confinement_refused", refusal })),
+  ];
+  for (const reason of reasons) {
+    const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason });
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, reason);
+    assert.equal(typeof event.error, "string");
+  }
+});
+
+it("hook failed malformed reasons do not fall back to legacy strings", () => {
+  for (const reason of [null, {}, { reason_code: 7 }, { reason_code: "confinement_refused" }, { reason_code: "confinement_refused", refusal: null }, { reason_code: "execution_failed" }, { reason_code: "execution_failed", message: {} }, { reason_code: "timeout", timeout_ms: -1 }]) {
+    const raw = { type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason, error: "legacy diagnostic" };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "malformed_event");
+    assert.deepEqual(event.raw, raw);
+  }
+});
+
+it("hook failed legacy string wire remains compatible", () => {
+  const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", error: "legacy diagnostic" });
+  assert.equal(event.type, "hook_failed");
+  assert.equal(event.error, "legacy diagnostic");
+  assert.equal(event.reason, undefined);
+});
+
+it("native refusal terminal kinds remain valid settlement companions", () => {
+  for (const failure_kind of ["confinement_refused", "hook_denied"]) {
+    const row = settlementHistoryWireRow();
+    row.results[0].settlement_failures = [{ admission_source: "configured_gate", effect_kind: "tool_dispatch", physical_outcome: "failed", failure_kind }];
+    const event = MeerkatClient.parseSessionMessage(row).results[0];
+    assert.deepEqual(event.settlementFailures, row.results[0].settlement_failures);
+  }
+});
+
+
+it("hook failed preserves unknown future reason codes", () => {
+  for (const code of ["future_guard_busy", "unknown"]) {
+    const reason = {
+      reason_code: code, retry_after_ms: 23,
+      details: { owner: "future-native-owner", token: null, stages: ["prepared"] },
+    };
+    const raw = {
+      type: "hook_failed", hook_id: "  hook-future  ", point: "post_tool_execution",
+      reason, error: "permission denied by legacy string",
+    };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "hook_failed");
+    assert.equal(event.hookId, raw.hook_id);
+    assert.equal(event.point, raw.point);
+    assert.deepEqual(event.reason, { reason_code: "unknown", rawReasonCode: code, raw: reason });
+    assert.equal(event.error, "unknown hook failure");
+    assert.equal(parseEvent({ type: "text_delta", delta: "continued after future reason" }).delta, "continued after future reason");
+  }
+});
+
+it("hook failed preserves unknown future confinement causes", () => {
+  for (const refusal of ["future_backend_busy", "constructor", "__proto__"]) {
+    const reason = {
+      reason_code: "confinement_refused", refusal,
+      detail: { generation: 9, resource: null },
+    };
+    const raw = {
+      type: "hook_failed", hook_id: "  hook-future  ", point: "post_tool_execution",
+      reason, error: "permission denied by legacy string",
+    };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, { reason_code: "unknown", rawReasonCode: "confinement_refused", raw: reason });
+    assert.equal(event.error, "unknown hook failure");
+    assert.equal(parseEvent({ type: "text_delta", delta: "continued after future cause" }).delta, "continued after future cause");
+  }
+});
+
+it("hook failed displays each known confinement cause exactly", () => {
+  const messages = {
+    invalid_requirement: "invalid execution confinement requirement",
+    invalid_launch: "invalid confined process launch",
+    unsupported_requirement: "required execution confinement is unsupported by this backend",
+    backend_unavailable: "required execution confinement backend is unavailable",
+    preparation_failed: "confined process preparation failed",
+  };
+  for (const [refusal, message] of Object.entries(messages)) {
+    const reason = { reason_code: "confinement_refused", refusal };
+    const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason });
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, reason);
+    assert.equal(event.error, message);
+  }
+});
+
+
+it("hook denied preserves payload presence including explicit null", () => {
+  const wire = {
+    type: "hook_denied", hook_id: "hook-1", point: "pre_tool_execution",
+    reason_code: "policy_violation", message: "blocked by hook",
+  };
+  const absent = parseEvent(wire);
+  assert.equal(absent.type, "hook_denied");
+  assert.equal(Object.hasOwn(absent, "payload"), false);
+
+  const present = parseEvent({ ...wire, payload: null });
+  assert.equal(present.type, "hook_denied");
+  assert.equal(Object.hasOwn(present, "payload"), true);
+  assert.equal(present.payload, null);
+});
+
+
+it("hook failed displays every remaining known reason exactly", () => {
+  for (const [reason, display] of [
+    [{ reason_code: "timeout", timeout_ms: 23 }, "hook timed out after 23ms"],
+    [{ reason_code: "execution_failed", message: "process exited" }, "process exited"],
+    [{ reason_code: "config_invalid", message: "invalid config" }, "invalid config"],
+    [{ reason_code: "observe_only_violation" }, "background hooks are observe-only"],
+  ]) {
+    const event = parseEvent({ type: "hook_failed", hook_id: "hook-1", point: "post_tool_execution", reason });
+    assert.equal(event.type, "hook_failed");
+    assert.deepEqual(event.reason, reason);
+    assert.equal(event.error, display);
+  }
 });

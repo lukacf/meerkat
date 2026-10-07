@@ -76,7 +76,7 @@ impl BuiltinTool for ShellJobStatusTool {
             .job_manager
             .get_status(&job_id)
             .await
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?
+            .map_err(BuiltinToolError::from)?
             .ok_or_else(|| {
                 BuiltinToolError::execution_failed(
                     ShellError::JobNotFound(input.job_id.clone()).to_string(),

@@ -52,6 +52,16 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     // Wire types (contracts-owned types only — types embedding core types
     // without JsonSchema use serde for serialization but not for schema generation)
     let wire_types = serde_json::json!({
+        "PrincipalId": schema_for!(crate::wire::PrincipalId),
+        "TrustDomainId": schema_for!(crate::wire::TrustDomainId),
+        "PrincipalKind": schema_for!(crate::wire::PrincipalKind),
+        "PrincipalQualification": schema_for!(crate::wire::PrincipalQualification),
+        "PrincipalRef": schema_for!(crate::wire::PrincipalRef),
+        "ActingOnBehalfOf": schema_for!(crate::wire::ActingOnBehalfOf),
+        "GrantScope": schema_for!(crate::wire::GrantScope),
+        "GrantAction": schema_for!(crate::wire::GrantAction),
+        "AuthGrant": schema_for!(crate::wire::AuthGrant),
+        "VisibilityClass": schema_for!(crate::wire::VisibilityClass),
         "RuntimeProfileCapability": schema_for!(crate::capability::RuntimeProfileCapability),
         "RuntimeProfileId": schema_for!(crate::capability::RuntimeProfileId),
         "RuntimeProfileClearingAction": schema_for!(crate::capability::RuntimeProfileClearingAction),
@@ -517,6 +527,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireExternalRouteInstallObligation": schema_for!(crate::wire::WireExternalRouteInstallObligation),
         "WireScopeDeniedDetail": schema_for!(crate::wire::WireScopeDeniedDetail),
         "WireHostUnavailableDetail": schema_for!(crate::wire::WireHostUnavailableDetail),
+        "WireInputAdmissionErrorDetail": schema_for!(crate::wire::WireInputAdmissionErrorDetail),
+        "WireControllerReadinessFailure": schema_for!(crate::wire::WireControllerReadinessFailure),
+        "WireCredentialUseDisposition": schema_for!(crate::wire::WireCredentialUseDisposition),
         "WireStaleCursorDetail": schema_for!(crate::wire::WireStaleCursorDetail),
         "WireStaleFenceDetail": schema_for!(crate::wire::WireStaleFenceDetail),
         "MobBindHostResult": schema_for!(crate::wire::MobBindHostResult),
@@ -1724,6 +1737,81 @@ mod tests {
             "content": []
         })));
 
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_principal_schema_preserves_legacy_and_closed_qualification() {
+        let output_dir = temp_output_dir("principal-qualification");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        let validator =
+            jsonschema::validator_for(&wire_types["PrincipalRef"]).expect("schema compiles");
+        assert!(validator.is_valid(&serde_json::json!({"kind":"human", "id":"alice"})));
+        assert!(validator.is_valid(&serde_json::json!({
+            "kind":"human", "id":"alice",
+            "qualification":{"kind":"qualified", "trust_domain_id":"authority:one"}
+        })));
+        for qualification in [
+            serde_json::json!(null),
+            serde_json::json!({"kind":"future"}),
+            serde_json::json!({"kind":"unqualified", "trust_domain_id":null}),
+            serde_json::json!({"kind":"unqualified", "trust_domain_id":"authority:one"}),
+            serde_json::json!({"kind":"qualified"}),
+            serde_json::json!({"kind":"qualified", "trust_domain_id":null}),
+        ] {
+            assert!(!validator.is_valid(&serde_json::json!({
+                "kind":"human", "id":"alice", "qualification":qualification
+            })));
+        }
+        let domain_validator = jsonschema::validator_for(&wire_types["TrustDomainId"])
+            .expect("domain schema compiles");
+        for id in [
+            "",
+            " ",
+            "\t",
+            "a\nb",
+            "a\r",
+            "\u{0085}",
+            "a\u{009f}",
+            "\u{00a0}",
+            "\u{1680}",
+            "\u{2000}",
+            "\u{2028}",
+            "\u{2029}",
+            "\u{202f}",
+            "\u{205f}",
+            "\u{3000}",
+            "alice",
+            " alice ",
+            "\u{200b}",
+            "\u{feff}",
+            "\u{1f600}",
+        ] {
+            let domain = serde_json::json!(id);
+            assert_eq!(
+                domain_validator.is_valid(&domain),
+                serde_json::from_value::<crate::TrustDomainId>(domain).is_ok(),
+                "domain syntax parity for {id:?}"
+            );
+            let qualified = serde_json::json!({
+                "kind":"human", "id":id,
+                "qualification":{"kind":"qualified", "trust_domain_id":"authority:one"}
+            });
+            assert_eq!(
+                validator.is_valid(&qualified),
+                serde_json::from_value::<crate::PrincipalRef>(qualified).is_ok(),
+                "qualified id syntax parity for {id:?}"
+            );
+            for legacy in [
+                serde_json::json!({"kind":"human", "id":id}),
+                serde_json::json!({"kind":"human", "id":id, "qualification":{"kind":"unqualified"}}),
+            ] {
+                assert!(validator.is_valid(&legacy), "legacy schema for {id:?}");
+                assert!(serde_json::from_value::<crate::PrincipalRef>(legacy).is_ok());
+            }
+        }
         fs::remove_dir_all(&output_dir).unwrap();
     }
 

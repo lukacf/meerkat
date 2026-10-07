@@ -350,7 +350,8 @@ macro_rules! auth_catalog_machine_dsl {
                     if self.expires_at == None {
                         true
                     } else {
-                        now_ts + refresh_window_secs <= self.expires_at.get("value")
+                        now_ts < self.expires_at.get("value")
+                        && now_ts + refresh_window_secs <= self.expires_at.get("value")
                     }
                 }
                 to Valid

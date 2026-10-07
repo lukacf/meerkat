@@ -11,6 +11,7 @@ undeclared one rather than a hand-built imitation of both.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -477,6 +478,89 @@ Failed in:
         self.assertEqual(parsed.findings, [])
         self.assertEqual(parsed.finished_crates, ["meerkat", "meerkat-agent-build-authority"])
         self.assertEqual(parsed.summary_lines, 2)
+
+
+class ObservedCallableShapeTests(unittest.TestCase):
+    """Callable shapes from the 0.8.51 publication gate's real report."""
+
+    FUNCTIONS = (
+        "clear_tokens_and_publish_lifecycle_released_for_identity",
+        "clear_tokens_and_publish_lifecycle_released",
+    )
+    DEPRECATED_REPORT = """\
+    Checking meerkat-rpc v0.8.50 -> v0.8.50 (assume patch change)
+--- failure type_method_marked_deprecated: type method #[deprecated] added ---
+Failed in:
+  method meerkat_rpc::session_runtime::SessionRuntime::set_callback_channel in crates/meerkat-rpc/src/session_runtime.rs:6397
+     Summary semver requires new minor version: 0 major and 1 minor checks failed
+    Finished [   0.190s] meerkat-rpc
+"""
+
+    def removed_report(self) -> "gate.ReportParse":
+        # All six fully lowercase paths were reported, including public reexports.
+        items = "\n".join(
+            f"  function {prefix}::{name}"
+            for name in self.FUNCTIONS
+            for prefix in (
+                "meerkat_core::auth::lifecycle",
+                "meerkat_core::auth",
+                "meerkat_core",
+            )
+        )
+        return gate.parse_report(
+            "    Checking meerkat-core v0.8.50 -> v0.8.51\n"
+            "--- failure function_missing: public function removed ---\n"
+            f"Failed in:\n{items}\n"
+            "     Summary semver requires new major version\n"
+            "    Finished [ 0.1s] meerkat-core\n"
+        )
+
+    def section(self, declaration: str, category: str = "Breaking") -> "gate.Section":
+        return gate.Section(
+            "## [0.8.51] - 2026-10-02", "0.8.51", " - 2026-10-02",
+            f"\n### {category}\n\n- " + declaration + "\n",
+        )
+
+    def test_lowercase_removed_functions_have_exact_structural_names(self) -> None:
+        findings = self.removed_report().findings
+        self.assertEqual(len(findings), 6)
+        self.assertEqual([f.symbols for f in findings], [(name,) for name in self.FUNCTIONS for _ in range(3)])
+        self.assertTrue(all(f.structural for f in findings))
+
+    def test_removed_functions_require_each_exact_name(self) -> None:
+        parsed = self.removed_report()
+        declared = ", ".join(f"`{name}`" for name in self.FUNCTIONS) + " removed."
+        self.assertEqual(gate.check_named(parsed, self.section(declared)), [])
+        for name in self.FUNCTIONS:
+            with self.subTest(missing=name):
+                # A longer identifier must not accidentally cover the removed one.
+                errors = gate.check_named(parsed, self.section(declared.replace(f"`{name}`", f"`{name}_replacement`")))
+                self.assertEqual(len(errors), 3)
+                self.assertTrue(all(f"missing: `{name}`" in error for error in errors))
+
+    def test_deprecated_method_keeps_owner_and_exact_method_name(self) -> None:
+        findings = gate.parse_report(self.DEPRECATED_REPORT).findings
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].symbols, ("SessionRuntime", "set_callback_channel"))
+        self.assertTrue(findings[0].structural)
+
+    def test_deprecated_method_cannot_be_declared_by_owner_alone(self) -> None:
+        parsed = gate.parse_report(self.DEPRECATED_REPORT)
+        for declaration in (
+            "`SessionRuntime` changed.",
+            "`SessionRuntime::set_callback_channel_v2` changed.",
+        ):
+            with self.subTest(declaration=declaration):
+                errors = gate.check_named(parsed, self.section(declaration, "Deprecated"))
+                self.assertEqual(len(errors), 1)
+                self.assertIn("missing: `set_callback_channel`", errors[0])
+        owner_missing = gate.check_named(parsed, self.section("`set_callback_channel` deprecated.", "Deprecated"))
+        self.assertEqual(len(owner_missing), 1)
+        self.assertIn("missing: `SessionRuntime`", owner_missing[0])
+        self.assertEqual(
+            gate.check_named(parsed, self.section("`SessionRuntime::set_callback_channel` deprecated.", "Deprecated")),
+            [],
+        )
 
 
 class NamingTests(unittest.TestCase):
@@ -1263,6 +1347,84 @@ class BaselineIdenticalCrates(unittest.TestCase):
         self.assertTrue(any("driver and report disagree" in error for error in errors))
         errors = gate.check_measured(gate.parse_report(""), 101, self.scope([]), [], tool_skipped=True)
         self.assertTrue(any("exit code is 101" in error for error in errors))
+
+
+class RustdocBuildIsolationTests(unittest.TestCase):
+    def test_source_checkouts_have_isolated_reusable_rustdoc_builds(self) -> None:
+        """Exercise the producer's real argv/copy path without invoking Rust."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = root / "bin"
+            tools.mkdir()
+            target = root / "shared target"
+            calls = root / "calls.jsonl"
+
+            def executable(path: Path, body: str) -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"#!{sys.executable}\n" + body, encoding="utf-8")
+                path.chmod(0o755)
+
+            executable(tools / "rustc", "print('rustc fixture\\ncommit-hash: fixture')\n")
+            executable(tools / "git", "print('fixture-commit')\n")
+            cargo = '''import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args == ["metadata", "--no-deps", "--format-version", "1"]:
+    print(json.dumps({"target_directory": os.environ["CARGO_TARGET_DIR"], "packages": [
+        {"name": name, "version": "0.8.50", "targets": [{"name": name.replace("-", "_"), "kind": ["lib"]}],
+         "features": {"public": [], "unstable": [], "__internal": []}}
+        for name in ("meerkat-core", "meerkat-models")]}))
+elif args and args[0] == "doc":
+    with open(os.environ["TEST_DOC_CALLS"], "a") as log:
+        log.write(json.dumps({"args": args, "bootstrap": os.environ.get("RUSTC_BOOTSTRAP"),
+                             "flags": os.environ.get("RUSTDOCFLAGS")}) + "\\n")
+    out = Path(args[args.index("--target-dir") + 1]) / "doc"
+    out.mkdir(parents=True, exist_ok=True)
+    for name in ("meerkat_core", "meerkat_models"):
+        (out / (name + ".json")).write_text(json.dumps({"format_version": 1, "source": str(Path.cwd())}))
+else:
+    sys.exit("unexpected cargo invocation: " + repr(args))
+'''
+            candidate, baseline = root / "candidate", root / "baseline"
+            for source in (candidate, baseline):
+                executable(source / "scripts" / "repo-cargo", cargo)
+            env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+                       PYTHON=sys.executable, CARGO_TARGET_DIR=str(target), TEST_DOC_CALLS=str(calls))
+            producer = SCRIPT.with_name("semver-rustdoc-json.sh")
+            for index, source in enumerate((candidate, baseline, candidate)):
+                out = root / f"json-{index}"
+                with tempfile.TemporaryFile(mode="w+") as log:
+                    result = subprocess.run(
+                        ["bash", str(producer), "--source-root", str(source), "--out", str(out),
+                         "--crate", "meerkat-core", "--crate", "meerkat-models", "--crate", "absent-crate"],
+                        env=env, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=30,
+                    )
+                    log.seek(0)
+                    self.assertEqual(result.returncode, 0, log.read())
+                for name in ("meerkat-core", "meerkat-models"):
+                    self.assertEqual(json.loads((out / f"{name}.json").read_text())["source"],
+                                     str(source.resolve()))
+                manifest = json.loads((out / "manifest.json").read_text())
+                self.assertEqual(set(manifest["crates"]), {"meerkat-core", "meerkat-models"})
+                self.assertEqual(manifest["skipped"], {"absent-crate": "not a workspace member"})
+                self.assertTrue(all(c["features"] == ["public"] for c in manifest["crates"].values()))
+
+            builds = [json.loads(line) for line in calls.read_text().splitlines()]
+            self.assertEqual(len(builds), 3, "one unified doc invocation per source")
+            roots = []
+            for build in builds:
+                args = build["args"]
+                self.assertEqual(args[:4], ["doc", "--no-deps", "--lib", "--target-dir"])
+                self.assertEqual(args[5:], ["-p", "meerkat-core", "--features", "meerkat-core/public",
+                                           "-p", "meerkat-models", "--features", "meerkat-models/public"])
+                self.assertEqual(build["bootstrap"], "1")
+                self.assertEqual(build["flags"], "-Z unstable-options --output-format json "
+                                 "--document-private-items --document-hidden-items --cap-lints allow")
+                roots.append(Path(args[4]))
+                self.assertTrue(roots[-1].is_relative_to(target))
+            self.assertNotEqual(roots[0], roots[1], "candidate and baseline must not share build output")
+            self.assertEqual(roots[0], roots[2], "same source checkout must retain warm build output")
+            self.assertNotEqual(roots[0], target / "semver-rustdoc", "do not reuse contaminated legacy output")
 
 
 if __name__ == "__main__":

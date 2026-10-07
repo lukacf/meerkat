@@ -311,6 +311,8 @@ async fn ops_lifecycle_contract_terminate_owner_resolves_all_pending_watches_onc
 fn make_operation_input(operation_id: OperationId, event: OpEvent) -> Input {
     Input::Operation(OperationInput {
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::System,

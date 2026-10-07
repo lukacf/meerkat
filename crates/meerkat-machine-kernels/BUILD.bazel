@@ -83,6 +83,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -117,6 +118,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
         "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
     ] + all_crate_deps(
@@ -168,6 +170,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
@@ -220,6 +223,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
@@ -273,6 +277,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
@@ -326,6 +331,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",

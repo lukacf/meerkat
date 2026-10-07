@@ -2399,6 +2399,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RegisterAcceptedIdempotencyStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BindInputAuthorityIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputAuthorityAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputAuthorityRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputAuthorityRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputAuthorityStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedTerminalQueueIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8545,6 +8560,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `current_run_has_pre_run_phase`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `input_authority_bindings_have_native_owner`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `staged_inputs_are_not_queued`

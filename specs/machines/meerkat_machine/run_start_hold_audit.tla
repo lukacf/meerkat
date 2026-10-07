@@ -96,7 +96,7 @@ AuditPrefix ==
                       audit_retired_refused, audit_partial_release,
                       audit_refused_after_partial, audit_stopped_hold,
                       audit_resumed_held, audit_refused_after_resume>>
-    \/ model_step_count = 2 /\ ResolveAdmissionPlanDefaultQueueKindIdle(AuditInput, "Prompt", None, "Ordinary", "Untyped", FALSE, None, FALSE, FALSE, FALSE)
+    \/ model_step_count = 2 /\ ResolveAdmissionPlanDefaultQueueKindIdle(AuditInput, None, None, "Prompt", None, "Ordinary", "Untyped", FALSE, None, FALSE, FALSE, FALSE)
        /\ UNCHANGED auditVars
     \/ model_step_count = 3 /\ QueueAcceptedIdle(AuditInput)
        /\ UNCHANGED auditVars

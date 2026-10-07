@@ -103,7 +103,8 @@ async fn persist_destroyed_runtime_lifecycle(
 ) -> (SessionId, LogicalRuntimeId) {
     let session_id = SessionId::new();
     let runtime_id = LogicalRuntimeId::for_session(&session_id);
-    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store())
+        .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -486,6 +487,8 @@ fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Operator,
@@ -505,6 +508,8 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
     Input::Prompt(PromptInput {
         injected_context: Vec::new(),
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Operator,
@@ -589,7 +594,8 @@ async fn recover_from_store() {
         .await
         .unwrap();
 
-    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store())
+        .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -633,7 +639,8 @@ async fn recover_rebuilds_dedup_index() {
         .await
         .unwrap();
 
-    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store())
+        .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -671,7 +678,8 @@ async fn recover_discards_machine_classified_ephemeral_inputs() {
         .await
         .unwrap();
 
-    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store())
+        .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -808,7 +816,8 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
     let store: Arc<dyn RuntimeStore> = Arc::new(
         FailPersistInputStore::fail_commit_machine_lifecycle_once(inner.clone()),
     );
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter =
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine");
     let err = adapter
         .register_session(session_id.clone())
         .await
@@ -940,7 +949,8 @@ async fn recover_consumes_committed_applied_pending_inputs() {
         .await
         .unwrap();
 
-    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store())
+        .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -968,7 +978,8 @@ async fn driver_persistent_recovery_replaces_terminal_process_projection() {
     let (session_id, rid) = persist_destroyed_runtime_lifecycle(Arc::clone(&store)).await;
 
     let adapter =
-        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store());
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await
@@ -1002,7 +1013,8 @@ async fn driver_persistent_recovery_normalizes_phase_and_recovers_durable_input_
         .unwrap();
 
     let adapter =
-        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store());
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine");
     adapter
         .register_session(session_id.clone())
         .await

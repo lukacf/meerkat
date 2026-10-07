@@ -237,6 +237,16 @@ them.
 
 ### Added
 
+- INFO timing lines on the way from a live delegation worker's terminal to the
+  provider's result acknowledgement (#1820). Each carries the delegation's
+  `operation_id` and `elapsed_since_terminal_ms`: terminal observed, terminal
+  classified against its WorkGraph item, terminal realized, result release
+  and delivery authorized, pending peer-request read started and finished
+  (with `rows`), result dispatched, and result acknowledged. The runtime loop
+  logs one INFO line per finished run, "runtime run finalization ended", with
+  `run_id`, `commit_ms`, `receipt_ms` and `total_ms`; its steps (finalization
+  started, commit persisted, terminal receipt persisted) are at DEBUG. No
+  behaviour changes.
 - The loopback OAuth callback can be cancelled during an active wait with a
   joined cleanup receipt. `LoopbackHandle::wait_until(&mut self, Instant)` is
   cancel-safe: dropping it loses neither the receiver, a callback already

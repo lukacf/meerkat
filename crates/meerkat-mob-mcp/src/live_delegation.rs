@@ -960,6 +960,10 @@ struct RetainedDelegation {
     /// [`ResultReleaseOutcome::ClosedBeforeDispatch`], so the close never
     /// waits on a result that can no longer be delivered.
     close_signal: CancellationToken,
+    /// When this worker's terminal was observed: the origin of the INFO
+    /// timing lines on the way from the terminal to the provider's result
+    /// acknowledgement. Diagnostics only; nothing decides on it.
+    terminal_observed_at: std::sync::OnceLock<tokio::time::Instant>,
 }
 
 /// What one release attempt of a retained result came to. Every outcome is
@@ -1035,6 +1039,19 @@ enum SteerDeliveryOutcome {
 }
 
 impl RetainedDelegation {
+    /// Mark the worker's terminal as observed now (first call wins).
+    fn mark_terminal_observed(&self) {
+        let _ = self.terminal_observed_at.set(tokio::time::Instant::now());
+    }
+
+    /// Milliseconds since the worker's terminal was observed, for the timing
+    /// lines; absent for a result this process did not see terminate.
+    fn elapsed_since_terminal_ms(&self) -> Option<u64> {
+        self.terminal_observed_at
+            .get()
+            .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
+
     /// Wait for every steer this delegation authorized. Called once the
     /// worker's run is terminal, when each pending delivery resolves as
     /// `MissedRun` at the latest. Returns the last delivery's outcome.
@@ -5082,6 +5099,7 @@ impl ExperimentalLiveDelegationCoordinator {
             source_identity,
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
             close_signal: CancellationToken::new(),
+            terminal_observed_at: std::sync::OnceLock::new(),
         });
         let Some(cancellation) = execution.cancellation_handle() else {
             let operation_id = retained.operation.operation_id().clone();
@@ -5164,6 +5182,12 @@ impl ExperimentalLiveDelegationCoordinator {
                 return;
             }
             let worker_terminal = execution.await_terminal().await;
+            task_retained.mark_terminal_observed();
+            tracing::info!(
+                operation_id = %task_retained.operation.operation_id(),
+                elapsed_since_terminal_ms = task_retained.elapsed_since_terminal_ms(),
+                "live delegation worker terminal observed"
+            );
             // The worker's run has ended, so every steer still waiting for
             // one of its boundaries resolves now; settle them before the
             // terminal is realized, never leaving a delivery behind it.
@@ -5182,8 +5206,9 @@ impl ExperimentalLiveDelegationCoordinator {
             )
             .await;
             let deferred_close = terminal.deferred_close.take();
-            tracing::debug!(
+            tracing::info!(
                 operation_id = %task_retained.operation.operation_id(),
+                elapsed_since_terminal_ms = task_retained.elapsed_since_terminal_ms(),
                 result_present = terminal.result_text.is_some(),
                 terminal_ineligible = terminal.terminal_ineligible,
                 terminal = ?terminal.terminal,
@@ -5642,6 +5667,7 @@ impl ExperimentalLiveDelegationCoordinator {
     /// pending-answer notice.
     async fn awaiting_peer_replies(
         &self,
+        retained: &RetainedDelegation,
         session_id: &SessionId,
         interaction: &str,
     ) -> Vec<String> {
@@ -5686,6 +5712,8 @@ impl ExperimentalLiveDelegationCoordinator {
         }
         let awaiting = peer_replies::awaiting_peer_replies(&messages, interaction);
         tracing::info!(
+            operation_id = %retained.operation.operation_id(),
+            elapsed_since_terminal_ms = retained.elapsed_since_terminal_ms(),
             %session_id,
             rows = messages.len(),
             members = awaiting.len(),
@@ -5797,6 +5825,11 @@ impl ExperimentalLiveDelegationCoordinator {
             }
             prepared = pre_dispatch => prepared?,
         };
+        tracing::info!(
+            operation_id = %retained.operation.operation_id(),
+            elapsed_since_terminal_ms = retained.elapsed_since_terminal_ms(),
+            "live delegation result release and delivery authorized; delegation lane held"
+        );
         let ambiguity_authority = delivery.clone();
         if retained.result.lock().await.terminal_ineligible {
             retained.result.lock().await.release_delivery(reservation);
@@ -5811,7 +5844,13 @@ impl ExperimentalLiveDelegationCoordinator {
                     .domain_correlation()
                     .interaction_id()
                     .to_string();
-                self.awaiting_peer_replies(session_id, &interaction).await
+                tracing::info!(
+                    operation_id = %retained.operation.operation_id(),
+                    elapsed_since_terminal_ms = retained.elapsed_since_terminal_ms(),
+                    "live delegation result release reading the worker's pending peer requests"
+                );
+                self.awaiting_peer_replies(retained, session_id, &interaction)
+                    .await
             }
             None => Vec::new(),
         };
@@ -5855,6 +5894,12 @@ impl ExperimentalLiveDelegationCoordinator {
             announcement,
         )
         .await;
+        tracing::info!(
+            operation_id = %retained.operation.operation_id(),
+            elapsed_since_terminal_ms = retained.elapsed_since_terminal_ms(),
+            dispatched = dispatch.is_ok(),
+            "live delegation result dispatched to the provider"
+        );
         let resolution = match dispatch {
             Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable) => {
                 let mut result = retained.result.lock().await;
@@ -5888,6 +5933,7 @@ impl ExperimentalLiveDelegationCoordinator {
         if observation == LiveDelegationResultDeliveryObservation::Delivered {
             tracing::info!(
                 operation_id = %retained.operation.operation_id(),
+                elapsed_since_terminal_ms = retained.elapsed_since_terminal_ms(),
                 delegation_ref_digest = %projection_evidence.delegation_ref_digest,
                 result_digest = %projection_evidence.result_digest,
                 "exact bounded live delegation result received provider append acknowledgement"
@@ -6663,6 +6709,13 @@ async fn realize_terminal(
     };
     let (terminal_kind, blockers, explicit_block, deferred_close) =
         classify_worker_terminal(retained, mob_terminal, mob_result_text.as_deref()).await;
+    tracing::info!(
+        operation_id = %admission.operation().operation_id(),
+        elapsed_since_terminal_ms = retained.elapsed_since_terminal_ms(),
+        workgraph = retained.workgraph.is_some(),
+        terminal = ?terminal_kind,
+        "live delegation worker terminal classified against its WorkGraph item"
+    );
     if runtime
         .live_channel_is_active_for_session(binding.session_id(), binding.channel_id())
         .await
@@ -8784,6 +8837,7 @@ mod tests {
             source_identity: AgentIdentity::from("exact-result-source"),
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
             close_signal: CancellationToken::new(),
+            terminal_observed_at: std::sync::OnceLock::new(),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),
@@ -9467,6 +9521,7 @@ mod tests {
             source_identity: AgentIdentity::from("two-results-source"),
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
             close_signal: CancellationToken::new(),
+            terminal_observed_at: std::sync::OnceLock::new(),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),
@@ -9800,6 +9855,7 @@ mod tests {
             source_identity: AgentIdentity::from("exact-result-source"),
             steer_delivery_chain: std::sync::Mutex::new(SteerDeliveryChain::default()),
             close_signal: CancellationToken::new(),
+            terminal_observed_at: std::sync::OnceLock::new(),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),

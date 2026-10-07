@@ -33861,16 +33861,22 @@ async fn time_budget_terminal_run_commit_is_refused_before_mutation() {
 }
 
 #[tokio::test]
-async fn budget_terminal_commit_failure_publishes_no_durable_terminal_state() {
-    // A failed durable apply of a budget run commit is an ordinary
-    // finalization failure: nothing durable is published and the budget
-    // terminal is not rewritten.
+async fn budget_terminal_failed_atomic_terminal_boundary_commit_publishes_nothing() {
+    // A failed atomic terminal-boundary commit of a budget run, before any
+    // durable publication: nothing durable is published, the accepted
+    // durable input row keeps its pre-failure state, and the budget terminal
+    // is not rewritten. This is not a failure after a successful commit.
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store: Arc<dyn RuntimeStore> = Arc::new(
         RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
     );
     let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
     mark_staged_run_budget_terminal(&driver, &run_id, false).await;
+    let before = inner
+        .load_input_state(&runtime_id, &input_id)
+        .await
+        .unwrap()
+        .expect("the accepted input is durable before the commit");
 
     let error = commit_staged_run(&driver, &runtime_id, &run_id, &input_id)
         .await
@@ -33887,15 +33893,21 @@ async fn budget_terminal_commit_failure_publishes_no_durable_terminal_state() {
             .is_none(),
         "the failed commit publishes no receipt"
     );
-    let durable = inner
+    let after = inner
         .load_input_state(&runtime_id, &input_id)
         .await
-        .unwrap();
-    assert!(
-        durable.is_none_or(|stored| {
-            stored.seed.phase != crate::input_state::InputLifecycleState::Consumed
-        }),
-        "the failed commit does not durably consume its input"
+        .unwrap()
+        .expect("the accepted durable input row survives the failed commit");
+    assert_eq!(after.seed.phase, before.seed.phase);
+    assert_eq!(after.seed.terminal_outcome, before.seed.terminal_outcome);
+    assert_eq!(
+        format!("{after:?}"),
+        format!("{before:?}"),
+        "the durable row and state are unchanged"
+    );
+    assert_ne!(
+        after.seed.phase,
+        crate::input_state::InputLifecycleState::Consumed
     );
     assert_budget_terminal_retained(&driver).await;
 }

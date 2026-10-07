@@ -15759,6 +15759,18 @@ mod tests {
             messages.contains("exceed the budget"),
             "the prompt is durable: {messages}"
         );
+        assert!(
+            !messages.contains("reply past the budget"),
+            "the rejected reply is not committed: {messages}"
+        );
+        assert!(
+            result.text.is_empty(),
+            "a fresh session has no committed assistant text: {:?}",
+            result.text
+        );
+        // The request that crossed the budget is still charged.
+        assert_eq!(result.usage.input_tokens, 1_000);
+        assert_eq!(result.usage.output_tokens, 1_000);
         // The run's input is durably consumed, not left for recovery.
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
         let rows = runtime

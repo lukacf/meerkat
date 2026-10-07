@@ -115,6 +115,7 @@ async fn send_token_request(
         .await
         .map_err(|e| OAuthError::Network(e.to_string()))?;
     let status = resp.status();
+    super::refuse_credential_redirect(status)?;
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(OAuthError::TokenEndpoint {
@@ -133,4 +134,71 @@ async fn send_token_request(
         expires_in_secs: wire.expires_in,
         scope: wire.scope,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::auth_oauth::redirect_fixture::{
+        BODY_CANARY, LOCATION_CANARY, spawn_redirecting_endpoint,
+    };
+    use crate::auth_oauth::{credential_http_client, poll_device_code, request_device_code};
+    use std::sync::atomic::Ordering;
+
+    fn endpoints(token_url: &str) -> OAuthEndpoints {
+        OAuthEndpoints {
+            client_id: "client".into(),
+            authorize_url: "https://issuer.example/authorize".into(),
+            token_url: token_url.into(),
+            device_code_url: Some(token_url.into()),
+            redirect_uri: "http://127.0.0.1:1/callback".into(),
+            scopes: vec!["scope".into()],
+            extra_authorize_params: Vec::new(),
+            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+            include_state_in_token_exchange: false,
+            extra_token_params: Vec::new(),
+            refresh_scopes: Vec::new(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    fn assert_refused(error: OAuthError) {
+        assert!(
+            matches!(error, OAuthError::RedirectRefused { status: 302 }),
+            "{error:?}"
+        );
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains(LOCATION_CANARY), "{rendered}");
+        assert!(!rendered.contains(BODY_CANARY), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn credential_endpoints_never_follow_a_redirect() {
+        let http = credential_http_client().unwrap();
+        let (url, target_hits) = spawn_redirecting_endpoint().await;
+        let endpoints = endpoints(&url);
+        assert_refused(
+            exchange_authorization_code(&http, &endpoints, "code", "verifier", None)
+                .await
+                .unwrap_err(),
+        );
+        assert_refused(
+            exchange_refresh_token(&http, &endpoints, "refresh-secret", Some("client-secret"))
+                .await
+                .unwrap_err(),
+        );
+        assert_refused(request_device_code(&http, &endpoints).await.unwrap_err());
+        assert_refused(
+            poll_device_code(&http, &endpoints, "device-code", None)
+                .await
+                .err()
+                .expect("a redirect answer is refused"),
+        );
+        assert_eq!(
+            target_hits.load(Ordering::SeqCst),
+            0,
+            "no grant, refresh token or device code reached the redirect target"
+        );
+    }
 }

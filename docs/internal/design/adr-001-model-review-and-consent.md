@@ -27,7 +27,7 @@ with model-visible feedback. Permitted siblings and queued work continue.
 
 Keep R1 authorization local, with no reviewer call. Measure optional reviewer
 latency, token use, extra model turns and human delay separately from the native
-dispatch p99 <1 ms and representative native overhead <=10% requirements. This
+dispatch p99 under 1 ms and representative native overhead at most 10% requirements. This
 amendment provides no new benchmark evidence and adds no default policy network
 round trip or per-operation fsync.
 

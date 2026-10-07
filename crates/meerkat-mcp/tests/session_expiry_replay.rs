@@ -13,8 +13,9 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use meerkat_auth_core::{McpAuthMode, McpOAuthError, McpServerIdentity};
 use meerkat_core::McpServerConfig;
-use meerkat_mcp::{McpConnection, McpError};
+use meerkat_mcp::{McpAuthResolver, McpConnection, McpError};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
@@ -33,6 +34,18 @@ struct Fixture {
     /// whose handler fails.
     redirect_calls: AtomicBool,
     redirected_posts: AtomicUsize,
+    /// Whether the redirected `/mcp/` handler answers `401` instead of `500`.
+    redirect_target_unauthorized: AtomicBool,
+    /// Whether `tools/call` answers `401` (the bearer was refused).
+    unauthorized_calls: AtomicBool,
+    /// Whether a `tools/call` carried the OAuth fixture's bearer.
+    bearer_seen: AtomicBool,
+}
+
+const BEARER: &str = "fixture-only-oauth-bearer";
+
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, [("www-authenticate", "Bearer")]).into_response()
 }
 
 async fn mcp(State(fixture): State<Arc<Fixture>>, headers: HeaderMap, body: String) -> Response {
@@ -67,6 +80,14 @@ async fn mcp(State(fixture): State<Arc<Fixture>>, headers: HeaderMap, body: Stri
                 "a call always carries the session it was admitted in"
             );
             fixture.tool_posts.fetch_add(1, Ordering::SeqCst);
+            if headers.get("authorization").and_then(|v| v.to_str().ok())
+                == Some(format!("Bearer {BEARER}").as_str())
+            {
+                fixture.bearer_seen.store(true, Ordering::SeqCst);
+            }
+            if fixture.unauthorized_calls.load(Ordering::SeqCst) {
+                return unauthorized();
+            }
             if fixture.redirect_calls.load(Ordering::SeqCst) {
                 return (StatusCode::TEMPORARY_REDIRECT, [("location", "/mcp/")]).into_response();
             }
@@ -96,7 +117,10 @@ async fn start(fixture: Arc<Fixture>) -> String {
             "/mcp/",
             post(|State(fixture): State<Arc<Fixture>>| async move {
                 fixture.redirected_posts.fetch_add(1, Ordering::SeqCst);
-                StatusCode::INTERNAL_SERVER_ERROR
+                if fixture.redirect_target_unauthorized.load(Ordering::SeqCst) {
+                    return unauthorized();
+                }
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }),
         )
         .with_state(fixture);
@@ -252,5 +276,94 @@ async fn a_redirected_tool_call_that_fails_is_uncertain_and_not_resent() {
         .await
         .unwrap();
     assert_eq!(fixture.tool_posts.load(Ordering::SeqCst), 2);
+    let _ = connection.close().await;
+}
+
+/// An OAuth-bearer connection: every request reads this fixed stored bearer.
+struct FixedBearer;
+
+#[async_trait::async_trait]
+impl McpAuthResolver for FixedBearer {
+    async fn stored_bearer_token(
+        &self,
+        _target: &McpServerIdentity,
+    ) -> Result<Option<String>, McpOAuthError> {
+        Ok(Some(BEARER.to_string()))
+    }
+
+    async fn interactive_login(
+        &self,
+        target: &McpServerIdentity,
+        _www_authenticate: Option<&str>,
+    ) -> Result<String, McpOAuthError> {
+        Err(McpOAuthError::HumanAuthorizationRequired {
+            server_name: target.server_name().to_owned(),
+        })
+    }
+}
+
+async fn oauth_connection(fixture: &Arc<Fixture>, name: &str) -> McpConnection {
+    let url = start(Arc::clone(fixture)).await;
+    let config = McpServerConfig::streamable_http(name, url, HashMap::new());
+    McpConnection::connect_with_mcp_auth(&config, McpAuthMode::Stored, Some(Arc::new(FixedBearer)))
+        .await
+        .unwrap()
+}
+
+/// On an OAuth-bearer connection the call's own disposition decides first: a
+/// session 404, or a redirect followed by a 401, stays uncertain and is never
+/// reported as an authorization refusal. Control: a plain 401 on the same
+/// kind of connection is the typed authorization refusal.
+#[tokio::test]
+async fn an_oauth_connection_keeps_uncertain_outcomes_ahead_of_its_auth_refusal() {
+    let expired = Arc::new(Fixture::default());
+    expired.expire_calls.store(true, Ordering::SeqCst);
+    expired.execute_then_expire.store(true, Ordering::SeqCst);
+    let connection = oauth_connection(&expired, "oauth-expired").await;
+    let error = connection
+        .call_tool("effect", &json!({"n": 1}))
+        .await
+        .expect_err("an expired session is not a success");
+    assert!(
+        matches!(&error, McpError::SessionExpired { tool, .. } if tool == "effect"),
+        "{error:?}"
+    );
+    assert!(expired.bearer_seen.load(Ordering::SeqCst));
+    assert_eq!(expired.tool_posts.load(Ordering::SeqCst), 1);
+    let _ = connection.close().await;
+
+    let redirected = Arc::new(Fixture::default());
+    redirected.redirect_calls.store(true, Ordering::SeqCst);
+    redirected
+        .redirect_target_unauthorized
+        .store(true, Ordering::SeqCst);
+    let connection = oauth_connection(&redirected, "oauth-redirected").await;
+    let error = connection
+        .call_tool("effect", &json!({"n": 1}))
+        .await
+        .expect_err("the routed handler refused the bearer");
+    assert!(
+        matches!(&error, McpError::RedirectedOutcomeUncertain { tool, .. } if tool == "effect"),
+        "{error:?}"
+    );
+    assert!(redirected.bearer_seen.load(Ordering::SeqCst));
+    assert_eq!(redirected.tool_posts.load(Ordering::SeqCst), 1);
+    assert_eq!(redirected.redirected_posts.load(Ordering::SeqCst), 1);
+    let _ = connection.close().await;
+
+    let refused = Arc::new(Fixture::default());
+    refused.unauthorized_calls.store(true, Ordering::SeqCst);
+    let connection = oauth_connection(&refused, "oauth-refused").await;
+    let error = connection
+        .call_tool("effect", &json!({"n": 1}))
+        .await
+        .expect_err("the bearer was refused");
+    assert!(
+        matches!(&error, McpError::AuthorizationRequired { .. }),
+        "{error:?}"
+    );
+    assert!(refused.bearer_seen.load(Ordering::SeqCst));
+    assert_eq!(refused.tool_posts.load(Ordering::SeqCst), 1);
+    assert_eq!(refused.initializes.load(Ordering::SeqCst), 1);
     let _ = connection.close().await;
 }

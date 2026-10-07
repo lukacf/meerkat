@@ -278,8 +278,8 @@ ask its user.
   `Authorization` header and a host OAuth resolver. Mob portable profiles
   cannot carry `oauth_account_selection` and refuse it. Credentials are
   stored per installation (the host's token store), not per realm, and a
-  reconnect of a Known credential stored before account bindings were
-  recorded needs a disconnect first. The default account
+  new login over a Known credential stored before account bindings were
+  recorded needs a disconnect first (using it does not). The default account
   strategy is OpenID Connect UserInfo: it
   requests `openid`, calls the issuer's `userinfo_endpoint` with the new
   access token and reports `sub`, which must equal `oauth_account` when one

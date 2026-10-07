@@ -6273,14 +6273,52 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_add_tool_refuses_oauth_account_selection_without_staging() {
-        let (state, session_id) = state_with_persisted_session().await;
-        let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
-        attach_test_mcp_router(
-            &state,
-            &parsed,
-            Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())),
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+            Some(Arc::new(TestClient::default())),
         )
         .await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        // A router bound to this session's real external-tool surface, so
+        // staging is observable in its snapshot.
+        let adapter_slot = Arc::new(std::sync::Mutex::new(None));
+        let slot = Arc::clone(&adapter_slot);
+        materialize_test_mcp_fixture(
+            &state,
+            &session_id,
+            McpActorMaterializationMode::Fresh,
+            move |bindings| {
+                let router = Arc::new(meerkat_mcp::McpRouterAdapter::new(
+                    McpRouter::new_with_surface_handle(Arc::clone(
+                        bindings.external_tool_surface(),
+                    )),
+                ));
+                *slot.lock().expect("slot") = Some(Arc::clone(&router));
+                let router_tools: Arc<dyn AgentToolDispatcher> = router.clone();
+                let mut request = mock_deferred_materialization_request(session, bindings, None);
+                request
+                    .build
+                    .get_or_insert_with(Default::default)
+                    .external_tools = Some(router_tools);
+                (request, router)
+            },
+        )
+        .await;
+        let adapter = adapter_slot
+            .lock()
+            .expect("slot")
+            .clone()
+            .expect("the fixture built the router");
+        let snapshot = || {
+            AgentToolDispatcher::external_tool_surface_snapshot(adapter.as_ref())
+                .expect("a surface-bound router exposes its snapshot")
+        };
+        let before = snapshot();
+        let session_id = session_id.to_string();
         for selection in [
             serde_json::json!({"oauth_account_selection": "unverified"}),
             serde_json::json!({"oauth_account_selection": "discover"}),
@@ -6306,10 +6344,11 @@ mod tests {
                 "{}",
                 error.message
             );
+            // Nothing was staged or written: the whole surface is unchanged.
+            assert_eq!(snapshot(), before, "a refusal must not change the surface");
         }
-        // Paired control: the same server without a selection passes this
-        // guard (the refusal is specific to the account selection).
-        let control = handle_tools_call(
+        // Paired control: the same server without a selection is staged.
+        handle_tools_call(
             &state,
             "meerkat_mcp_add",
             &serde_json::json!({
@@ -6317,14 +6356,23 @@ mod tests {
                 "server_config": {"name": "plain", "url": "https://mcp.example.invalid/mcp"},
             }),
         )
-        .await;
-        if let Err(error) = control {
-            assert!(
-                !error.message.contains("host configuration"),
-                "{}",
-                error.message
-            );
-        }
+        .await
+        .expect("a plain server passes the guard and is staged");
+        let after = snapshot();
+        let staged: Vec<_> = after
+            .entries
+            .iter()
+            .filter(|entry| entry.staged_op == meerkat_core::ExternalToolSurfaceStagedOp::Add)
+            .map(|entry| entry.surface_id.as_str())
+            .collect();
+        assert_eq!(staged, ["plain"]);
+        assert!(
+            after
+                .entries
+                .iter()
+                .all(|entry| entry.surface_id != "selected"),
+            "the refused server never reached the surface"
+        );
     }
 
     #[tokio::test]

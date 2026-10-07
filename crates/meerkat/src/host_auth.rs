@@ -526,7 +526,9 @@ pub enum HostAuthError {
 pub struct HostAuthService {
     persistence: ProviderAuthPersistence,
     authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
-    http: reqwest::Client,
+    /// Token and device-code requests follow no redirects. A build failure
+    /// is kept and every exchange fails with it.
+    http: Result<reqwest::Client, meerkat_providers::auth_oauth::CredentialHttpClientUnavailable>,
     mcp_account_strategy: Arc<dyn McpOAuthAccountStrategy>,
     connector_strategies: ConnectorStrategies,
 }
@@ -539,7 +541,7 @@ impl HostAuthService {
         Self {
             persistence,
             authority,
-            http: reqwest::Client::new(),
+            http: meerkat_providers::auth_oauth::credential_http_client(),
             mcp_account_strategy: Arc::new(OidcUserInfoAccountStrategy::new()),
             connector_strategies: ConnectorStrategies::with_defaults(),
         }
@@ -614,8 +616,17 @@ impl HostAuthService {
         Ok(self.connector_oauth_authority()?.status(slot).await?)
     }
 
+    /// The redirect-free token-exchange client, or its typed build failure.
+    fn http(&self) -> Result<&reqwest::Client, HostAuthError> {
+        self.http
+            .as_ref()
+            .map_err(|error| HostAuthError::OAuthExchange(OAuthError::from(*error)))
+    }
+
+    /// Use `http` for token and device-code requests. It must not follow
+    /// redirects (reqwest `redirect::Policy::none()`).
     pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
-        self.http = http;
+        self.http = Ok(http);
         self
     }
 
@@ -935,7 +946,7 @@ impl HostAuthService {
         )?;
         let oauth = oauth_provider_resolution(target.provider, redirect_uri.clone());
         let exchanged = exchange_authorization_code_with_state(
-            &self.http,
+            self.http()?,
             &oauth.endpoints,
             code.as_ref(),
             &flow.pkce_verifier,
@@ -994,7 +1005,7 @@ impl HostAuthService {
         if oauth.endpoints.device_code_url.is_none() {
             return Err(HostAuthError::DeviceFlowUnsupported(target.provider));
         }
-        let device = request_device_code(&self.http, &oauth.endpoints).await?;
+        let device = request_device_code(self.http()?, &oauth.endpoints).await?;
         let lease_key = LeaseKey::from_credential_identity(&resolved.credential_identity);
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
         self.authority.oauth_flow_authority().admit_device_code(
@@ -1031,7 +1042,7 @@ impl HostAuthService {
             .oauth_flow_authority()
             .begin_device_code_poll(device_code, &resolved.credential_identity, target.provider)?;
         let outcome = poll_device_code(
-            &self.http,
+            self.http()?,
             &oauth.endpoints,
             device_code,
             oauth.client_secret,
@@ -1507,5 +1518,104 @@ oauth_account_selection = "unverified"
                 HostMcpTargetRefusal::UnknownServer { .. }
             ))
         ));
+    }
+
+    mod redirect_fixture {
+        #![allow(clippy::unwrap_used)]
+        /// A credential endpoint that answers every request with a `302` to a
+        /// second listener, which counts the requests that reach it. The
+        /// `Location` and the body carry canaries that must never be rendered.
+        pub(crate) const LOCATION_CANARY: &str = "redirect-location-secret-canary";
+        pub(crate) const BODY_CANARY: &str = "redirect-body-secret-canary";
+
+        pub(crate) async fn spawn_redirecting_endpoint()
+        -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
+
+            async fn read_request(stream: &mut tokio::net::TcpStream) {
+                let mut buffer = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let Ok(read) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&buffer);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= end + 4 + length {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            let hits = Arc::new(AtomicUsize::new(0));
+            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target_addr = target.local_addr().unwrap();
+            let counted = Arc::clone(&hits);
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = target.accept().await {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    read_request(&mut stream).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                }
+            });
+            let endpoint = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint_addr = endpoint.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = endpoint.accept().await {
+                    read_request(&mut stream).await;
+                    let response = format!(
+                        "HTTP/1.1 302 Found\r\nlocation: http://{target_addr}/token?leak={LOCATION_CANARY}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{BODY_CANARY}",
+                        BODY_CANARY.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            });
+            (format!("http://{endpoint_addr}/token"), hits)
+        }
+    }
+
+    /// `HostAuthService::new` uses the redirect-free credential client for
+    /// its token and device-code exchanges.
+    #[tokio::test]
+    async fn host_auth_service_client_never_follows_a_redirect() {
+        use redirect_fixture::spawn_redirecting_endpoint;
+        let (url, target_hits) = spawn_redirecting_endpoint().await;
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let persistence = ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        let service = HostAuthService::new(persistence, runtime.provider_auth_runtime_authority());
+        let response = service
+            .http()
+            .unwrap()
+            .post(&url)
+            .form(&[("grant_type", "authorization_code")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 302);
+        assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

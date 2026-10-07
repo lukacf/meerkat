@@ -85,6 +85,14 @@ pub enum AzureAuthError {
     Network(String),
     #[error("invalid token response: {0}")]
     InvalidResponse(String),
+    /// The token endpoint answered with a redirect, refused by its status
+    /// alone (no `Location` or body is kept).
+    #[error(
+        "azure token endpoint answered with a redirect (status {status}); redirects are refused"
+    )]
+    RedirectRefused { status: u16 },
+    #[error(transparent)]
+    HttpClientUnavailable(#[from] crate::auth_oauth::CredentialHttpClientUnavailable),
 }
 
 impl From<AzureAuthError> for AuthError {
@@ -96,6 +104,9 @@ impl From<AzureAuthError> for AuthError {
                 AuthError::RefreshFailed(format!("azure token endpoint returned {status}: {body}"))
             }
             AzureAuthError::InvalidResponse(msg) => AuthError::Other(format!("azure: {msg}")),
+            AzureAuthError::RedirectRefused { .. } | AzureAuthError::HttpClientUnavailable(_) => {
+                AuthError::RefreshFailed(e.to_string())
+            }
         }
     }
 }
@@ -117,7 +128,9 @@ struct CachedToken {
 pub struct AzureAdAuthorizer {
     scope: String,
     creds: AzureClientCredentials,
-    http: reqwest::Client,
+    /// Follows no redirects. A build failure is kept and every token
+    /// request fails with it; nothing falls back to a default client.
+    http: Result<reqwest::Client, crate::auth_oauth::CredentialHttpClientUnavailable>,
     cache: Arc<Mutex<Option<CachedToken>>>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     label: String,
@@ -132,7 +145,7 @@ impl AzureAdAuthorizer {
         Self {
             scope,
             creds,
-            http: reqwest::Client::new(),
+            http: crate::auth_oauth::credential_http_client(),
             cache: Arc::new(Mutex::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             label,
@@ -172,6 +185,10 @@ impl AzureAdAuthorizer {
         )
     }
 
+    fn http(&self) -> Result<&reqwest::Client, AzureAuthError> {
+        self.http.as_ref().map_err(|error| (*error).into())
+    }
+
     async fn fetch_token(&self) -> Result<CachedToken, AzureAuthError> {
         let form = vec![
             ("grant_type", "client_credentials".to_string()),
@@ -180,13 +197,18 @@ impl AzureAdAuthorizer {
             ("scope", self.scope.clone()),
         ];
         let resp = self
-            .http
+            .http()?
             .post(self.token_url())
             .form(&form)
             .send()
             .await
             .map_err(|e| AzureAuthError::Network(e.to_string()))?;
         let status = resp.status();
+        if status.is_redirection() {
+            return Err(AzureAuthError::RedirectRefused {
+                status: status.as_u16(),
+            });
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(AzureAuthError::TokenEndpoint {
@@ -280,7 +302,9 @@ fn azure_refresh_failure_observation(err: &AzureAuthError) -> RefreshFailureObse
         AzureAuthError::MissingEnv(_) | AzureAuthError::InvalidResponse(_) => {
             RefreshFailureObservation::local_credential_unusable()
         }
-        AzureAuthError::Network(_) => RefreshFailureObservation::transient(),
+        AzureAuthError::Network(_)
+        | AzureAuthError::RedirectRefused { .. }
+        | AzureAuthError::HttpClientUnavailable(_) => RefreshFailureObservation::transient(),
         AzureAuthError::TokenEndpoint { status, body } => {
             oauth_endpoint_failure_observation(*status, body)
         }
@@ -314,6 +338,37 @@ impl HttpAuthorizer for AzureAdAuthorizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    async fn token_endpoint_redirect_is_refused_without_following_it() {
+        use crate::auth_oauth::redirect_fixture::{
+            BODY_CANARY, LOCATION_CANARY, spawn_redirecting_endpoint,
+        };
+        let (url, target_hits) = spawn_redirecting_endpoint().await;
+        let authorizer = AzureAdAuthorizer::new(
+            "https://management.azure.com/.default",
+            AzureClientCredentials {
+                tenant_id: "tenant".into(),
+                client_id: "client".into(),
+                client_secret: "client-secret".into(),
+                authority_host: DEFAULT_AUTHORITY.into(),
+            },
+        )
+        .with_token_url_override(url);
+        let error = match authorizer.fetch_token().await {
+            Err(error) => error,
+            Ok(_) => panic!("a redirect answer must not yield a token"),
+        };
+        assert!(
+            matches!(error, AzureAuthError::RedirectRefused { status: 302 }),
+            "{error:?}"
+        );
+        let rendered = format!("{error} {error:?}");
+        let rendered = format!("{rendered} {}", AuthError::from(error));
+        assert!(!rendered.contains(LOCATION_CANARY) && !rendered.contains(BODY_CANARY));
+        assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn azure_client_credentials_debug_redacts_client_secret() {

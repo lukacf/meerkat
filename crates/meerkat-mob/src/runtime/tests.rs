@@ -4712,6 +4712,58 @@ impl SessionServiceControlExt for MockSessionService {
     }
 }
 
+impl MockSessionService {
+    /// The counted, delay- and fault-injectable metadata read behind both
+    /// metadata seams. Only the retained seam still observes an archived
+    /// session, as the persistent service's retained authority does.
+    async fn counted_metadata_read(
+        &self,
+        session_id: &SessionId,
+        hide_archived: bool,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        self.load_persisted_session_metadata_calls
+            .fetch_add(1, Ordering::Relaxed);
+        *self
+            .metadata_reads_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.clone())
+            .or_default() += 1;
+        let delay_ms = self
+            .load_persisted_session_metadata_delay_ms
+            .load(Ordering::Relaxed);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        if self
+            .metadata_read_failures_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(session_id)
+        {
+            return Err(SessionError::Store(Box::new(std::io::Error::other(
+                "mock metadata read failure",
+            ))));
+        }
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let persisted =
+            if hide_archived && self.archived_session_ids.read().await.contains(session_id) {
+                None
+            } else {
+                self.persisted_session_clone(session_id).await
+            };
+        persisted
+            .as_ref()
+            .map(meerkat_core::PersistedSessionMetadataView::try_from_session)
+            .transpose()
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "session {session_id} durable metadata failed typed restore: {error}"
+                )))
+            })
+    }
+}
+
 #[async_trait]
 impl MobSessionService for MockSessionService {
     async fn subscribe_session_activity(
@@ -5456,45 +5508,14 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
-        self.load_persisted_session_metadata_calls
-            .fetch_add(1, Ordering::Relaxed);
-        *self
-            .metadata_reads_for
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(session_id.clone())
-            .or_default() += 1;
-        let delay_ms = self
-            .load_persisted_session_metadata_delay_ms
-            .load(Ordering::Relaxed);
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-        if self
-            .metadata_read_failures_for
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(session_id)
-        {
-            return Err(SessionError::Store(Box::new(std::io::Error::other(
-                "mock metadata read failure",
-            ))));
-        }
-        let _authority_guard = self.resume_authority_gate.lock().await;
-        let persisted = if self.archived_session_ids.read().await.contains(session_id) {
-            None
-        } else {
-            self.persisted_session_clone(session_id).await
-        };
-        persisted
-            .as_ref()
-            .map(meerkat_core::PersistedSessionMetadataView::try_from_session)
-            .transpose()
-            .map_err(|error| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "session {session_id} durable metadata failed typed restore: {error}"
-                )))
-            })
+        self.counted_metadata_read(session_id, true).await
+    }
+
+    async fn load_retained_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        self.counted_metadata_read(session_id, false).await
     }
 
     async fn session_known_to_archive_authority(

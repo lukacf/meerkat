@@ -58,13 +58,14 @@ impl super::MobHandle {
             .ok_or(MemberCreationError::Absent(
                 crate::MemberCreationAbsence::LegacyCreation,
             ))?;
-        let metadata = self
-            .session_service
-            .load_persisted_session_metadata(session_id)
-            .await?
-            .ok_or(MemberCreationError::Unavailable(
-                "source metadata is unavailable",
-            ))?;
+        let metadata = crate::member_creation::load_creation_source_metadata(
+            self.session_service.as_ref(),
+            session_id,
+        )
+        .await?
+        .ok_or(MemberCreationError::Unavailable(
+            "source metadata is unavailable",
+        ))?;
         let metadata = metadata
             .session_metadata
             .ok_or(MemberCreationError::Unavailable(

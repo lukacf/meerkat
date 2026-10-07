@@ -445,6 +445,7 @@ them.
 
 ### Fixed
 
+- Mob destruction no longer overflows normal 2 MiB worker stacks in debug builds when retiring session-backed children.
 - `McpOAuthPendingLogin::cancel` disarmed its drop guard before it
   awaited the listener, then ignored the listener's result: a cancel dropped
   during the drain never retired the attempt, and a normal return did not
@@ -489,6 +490,16 @@ them.
   Cold reads no longer wait on their own guard. Connector logout uses the
   coordinated credential mutation path with an atomic mode check, preserving
   foreign-mode credentials and the existing rollback behavior.
+- An agent's `mob_spawn_member` no longer hangs when its session service keeps
+  sessions in memory while reporting the persistent mob contract (the CLI run
+  host). Creation-source capture read the calling session's metadata through
+  `load_persisted_session_metadata`, which such a service serves from the
+  calling session's own task, and that task was waiting for the tool. Capture
+  now reads only `MobSessionService::load_retained_session_metadata` through
+  the new `meerkat_mob::load_creation_source_metadata`; a service without a
+  retained metadata authority records the child as unproven
+  (`MemberCreationAbsence::NonDurableService`). Durable hosts capture the
+  same source as before.
 
 - Turbo S S106: a reopen whose retained conversation summary was followed by
   more rows than the startup input holds generated a fresh summary, and when

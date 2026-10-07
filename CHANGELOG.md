@@ -247,6 +247,21 @@ them.
   `run_id`, `commit_ms`, `receipt_ms` and `total_ms`; its steps (finalization
   started, commit persisted, terminal receipt persisted) are at DEBUG. No
   behaviour changes.
+- Stall diagnostics on the live voice projection path (#1821). A watched
+  await logs at DEBUG on entry and exit and at WARN once it has been pending
+  for 2 s (then every 5 s), naming its step and channel or session
+  (`meerkat_core::slow_await::warn_if_slow`). Watched awaits:
+  - projection pump: applying an observation, releasing sealed unmeasured
+    segments and applying a segment release, reserving the assistant output
+    (lifecycle lease), the first-output media-health request, and publishing
+    assistant output;
+  - provider reader: source-observation admission and provider lifecycle
+    observation;
+  - session: the realtime write guard and the full-session save.
+  The public Live broker logs at INFO when it queues a finished provider
+  turn, and the pump when a user turn or an assistant segment reaches the
+  transcript. These lines carry the turn or item reference, never the text.
+  No behaviour changes.
 - The loopback OAuth callback can be cancelled during an active wait with a
   joined cleanup receipt. `LoopbackHandle::wait_until(&mut self, Instant)` is
   cancel-safe: dropping it loses neither the receiver, a callback already

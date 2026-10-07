@@ -108,6 +108,7 @@ pub mod session_recovery;
 pub mod session_store;
 pub mod skills;
 pub mod skills_config;
+pub mod slow_await;
 pub mod state;
 pub mod storage_diagnostics;
 pub mod storage_durability;

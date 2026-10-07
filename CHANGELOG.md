@@ -37,17 +37,21 @@ them.
 
 ### Breaking
 
-- Server-to-server credential requests follow no redirects (see Fixed),
-  which changes these Rust types:
+- The credential routes listed under Fixed (token, refresh and
+  device-code exchanges; the Claude, ChatGPT and Code Assist OAuth runtimes;
+  the Google and Azure credential exchanges; Code Assist onboarding; the
+  Copilot token transport and refresh; `HostAuthService`) follow no
+  redirects, which changes these Rust types:
   - `OAuthError` gains `RedirectRefused { status }` and
     `HttpClientUnavailable(CredentialHttpClientUnavailable)`;
   - `GoogleAuthError` and `AzureAuthError` gain `RedirectRefused { status }`
     and `HttpClientUnavailable`.
-  Behaviour-only (not measured by the gate): a `3xx` answer from a token,
-  refresh, device-code, credential-exchange, Copilot token or Code Assist
-  setup endpoint is now a typed refusal instead of being followed, and a
+  Behaviour-only (not measured by the gate): a `3xx` answer on one of those
+  routes is now a typed refusal instead of being followed, and a
   redirect-free client that fails to build fails each request instead of
-  falling back to a default client. `HostAuthService::with_http_client`
+  falling back to a default client. Other credential-bearing clients (MCP
+  Streamable HTTP, skills HTTP sources, the doctor self-hosted probe) are
+  not covered by this change. `HostAuthService::with_http_client`
   must be given a client that follows no redirects.
 
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
@@ -280,8 +284,8 @@ them.
 
 ### Fixed
 
-- Credential routes no longer follow redirects. The token and refresh
-  exchange, device-code requests, the Claude, ChatGPT and Code Assist OAuth
+- These credential routes no longer follow redirects: the token and
+  refresh exchange, device-code requests, the Claude, ChatGPT and Code Assist OAuth
   runtimes (including Claude API-key provisioning), the Google and Azure
   credential exchanges, the Code Assist onboarding client, the Copilot
   token exchange and the host auth service each use one redirect-free
@@ -290,7 +294,10 @@ them.
   nor the body is kept or rendered, and no grant, refresh token, device
   code or bearer reaches the redirect target. A client build failure is
   kept as `CredentialHttpClientUnavailable` instead of falling back to a
-  default client. Browser authorization redirects and loopback callbacks
+  default client. On the Google default chain, a refused redirect or an
+  unavailable client at the metadata server stays typed and transient
+  instead of becoming `NoCredentialSource`, so a refresh does not retire a
+  valid credential. Browser authorization redirects and loopback callbacks
   are unchanged.
 
 - Turbo S S106: a reopen whose retained conversation summary was followed by

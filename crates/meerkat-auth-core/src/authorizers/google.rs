@@ -320,7 +320,7 @@ impl GoogleAuthAuthorizer {
         // 3. Metadata server
         match self.fetch_from_metadata().await {
             Ok(t) => Ok(t),
-            Err(err) if default_chain_metadata_error_is_retryable(&err) => Err(err),
+            Err(err) if default_chain_keeps_metadata_error(&err) => Err(err),
             Err(_) => Err(GoogleAuthError::NoCredentialSource),
         }
     }
@@ -499,12 +499,18 @@ fn google_refresh_failure_observation(err: &GoogleAuthError) -> RefreshFailureOb
     }
 }
 
-fn default_chain_metadata_error_is_retryable(err: &GoogleAuthError) -> bool {
+/// Whether the default chain reports a metadata-server failure as itself
+/// rather than as `NoCredentialSource` (which classifies as an unusable
+/// credential). A transient metadata answer, a refused redirect and an
+/// unavailable client are route or host failures: collapsing them would let
+/// a refresh retire a valid credential.
+fn default_chain_keeps_metadata_error(err: &GoogleAuthError) -> bool {
     match err {
         GoogleAuthError::MetadataEndpoint { status, body } => {
             let _ = body;
             endpoint_failure_is_transient(*status)
         }
+        GoogleAuthError::RedirectRefused { .. } | GoogleAuthError::HttpClientUnavailable(_) => true,
         _ => false,
     }
 }
@@ -531,6 +537,80 @@ impl HttpAuthorizer for GoogleAuthAuthorizer {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// The default chain with no file credential falls back to the metadata
+    /// server. A refused redirect or an unavailable client there stays typed
+    /// and transient; it never becomes `NoCredentialSource`, which would
+    /// retire a valid credential on refresh.
+    #[tokio::test]
+    async fn default_chain_keeps_route_failures_typed_and_transient() {
+        use crate::auth_oauth::redirect_fixture::spawn_redirecting_endpoint;
+        let home = tempfile::tempdir().unwrap();
+        let (url, target_hits) = spawn_redirecting_endpoint().await;
+        let default_chain = || {
+            GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, Arc::new(|_| None))
+                .with_home_dir(home.path())
+                .with_metadata_url_override(url.clone())
+        };
+        let redirected = match default_chain().fetch_full_chain().await {
+            Err(error) => error,
+            Ok(_) => panic!("a redirect answer must not yield a token"),
+        };
+        assert!(
+            matches!(redirected, GoogleAuthError::RedirectRefused { status: 302 }),
+            "{redirected:?}"
+        );
+        assert_eq!(
+            google_refresh_failure_observation(&redirected),
+            RefreshFailureObservation::transient()
+        );
+        assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let mut unavailable = default_chain();
+        unavailable.http = Err(crate::auth_oauth::CredentialHttpClientUnavailable);
+        let error = match unavailable.fetch_full_chain().await {
+            Err(error) => error,
+            Ok(_) => panic!("no client must not yield a token"),
+        };
+        assert!(
+            matches!(error, GoogleAuthError::HttpClientUnavailable(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            google_refresh_failure_observation(&error),
+            RefreshFailureObservation::transient()
+        );
+    }
+
+    #[tokio::test]
+    async fn user_adc_refresh_redirect_is_refused_without_following_it() {
+        use crate::auth_oauth::redirect_fixture::{
+            BODY_CANARY, LOCATION_CANARY, spawn_redirecting_endpoint,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let adc = dir.path().join("adc.json");
+        std::fs::write(
+            &adc,
+            r#"{"client_id":"client","client_secret":"client-secret","refresh_token":"refresh-secret"}"#,
+        )
+        .unwrap();
+        let (url, target_hits) = spawn_redirecting_endpoint().await;
+        let authorizer =
+            GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, Arc::new(|_| None))
+                .with_token_url_override(url);
+        let error = match authorizer.fetch_from_user_adc(&adc).await {
+            Err(error) => error,
+            Ok(_) => panic!("a redirect answer must not yield a token"),
+        };
+        assert!(
+            matches!(error, GoogleAuthError::RedirectRefused { status: 302 }),
+            "{error:?}"
+        );
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains(LOCATION_CANARY) && !rendered.contains(BODY_CANARY));
+        assert!(!rendered.contains("refresh-secret"));
+        assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn metadata_endpoint_redirect_is_refused_without_following_it() {

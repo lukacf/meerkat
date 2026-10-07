@@ -1514,4 +1514,23 @@ mod tests {
             .build_client(connection)
             .expect("Google OAuth Code Assist should use the default cloudcode base URL");
     }
+
+    /// Structural pin for credential clients built inside a function (the
+    /// refresh and setup paths): the production part of this file builds no
+    /// HTTP client other than `credential_http_client`, so a revert to a
+    /// default client fails here.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn production_code_builds_only_the_redirect_free_credential_client() {
+        let source = include_str!("mod.rs");
+        let production = &source[..source.find("\nmod tests {").unwrap()];
+        for forbidden in [
+            concat!("Client", "::new()"),
+            concat!("Client", "::default()"),
+            concat!("Client", "::builder()"),
+        ] {
+            assert!(!production.contains(forbidden), "{forbidden}");
+        }
+        assert!(production.contains("credential_http_client()"));
+    }
 }

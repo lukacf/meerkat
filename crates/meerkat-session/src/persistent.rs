@@ -15855,8 +15855,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// commits it without exporting or encoding the full Session.
     /// Returns the committed message count and transcript digest so callers can
     /// seed a checkpointer without a second actor round-trip.
-    /// Save the full live session; WARNs while the save stays pending past
-    /// the slow-await threshold (diagnostics only).
+    ///
+    /// WARNs while the save stays pending past the slow-await threshold
+    /// (diagnostics only).
     async fn persist_full_session(&self, id: &SessionId) -> Result<(usize, String), SessionError> {
         meerkat_core::slow_await::warn_if_slow(
             id,

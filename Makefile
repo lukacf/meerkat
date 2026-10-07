@@ -1020,7 +1020,7 @@ help:
 	@echo "  $(GREEN)verify-machine-poster-coverage$(NC)- Check posters cover every canonical machine and advertise only canonical states/triggers"
 	@echo "  $(GREEN)path-classifier-selftest$(NC)- Check the shell path classifiers still route gate inputs"
 	@echo "  $(GREEN)check-rust-release-config$(NC)- Verify release Rust crate list and binary metadata"
-	@echo "  $(GREEN)check-crate-license-files$(NC)- Verify every release crate packages LICENSE-MIT and LICENSE-APACHE"
+	@echo "  $(GREEN)check-crate-license-files$(NC)- Verify every release crate packages exactly the license texts its license field names"
 	@echo "  $(GREEN)verify-lock-consistency$(NC)- Verify Cargo.lock resolves under --locked (merge danglers)"
 	@echo "  $(GREEN)verify-bazel-locks$(NC)    - Verify generated BUILD files + MODULE.bazel.lock freshness"
 	@echo "  $(GREEN)verify-bazel-locks-strict$(NC)- Same, with the bb lockfile check required"

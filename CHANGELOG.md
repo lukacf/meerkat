@@ -520,14 +520,19 @@ them.
   5.5 it accepts forced `tool_choice` and does not support mid-conversation
   system messages. Provider inference stays an exact catalog match: other
   uncatalogued `claude-*` IDs still fail loudly.
-- Published crates now include their license files. Every crate declares
-  `license = "MIT OR Apache-2.0"`, but cargo packages only files under the
-  crate directory, so 0.8.51 and earlier published every crate without
-  `LICENSE-MIT` or `LICENSE-APACHE`. Each release crate now carries symlinks
-  to the workspace-root files, which `cargo package` follows, and
+- Published crates now include their license files. Cargo packages only
+  files under the crate directory, so 0.8.51 and earlier published every
+  crate without `LICENSE-MIT` or `LICENSE-APACHE`. Each release crate now
+  carries symlinks to the workspace-root license texts its `license` field
+  names, which `cargo package` follows: both for `MIT OR Apache-2.0`, and
+  only `LICENSE-APACHE` for `meerkat-sandbox`, which is `Apache-2.0` alone
+  because it carries third-party Apache-2.0 code.
   `make check-crate-license-files` fails CI and release validation when a
-  release crate's `cargo package --list` lacks either file. The release
-  packaging check also verifies both files in every built `.crate` archive.
+  release crate's `cargo package --list` lacks a text its license
+  expression names or ships one it does not name, and the release packaging
+  check applies the same rule to every built `.crate` archive. Both derive
+  the texts from `cargo metadata` (`scripts/crate-license-files.sh`) and
+  fail closed on an expression they do not know.
 
 ### Testing
 

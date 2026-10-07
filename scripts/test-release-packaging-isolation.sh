@@ -73,6 +73,19 @@ EOF
 cat > "$FIXTURE/scripts/fake-cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# `cargo metadata` feeds scripts/crate-license-files.sh. Every fixture crate
+# is dual-licensed unless LICENSE_EXPR_CRATE names one whose expression is
+# LICENSE_EXPR.
+if [[ "${1:-}" == metadata ]]; then
+  packages=""
+  for name in alpha beta gamma; do
+    expression="MIT OR Apache-2.0"
+    [[ "${LICENSE_EXPR_CRATE:-}" == "$name" ]] && expression="${LICENSE_EXPR:?}"
+    packages+="${packages:+,}{\"name\":\"$name\",\"license\":\"$expression\"}"
+  done
+  printf '{"packages":[%s]}\n' "$packages"
+  exit 0
+fi
 : "${STATE_DIR:?}"
 : "${EXPECTED_PACKAGES:?}"
 : "${CARGO_TARGET_DIR:?}"
@@ -125,7 +138,9 @@ fi
 archive_root="$call_tmp.archive/$crate-0.0.0"
 mkdir -p "$archive_root"
 printf 'fixture archive\n' > "$archive_root/Cargo.toml"
-printf 'MIT\n' > "$archive_root/LICENSE-MIT"
+if [[ "${OMIT_MIT_CRATE:-}" != "$crate" ]]; then
+  printf 'MIT\n' > "$archive_root/LICENSE-MIT"
+fi
 if [[ "${OMIT_LICENSE_CRATE:-}" != "$crate" ]]; then
   printf 'Apache-2.0\n' > "$archive_root/LICENSE-APACHE"
 fi
@@ -269,5 +284,36 @@ grep -Fq "package archive lacks LICENSE-APACHE" "$license_log" ||
   fail "the archive missing its license file was not named" "$(cat "$license_log")"
 grep -Fq "gamma-0.0.0.crate" "$license_log" ||
   fail "the license failure did not name the archive" "$(cat "$license_log")"
+
+# An Apache-2.0-only crate ships LICENSE-APACHE alone.
+apache_state="$TEST_ROOT/apache-only"
+apache_log="$TEST_ROOT/apache-only.log"
+status="$(run_checker "$CHECKER" "$apache_state" "$apache_log" \
+  LICENSE_EXPR_CRATE=gamma LICENSE_EXPR=Apache-2.0 OMIT_MIT_CRATE=gamma)"
+if [[ "$status" -ne 0 ]]; then
+  fail "an Apache-2.0-only archive with only LICENSE-APACHE was rejected" "$(cat "$apache_log")"
+fi
+
+# The same crate shipping LICENSE-MIT would misstate its licensing.
+apache_mit_state="$TEST_ROOT/apache-only-mit"
+apache_mit_log="$TEST_ROOT/apache-only-mit.log"
+status="$(run_checker "$CHECKER" "$apache_mit_state" "$apache_mit_log" \
+  LICENSE_EXPR_CRATE=gamma LICENSE_EXPR=Apache-2.0)"
+if [[ "$status" -eq 0 ]]; then
+  fail "an Apache-2.0-only archive shipping LICENSE-MIT was accepted"
+fi
+grep -Fq "package archive ships LICENSE-MIT, which its license (Apache-2.0) does not name" "$apache_mit_log" ||
+  fail "the unexpected license text was not named" "$(cat "$apache_mit_log")"
+
+# An expression the gate does not know fails closed.
+unknown_state="$TEST_ROOT/unknown-expression"
+unknown_log="$TEST_ROOT/unknown-expression.log"
+status="$(run_checker "$CHECKER" "$unknown_state" "$unknown_log" \
+  LICENSE_EXPR_CRATE=gamma LICENSE_EXPR=GPL-3.0-only)"
+if [[ "$status" -eq 0 ]]; then
+  fail "an unsupported license expression was accepted"
+fi
+grep -Fq "unsupported license expression for gamma: GPL-3.0-only" "$unknown_log" ||
+  fail "the unsupported expression was not named" "$(cat "$unknown_log")"
 
 echo "release packaging isolation contract holds"

@@ -122,7 +122,8 @@ pub enum ToolDispatchTerminalErrorKind {
     CallbackPending,
     ConfinementRefused,
     HookDenied,
-    /// Appended so released ordinals stay stable.
+    // Appended so released ordinals stay stable. A plain comment, not a doc
+    // comment: a documented unit variant would split this schema enum.
     OutcomeUncertain,
 }
 

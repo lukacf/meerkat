@@ -250,7 +250,8 @@ async fn setup_mob()
     // Use the session service's persistent MeerkatMachine so autonomous-host
     // drains and runtime-backed turns share the durable runtime-store authority.
     let runtime_adapter = mob_service
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
         .expect("persistent pictionary smoke service should expose a runtime adapter");
 
     let handle = MobBuilder::new(pictionary_definition(), MobStorage::in_memory())

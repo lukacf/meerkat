@@ -24,6 +24,7 @@ pub mod factory;
 pub mod http;
 pub mod provider_runtime;
 pub mod realtime_session;
+pub mod request_authorization;
 pub mod streaming;
 pub mod test_client;
 pub mod types;
@@ -38,8 +39,8 @@ pub use realtime_session::{
 pub use test_client::TestClient;
 pub use types::{
     ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmReplayProjection, LlmRequest,
-    LlmRequestRouteWitness, LlmResponse, LlmStream, PreparedLlmRequest, ProviderGeneratedImage,
-    ProviderImageGenerationOutput, ProviderImageGenerationRequest, ToolCallBuffer,
-    WebSearchExecutor, dimensions_from_size_preference, media_type_from_format_preference,
-    normalize_base64_image_data,
+    LlmRequestRouteWitness, LlmResponse, LlmStream, PlainModelRoute, PreparedLlmRequest,
+    ProviderGeneratedImage, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
+    ToolCallBuffer, WebSearchExecutor, dimensions_from_size_preference,
+    media_type_from_format_preference, normalize_base64_image_data,
 };

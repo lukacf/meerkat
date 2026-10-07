@@ -60,7 +60,7 @@ export function serializePromptContentInput(
  *
  * Carries the stable wire `code` (e.g. `AGENT_ERROR`, `SESSION_BUSY`) emitted
  * by the WASM runtime's typed `{ code, message }` envelope, so callers can
- * classify a terminal fault without sniffing message strings.
+ * classify the error without sniffing message strings.
  */
 export class MeerkatError extends Error {
   readonly code: string;
@@ -76,7 +76,8 @@ export class MeerkatError extends Error {
   /**
    * Build a {@link MeerkatError} from a rejected WASM call. The rejection
    * reason is the runtime's `{ code, message }` JSON envelope (as a string or
-   * object); fall back to the raw reason when it is not a typed envelope.
+   * object), preserving its `data` or `details`; fall back to the raw reason
+   * when it is not a typed envelope.
    */
   static fromWasm(reason: unknown): MeerkatError {
     const envelope = parseErrorEnvelope(reason);
@@ -112,7 +113,8 @@ function parseErrorEnvelope(
     return undefined;
   }
   const message = typeof record.message === 'string' ? record.message : code;
-  return { code, message, data: record.data };
+  const data = Object.hasOwn(record, 'data') ? record.data : record.details;
+  return { code, message, data };
 }
 
 function normalizeSessionEvent(raw: unknown): SessionEvent {

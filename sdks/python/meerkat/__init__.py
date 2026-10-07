@@ -402,6 +402,9 @@ from .errors import (
 from .events import (
     AgentErrorClass,
     AgentErrorReason,
+    HookFailureReason,
+    UnknownHookFailureReason,
+    ConfinementRefusal,
     AgentErrorReport,
     BackgroundJobCompleted,
     BackgroundJobTerminalStatus,
@@ -818,6 +821,9 @@ __all__ = [
     # Events (base + all variants)
     "AgentErrorClass",
     "AgentErrorReason",
+    "HookFailureReason",
+    "UnknownHookFailureReason",
+    "ConfinementRefusal",
     "AgentErrorReport",
     "Event",
     "RunInput",

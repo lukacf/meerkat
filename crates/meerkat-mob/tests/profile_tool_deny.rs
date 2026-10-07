@@ -268,6 +268,65 @@ async fn a_deny_entry_in_no_tool_vocabulary_fails_the_spawn_typed() {
     }
 }
 
+/// The failed spawn's rollback compensates a registration that spawn created,
+/// so it joins that registration's unregister saga until terminal: a saga
+/// outliving the plain unregister's caller grace is cleanup in progress, and
+/// the typed build error still reaches the caller. The saga is held until the
+/// rollback has dispatched its wait, and the machine witnesses which wait
+/// that was, so no scheduling decides the outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deny_entry_in_no_tool_vocabulary_fails_the_spawn_typed_past_a_slow_rollback() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let client = Arc::new(ShellThenDoneClient {
+        marker: temp.path().join(MARKER),
+    });
+    let (service, adapter) = build_service(temp.path(), Arc::clone(&client)).await;
+    let storage = MobStorage::persistent(temp.path().join("mob.db")).expect("mob storage");
+    let handle = MobBuilder::new(mob_definition(&["mob_wier"]), storage)
+        .with_session_service(service.clone())
+        .with_runtime_adapter(adapter.clone())
+        .with_default_llm_client(client.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let (saga_entered, release_saga) = adapter.test_hold_next_unregister_saga();
+    let rollback_wait = adapter.test_witness_next_unregister_wait();
+    adapter.test_set_unregister_caller_wait_grace(Duration::ZERO);
+    let release_after_dispatch = async {
+        saga_entered
+            .await
+            .expect("the spawn rollback started an unregister saga");
+        let wait = rollback_wait
+            .await
+            .expect("the spawn rollback dispatched its wait on the held saga");
+        let _ = release_saga.send(());
+        wait
+    };
+    let (spawned, rollback_wait) = tokio::join!(
+        handle.spawn_spec(SpawnMemberSpec::new("peer", AgentIdentity::from("kitchen"))),
+        release_after_dispatch,
+    );
+    assert_eq!(
+        rollback_wait,
+        meerkat_runtime::UnregisterTeardownWaitWitness::UntilTerminal,
+        "the rollback joins its saga until terminal instead of answering within the caller grace"
+    );
+    let message = spawned
+        .expect_err("an unknown deny entry must fail the spawn")
+        .to_string();
+    for needle in [
+        "profile 'peer'",
+        "'mob_wier'",
+        "shell, comms",
+        "agent mob tools",
+    ] {
+        assert!(
+            message.contains(needle),
+            "{needle} missing from the spawn error: {message}"
+        );
+    }
+}
+
 /// A known tool the member does not mount is an inert deny entry: with
 /// `mob = false` the agent mob tools are not composed, yet `mob_wire` is in
 /// the agent mob tool vocabulary, so the member builds.

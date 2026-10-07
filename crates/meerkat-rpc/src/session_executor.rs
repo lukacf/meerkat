@@ -345,7 +345,11 @@ impl CoreExecutorBoundaryHandle for MobRpcRuntimeBoundaryHandle {
                 })
                 .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
         }
-        if let Some(adapter) = self.session_service.runtime_adapter() {
+        if let Some(adapter) = self
+            .session_service
+            .acquire_runtime_adapter(None)
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
+        {
             return self
                 .session_service
                 .cancel_after_boundary_with_machine_authority(
@@ -520,7 +524,11 @@ impl CoreExecutorInterruptHandle for MobRpcRuntimeInterruptHandle {
                 })
                 .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
         }
-        if let Some(adapter) = self.session_service.runtime_adapter() {
+        if let Some(adapter) = self
+            .session_service
+            .acquire_runtime_adapter(None)
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
+        {
             return self
                 .session_service
                 .interrupt_run_with_machine_authority(
@@ -678,6 +686,9 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
 
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(SessionRuntimeBoundaryHandle {
             runtime: Arc::clone(&self.runtime),
@@ -969,7 +980,8 @@ mod persistent_cleanup_tests {
             AgentFactory::new(temp.path().join("sessions")),
             Config::default(),
             2,
-            PersistenceBundle::new(session_store, runtime_store, blob_store),
+            PersistenceBundle::new(session_store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             NotificationSink::noop(),
         ));
         let service = runtime.persistent_service();
@@ -1044,6 +1056,9 @@ mod persistent_cleanup_tests {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl CoreExecutor for MobRpcRuntimeExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(MobRpcRuntimeBoundaryHandle {
             session_service: Arc::clone(&self.session_service),
@@ -1285,7 +1300,11 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 })
                 .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()));
         }
-        if let Some(adapter) = self.session_service.runtime_adapter() {
+        if let Some(adapter) = self
+            .session_service
+            .acquire_runtime_adapter(None)
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
+        {
             return self
                 .session_service
                 .cancel_current_after_boundary_with_machine_authority(
@@ -1353,7 +1372,8 @@ mod tests {
             meerkat::AgentFactory::new(temp.path().join("sessions")),
             meerkat::Config::default(),
             2,
-            meerkat::PersistenceBundle::new(session_store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(session_store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             NotificationSink::noop(),
         ));
         let service = runtime.persistent_service();

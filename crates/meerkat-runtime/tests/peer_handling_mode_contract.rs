@@ -33,6 +33,8 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {

@@ -2448,7 +2448,7 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// one machine. A service constructed directly, outside a composition,
     /// gets a machine of its own on first use, which lives and dies with this
     /// instance.
-    runtime_adapter: std::sync::OnceLock<Arc<MeerkatMachine>>,
+    runtime_adapter: std::sync::Mutex<Option<Arc<MeerkatMachine>>>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
     /// Gates for active keep-alive checkpointers, keyed by session ID.
@@ -7359,6 +7359,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.external_tool_surface_snapshot(id).await
     }
 
+    /// Pin the actual selected client while the caller holds this service's
+    /// exact actor turn-boundary lease. No serialized identity is resolved.
+    pub async fn pin_controller_client_for_actor(
+        &self,
+        lease: &LiveSessionActorTurnBoundaryLease,
+    ) -> Result<meerkat_core::ControllerModelClient, SessionError> {
+        self.pin_controller_client_for_actor_under_runtime_turn_boundary(lease.witness())
+            .await
+    }
+
+    /// Variant for the canonical materialization owner already holding the
+    /// runtime turn boundary. Reacquiring that boundary here would deadlock.
+    #[doc(hidden)]
+    pub async fn pin_controller_client_for_actor_under_runtime_turn_boundary(
+        &self,
+        witness: &crate::ephemeral::LiveSessionActorWitness,
+    ) -> Result<meerkat_core::ControllerModelClient, SessionError> {
+        self.inner.pin_controller_client_for_actor(witness).await
+    }
+
     pub async fn live_session_llm_identity(
         &self,
         id: &SessionId,
@@ -8899,7 +8919,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             incremental,
             runtime_store,
             blob_store,
-            runtime_adapter: std::sync::OnceLock::new(),
+            runtime_adapter: std::sync::Mutex::new(None),
             event_store: None,
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
@@ -8944,20 +8964,76 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     #[must_use]
     pub fn with_canonical_runtime_adapter(self, adapter: Arc<MeerkatMachine>) -> Self {
         // A fresh service has no machine yet; binding replaces nothing.
-        let _ = self.runtime_adapter.set(adapter);
+        let mut owner = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.is_none() {
+            *owner = Some(adapter);
+        }
+        drop(owner);
         self
     }
 
     /// The runtime machine hosting this service's session runtimes: the one
     /// the surface composition bound, or, for a service constructed directly,
     /// a machine of its own created on first use and owned by this instance.
-    pub fn canonical_runtime_adapter(&self) -> Arc<MeerkatMachine> {
-        Arc::clone(self.runtime_adapter.get_or_init(|| {
-            Arc::new(MeerkatMachine::persistent(
+    pub fn canonical_runtime_adapter(
+        &self,
+    ) -> Result<Arc<MeerkatMachine>, meerkat_runtime::RuntimeDriverError> {
+        self.acquire_canonical_runtime_adapter(None)
+    }
+
+    /// Acquire this service's one runtime owner. Failed initialization leaves
+    /// the service unbound; an explicit owner must share its physical store.
+    pub fn acquire_canonical_runtime_adapter(
+        &self,
+        explicit: Option<Arc<MeerkatMachine>>,
+    ) -> Result<Arc<MeerkatMachine>, meerkat_runtime::RuntimeDriverError> {
+        use meerkat_runtime::traits::ControllerReadinessFailure;
+        if explicit
+            .as_ref()
+            .is_some_and(|adapter| !adapter.shares_runtime_store_authority(&self.runtime_store))
+        {
+            return Err(
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: ControllerReadinessFailure::UnsupportedScope,
+                },
+            );
+        }
+        let mut owner = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = owner.as_ref() {
+            if !existing.shares_runtime_store_authority(&self.runtime_store) {
+                return Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: ControllerReadinessFailure::UnsupportedScope,
+                    },
+                );
+            }
+            if explicit
+                .as_ref()
+                .is_some_and(|adapter| !existing.shares_runtime_execution_owner_with(adapter))
+            {
+                return Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: ControllerReadinessFailure::AuthorityChanged,
+                    },
+                );
+            }
+            return Ok(Arc::clone(existing));
+        }
+        let adapter = match explicit {
+            Some(adapter) => adapter,
+            None => Arc::new(MeerkatMachine::persistent(
                 Arc::clone(&self.runtime_store),
                 Arc::clone(&self.blob_store),
-            ))
-        }))
+            )?),
+        };
+        *owner = Some(Arc::clone(&adapter));
+        Ok(adapter)
     }
 
     #[must_use]
@@ -22197,10 +22273,13 @@ mod tests {
             .await
             .expect("seed archived-resume RuntimeStore body");
 
-        let machine = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent(
+                Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("construct runtime authority"),
+        );
         machine
             .register_session(id.clone())
             .await
@@ -23190,7 +23269,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::new(probe.inner.clone()) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .register_session(id.clone())
             .await
@@ -26425,7 +26505,8 @@ mod tests {
             Arc::clone(&runtime_store),
             memory_blob_store(),
         );
-        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store())
+            .expect("construct runtime authority");
 
         let first = service
             .create_session(create_request("first", InitialTurnPolicy::Defer))
@@ -28273,7 +28354,8 @@ mod tests {
         let archive_runtime_store = Arc::clone(runtime_store);
         let archive_id = id.clone();
         tokio::spawn(async move {
-            let machine = MeerkatMachine::persistent(archive_runtime_store, memory_blob_store());
+            let machine = MeerkatMachine::persistent(archive_runtime_store, memory_blob_store())
+                .expect("construct runtime authority");
             archive_service
                 .archive_with_machine_protocol(
                     &archive_id,
@@ -28595,7 +28677,8 @@ mod tests {
             "second deferred session should be rejected while first is staged: {blocked:?}"
         );
 
-        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store())
+            .expect("construct runtime authority");
         service
             .archive_with_machine_protocol(
                 &staged.session_id,
@@ -28667,7 +28750,8 @@ mod tests {
         let machine = MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .register_session(id)
             .await
@@ -30936,6 +31020,7 @@ mod tests {
                         },
                     }],
                     is_error: false,
+                    settlement_failures: Vec::new(),
                 }],
                 created_at: std::time::SystemTime::UNIX_EPOCH.into(),
             });
@@ -32751,10 +32836,10 @@ mod tests {
                         .expect("seed committed HeadCanonical handoff");
                 }
             }
-            let machine = Arc::new(MeerkatMachine::persistent(
-                Arc::clone(&runtime_store),
-                Arc::clone(&blob_store),
-            ));
+            let machine = Arc::new(
+                MeerkatMachine::persistent(Arc::clone(&runtime_store), Arc::clone(&blob_store))
+                    .expect("construct runtime authority"),
+            );
             machine
                 .register_session(session_id.clone())
                 .await
@@ -33852,7 +33937,8 @@ mod tests {
             Arc::clone(&runtime_store),
             memory_blob_store(),
         );
-        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store())
+            .expect("construct runtime authority");
 
         let created = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
@@ -34040,7 +34126,8 @@ mod tests {
             Arc::clone(&runtime_store),
             memory_blob_store(),
         );
-        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store())
+            .expect("construct runtime authority");
 
         let created = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
@@ -34125,7 +34212,8 @@ mod tests {
             Arc::clone(&runtime_store),
             memory_blob_store(),
         );
-        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store())
+            .expect("construct runtime authority");
 
         let created = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
@@ -34239,7 +34327,8 @@ mod tests {
             Arc::clone(&blob_store),
         );
         let machine =
-            MeerkatMachine::persistent(Arc::clone(&runtime_store), Arc::clone(&blob_store));
+            MeerkatMachine::persistent(Arc::clone(&runtime_store), Arc::clone(&blob_store))
+                .expect("construct runtime authority");
 
         let created = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
@@ -34316,7 +34405,8 @@ mod tests {
             Arc::clone(&blob_store),
         );
         let reopened_machine =
-            MeerkatMachine::persistent(Arc::clone(&runtime_store), Arc::clone(&blob_store));
+            MeerkatMachine::persistent(Arc::clone(&runtime_store), Arc::clone(&blob_store))
+                .expect("construct runtime authority");
         reopened_service
             .archive_with_machine_protocol(
                 &id,
@@ -34633,7 +34723,8 @@ mod tests {
             Arc::clone(&runtime_store),
             memory_blob_store(),
         );
-        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store())
+            .expect("construct runtime authority");
 
         let created = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
@@ -35139,7 +35230,8 @@ mod tests {
             .expect("runtime turn admission should be reserved");
         let mismatched_runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
         let mismatched_machine =
-            meerkat_runtime::MeerkatMachine::persistent_without_blobs(mismatched_runtime_store);
+            meerkat_runtime::MeerkatMachine::persistent_without_blobs(mismatched_runtime_store)
+                .expect("construct runtime authority");
 
         let (error, returned_admission) = service
             .run_machine_committed_live_turn(
@@ -36052,7 +36144,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             runtime_store.clone() as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .register_session(session_id.clone())
             .await
@@ -37306,10 +37399,13 @@ mod tests {
             .expect("create generation-zero RuntimeStore authority");
         let id = created.session_id;
 
-        let machine = std::sync::Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = std::sync::Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent(
+                Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("construct runtime authority"),
+        );
         machine
             .register_session(id.clone())
             .await
@@ -37372,7 +37468,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .register_session(id.clone())
             .await
@@ -37447,7 +37544,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .register_session(id.clone())
             .await
@@ -37670,7 +37768,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .register_session(id.clone())
             .await
@@ -37778,10 +37877,13 @@ mod tests {
             .await
             .expect("seed active RuntimeStore body");
 
-        let machine = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent(
+                Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("construct runtime authority"),
+        );
         machine
             .register_session(id.clone())
             .await
@@ -37895,10 +37997,13 @@ mod tests {
             .await
             .expect("seed active runtime checkpoint authority");
 
-        let machine = std::sync::Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let machine = std::sync::Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent(
+                Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("construct runtime authority"),
+        );
         machine
             .register_session(id.clone())
             .await
@@ -37972,7 +38077,8 @@ mod tests {
         let first_process = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         first_process
             .register_session(id.clone())
             .await
@@ -37992,7 +38098,8 @@ mod tests {
         let restarted = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         assert!(
             !restarted.contains_session(&id).await,
             "cold restart must begin without an in-memory registration"
@@ -38064,7 +38171,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         service
             .archive_with_machine_protocol(
                 &id,
@@ -38128,7 +38236,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store),
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         service
             .archive_with_machine_protocol(
                 &id,
@@ -38184,7 +38293,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .prepare_bindings(id.clone())
             .await
@@ -38260,7 +38370,8 @@ mod tests {
         let first_process = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         first_process
             .prepare_bindings(id.clone())
             .await
@@ -38273,7 +38384,8 @@ mod tests {
         let restarted = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         let duplicate = service
             .archive_with_machine_protocol(
                 &id,
@@ -38340,7 +38452,8 @@ mod tests {
         let first_process = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         first_process
             .prepare_bindings(id.clone())
             .await
@@ -38353,7 +38466,8 @@ mod tests {
         let restarted = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         failing_store.fail_saves.store(true, Ordering::Release);
         let duplicate = service
             .archive_with_machine_protocol(
@@ -38420,7 +38534,8 @@ mod tests {
         let first_process = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         first_process
             .prepare_bindings(id.clone())
             .await
@@ -38433,7 +38548,8 @@ mod tests {
         let restarted = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         failing_store.fail_loads.store(true, Ordering::Release);
         let duplicate = service
             .archive_with_machine_protocol(
@@ -38490,7 +38606,8 @@ mod tests {
         let before_restart = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         before_restart
             .prepare_bindings(id.clone())
             .await
@@ -38506,7 +38623,8 @@ mod tests {
         let after_restart = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         assert!(
             !after_restart.contains_session(&id).await,
             "restart fixture must begin without a live runtime registration"
@@ -38633,10 +38751,13 @@ mod tests {
             .await
             .expect("seed RuntimeStore body");
 
-        let before_restart = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
-            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
-            memory_blob_store(),
-        ));
+        let before_restart = Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent(
+                Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+                memory_blob_store(),
+            )
+            .expect("construct runtime authority"),
+        );
         before_restart
             .prepare_bindings(id.clone())
             .await
@@ -38679,7 +38800,8 @@ mod tests {
         let after_restart = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         event_store.fail_appends();
         let first_archive_error = service
             .archive_with_machine_protocol(
@@ -38830,7 +38952,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .prepare_bindings(id.clone())
             .await
@@ -38908,7 +39031,8 @@ mod tests {
         let first_process = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         first_process
             .prepare_bindings(id.clone())
             .await
@@ -38927,7 +39051,8 @@ mod tests {
         let restarted = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         assert!(
             !restarted
                 .archive_runtime_residue_present(&id)
@@ -39005,7 +39130,8 @@ mod tests {
         let machine = meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        )
+        .expect("construct runtime authority");
         machine
             .register_session(id.clone())
             .await

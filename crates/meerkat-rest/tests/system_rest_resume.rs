@@ -58,7 +58,8 @@ async fn inner_test_rest_resume_metadata() {
         store.clone(),
         shared_runtime_store.clone(),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let runtime_adapter = persistence.runtime_adapter();
     let workgraph_store = persistence.workgraph_store();
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));
@@ -76,7 +77,8 @@ async fn inner_test_rest_resume_metadata() {
         Some(runtime_adapter.clone()),
         None,
         meerkat_mob::MobControlPrincipal::Owner,
-    );
+    )
+    .expect("wire runtime authority");
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store_arc),
@@ -199,7 +201,8 @@ async fn inner_test_rest_resume_metadata() {
         store.clone(),
         shared_runtime_store,
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let runtime_adapter2 = persistence2.runtime_adapter();
     let workgraph_store2 = persistence2.workgraph_store();
     builder2.default_session_store =
@@ -223,7 +226,8 @@ async fn inner_test_rest_resume_metadata() {
         Some(runtime_adapter2.clone()),
         None,
         meerkat_mob::MobControlPrincipal::Owner,
-    );
+    )
+    .expect("wire runtime authority");
     // The resume server's CONFIG carries deliberately divergent defaults
     // (model resolved per request via the canonical
     // `meerkat::resolve_create_session_default_model` ladder, max_tokens on

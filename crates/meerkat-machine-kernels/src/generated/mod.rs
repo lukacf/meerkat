@@ -3,6 +3,7 @@ pub mod approval_lifecycle;
 pub mod auth;
 pub mod detached_job;
 pub mod forked_participant_lifecycle;
+pub mod grant_authority;
 pub mod meerkat;
 pub mod mob;
 pub mod occurrence_lifecycle;

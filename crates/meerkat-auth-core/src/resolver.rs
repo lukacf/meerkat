@@ -518,9 +518,10 @@ impl ManagedStoreOAuthRefreshPreparationSlot {
                         } else {
                             ManagedStoreOAuthRefreshPreparationMode::RefreshOwner
                         };
-                        match prepare(current, mode).await.map_err(|error| {
-                            CredentialMutationError::AuthLifecycle(error.to_string())
-                        })? {
+                        match prepare(current, mode)
+                            .await
+                            .map_err(mutation_error_from_refresh)?
+                        {
                             LockedManagedStoreOAuthRefresh::UseCached(cached) => {
                                 Ok(CredentialMutationOutcome::Persisted(cached))
                             }
@@ -528,15 +529,13 @@ impl ManagedStoreOAuthRefreshPreparationSlot {
                                 .commit(returned)
                                 .await
                                 .map(CredentialMutationOutcome::Persisted)
-                                .map_err(|error| {
-                                    CredentialMutationError::AuthLifecycle(error.to_string())
-                                }),
+                                .map_err(mutation_error_from_refresh),
                         }
                     })
                 }),
             )
             .await
-            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+            .map_err(refresh_error_from_mutation)?;
         match outcome {
             CredentialMutationOutcome::Persisted(tokens) => Ok(tokens),
             CredentialMutationOutcome::Cleared => Err(RefreshError::Refresh(
@@ -562,35 +561,75 @@ pub struct PreparedManagedStoreOAuthRefresh {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PreparedManagedStoreOAuthRefresh {
-    /// Commit provider-refreshed tokens against the exact durable predecessor
-    /// captured under the refresh coordinator lock.
+    /// Commit under reacquired lifecycle custody. The coordinator remains held
+    /// by the caller, including compensation for this transaction's own write.
     pub async fn commit(self, refreshed: PersistedTokens) -> Result<PersistedTokens, RefreshError> {
-        match publish_managed_store_tokens_lifecycle_and_save(
+        publish_managed_store_tokens_lifecycle_and_save(
             &self.env,
             &self.binding,
             &self.previous,
             &refreshed,
         )
         .await
-        {
-            Ok(committed) => Ok(committed),
-            Err(error) => Err(self.fail(RefreshError::Refresh(error.to_string()))),
-        }
+        .map_err(refresh_error_from_provider)
     }
 
-    /// Publish the provider failure through AuthMachine authority while the
-    /// same prepared transaction still owns the lifecycle begun under lock.
-    pub fn fail(self, error: RefreshError) -> RefreshError {
-        let observation = error.observation();
+    /// A provider failure can close only the exact lifecycle and durable
+    /// predecessor captured before HTTP. A stale failure is not a new verdict.
+    pub async fn fail(self, error: RefreshError) -> RefreshError {
+        if matches!(&error, RefreshError::StalePreparation) {
+            return error;
+        }
+        let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(
+            self.binding.credential_identity(),
+        );
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+        let Some(auth) = self.env.auth_lease_handle.as_ref() else {
+            return RefreshError::Refresh("refresh authority is unavailable".into());
+        };
+        let stored = match self.previous.store.load(&self.previous.key).await {
+            Ok(stored) => stored,
+            Err(error) => return RefreshError::Refresh(error.to_string()),
+        };
+        if stored.as_ref() != Some(&self.previous.tokens)
+            || self.previous.lifecycle_snapshot.as_ref() != Some(&auth.snapshot(&lease_key))
+        {
+            return RefreshError::StalePreparation;
+        }
         match mark_managed_store_oauth_refresh_failed(
             &self.env,
             &self.binding,
             self.refresh_started,
-            observation,
+            error.observation(),
         ) {
             Ok(()) => error,
             Err(lifecycle_error) => RefreshError::Refresh(format!("{error}; {lifecycle_error}")),
         }
+    }
+}
+
+/// Preserve stale preparation across provider and coalesced-result boundaries.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn refresh_error_from_provider(error: ProviderAuthError) -> RefreshError {
+    match error {
+        ProviderAuthError::Auth(AuthError::StaleCredential) => RefreshError::StalePreparation,
+        other => RefreshError::Refresh(other.to_string()),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mutation_error_from_refresh(error: RefreshError) -> CredentialMutationError {
+    match error {
+        RefreshError::StalePreparation => CredentialMutationError::StalePreparation,
+        other => CredentialMutationError::AuthLifecycle(other.to_string()),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn refresh_error_from_mutation(error: CredentialMutationError) -> RefreshError {
+    match error {
+        CredentialMutationError::StalePreparation => RefreshError::StalePreparation,
+        other => RefreshError::Refresh(other.to_string()),
     }
 }
 
@@ -737,6 +776,7 @@ async fn restore_marked_token_lifecycle_if_absent(
     expected_mode: PersistedAuthMode,
     lease_key: &meerkat_core::handles::LeaseKey,
     now: chrono::DateTime<chrono::Utc>,
+    guard: Option<&meerkat_core::AuthLoginLifecycleGuard>,
 ) -> Result<(), ProviderAuthError> {
     let snapshot = auth_lease.snapshot(lease_key);
     if snapshot.phase.is_some()
@@ -746,16 +786,27 @@ async fn restore_marked_token_lifecycle_if_absent(
     {
         return Ok(());
     }
-    meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
-        store,
-        auth_lease,
-        binding.credential_identity(),
-        expected_mode,
-        now,
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| {
+    let restored = if let Some(guard) = guard {
+        meerkat_core::rehydrate_marked_tokens_for_status_for_identity_with_guard(
+            store,
+            auth_lease,
+            binding.credential_identity(),
+            expected_mode,
+            now,
+            guard,
+        )
+        .await
+    } else {
+        meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+            store,
+            auth_lease,
+            binding.credential_identity(),
+            expected_mode,
+            now,
+        )
+        .await
+    };
+    restored.map(|_| ()).map_err(|error| {
         ProviderAuthError::SourceResolutionFailed(format!(
             "AuthMachine lifecycle restore failed: {error}"
         ))
@@ -763,9 +814,84 @@ async fn restore_marked_token_lifecycle_if_absent(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManagedStorePurpose {
+    FreshResolution,
+    ExistingOwnerMaintenance,
+}
+
+/// Observe the existing generated credential owner while the caller holds its
+/// exact normalized lifecycle guard. This performs no token-store or network I/O.
+/// The returned snapshot is a comparison input, not reusable use authority.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn observe_existing_managed_store_lifecycle_with_guard(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
+) -> Result<
+    (
+        meerkat_core::handles::AuthLeaseSnapshot,
+        ManagedStoreLifecycle,
+    ),
+    ProviderAuthError,
+> {
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
+    if guard.lease_key() != &lease_key {
+        return Err(stale_credential_error());
+    }
+    let auth = env
+        .auth_lease_handle
+        .as_ref()
+        .ok_or_else(lease_absent_error)?;
+    // Sample only after the caller has acquired this exact guard.
+    observe_auth_lease_freshness_for_now(auth.as_ref(), &lease_key, (env.now)())?;
+    let lifecycle = match resolve_credential_use_admission(
+        auth,
+        &lease_key,
+        meerkat_core::handles::CredentialUseIntent::UseCredential,
+    )? {
+        CredentialUseDisposition::Authorized => ManagedStoreLifecycle::Authorized,
+        CredentialUseDisposition::RefreshRequired => ManagedStoreLifecycle::RefreshRequired,
+        CredentialUseDisposition::ReauthRequired => return Err(user_reauth_required_error()),
+        CredentialUseDisposition::RefreshDisallowed => return Err(refresh_required_error()),
+        CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::AlreadyRefreshing => {
+            return Err(lease_absent_error());
+        }
+    };
+    Ok((auth.snapshot(&lease_key), lifecycle))
+}
+
+/// Load managed material for fresh binding resolution, including the existing
+/// marked-token restoration path for a new process-local owner.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn load_managed_store_tokens_with_lifecycle(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
+) -> Result<ManagedStoreTokens, ProviderAuthError> {
+    load_managed_store_tokens_for_purpose(env, binding, ManagedStorePurpose::FreshResolution).await
+}
+
+/// Load for a retained managed client. Missing/released owners are refused before
+/// store I/O and may never be restored from durable token bytes by this route.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn load_existing_managed_store_tokens_with_lifecycle(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+) -> Result<ManagedStoreTokens, ProviderAuthError> {
+    load_managed_store_tokens_for_purpose(
+        env,
+        binding,
+        ManagedStorePurpose::ExistingOwnerMaintenance,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn load_managed_store_tokens_for_purpose(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    purpose: ManagedStorePurpose,
 ) -> Result<ManagedStoreTokens, ProviderAuthError> {
     let store = env
         .provider_auth_persistence()
@@ -783,6 +909,13 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     } else {
         None
     };
+    if purpose == ManagedStorePurpose::ExistingOwnerMaintenance {
+        observe_existing_managed_store_lifecycle_with_guard(
+            env,
+            binding,
+            lifecycle_guard.as_ref().ok_or_else(lease_absent_error)?,
+        )?;
+    }
     let tokens = store
         .load(&key)
         .await
@@ -799,15 +932,18 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .as_ref()
         .ok_or_else(lease_absent_error)?;
     let now = (env.now)();
-    restore_marked_token_lifecycle_if_absent(
-        auth_lease,
-        store.as_ref(),
-        binding,
-        expected_mode,
-        &lease_key,
-        now,
-    )
-    .await?;
+    if purpose == ManagedStorePurpose::FreshResolution {
+        restore_marked_token_lifecycle_if_absent(
+            auth_lease,
+            store.as_ref(),
+            binding,
+            expected_mode,
+            &lease_key,
+            now,
+            lifecycle_guard.as_ref(),
+        )
+        .await?;
+    }
     observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, now)?;
     let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let snapshot = restore_snapshot.snapshot().clone();
@@ -956,10 +1092,7 @@ fn begin_managed_store_oauth_refresh_lifecycle(
     if let Some(expected) = previous.lifecycle_snapshot.as_ref()
         && &current_snapshot != expected
     {
-        return Err(ProviderAuthError::SourceResolutionFailed(
-            "AuthMachine lifecycle changed before OAuth refresh; discarding stale refresh attempt"
-                .into(),
-        ));
+        return Err(stale_credential_error());
     }
     // The begin-refresh disposition is owned by the per-binding AuthMachine: we
     // feed only the typed `BeginRefresh` intent and mirror the verdict.
@@ -1000,6 +1133,84 @@ fn begin_managed_store_oauth_refresh_lifecycle(
     }
 }
 
+/// Consult the actual generated owner for legacy refresh preparation only.
+/// Callers must also verify the exact durable marker relation under lifecycle
+/// custody. This is not permission to use an expired credential as a bearer.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn legacy_refresh_owner_allows_preparation(
+    auth: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    lease: &meerkat_core::handles::LeaseKey,
+) -> Result<bool, meerkat_core::handles::DslTransitionError> {
+    use meerkat_core::handles::CredentialUseIntent;
+    match auth.resolve_credential_use_admission(lease, CredentialUseIntent::HoldAuthority)? {
+        CredentialUseDisposition::Authorized => Ok(true),
+        CredentialUseDisposition::RefreshRequired => Ok(auth
+            .resolve_credential_use_admission(lease, CredentialUseIntent::BeginRefresh)?
+            == CredentialUseDisposition::RefreshRequired),
+        _ => Ok(false),
+    }
+}
+
+/// Normalize an interrupted durable Refreshing publication only while the
+/// caller owns its existing refresh coordinator/file lock and this exact
+/// lifecycle guard. This is not a general status or recovery policy.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn normalize_interrupted_refresh_under_coordinator(
+    store: &dyn TokenStore,
+    auth: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    key: &TokenKey,
+    tokens: &PersistedTokens,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
+) -> Result<Option<PersistedTokens>, RefreshError> {
+    let lease =
+        meerkat_core::handles::LeaseKey::from_credential_identity(key.credential_identity());
+    if guard.lease_key() != &lease {
+        return Err(RefreshError::StalePreparation);
+    }
+    if meerkat_core::tokens_lifecycle_publication(tokens).and_then(|marker| marker.phase)
+        != Some(AuthLeasePhase::Refreshing)
+    {
+        return Ok(None);
+    }
+    let snapshot = auth.snapshot(&lease);
+    if durable_marker::marker_relation_for_tokens_and_snapshot(tokens, &snapshot, key)
+        != durable_marker::AuthLeaseDurableMarkerRelation::Matches
+    {
+        return Err(RefreshError::StalePreparation);
+    }
+    // Preserve current reauthentication/absence while permitting an expired
+    // credential that the generated owner admits for refresh preparation.
+    if !legacy_refresh_owner_allows_preparation(auth, &lease)
+        .map_err(|error| RefreshError::Refresh(error.to_string()))?
+    {
+        return Err(RefreshError::StalePreparation);
+    }
+    if snapshot.phase != Some(AuthLeasePhase::Refreshing) {
+        let restored = meerkat_core::rehydrate_durable_predecessor_for_mutation_for_identity(
+            store,
+            auth,
+            key.credential_identity(),
+            chrono::Utc::now(),
+            guard,
+        )
+        .await
+        .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+        if restored.as_ref() != Some(tokens) {
+            return Err(RefreshError::StalePreparation);
+        }
+    }
+    let closed = auth
+        .refresh_failed(&lease, RefreshFailureObservation::transient())
+        .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+    let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(key, tokens, &closed)
+        .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+    store
+        .save(key, &marked)
+        .await
+        .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+    Ok(Some(marked))
+}
+
 /// Establish the managed OAuth refresh baseline while the provider's
 /// [`RefreshCoordinator`] transaction is held.
 ///
@@ -1015,9 +1226,50 @@ fn begin_managed_store_oauth_refresh_lifecycle(
 pub async fn prepare_managed_store_oauth_refresh_under_lock(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
+    previous: ManagedStoreTokens,
+    locked_baseline: PersistedTokens,
+    mode: ManagedStoreOAuthRefreshPreparationMode,
+) -> Result<LockedManagedStoreOAuthRefresh, ProviderAuthError> {
+    prepare_managed_store_oauth_refresh_for_purpose(
+        env,
+        binding,
+        previous,
+        locked_baseline,
+        mode,
+        ManagedStorePurpose::FreshResolution,
+    )
+    .await
+}
+
+/// Recheck retained-client maintenance under the existing coordinator and exact
+/// lifecycle guard. A release during the wait may never become restoration.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn prepare_existing_managed_store_oauth_refresh_under_lock(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    previous: ManagedStoreTokens,
+    locked_baseline: PersistedTokens,
+    mode: ManagedStoreOAuthRefreshPreparationMode,
+) -> Result<LockedManagedStoreOAuthRefresh, ProviderAuthError> {
+    prepare_managed_store_oauth_refresh_for_purpose(
+        env,
+        binding,
+        previous,
+        locked_baseline,
+        mode,
+        ManagedStorePurpose::ExistingOwnerMaintenance,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn prepare_managed_store_oauth_refresh_for_purpose(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
     mut previous: ManagedStoreTokens,
     locked_baseline: PersistedTokens,
     mode: ManagedStoreOAuthRefreshPreparationMode,
+    purpose: ManagedStorePurpose,
 ) -> Result<LockedManagedStoreOAuthRefresh, ProviderAuthError> {
     if previous.lifecycle_guard.is_some() {
         return Err(ProviderAuthError::SourceResolutionFailed(
@@ -1030,7 +1282,18 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
     previous.lifecycle_guard =
         Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await);
 
-    let durable_baseline = previous
+    if purpose == ManagedStorePurpose::ExistingOwnerMaintenance {
+        observe_existing_managed_store_lifecycle_with_guard(
+            env,
+            binding,
+            previous
+                .lifecycle_guard
+                .as_ref()
+                .ok_or_else(lease_absent_error)?,
+        )?;
+    }
+
+    let mut durable_baseline = previous
         .store
         .load(&previous.key)
         .await
@@ -1041,9 +1304,7 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
             )
         })?;
     if durable_baseline != locked_baseline {
-        return Err(ProviderAuthError::SourceResolutionFailed(
-            "managed_store tokens changed after the coordinator-locked reload".into(),
-        ));
+        return Err(stale_credential_error());
     }
 
     let expected_mode = require_persisted_auth_mode(&durable_baseline, binding)?;
@@ -1056,7 +1317,77 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
         return Err(stale_credential_error());
     }
 
-    if durable_baseline == previous.tokens {
+    let mut owner_already_matches = false;
+    if purpose == ManagedStorePurpose::ExistingOwnerMaintenance {
+        // I/O may have waited. Observe again under retained custody before a
+        // rebase, without treating a durable marker as current use permission.
+        let (current, lifecycle) = observe_existing_managed_store_lifecycle_with_guard(
+            env,
+            binding,
+            previous
+                .lifecycle_guard
+                .as_ref()
+                .ok_or_else(lease_absent_error)?,
+        )?;
+        match durable_marker::marker_relation_for_tokens_and_snapshot(
+            &durable_baseline,
+            &current,
+            &previous.key,
+        ) {
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches => {
+                owner_already_matches = true;
+                let auth = env
+                    .auth_lease_handle
+                    .as_ref()
+                    .ok_or_else(lease_absent_error)?;
+                let captured = auth.capture_auth_lifecycle_restore_snapshot(&lease_key);
+                previous.lifecycle_snapshot = Some(captured.snapshot().clone());
+                previous.lifecycle_restore_snapshot = Some(captured);
+                previous.lifecycle = lifecycle;
+            }
+            durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer => {
+                // Only a changed locked row may advance the same credential
+                // publication observed at preload. Never reset a replacement.
+                let same_preload = previous.lifecycle_snapshot.as_ref().is_some_and(|preload| {
+                    preload.credential_present == current.credential_present
+                        && preload.generation == current.generation
+                        && preload.expires_at == current.expires_at
+                        && preload.credential_published_at_millis
+                            == current.credential_published_at_millis
+                });
+                if durable_baseline == previous.tokens || !same_preload {
+                    return Err(stale_credential_error());
+                }
+            }
+            durable_marker::AuthLeaseDurableMarkerRelation::TokenStale
+            | durable_marker::AuthLeaseDurableMarkerRelation::Invalid => {
+                return Err(stale_credential_error());
+            }
+        }
+    }
+
+    // Legacy normalization may not use the ordinary changed-token rebase to
+    // erase a newer or reauthentication owner before checking it.
+    if meerkat_core::tokens_lifecycle_publication(&durable_baseline).and_then(|marker| marker.phase)
+        == Some(AuthLeasePhase::Refreshing)
+    {
+        let auth = env
+            .auth_lease_handle
+            .as_ref()
+            .ok_or_else(lease_absent_error)?;
+        if durable_marker::marker_relation_for_tokens_and_snapshot(
+            &durable_baseline,
+            &auth.snapshot(&lease_key),
+            &previous.key,
+        ) != durable_marker::AuthLeaseDurableMarkerRelation::Matches
+            || !legacy_refresh_owner_allows_preparation(auth, &lease_key)
+                .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?
+        {
+            return Err(stale_credential_error());
+        }
+    }
+
+    if durable_baseline == previous.tokens || owner_already_matches {
         // Preserve byte-for-byte identity with the value loaded by the
         // coordinator-owned provider closure even when no rebase was needed.
         previous.tokens = durable_baseline.clone();
@@ -1076,12 +1407,16 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
                     "AuthMachine lifecycle rebase release failed: {error}"
                 ))
             })?;
-        let restored = meerkat_core::rehydrate_marked_tokens_for_status(
+        let restored = meerkat_core::rehydrate_marked_tokens_for_status_for_identity_with_guard(
             previous.store.as_ref(),
             auth_lease,
-            binding.auth_binding_ref(),
+            binding.credential_identity(),
             expected_mode,
             (env.now)(),
+            previous
+                .lifecycle_guard
+                .as_ref()
+                .ok_or_else(lease_absent_error)?,
         )
         .await
         .map_err(|error| {
@@ -1104,6 +1439,32 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
         previous.lifecycle_restore_snapshot = Some(restore_snapshot);
     }
 
+    let auth = env
+        .auth_lease_handle
+        .as_ref()
+        .ok_or_else(lease_absent_error)?;
+    if let Some(normalized) = normalize_interrupted_refresh_under_coordinator(
+        previous.store.as_ref(),
+        auth,
+        &previous.key,
+        &durable_baseline,
+        previous
+            .lifecycle_guard
+            .as_ref()
+            .ok_or_else(lease_absent_error)?,
+    )
+    .await
+    .map_err(|error| match error {
+        RefreshError::StalePreparation => stale_credential_error(),
+        other => ProviderAuthError::SourceResolutionFailed(other.to_string()),
+    })? {
+        durable_baseline = normalized;
+        previous.tokens = durable_baseline.clone();
+        let captured = auth.capture_auth_lifecycle_restore_snapshot(&lease_key);
+        previous.lifecycle_snapshot = Some(captured.snapshot().clone());
+        previous.lifecycle_restore_snapshot = Some(captured);
+    }
+
     let admission = resolve_oauth_login_credential_disposition(
         env,
         binding,
@@ -1120,6 +1481,7 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
         OAuthLoginCredentialAdmission::BeginRefresh => {
             let refresh_started =
                 begin_managed_store_oauth_refresh_lifecycle(env, binding, &mut previous)?;
+            previous.release_prelock_lifecycle_guard();
             Ok(LockedManagedStoreOAuthRefresh::Refresh(
                 PreparedManagedStoreOAuthRefresh {
                     env: env.clone(),
@@ -1155,6 +1517,7 @@ pub fn mark_managed_store_oauth_refresh_failed(
     }
     auth_lease
         .refresh_failed(&lease_key, observation)
+        .map(|_| ())
         .map_err(|e| {
             ProviderAuthError::SourceResolutionFailed(format!(
                 "AuthMachine lifecycle refresh_failed failed: {e}"
@@ -1403,6 +1766,8 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
     let current_snapshot = auth_lease.snapshot(&lease_key);
     if current_tokens.as_ref() != Some(&previous.tokens) {
+        // Preserve the existing exactly-published shared result control only
+        // when it is the result this caller supplied and the owner matches it.
         if let Some(current) = current_tokens.as_ref()
             && persisted_token_material_matches(current, refreshed)
             && durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -1410,67 +1775,91 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
                 &current_snapshot,
                 &previous.key,
             ) == durable_marker::AuthLeaseDurableMarkerRelation::Matches
+            && resolve_credential_use_admission(
+                auth_lease,
+                &lease_key,
+                meerkat_core::handles::CredentialUseIntent::UseCredential,
+            )? == CredentialUseDisposition::Authorized
         {
             return Ok(current.clone());
         }
-        return Err(ProviderAuthError::SourceResolutionFailed(
-            "managed_store tokens changed during OAuth refresh; discarding stale refresh result"
-                .into(),
-        ));
+        return Err(stale_credential_error());
     }
     if &current_snapshot != previous_snapshot {
-        return Err(ProviderAuthError::SourceResolutionFailed(
-            "AuthMachine lifecycle changed during OAuth refresh; discarding stale refresh result"
-                .into(),
-        ));
+        return Err(stale_credential_error());
     }
 
-    let transition = publish_managed_store_tokens_refresh_lifecycle(env, binding, refreshed)?;
-    let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+    let transition = match publish_managed_store_tokens_refresh_lifecycle(env, binding, refreshed) {
+        Ok(transition) => transition,
+        Err(error) => {
+            // A rejected completion has not transferred authority. Close only
+            // our unchanged captured refresh, never a newer owner or a prior
+            // closure performed inside the publication helper.
+            if &auth_lease.snapshot(&lease_key) == previous_snapshot
+                && previous_snapshot.phase == Some(AuthLeasePhase::Refreshing)
+                && let Err(closure) =
+                    auth_lease.refresh_failed(&lease_key, RefreshFailureObservation::transient())
+            {
+                return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                    "{error}; refresh closure failed: {closure}"
+                )));
+            }
+            return Err(error);
+        }
+    };
+    let committed = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
         &previous.key,
         refreshed,
         &transition,
-    )
-    .map_err(|err| ProviderAuthError::SourceResolutionFailed(err.to_string()))?;
-    if let Err(save_error) = previous.store.save(&previous.key, &committed).await {
-        let mut rollback_errors = Vec::new();
-        if let Err(err) = auth_lease.release_credential_lifecycle(&lease_key) {
-            rollback_errors.push(format!(
-                "AuthMachine lifecycle rollback release failed: {err}"
-            ));
-        }
-        let mut restored_previous = previous.tokens.clone();
-        let restored_transition = match meerkat_core::restore_token_lifecycle_snapshot(
-            auth_lease,
-            previous_restore_snapshot,
-        ) {
-            Ok(restored_transition) => restored_transition,
-            Err(err) => {
-                rollback_errors.push(format!("AuthMachine lifecycle rollback failed: {err}"));
-                None
+    ) {
+        Ok(committed) => match previous.store.save(&previous.key, &committed).await {
+            Ok(()) => return Ok(committed),
+            Err(error) => {
+                format!("TokenStore save failed after AuthMachine lifecycle acquire: {error}")
             }
-        };
-        if let Some(restored_transition) = restored_transition {
-            restored_previous = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &previous.key,
-                &previous.tokens,
-                &restored_transition,
-            )
-            .map_err(|err| ProviderAuthError::SourceResolutionFailed(err.to_string()))?;
-        }
-        if let Err(err) = previous.store.save(&previous.key, &restored_previous).await {
-            rollback_errors.push(format!("TokenStore rollback save failed: {err}"));
-        }
-        let rollback_suffix = if rollback_errors.is_empty() {
-            String::new()
+        },
+        Err(error) => format!("refreshed credential marker failed: {error}"),
+    };
+    // This transaction has already changed the owner. Its own compensation
+    // must not compare against the pre-write generation or call outer fail.
+    let rollback = async {
+        auth_lease
+            .release_credential_lifecycle(&lease_key)
+            .map_err(|error| format!("AuthMachine lifecycle rollback release failed: {error}"))?;
+        let restored =
+            meerkat_core::restore_token_lifecycle_snapshot(auth_lease, previous_restore_snapshot)
+                .map_err(|error| format!("AuthMachine lifecycle rollback failed: {error}"))?
+                .ok_or_else(|| {
+                    "AuthMachine lifecycle rollback returned no credential".to_string()
+                })?;
+        let closed = if restored.phase() == AuthLeasePhase::Refreshing {
+            auth_lease
+                .refresh_failed(&lease_key, RefreshFailureObservation::transient())
+                .map_err(|error| format!("AuthMachine rollback refresh closure failed: {error}"))?
         } else {
-            format!("; {}", rollback_errors.join("; "))
+            restored
         };
-        return Err(ProviderAuthError::SourceResolutionFailed(format!(
-            "TokenStore save failed after AuthMachine lifecycle acquire: {save_error}{rollback_suffix}"
-        )));
+        let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &previous.key,
+            &previous.tokens,
+            &closed,
+        )
+        .map_err(|error| format!("rollback marker failed: {error}"))?;
+        previous
+            .store
+            .save(&previous.key, &marked)
+            .await
+            .map_err(|error| format!("TokenStore rollback save failed: {error}"))?;
+        Ok::<(), String>(())
     }
-    Ok(committed)
+    .await;
+    let suffix = rollback
+        .err()
+        .map(|error| format!("; {error}"))
+        .unwrap_or_default();
+    Err(ProviderAuthError::SourceResolutionFailed(format!(
+        "{committed}{suffix}"
+    )))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3343,7 +3732,7 @@ mod tests {
                 .unwrap_err();
 
         assert!(
-            err.to_string().contains("changed during OAuth refresh"),
+            matches!(&err, ProviderAuthError::Auth(AuthError::StaleCredential)),
             "got {err}"
         );
         let snapshot = auth_lease.snapshot(&lease_key);
@@ -3407,6 +3796,144 @@ mod tests {
         assert_eq!(after_refresh.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(after_refresh.generation, before_refresh.generation + 1);
         assert!(after_refresh.credential_present);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn account_alias_oauth_rebase_preserves_exact_credential_identity() {
+        let template =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let identity =
+            meerkat_core::AuthCredentialIdentity::Account(meerkat_core::CredentialAccountRef {
+                realm: template.auth_binding_ref().realm.clone(),
+                account: meerkat_core::CredentialAccountId::parse("shared_oauth").unwrap(),
+            });
+        let lease_key = LeaseKey::from_credential_identity(&identity);
+        let key = TokenKey::from_credential_identity(&identity);
+        for alias in ["alias_one", "alias_two"] {
+            let mut binding_ref = template.auth_binding_ref().clone();
+            binding_ref.binding = meerkat_core::connection::BindingId::parse(alias).unwrap();
+            let binding = ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+                &binding_ref,
+                identity.clone(),
+                template.backend_profile(),
+                template.auth_profile(),
+                template.policy(),
+            )
+            .expect("real catalog accepts a managed account binding");
+            let alias_key = LeaseKey::from_auth_binding(&binding_ref);
+            assert_ne!(lease_key, alias_key);
+            let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+            let publisher = generated_auth_lease_handle_for_test(Arc::new(
+                meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+            ));
+            let raw_a = chatgpt_oauth_tokens("account-rebase-a");
+            let acquired = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                &publisher, &identity, &raw_a,
+            )
+            .unwrap();
+            let marked_a = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key, &raw_a, &acquired,
+            )
+            .unwrap();
+            store.save(&key, &marked_a).await.unwrap();
+            let local = generated_auth_lease_handle_for_test(Arc::new(
+                meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+            ));
+            meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+                store.as_ref(),
+                &local,
+                &identity,
+                PersistedAuthMode::ChatgptOauth,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap()
+            .expect("local owner starts with account A");
+            let previous = managed_store_tokens(
+                Arc::clone(&store),
+                key.clone(),
+                marked_a.clone(),
+                Some(local.snapshot(&lease_key)),
+                Some(local.capture_auth_lifecycle_restore_snapshot(&lease_key)),
+                ManagedStoreLifecycle::RefreshRequired,
+                None,
+            );
+            let raw_b = chatgpt_oauth_tokens("account-rebase-b");
+            publisher.begin_refresh(&lease_key).unwrap();
+            let refreshed = publisher
+                .complete_refresh(
+                    &lease_key,
+                    meerkat_core::persisted_token_expires_at_epoch_secs(&raw_b),
+                    chrono::Utc::now().timestamp().max(0) as u64,
+                )
+                .unwrap();
+            let marked_b = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key, &raw_b, &refreshed,
+            )
+            .unwrap();
+            assert_ne!(marked_a, marked_b, "must execute the durable rebase branch");
+            store.save(&key, &marked_b).await.unwrap();
+            let env = ResolverEnvironment::testing()
+                .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
+                .with_auth_lease_handle(local.clone());
+            let locked_store = Arc::clone(&store);
+            let locked_key = key.clone();
+            let refresh: RefreshFn = Box::new(move || {
+                Box::pin(async move {
+                    let locked = locked_store
+                        .load(&locked_key)
+                        .await
+                        .map_err(|error| RefreshError::Refresh(error.to_string()))?
+                        .ok_or_else(|| RefreshError::Refresh("fixture account absent".into()))?;
+                    match prepare_managed_store_oauth_refresh_under_lock(
+                        &env,
+                        &binding,
+                        previous,
+                        locked,
+                        ManagedStoreOAuthRefreshPreparationMode::AdoptPublished,
+                    )
+                    .await
+                    .map_err(|error| RefreshError::Refresh(error.to_string()))?
+                    {
+                        LockedManagedStoreOAuthRefresh::UseCached(tokens) => Ok(tokens),
+                        LockedManagedStoreOAuthRefresh::Refresh(_) => Err(RefreshError::Refresh(
+                            "adopting a published account must not request a refresh".into(),
+                        )),
+                    }
+                })
+            });
+            let coordinator = crate::InMemoryCoordinator::new();
+            let adopted = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                coordinator.with_forced_refresh(key.clone(), refresh),
+            )
+            .await
+            .expect("same-key coordinator and lifecycle guard do not recurse")
+            .expect("account rebase must not validate the guard against its binding alias");
+            assert_eq!(adopted, marked_b);
+            assert_eq!(store.load(&key).await.unwrap(), Some(marked_b.clone()));
+            assert_eq!(
+                local.snapshot(&lease_key).phase,
+                Some(AuthLeasePhase::Valid)
+            );
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &marked_b,
+                    &local.snapshot(&lease_key),
+                    &key,
+                ),
+                durable_marker::AuthLeaseDurableMarkerRelation::Matches,
+            );
+            assert_eq!(local.snapshot(&alias_key).phase, None);
+            assert!(
+                store
+                    .load(&TokenKey::from_auth_binding(&binding_ref))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "file-lock"))]
@@ -3551,9 +4078,11 @@ mod tests {
                                 rotated.refresh_token = Some("refresh-c".into());
                             }
                             other => {
-                                return Err(transaction.fail(RefreshError::Refresh(format!(
-                                    "unexpected rotating-token baseline: {other:?}"
-                                ))));
+                                return Err(transaction
+                                    .fail(RefreshError::Refresh(format!(
+                                        "unexpected rotating-token baseline: {other:?}"
+                                    )))
+                                    .await);
                             }
                         }
                         rotated.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
@@ -4082,7 +4611,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            err.to_string().contains("changed during OAuth refresh"),
+            matches!(&err, ProviderAuthError::Auth(AuthError::StaleCredential)),
             "got {err}"
         );
         let stored = store.load(&key).await.unwrap().unwrap();
@@ -4132,6 +4661,20 @@ mod tests {
 
         assert_eq!(second, first);
         assert_eq!(second, store.load(&key).await.unwrap().unwrap());
+        // The same bytes no longer establish usability after the actual owner
+        // requires reauthentication. Marker equality deliberately omits phase.
+        let owner = env.auth_lease_handle.as_ref().unwrap();
+        owner.mark_reauth_required(&lease_key).unwrap();
+        let refused_owner = owner.snapshot(&lease_key);
+        let rejected =
+            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
+                .await;
+        assert!(matches!(
+            rejected,
+            Err(ProviderAuthError::Auth(AuthError::StaleCredential))
+        ));
+        assert_eq!(owner.snapshot(&lease_key), refused_owner);
+        assert_eq!(store.load(&key).await.unwrap(), Some(first));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4180,7 +4723,7 @@ mod tests {
                 .unwrap_err();
 
         assert!(
-            err.to_string().contains("changed during OAuth refresh"),
+            matches!(&err, ProviderAuthError::Auth(AuthError::StaleCredential)),
             "got {err}"
         );
         assert_eq!(
@@ -4253,5 +4796,531 @@ mod tests {
             lease.kind(),
             meerkat_core::ResolvedAuthKind::DynamicAuthorizer(_)
         ));
+    }
+
+    // C-e: real generated owner controls, not a mutable snapshot fake.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn ce_status_fixture() -> (
+        Arc<dyn TokenStore>,
+        GeneratedAuthLeaseHandle,
+        PersistedTokens,
+    ) {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth = generated_auth_lease_handle_for_test(handle);
+        let key = default_test_token_key();
+        let lease = default_test_lease_key();
+        let raw = chatgpt_oauth_tokens("ce-status-original");
+        let transition = auth
+            .acquire_lease(
+                &lease,
+                meerkat_core::persisted_token_expires_at_epoch_secs(&raw),
+            )
+            .unwrap();
+        let marked =
+            meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &raw, &transition)
+                .unwrap();
+        store.save(&key, &marked).await.unwrap();
+        (store, auth, marked)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn ce_status_preserves_phase(phase: AuthLeasePhase) {
+        let (store, auth, original) = ce_status_fixture().await;
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let lease = default_test_lease_key();
+        match phase {
+            AuthLeasePhase::Refreshing => auth.begin_refresh(&lease).unwrap(),
+            AuthLeasePhase::ReauthRequired => auth.mark_reauth_required(&lease).unwrap(),
+            _ => panic!("only the two live-phase controls are supported"),
+        }
+        let before = auth.snapshot(&lease);
+        assert_eq!(before.phase, Some(phase));
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &original,
+                &before,
+                &default_test_token_key()
+            ),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches
+        );
+        let status = meerkat_core::rehydrate_marked_tokens_for_status(
+            store.as_ref(),
+            &auth,
+            binding.auth_binding_ref(),
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await;
+        let after = auth.snapshot(&lease);
+        let disposition = auth
+            .resolve_credential_use_admission(
+                &lease,
+                meerkat_core::handles::CredentialUseIntent::HoldAuthority,
+            )
+            .unwrap();
+        assert!(status.is_ok(), "a matching publication remains readable");
+        assert_eq!(
+            after, before,
+            "status must not replace an actual live phase with the durable Valid marker"
+        );
+        assert_eq!(
+            store.load(&default_test_token_key()).await.unwrap(),
+            Some(original)
+        );
+        let expected = if phase == AuthLeasePhase::Refreshing {
+            meerkat_core::handles::CredentialUseDisposition::Authorized
+        } else {
+            meerkat_core::handles::CredentialUseDisposition::ReauthRequired
+        };
+        assert_eq!(
+            disposition, expected,
+            "the generated owner still decides use"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn ce_status_preserves_matching_refreshing() {
+        ce_status_preserves_phase(AuthLeasePhase::Refreshing).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn ce_status_preserves_matching_reauth_required() {
+        ce_status_preserves_phase(AuthLeasePhase::ReauthRequired).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn ce_status_absent_newer_and_unmarked_controls() {
+        let (store, original_auth, original) = ce_status_fixture().await;
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = default_test_token_key();
+        let lease = default_test_lease_key();
+        let fresh = generated_auth_lease_handle_for_test(Arc::new(
+            meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+        ));
+        let absent = meerkat_core::rehydrate_marked_tokens_for_status(
+            store.as_ref(),
+            &fresh,
+            binding.auth_binding_ref(),
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            absent,
+            Some(original.clone()),
+            "positive cold restore remains supported"
+        );
+        assert_eq!(fresh.snapshot(&lease), original_auth.snapshot(&lease));
+        let newer_raw = chatgpt_oauth_tokens("ce-status-newer");
+        let newer = mark_tokens_lifecycle_published_after_time_for_test(
+            &newer_raw,
+            2,
+            marker_credential_published_at_for_test(&original),
+        );
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &newer,
+                &fresh.snapshot(&lease),
+                &key
+            ),
+            durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
+        );
+        store.save(&key, &newer).await.unwrap();
+        let restored = meerkat_core::rehydrate_marked_tokens_for_status(
+            store.as_ref(),
+            &fresh,
+            binding.auth_binding_ref(),
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            restored,
+            Some(newer.clone()),
+            "positive newer durable publication is restored"
+        );
+        let before_unmarked = fresh.snapshot(&lease);
+        let unmarked = chatgpt_oauth_tokens("ce-unmarked");
+        store.save(&key, &unmarked).await.unwrap();
+        let rejected = meerkat_core::rehydrate_marked_tokens_for_status(
+            store.as_ref(),
+            &fresh,
+            binding.auth_binding_ref(),
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            rejected.is_none(),
+            "unmarked bytes cannot restore a publication"
+        );
+        assert_eq!(fresh.snapshot(&lease), before_unmarked);
+        // Nonmatching durable restoration keeps its existing contract. Stale
+        // refresh-result behavior is tested at the actual HTTP transaction.
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn ce_coalesced_finish_preserves_typed_stale_preparation() {
+        let store = Arc::new(crate::auth_store::EphemeralTokenStore::new());
+        let key = default_test_token_key();
+        let tokens = chatgpt_oauth_tokens("coalesced-stale");
+        store.save(&key, &tokens).await.unwrap();
+        let slot = ManagedStoreOAuthRefreshPreparationSlot::new(Box::new(|_, _| {
+            Box::pin(async { Err(RefreshError::StalePreparation) })
+        }));
+        let result = slot
+            .finish_coordinated_refresh(
+                Arc::new(crate::auth_store::InMemoryCoordinator::new()),
+                store.clone(),
+                key.clone(),
+                tokens.clone(),
+            )
+            .await;
+        assert!(matches!(result, Err(RefreshError::StalePreparation)));
+        assert_eq!(store.load(&key).await.unwrap(), Some(tokens));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    mod retained_maintenance {
+        use super::*;
+
+        async fn fixture(
+            present: bool,
+        ) -> (
+            ResolverEnvironment,
+            ValidatedBinding,
+            Arc<dyn TokenStore>,
+            GeneratedAuthLeaseHandle,
+            PersistedTokens,
+        ) {
+            let binding =
+                simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+            let key = TokenKey::from_credential_identity(binding.credential_identity());
+            let lease = LeaseKey::from_credential_identity(binding.credential_identity());
+            let owner = generated_auth_lease_handle_for_test(Arc::new(
+                meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+            ));
+            let publisher = if present {
+                owner.clone()
+            } else {
+                generated_auth_lease_handle_for_test(Arc::new(
+                    meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+                ))
+            };
+            let tokens = chatgpt_oauth_tokens("maintenance-original");
+            let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+            let acquired = publisher
+                .acquire_lease(
+                    &lease,
+                    meerkat_core::persisted_token_expires_at_epoch_secs(&tokens),
+                )
+                .unwrap();
+            let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key, &tokens, &acquired,
+            )
+            .unwrap();
+            let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+            store.save(&key, &marked).await.unwrap();
+            drop(guard);
+            let env = ResolverEnvironment::testing()
+                .with_provider_auth_persistence(test_provider_auth_persistence(store.clone()))
+                .with_auth_lease_handle(owner.clone());
+            (env, binding, store, owner, marked)
+        }
+
+        #[tokio::test]
+        async fn fresh_resolution_still_restores_an_absent_owner() {
+            let (env, binding, store, owner, marked) = fixture(false).await;
+            let lease = LeaseKey::from_credential_identity(binding.credential_identity());
+            let key = TokenKey::from_credential_identity(binding.credential_identity());
+            assert!(!owner.snapshot(&lease).credential_present);
+            let loaded = load_managed_store_tokens_with_lifecycle(&env, &binding)
+                .await
+                .unwrap();
+            assert_eq!(loaded.tokens, marked);
+            assert_eq!(loaded.lifecycle, ManagedStoreLifecycle::Authorized);
+            assert_eq!(owner.snapshot(&lease).phase, Some(AuthLeasePhase::Valid));
+            drop(loaded);
+            assert_eq!(store.load(&key).await.unwrap(), Some(marked));
+        }
+        #[tokio::test]
+        async fn existing_maintenance_cannot_restore_absent_owner() {
+            let (env, binding, store, owner, marked) = fixture(false).await;
+            let lease = LeaseKey::from_credential_identity(binding.credential_identity());
+            let key = TokenKey::from_credential_identity(binding.credential_identity());
+            let before = owner.snapshot(&lease);
+            let result = load_existing_managed_store_tokens_with_lifecycle(&env, &binding).await;
+            assert!(matches!(
+                result,
+                Err(ProviderAuthError::Auth(AuthError::LeaseAbsent))
+            ));
+            assert_eq!(owner.snapshot(&lease), before);
+            assert_eq!(store.load(&key).await.unwrap(), Some(marked));
+        }
+
+        #[tokio::test]
+        async fn existing_maintenance_rechecks_release_before_locked_rebase() {
+            for changed_row in [false, true] {
+                let (env, binding, store, owner, original) = fixture(true).await;
+                let lease = LeaseKey::from_credential_identity(binding.credential_identity());
+                let key = TokenKey::from_credential_identity(binding.credential_identity());
+                let mut previous =
+                    load_existing_managed_store_tokens_with_lifecycle(&env, &binding)
+                        .await
+                        .unwrap();
+                assert_eq!(previous.lifecycle, ManagedStoreLifecycle::Authorized);
+                previous.release_prelock_lifecycle_guard();
+                owner.release_lease(&lease).unwrap();
+                let released = owner.snapshot(&lease);
+                assert!(!released.credential_present);
+                let durable = if changed_row {
+                    let publisher = generated_auth_lease_handle_for_test(Arc::new(
+                        meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+                    ));
+                    let mut tokens = original.clone();
+                    tokens.primary_secret = Some("maintenance-later-marked-row".into());
+                    let expiry = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+                    publisher.acquire_lease(&lease, expiry).unwrap();
+                    publisher.begin_refresh(&lease).unwrap();
+                    let transition = publisher
+                        .complete_refresh(
+                            &lease,
+                            expiry,
+                            chrono::Utc::now().timestamp().max(0) as u64,
+                        )
+                        .unwrap();
+                    meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                        &key,
+                        &tokens,
+                        &transition,
+                    )
+                    .unwrap()
+                } else {
+                    original
+                };
+                store.save(&key, &durable).await.unwrap();
+                let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let observed_in_refresh = observed.clone();
+                let locked_store = store.clone();
+                let locked_key = key.clone();
+                let refresh: RefreshFn = Box::new(move || {
+                    Box::pin(async move {
+                        let locked = locked_store.load(&locked_key).await.unwrap().unwrap();
+                        match prepare_existing_managed_store_oauth_refresh_under_lock(
+                            &env,
+                            &binding,
+                            previous,
+                            locked,
+                            ManagedStoreOAuthRefreshPreparationMode::AdoptPublished,
+                        )
+                        .await
+                        {
+                            Err(error) => {
+                                observed_in_refresh.store(
+                                    matches!(
+                                        &error,
+                                        ProviderAuthError::Auth(AuthError::LeaseAbsent)
+                                    ),
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                                Err(refresh_error_from_provider(error))
+                            }
+                            Ok(_) => Err(RefreshError::Refresh("unexpected admission".into())),
+                        }
+                    })
+                });
+                let coordinator = crate::InMemoryCoordinator::new();
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    coordinator.with_forced_refresh(key.clone(), refresh),
+                )
+                .await
+                .expect("actual coordinator and lease custody finish");
+                assert!(result.is_err());
+                assert!(
+                    observed.load(std::sync::atomic::Ordering::SeqCst),
+                    "changed_row={changed_row}: exact typed owner absence must reach the callback"
+                );
+                assert_eq!(owner.snapshot(&lease), released);
+                assert_eq!(store.load(&key).await.unwrap(), Some(durable));
+            }
+        }
+
+        struct LoadCountingStore {
+            inner: Arc<dyn TokenStore>,
+            loads: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl TokenStore for LoadCountingStore {
+            async fn load(
+                &self,
+                key: &TokenKey,
+            ) -> Result<Option<PersistedTokens>, meerkat_core::auth::TokenStoreError> {
+                self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.inner.load(key).await
+            }
+            async fn save(
+                &self,
+                key: &TokenKey,
+                tokens: &PersistedTokens,
+            ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+                self.inner.save(key, tokens).await
+            }
+            async fn clear(
+                &self,
+                key: &TokenKey,
+            ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+                self.inner.clear(key).await
+            }
+            async fn list(&self) -> Result<Vec<TokenKey>, meerkat_core::auth::TokenStoreError> {
+                self.inner.list().await
+            }
+            fn backend_name(&self) -> &'static str {
+                self.inner.backend_name()
+            }
+        }
+
+        #[tokio::test]
+        async fn absent_or_released_maintenance_preload_never_reads_the_store() {
+            for released in [false, true] {
+                let (env, binding, store, owner, marked) = fixture(released).await;
+                let lease = LeaseKey::from_credential_identity(binding.credential_identity());
+                let key = TokenKey::from_credential_identity(binding.credential_identity());
+                if released {
+                    owner.release_lease(&lease).unwrap();
+                }
+                let before = owner.snapshot(&lease);
+                assert!(!before.credential_present);
+                let counted = Arc::new(LoadCountingStore {
+                    inner: store.clone(),
+                    loads: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let env = env.with_provider_auth_persistence(test_provider_auth_persistence(
+                    counted.clone(),
+                ));
+                let result =
+                    load_existing_managed_store_tokens_with_lifecycle(&env, &binding).await;
+                assert!(
+                    matches!(result, Err(ProviderAuthError::Auth(AuthError::LeaseAbsent))),
+                    "released={released}: only exact current owner absence may refuse preload"
+                );
+                assert_eq!(
+                    counted.loads.load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "released={released}: marked storage must not be read to resurrect an owner"
+                );
+                assert_eq!(owner.snapshot(&lease), before);
+                assert_eq!(store.load(&key).await.unwrap(), Some(marked));
+            }
+        }
+
+        async fn assert_locked_newer_publication(replace_owner: bool) {
+            let (env, binding, store, owner, _) = fixture(true).await;
+            let lease = LeaseKey::from_credential_identity(binding.credential_identity());
+            let key = TokenKey::from_credential_identity(binding.credential_identity());
+            assert_eq!(key, default_test_token_key());
+            let mut previous = load_existing_managed_store_tokens_with_lifecycle(&env, &binding)
+                .await
+                .unwrap();
+            assert_eq!(previous.lifecycle, ManagedStoreLifecycle::Authorized);
+            let preload = owner.snapshot(&lease);
+            previous.release_prelock_lifecycle_guard();
+            if replace_owner {
+                let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+                owner.release_lease_with_guard(&lease, &guard).unwrap();
+                owner
+                    .acquire_lease(&lease, preload.expires_at.unwrap())
+                    .unwrap();
+                drop(guard);
+            }
+            let before = owner.snapshot(&lease);
+            assert!(before.credential_present);
+            assert_eq!(before != preload, replace_owner);
+            let next = chatgpt_oauth_tokens("maintenance-newer-locked-publication");
+            // This helper uses actual generated Acquire/Begin/Complete outputs,
+            // waiting only for their real publication clock to exceed `before`.
+            let durable = mark_tokens_lifecycle_published_after_time_for_test(
+                &next,
+                before.generation + 1,
+                before.credential_published_at_millis.unwrap(),
+            );
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(&durable, &before, &key),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
+            );
+            store.save(&key, &durable).await.unwrap();
+            let locked_store = store.clone();
+            let locked_key = key.clone();
+            let prepare_env = env.clone();
+            let prepare_binding = binding.clone();
+            let refresh: RefreshFn = Box::new(move || {
+                Box::pin(async move {
+                    let locked = locked_store.load(&locked_key).await.unwrap().unwrap();
+                    match prepare_existing_managed_store_oauth_refresh_under_lock(
+                        &prepare_env,
+                        &prepare_binding,
+                        previous,
+                        locked,
+                        ManagedStoreOAuthRefreshPreparationMode::AdoptPublished,
+                    )
+                    .await
+                    .map_err(refresh_error_from_provider)?
+                    {
+                        LockedManagedStoreOAuthRefresh::UseCached(tokens) => Ok(tokens),
+                        LockedManagedStoreOAuthRefresh::Refresh(_) => Err(RefreshError::Refresh(
+                            "adoption unexpectedly started a provider exchange".into(),
+                        )),
+                    }
+                })
+            });
+            let coordinator = crate::InMemoryCoordinator::new();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                coordinator.with_forced_refresh(key.clone(), refresh),
+            )
+            .await
+            .expect("actual coordinator and generated owner finish");
+            if replace_owner {
+                assert!(
+                    matches!(result, Err(RefreshError::StalePreparation)),
+                    "a changed actual owner must not be reset from a later durable row"
+                );
+                assert_eq!(owner.snapshot(&lease), before);
+            } else {
+                assert_eq!(result.unwrap(), durable);
+                let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+                let (after, lifecycle) =
+                    observe_existing_managed_store_lifecycle_with_guard(&env, &binding, &guard)
+                        .unwrap();
+                assert_eq!(lifecycle, ManagedStoreLifecycle::Authorized);
+                assert_eq!(after.phase, Some(AuthLeasePhase::Valid));
+                assert!(after.generation > before.generation);
+                assert_eq!(
+                    durable_marker::marker_relation_for_tokens_and_snapshot(&durable, &after, &key),
+                    durable_marker::AuthLeaseDurableMarkerRelation::Matches
+                );
+                drop(guard);
+            }
+            assert_eq!(store.load(&key).await.unwrap(), Some(durable));
+        }
+
+        #[tokio::test]
+        async fn existing_maintenance_adopts_newer_locked_row_from_same_owner() {
+            assert_locked_newer_publication(false).await;
+        }
+
+        #[tokio::test]
+        async fn existing_maintenance_rejects_newer_locked_row_after_owner_replacement() {
+            assert_locked_newer_publication(true).await;
+        }
     }
 }

@@ -174,7 +174,7 @@ impl StdioChildCustody {
     }
 
     /// The spawned process id, once spawned.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     #[allow(clippy::expect_used)]
     pub(crate) async fn spawned_pid(&self) -> u32 {
         let mut spawned = self.spawned.subscribe();

@@ -15,15 +15,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use meerkat_auth_core::EphemeralTokenStore;
 use meerkat_auth_core::auth_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
 };
+use meerkat_auth_core::{EphemeralTokenStore, auth_store::InMemoryCoordinator};
 use meerkat_core::handles::{AuthLeasePhase, GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{
     AuthBindingRef, AuthCredentialIdentity, CredentialAccountId, CredentialAccountRef,
-    TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
-    clear_tokens_and_publish_lifecycle_released_for_identity,
+    auth::token_store::{CredentialMutationError, ProviderAuthPersistence},
+    clear_tokens_and_publish_lifecycle_released_coordinated,
+    clear_tokens_and_publish_lifecycle_released_coordinated_for_identity,
     mark_tokens_lifecycle_published_for_transition, publish_token_lifecycle_acquired,
     publish_token_lifecycle_acquired_for_identity, rehydrate_marked_tokens_for_status,
 };
@@ -122,15 +123,19 @@ impl TokenStore for FailingClearStore {
 
 #[tokio::test]
 async fn clear_destroys_durable_record_and_releases_lease() {
-    let store = EphemeralTokenStore::new();
+    let store = Arc::new(EphemeralTokenStore::new());
     let handle = test_auth_lease();
     let auth_binding = binding();
-    let key = publish_and_save(&store, &handle, &auth_binding).await;
+    let key = publish_and_save(store.as_ref(), &handle, &auth_binding).await;
     assert!(store.load(&key).await.unwrap().is_some());
 
-    clear_tokens_and_publish_lifecycle_released(&store, &handle, &auth_binding)
-        .await
-        .expect("clear succeeds");
+    clear_tokens_and_publish_lifecycle_released_coordinated(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        handle.clone(),
+        auth_binding.clone(),
+    )
+    .await
+    .expect("clear succeeds");
 
     assert!(
         store.load(&key).await.unwrap().is_none(),
@@ -145,7 +150,7 @@ async fn clear_destroys_durable_record_and_releases_lease() {
 
 #[tokio::test]
 async fn account_clear_destroys_the_shared_credential_and_lease() {
-    let store = EphemeralTokenStore::new();
+    let store = Arc::new(EphemeralTokenStore::new());
     let handle = test_auth_lease();
     let identity = AuthCredentialIdentity::Account(CredentialAccountRef {
         realm: meerkat_core::RealmId::global(),
@@ -160,9 +165,13 @@ async fn account_clear_destroys_the_shared_credential_and_lease() {
         .expect("mark account token");
     store.save(&key, &marked).await.expect("save account token");
 
-    clear_tokens_and_publish_lifecycle_released_for_identity(&store, &handle, &identity)
-        .await
-        .expect("clear account credential");
+    clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        handle.clone(),
+        identity.clone(),
+    )
+    .await
+    .expect("clear account credential");
 
     assert!(store.load(&key).await.unwrap().is_none());
     let snapshot = handle.snapshot(&LeaseKey::from_credential_identity(&identity));
@@ -171,19 +180,23 @@ async fn account_clear_destroys_the_shared_credential_and_lease() {
 
 #[tokio::test]
 async fn failed_clear_changes_nothing_durable_or_projected() {
-    let store = FailingClearStore {
+    let store = Arc::new(FailingClearStore {
         inner: EphemeralTokenStore::new(),
         fail_clear: AtomicBool::new(false),
-    };
+    });
     let handle = test_auth_lease();
     let auth_binding = binding();
-    let key = publish_and_save(&store, &handle, &auth_binding).await;
+    let key = publish_and_save(store.as_ref(), &handle, &auth_binding).await;
     store.fail_clear.store(true, Ordering::Release);
 
-    let err = clear_tokens_and_publish_lifecycle_released(&store, &handle, &auth_binding)
-        .await
-        .expect_err("injected clear failure must propagate");
-    assert!(matches!(err, TokenLifecycleClearError::TokenStoreClear(_)));
+    let err = clear_tokens_and_publish_lifecycle_released_coordinated(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        handle.clone(),
+        auth_binding.clone(),
+    )
+    .await
+    .expect_err("injected clear failure must propagate");
+    assert!(matches!(err, CredentialMutationError::TokenStore(_)));
 
     // Stage-then-commit ordering: the durable commit failed, so the staged
     // lease release is rolled back — durable record untouched, lease live.
@@ -200,7 +213,7 @@ async fn failed_clear_changes_nothing_durable_or_projected() {
 
 #[tokio::test]
 async fn rehydrate_releases_lease_whose_durable_record_is_gone() {
-    let store = EphemeralTokenStore::new();
+    let store = Arc::new(EphemeralTokenStore::new());
     let handle = test_auth_lease();
     let auth_binding = binding();
 
@@ -213,7 +226,7 @@ async fn rehydrate_releases_lease_whose_durable_record_is_gone() {
     assert!(credential_present, "fixture: lease holds a live credential");
 
     let rehydrated = rehydrate_marked_tokens_for_status(
-        &store,
+        store.as_ref(),
         &handle,
         &auth_binding,
         PersistedAuthMode::ChatgptOauth,

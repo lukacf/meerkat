@@ -91,6 +91,8 @@ fn generated_admission_projection(
     let transition = mm_dsl::MeerkatMachineMutator::apply(
         &mut authority,
         mm_dsl::MeerkatMachineInput::ResolveAdmissionPlan {
+            authority_binding: None,
+            authority_batch_key: None,
             input_id: input_id.clone(),
             input_kind: mm_dsl::AdmissionInputKind::from(input_kind),
             requested_lane,

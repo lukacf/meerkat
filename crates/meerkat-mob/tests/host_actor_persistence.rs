@@ -270,7 +270,8 @@ async fn controlling_restart_recovers_host_facts_from_durable_records() {
             meerkat_mob::MobStorage::persistent(&paths.mob_db_path).expect("persistent storage");
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
         let runtime_adapter = mob_service
-            .runtime_adapter()
+            .acquire_runtime_adapter(None)
+            .expect("acquire runtime authority")
             .expect("persistent service exposes a runtime adapter");
         let handle = meerkat_mob::MobBuilder::new(
             support::controlling_mob_definition(mob_id.clone()),
@@ -304,7 +305,8 @@ async fn controlling_restart_recovers_host_facts_from_durable_records() {
         meerkat_mob::MobStorage::persistent(&paths.mob_db_path).expect("reopen persistent storage");
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
     let runtime_adapter = mob_service
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
         .expect("persistent service exposes a runtime adapter");
     let resumed = meerkat_mob::MobBuilder::for_resume(storage)
         .with_session_service(mob_service)

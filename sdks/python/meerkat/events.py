@@ -29,12 +29,14 @@ Example::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict, cast
 from uuid import UUID
 
 from .errors import MeerkatError
 from .generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
 from .generated.event_types import (
+    ConfinementRefusal,
+    HookFailureReason as NativeHookFailureReason,
     LiveChannelId,
     LiveContextObservationId,
     ObjectiveId,
@@ -496,13 +498,25 @@ class HookCompleted(Event):
     duration_ms: int = 0
 
 
+class UnknownHookFailureReason(TypedDict):
+    """SDK wrapper retaining an unrecognized native cause's exact wire object."""
+
+    reason_code: Literal["unknown"]
+    raw_reason_code: str
+    raw: dict[str, Any]
+
+
+HookFailureReason: TypeAlias = NativeHookFailureReason | UnknownHookFailureReason
+
+
 @dataclass(frozen=True, slots=True)
 class HookFailed(Event):
-    """A hook invocation failed."""
+    """A hook invocation failed; error is the display projection of reason."""
 
     hook_id: HookId = ""
     point: str = ""
     error: str = ""
+    reason: HookFailureReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1192,6 +1206,47 @@ def _require_non_negative_int(raw: dict[str, Any], field_name: str) -> int:
     return value
 
 
+_CONFINEMENT_REFUSAL_MESSAGES = {
+    "invalid_requirement": "invalid execution confinement requirement",
+    "invalid_launch": "invalid confined process launch",
+    "unsupported_requirement": "required execution confinement is unsupported by this backend",
+    "backend_unavailable": "required execution confinement backend is unavailable",
+    "preparation_failed": "confined process preparation failed",
+}
+
+
+def _parse_hook_failure_reason(raw: Any) -> HookFailureReason:
+    if not isinstance(raw, dict):
+        raise ValueError("hook reason must be object")
+    code = _require_str(raw, "reason_code")
+    if code == "timeout":
+        _require_non_negative_int(raw, "timeout_ms")
+    elif code in {"execution_failed", "config_invalid"}:
+        _require_str(raw, "message")
+    elif code == "observe_only_violation":
+        pass
+    elif code == "confinement_refused":
+        refusal = _require_str(raw, "refusal")
+        if refusal not in _CONFINEMENT_REFUSAL_MESSAGES:
+            return {"reason_code": "unknown", "raw_reason_code": code, "raw": raw}
+    else:
+        return {"reason_code": "unknown", "raw_reason_code": code, "raw": raw}
+    return cast(NativeHookFailureReason, raw)
+
+
+def _hook_failure_message(reason: HookFailureReason) -> str:
+    code = reason["reason_code"]
+    if code == "timeout":
+        return f"hook timed out after {reason['timeout_ms']}ms"
+    if code in {"execution_failed", "config_invalid"}:
+        return reason["message"]
+    if code == "observe_only_violation":
+        return "background hooks are observe-only"
+    if code == "confinement_refused":
+        return _CONFINEMENT_REFUSAL_MESSAGES[reason["refusal"]]
+    return "unknown hook failure"
+
+
 def _require_bool(raw: dict[str, Any], field_name: str) -> bool:
     value = raw.get(field_name)
     if not isinstance(value, bool):
@@ -1458,7 +1513,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         # typed `retry` schedule, the flat legacy shape is still accepted.
         "hook_started": ("hook_id", "point"),
         "hook_completed": ("hook_id", "point", "duration_ms"),
-        "hook_failed": ("hook_id", "point", "error"),
+        "hook_failed": ("hook_id", "point"),
         "hook_denied": ("hook_id", "point", "reason_code", "message"),
         "skills_resolved": ("skills", "injection_bytes"),
         "interaction_complete": ("interaction_id", "result"),
@@ -1468,6 +1523,11 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         raw.get("assistant_message_id"), str
     ):
         raise ValueError("assistant_message_id must be string")
+    if event_type == "hook_failed":
+        if "reason" in raw:
+            _parse_hook_failure_reason(raw["reason"])
+        else:
+            _require_str(raw, "error")
     if event_type == "retrying":
         _parse_retry_projection(raw)
     if event_type == "interaction_failed":
@@ -1671,6 +1731,9 @@ def parse_event(raw: dict[str, Any]) -> Event:
         if cls is RunFailed and kwargs["error_report"] is not None:
             kwargs["error_class"] = kwargs["error_report"].class_
             kwargs["error"] = kwargs["error_report"].message
+        if cls is HookFailed and "reason" in raw:
+            kwargs["reason"] = _parse_hook_failure_reason(raw["reason"])
+            kwargs["error"] = _hook_failure_message(kwargs["reason"])
         if cls is Retrying:
             kwargs.update(_parse_retry_projection(raw))
         return cls(**kwargs)

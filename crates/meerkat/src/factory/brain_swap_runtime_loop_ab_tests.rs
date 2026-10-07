@@ -805,7 +805,8 @@ async fn attach_harness(
         Arc::clone(&session_store),
         Arc::clone(&runtime_store),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
 
     // Built through the PRODUCTION composition, not a hand-wired blueprint.
     // The canonical reconfigure host is installed by the same code path every

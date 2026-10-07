@@ -148,6 +148,17 @@ function assertArchivedLanes(plan, label) {
   assertLanes(plan, "cli + session");
 }
 
+// Runtime's ordinary unit tests remain in the pull request even when its
+// authorization dependency has native facade fixtures in its own dev graph.
+{
+  const plan = planFor(["crates/meerkat-runtime/src/lib.rs"]);
+  assert.equal(plan.pr_unit_budget_minutes, 16, "runtime uses the unchanged pull-request unit budget");
+  assert.deepEqual(plan.unit_shards.map((shard) => shard.packages), [["meerkat-runtime"]], "runtime retains its pull-request unit lane");
+  assert.deepEqual(plan.unit_deferred, [], "runtime unit tests are not deferred");
+  assert.ok(!plan.unit_deferred_chain.includes("meerkat-runtime"), "runtime remains outside the mob build chain");
+  assert.ok(plan.unit_shards[0].estimated_minutes <= plan.pr_unit_budget_minutes, "runtime's unit lane fits the budget");
+}
+
 // Budget by construction: every package outside the chain models under the
 // pull-request unit budget on its own, so no changed-package plan can
 // exceed it; every package inside the chain is deferred.
@@ -484,12 +495,12 @@ for (const path of [
   const names = (plan) => plan.integration_suites.map((suite) => suite.packages[0]);
   assert.deepEqual(
     names(planFor(["crates/meerkat-runtime/src/lib.rs"])),
-    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat", "meerkat-integration-tests"],
+    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat", "meerkat-integration-tests", "meerkat-authorization"],
   );
   assert.deepEqual(
     names(planFor(["crates/meerkat-machine-schema/src/lib.rs"])),
-    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat-machine-kernels"],
-    "a machine schema or DSL change runs the runtime, codegen parity and kernel oracle suites",
+    ["meerkat-runtime", "meerkat-machine-codegen", "meerkat-machine-kernels", "meerkat-authorization"],
+    "a machine schema or DSL change runs the runtime, codegen parity, kernel oracle and authorization suites",
   );
   assert.deepEqual(
     names(planFor(["crates/meerkat-mob/src/lib.rs"])),
@@ -504,11 +515,11 @@ for (const path of [
   assert.equal(store.integration_suites[0].name, "meerkat-store-restart");
   assert.match(store.integration_suites[0].package_flags, /^-p meerkat --features .*\bsession-store\b/);
   assert.match(store.integration_suites[0].test_flags, /--test cold_restart_resume_after_compaction\b/);
-  assert.deepEqual(names(planFor(["crates/meerkat-tools/src/lib.rs"])), []);
+  assert.deepEqual(names(planFor(["crates/meerkat-tools/src/lib.rs"])), ["meerkat-authorization"]);
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
   assert.deepEqual(
     names(planFor(["Cargo.toml"])),
-    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat-integration-tests"],
+    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat-integration-tests", "meerkat-authorization"],
     "workspace mode runs every suite",
   );
   // The gpt-live replays: a public Live path package or a fixture change
@@ -520,6 +531,37 @@ for (const path of [
   assert.equal(replay.integration_suites[0].test_flags, "--test gpt_live_replay");
   const fixture = planFor(["tests/integration/fixtures/gpt_live_replay/s104.provider-stream.jsonl"]);
   assert.deepEqual(names(fixture), ["meerkat-integration-tests"], "a fixture-only change runs the replays");
+  // Authorization's native model/tool loops and ordinary cost controls are
+  // integration binaries, so its default-feature unit row cannot run them.
+  for (const path of [
+    "crates/meerkat-authorization/src/grant_policy.rs",
+    "crates/meerkat-authorization/tests/native_governed_loop.rs",
+    "crates/meerkat-authorization/tests/native_cost.rs",
+    "crates/meerkat-authorization-contracts/src/grant.rs",
+    "crates/meerkat-core/src/agent/state.rs",
+    "crates/meerkat-runtime/src/store/execution_custody.rs",
+    "crates/meerkat/src/session_factory.rs",
+    "crates/meerkat-tools/src/lib.rs",
+    "crates/meerkat-llm-core/src/lib.rs",
+    "crates/meerkat-anthropic/src/lib.rs",
+    "crates/meerkat-auth-core/src/lib.rs",
+    "crates/meerkat-models/src/lib.rs",
+    "crates/meerkat-machine-schema/src/lib.rs",
+    "crates/meerkat-machine-dsl/src/lib.rs",
+    "crates/meerkat-machine-dsl-core/src/lib.rs",
+    "crates/meerkat-machine-derive/src/lib.rs",
+    "crates/meerkat-machine-kernels/src/lib.rs",
+  ]) {
+    const authorization = planFor([path]);
+    const selected = authorization.integration_suites.filter((suite) => suite.packages[0] === "meerkat-authorization");
+    assert.equal(selected.length, 1, `${path} selects exactly one native authorization suite`);
+    assert.equal(selected[0].package_flags, "-p meerkat-authorization", "ordinary native fixtures keep default features and ignored acceptance opt-in");
+  }
+  const authorizationGithub = run(["--format", "github", "--", "crates/meerkat-authorization/tests/native_governed_loop.rs"]);
+  assert.equal(authorizationGithub.status, 0, authorizationGithub.stderr);
+  const authorizationLines = Object.fromEntries(authorizationGithub.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  assert.equal(authorizationLines.integration_count, "1");
+  assert.deepEqual(JSON.parse(authorizationLines.integration_matrix).include.map((row) => row.packages), ["-p meerkat-authorization"]);
   // xtask's integration tests pin the workflows: an xtask change or a
   // workflow-only edit (a plan with no Rust change) runs them, with the
   // feature its machines_contracts target requires.
@@ -533,12 +575,13 @@ for (const path of [
   assert.equal(github.status, 0, github.stderr);
   const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   const rows = JSON.parse(lines.integration_matrix).include;
-  assert.equal(Number(lines.integration_count), 4);
+  assert.equal(Number(lines.integration_count), 5);
   assert.deepEqual(rows.map((row) => row.packages.split(" --features")[0]), [
     "-p meerkat-runtime",
     "-p meerkat-machine-codegen",
     "-p meerkat",
     "-p meerkat-integration-tests",
+    "-p meerkat-authorization",
   ]);
   assert.equal(rows[3].packages, "-p meerkat-integration-tests --features gpt-live-replay");
   assert.deepEqual(rows.map((row) => row.tests), [
@@ -546,6 +589,7 @@ for (const path of [
     undefined,
     "--test cold_restart_resume_after_compaction --test cold_restart_resume --test persistence_contract --test storage_provider_seam --test brain_swap_surface_parity",
     "--test gpt_live_replay",
+    undefined,
   ]);
   const docsGithub = run(["--format", "github", "--", "docs/index.mdx"]);
   const docsLines = Object.fromEntries(docsGithub.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));

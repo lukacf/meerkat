@@ -543,11 +543,26 @@ derives its `errorClass` and `error` display fields from that report.
 `retry` schedule: `attempt`, `maxAttempts`, `error` and `delayMs` are
 projections of `retry.plan.attempt`, `retry.plan.max_retries`,
 `retry.failure.message` and `retry.plan.selected_delay_ms`, and the schedule
-itself is kept in `retry`. The flat legacy shape is still accepted. The
-handwritten `HookFailedEvent` parser still expects the legacy flat `error`
-field; current wire events carry `reason`, so those payloads arrive as
-`MalformedEvent` with raw data preserved. That is a remaining SDK parser gap,
-not an alternate wire contract.
+itself is kept in `retry`. The flat legacy shape is still accepted.
+
+`HookFailedEvent.reason` contains a known native cause or an
+`UnknownHookFailureReason` with `reason_code: "unknown"`. Unknown wire reason
+codes and confinement refusal strings retain the exact original object in
+`reason.raw` and its original reason code in `reason.rawReasonCode`; their
+`error` display is `"unknown hook failure"`. Known native objects stay unchanged
+and narrow normally by `reason.reason_code`, including their typed fields.
+Inspect fields inside the unknown wrapper's `raw` defensively. Use the typed
+reason instead of parsing the display-only `error`.
+
+The legacy flat `error` wire remains accepted with `reason` absent. A present
+`reason` is authoritative even when `error` is also supplied. Malformed
+required fields in a known cause still produce `MalformedEvent` with the raw
+payload preserved, without falling back to the legacy error.
+
+`hook_launch_refused` is recognized through the current generated inventory
+and preserved by the existing raw-event path, including `reason` and the exact
+optional `tool_use_id`. This mechanical prelaunch fact is separate from a
+permission denial or a terminal run event.
 
 `TurnStartedEvent`, `TextDeltaEvent`, `TextCompleteEvent`,
 `TurnCompletedEvent` and `RetryingEvent` carry an optional
@@ -658,6 +673,7 @@ interface RetryingEvent { type: "retrying"; attempt: number; maxAttempts: number
 ### Hook events
 
 ```typescript
+import type { HookFailureReason } from "@rkat/sdk";
 type HookPoint =
   | "run_started" | "run_completed" | "run_failed"
   | "pre_llm_request" | "post_llm_response"
@@ -666,9 +682,12 @@ type HookPoint =
 
 interface HookStartedEvent        { type: "hook_started";         hookId: string; point: HookPoint }
 interface HookCompletedEvent      { type: "hook_completed";        hookId: string; point: HookPoint; durationMs: number }
-interface HookFailedEvent         { type: "hook_failed";           hookId: string; point: HookPoint; error: string }
+interface HookFailedEvent         { type: "hook_failed";           hookId: string; point: HookPoint; error: string; reason?: HookFailureReason }
 interface HookDeniedEvent         { type: "hook_denied";           hookId: string; point: HookPoint; reasonCode: string; message: string; payload?: unknown }
 ```
+
+`HookFailureReason` and `UnknownHookFailureReason` are public adapter types.
+`ConfinementRefusal` is also exported for the known native confinement causes.
 
 ### Skill events
 

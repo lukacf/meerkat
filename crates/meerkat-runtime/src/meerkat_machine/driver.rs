@@ -2582,6 +2582,18 @@ impl DriverEntry {
             shell_without_outbox.state.interaction_terminal_outbox = None;
             let mut durable_without_outbox = durable_stored.clone();
             durable_without_outbox.state.interaction_terminal_outbox = None;
+            // Observations can append while the existing row transaction is
+            // pending. Only prefix-compatible audit data may differ; all
+            // authority/outbox bytes remain subject to the exact checks below.
+            shell_stored
+                .state
+                .authorization_audit
+                .verify_committed_prefix_compatible(&durable_stored.state.authorization_audit)
+                .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                    reason: error.to_string(),
+                })?;
+            shell_without_outbox.state.authorization_audit = Default::default();
+            durable_without_outbox.state.authorization_audit = Default::default();
             // Finalized -> Published is also the exact point where a terminal
             // directed input's original ingress bytes become unnecessary.
             // Normalize only that one authorized omission before comparing
@@ -2605,6 +2617,19 @@ impl DriverEntry {
                         "interaction terminal recovery found unrelated durable divergence for input {input_id}"
                     ),
                 });
+            }
+
+            // Exact same outbox with a compatible observation prefix is not a
+            // semantic phase transition. Keep its committed row available for
+            // audit prefix reconciliation without inventing an outbox advance.
+            if serde_json::to_vec(shell_outbox)
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+                == serde_json::to_vec(durable_outbox)
+                    .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+            {
+                prospective.insert(input_id.clone(), durable_stored.clone());
+                replacements.push(durable_stored.clone());
+                continue;
             }
 
             let shell_rank = Self::interaction_terminal_outbox_phase_rank(shell_outbox);
@@ -2693,8 +2718,24 @@ impl DriverEntry {
         }
 
         let ledger = self.shell_driver_mut().ledger_mut();
-        for replacement in replacements {
-            ledger.recover(replacement.state);
+        let mut retained = Vec::with_capacity(replacements.len());
+        for mut replacement in replacements {
+            let live = ledger.get(&replacement.state.input_id).ok_or_else(|| {
+                RuntimeDriverError::RecoveryCorruption {
+                    reason: "committed input replacement has no retained native row".into(),
+                }
+            })?;
+            replacement.state.authorization_audit = live
+                .authorization_audit
+                .retain_live_with_committed(&replacement.state.authorization_audit)
+                .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                    reason: error.to_string(),
+                })?;
+            replacement.state.controller_client = live.controller_client.clone();
+            retained.push(replacement.state);
+        }
+        for state in retained {
+            ledger.recover(state);
         }
         Ok(())
     }
@@ -3357,7 +3398,7 @@ impl DriverEntry {
                             "terminal completion witness lost terminal outcome for recipient {input_id}"
                         ),
                     })?;
-                Ok((input_id.clone(), terminal_outcome))
+                Ok::<_, RuntimeDriverError>((input_id.clone(), terminal_outcome))
             })
             .collect::<Result<indexmap::IndexMap<_, _>, _>>()?;
         // Reading a stored input also reads its DSL-owned seed. Finish these
@@ -3591,8 +3632,25 @@ impl DriverEntry {
         // cancelled while a store implementation completed the CAS after its
         // future was dropped, the idempotent retry reaches this same point.
         let ledger = self.shell_driver_mut().ledger_mut();
+        let mut retained = Vec::with_capacity(replacements.len());
         for replacement in replacements {
-            ledger.recover(replacement.into_stored().state);
+            let mut state = replacement.into_stored().state;
+            let live = ledger.get(&state.input_id).ok_or_else(|| {
+                RuntimeDriverError::RecoveryCorruption {
+                    reason: "committed input replacement has no retained native row".into(),
+                }
+            })?;
+            state.authorization_audit = live
+                .authorization_audit
+                .retain_live_with_committed(&state.authorization_audit)
+                .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                    reason: error.to_string(),
+                })?;
+            state.controller_client = live.controller_client.clone();
+            retained.push(state);
+        }
+        for state in retained {
+            ledger.recover(state);
         }
         Ok(())
     }
@@ -4427,6 +4485,55 @@ impl DriverEntry {
         }
     }
 
+    /// Reuse the current admission owner before cold credential maintenance.
+    /// The caller holds the actual current session mutation gate and lease.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn authenticate_work(&self, input: &Input) -> Result<(), RuntimeDriverError> {
+        match self {
+            Self::Ephemeral(driver) => driver.authenticate_work(input),
+            Self::Persistent(driver) => {
+                driver.require_durability_ready()?;
+                driver.inner_ref().authenticate_work(input)
+            }
+        }
+    }
+
+    pub(crate) fn authenticate_work_with_credential(
+        &self,
+        input: &Input,
+        custody: &super::credential_custody::NativeCredentialCustody,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            Self::Ephemeral(driver) => driver.authenticate_work_with_credential(input, custody),
+            Self::Persistent(driver) => {
+                driver.require_durability_ready()?;
+                driver
+                    .inner_ref()
+                    .authenticate_work_with_credential(input, custody)
+            }
+        }
+    }
+
+    pub(crate) async fn accept_resolved_input_with_credential(
+        &mut self,
+        input: Input,
+        resolved: ResolvedAdmission,
+        custody: &super::credential_custody::NativeCredentialCustody,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        self.authenticate_work_with_credential(&input, custody)?;
+        match self {
+            Self::Ephemeral(driver) => {
+                driver.accept_resolved_input_with_credential(input, resolved, custody)
+            }
+            Self::Persistent(driver) => {
+                driver
+                    .accept_resolved_input_with_credential(input, resolved, custody)
+                    .await
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn accept_resolved_input(
         &mut self,
         input: Input,
@@ -4644,6 +4751,26 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d.post_admission_signal(),
             DriverEntry::Persistent(d) => d.post_admission_signal(),
+        }
+    }
+
+    pub(crate) fn set_executor_work_authorization_support(&mut self, supported: bool) {
+        match self {
+            DriverEntry::Ephemeral(d) => d.set_executor_work_authorization_support(supported),
+            DriverEntry::Persistent(d) => d
+                .inner_mut()
+                .set_executor_work_authorization_support(supported),
+        }
+    }
+
+    pub(crate) fn batch_work_authorization(
+        &self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+    ) -> Result<Option<meerkat_core::WorkAuthorizationContext>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.batch_work_authorization(run_id, input_ids),
+            DriverEntry::Persistent(d) => d.inner_ref().batch_work_authorization(run_id, input_ids),
         }
     }
 
@@ -8048,7 +8175,7 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
     let mut recovered_payloads = Vec::new();
 
     for bundle in observed_input_states {
-        let (bundle, admission_sequence_recovery) =
+        let (mut bundle, admission_sequence_recovery) =
             machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
 
         if matches!(
@@ -8070,6 +8197,13 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
                     &bundle.seed,
                     bundle.state.idempotency_key.as_ref(),
                 )?;
+                bundle.state.authorization_audit = bundle
+                    .state
+                    .authorization_audit
+                    .restore_observations_for_owner()
+                    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                        reason: error.to_string(),
+                    })?;
                 let inserted = driver.ledger_mut().recover(bundle.state.clone());
                 if !inserted {
                     continue;
@@ -8094,6 +8228,13 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
                 admission_sequence_recovery,
             )?;
 
+            bundle.state.authorization_audit = bundle
+                .state
+                .authorization_audit
+                .restore_observations_for_owner()
+                .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                    reason: error.to_string(),
+                })?;
             let inserted = driver.ledger_mut().recover(bundle.state.clone());
             if !inserted {
                 continue;
@@ -8534,6 +8675,8 @@ mod tests {
         let prompt_input = Input::Prompt(crate::input::PromptInput {
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: crate::input::InputOrigin::Operator,
@@ -8691,6 +8834,8 @@ mod tests {
         let event_input = Input::ExternalEvent(crate::input::ExternalEventInput {
             objective_id: None,
             header: crate::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: crate::input::InputOrigin::External {

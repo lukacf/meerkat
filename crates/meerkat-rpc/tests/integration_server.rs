@@ -174,7 +174,8 @@ fn spawn_test_server() -> (
             store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             blob_store,
-        ),
+        )
+        .expect("construct runtime authority"),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
@@ -195,7 +196,8 @@ fn spawn_test_server() -> (
         // Keep temp alive for the duration of the server
         let _temp = temp;
         let reader = BufReader::new(server_reader);
-        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store)
+            .expect("construct runtime authority");
         server.run().await
     });
 
@@ -223,7 +225,8 @@ fn spawn_test_server_with_client(
             store,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             blob_store,
-        ),
+        )
+        .expect("construct runtime authority"),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
@@ -243,7 +246,8 @@ fn spawn_test_server_with_client(
     let server_handle = tokio::spawn(async move {
         let _temp = temp;
         let reader = BufReader::new(server_reader);
-        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store)
+            .expect("construct runtime authority");
         server.run().await
     });
 
@@ -1620,7 +1624,8 @@ mod tcp_callback_ownership {
                     store,
                     Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                     blobs,
-                ),
+                )
+                .expect("construct runtime authority"),
                 meerkat_rpc::router::NotificationSink::noop(),
             );
             let config: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(

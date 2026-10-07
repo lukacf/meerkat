@@ -1207,7 +1207,8 @@ async fn open_public_live_with(
         Arc::new(meerkat_store::MemoryBlobStore::new()) as Arc<dyn BlobStore>,
         Arc::new(meerkat::DisabledScheduleStore),
         Arc::new(meerkat::MemoryWorkGraphStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let runtime = Arc::new(SessionRuntime::new_with_config_store(
         factory.clone(),
         config.clone(),
@@ -1227,7 +1228,8 @@ async fn open_public_live_with(
     )));
 
     let callback_rx = runtime.init_callback_channel();
-    let mobs = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None);
+    let mobs = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None)
+        .expect("construct runtime authority");
     runtime.set_mob_state(Arc::clone(&mobs));
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
     let (server_read, server_write) = tokio::io::split(server_stream);
@@ -10022,7 +10024,18 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
 
         // Exchanges 7-10 (native).
         evidence.stage(EvidenceStage::HaulExchanges)?;
-        let (t7, _a7, _, s7) = native_question(&mut live, "S106", "haul_e7", s106_spec("haul_e7", true)).await?;
+        let (t7, a7, _, s7) = native_question(&mut live, "S106", "haul_e7", s106_spec("haul_e7", true)).await?;
+        // e7 asks the project codename on the reopened channel, whose only
+        // source is the late summary: the answer must give it. A pass rate
+        // alone hid answers that never did ("I don't have it in front of me
+        // yet") when the summary arrived after the question (#1784).
+        if !a7.to_lowercase().contains(S106_TOKENS[0]) {
+            deterministic_failures.push(format!(
+                "e7 did not answer the project codename ({}): {:?}",
+                S106_TOKENS[0],
+                a7.trim()
+            ));
+        }
         latencies.extend(t7.input_final_to_audio_ms());
         let (t8, _a8, _, s8) = native_question(&mut live, "S106", "haul_e8", s106_spec("haul_e8", false)).await?;
         latencies.extend(t8.input_final_to_audio_ms());
@@ -10077,6 +10090,22 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             .filter(|token| !delivered_lower.contains(token))
             .collect();
         println!("GPT_LIVE_S106_FACTS_DELIVERED channel={channel} missing={missing:?}");
+        // A reopened channel never receives a summary append, at any time
+        // (#1784): its summary rides the startup input. Checked over the
+        // whole call, since a late append at the user's first delta passed
+        // the before-first-turn check (S106 R1 on 67687ce6d).
+        for reopened in 2..=channel {
+            let summary_appends = evidence
+                .owned_thinking_appends(reopened)?
+                .iter()
+                .filter(|append| append.starts_with(LATE_SUMMARY_PREFIX))
+                .count();
+            if summary_appends > 0 {
+                deterministic_failures.push(format!(
+                    "reopened channel {reopened} received {summary_appends} summary append(s); a reopen's summary must ride the startup input"
+                ));
+            }
+        }
         if !missing.is_empty() {
             deterministic_failures.push(format!(
                 "planted facts {missing:?} never reached the final channel's model as typed input; delivered: {delivered:?}"

@@ -2,7 +2,8 @@
 //!
 //! Every store read path deserializes persisted rows through typed serde and
 //! the generated `session_persistence_version_authority`. Session envelopes
-//! and metadata accept exactly the current version. Stored input state admits
+//! accept the current version and the explicit v3-to-v4 migration. Metadata
+//! accepts exactly the current version. Stored input state admits
 //! the explicitly modeled v4-to-v5 migration from the 0.8.10 floor; every
 //! older, missing, or future version FAILS CLOSED with a typed rejection.
 
@@ -163,7 +164,7 @@ fn stored_input_state_version_is_pinned_to_current() {
     assert_eq!(restore_stored_input_state_version(3), Ok(5));
     assert_eq!(restore_stored_input_state_version(4), Ok(5));
     assert_eq!(restore_stored_input_state_version(5), Ok(5));
-    assert_eq!(SESSION_VERSION, 3);
+    assert_eq!(SESSION_VERSION, 4);
     assert_eq!(SESSION_METADATA_SCHEMA_VERSION, 2);
 }
 

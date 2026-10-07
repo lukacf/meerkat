@@ -37,6 +37,9 @@ pub struct LlmRetryFailure {
 
 impl LlmRetryFailure {
     pub fn from_agent_error(error: &AgentError) -> Option<Self> {
+        if error.operation_refusal().is_some() {
+            return None;
+        }
         match error {
             AgentError::Llm {
                 provider,
@@ -580,5 +583,56 @@ mod tests {
             .expect("stream stall must be retryable");
         assert_eq!(schedule.failure.kind, LlmRetryFailureKind::CallTimeout);
         assert_eq!(schedule.failure.duration_ms, Some(300_000));
+    }
+
+    #[test]
+    fn observation_infrastructure_kind_cannot_be_made_retryable_by_compatibility_metadata() {
+        use crate::error::LlmProviderErrorRetryability;
+
+        let policy = RetryPolicy::default();
+        for retryability in [
+            LlmProviderErrorRetryability::NonRetryable,
+            LlmProviderErrorRetryability::Retryable,
+        ] {
+            // Exercise the actual compatibility decoder, including a
+            // contradictory retryability claim and irrelevant refusal text.
+            let wire = serde_json::json!({
+                "kind": LlmProviderErrorKind::OperationObservationUnavailable,
+                "retryability": retryability,
+                "details": {"kind": "denied", "message": "retry after 1", "retry_after_ms": 1}
+            });
+            let decoded = serde_json::from_value::<LlmProviderError>(wire);
+            if decoded.is_err() {
+                assert_eq!(
+                    retryability,
+                    LlmProviderErrorRetryability::Retryable,
+                    "the canonical nonretryable representation must decode"
+                );
+                // Rejecting contradictory compatibility metadata is also a
+                // valid boundary; it cannot create a retryable operation.
+                continue;
+            }
+            let provider = decoded.unwrap();
+            let error = AgentError::llm(
+                "fixture",
+                LlmFailureReason::ProviderError(provider),
+                "safe observation failure",
+            );
+            assert!(error.operation_refusal().is_none(), "not policy feedback");
+            assert!(LlmRetryFailure::from_agent_error(&error).is_none());
+            assert!(policy.schedule_retry(&error, 0, None).is_none());
+            assert!(crate::model_fallback::model_fallback_trigger(&error).is_none());
+        }
+
+        let retryable = AgentError::llm(
+            "fixture",
+            LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::ServerOverloaded,
+                serde_json::json!({}),
+            )),
+            "ordinary retryable provider overload",
+        );
+        assert!(LlmRetryFailure::from_agent_error(&retryable).is_some());
+        assert!(policy.schedule_retry(&retryable, 0, None).is_some());
     }
 }

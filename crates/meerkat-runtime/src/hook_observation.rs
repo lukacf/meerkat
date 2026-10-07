@@ -180,6 +180,11 @@ pub(crate) fn dispatch_runtime_input_error(
         RuntimeDriverError::Destroyed => HookRuntimeInputRejection::NotReady {
             state: HookRuntimeState::Destroyed,
         },
+        // Preserve the existing pre-admission rejection observation. The
+        // shared surface projection retains the exact canonical refusal kind.
+        RuntimeDriverError::InputRefused { .. } => HookRuntimeInputRejection::ValidationFailed {
+            detail: "input refused".into(),
+        },
         RuntimeDriverError::ValidationFailed { reason } => {
             HookRuntimeInputRejection::ValidationFailed {
                 detail: reason.clone(),

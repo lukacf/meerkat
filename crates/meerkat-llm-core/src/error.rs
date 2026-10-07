@@ -40,6 +40,20 @@ pub enum ToolChoiceRefusal {
 /// Categorized by whether they're retryable.
 #[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
 pub enum LlmError {
+    /// A local operation refusal, never a provider outage or retry signal.
+    /// The adapter preserves this as `AgentError::OperationRefused` so the
+    /// existing loop can return ordinary feedback through its controller.
+    #[error("operation unavailable under current authorization")]
+    OperationRefused {
+        #[serde(with = "operation_refusal_wire")]
+        refusal: meerkat_core::authorization::OperationRefused,
+    },
+    /// A failed protected observation before physical entry. Never retry or
+    /// feed this back to the model as a permission refusal.
+    #[error("operation observation unavailable")]
+    OperationObservationUnavailable,
+    #[error("operation authorization unavailable")]
+    OperationAuthorizationUnavailable,
     // === Retryable Errors ===
     #[error("Rate limited{}", match .retry_after_ms {
         Some(ms) => format!(", retry after {ms}ms"),
@@ -164,6 +178,26 @@ pub enum LlmError {
         choice: meerkat_core::ToolChoice,
         reason: ToolChoiceRefusal,
     },
+}
+
+// A refusal is an outcome, not a serialized live authorization handle. Keep
+// its existing protected Debug while retaining the typed disposition on wire.
+mod operation_refusal_wire {
+    use meerkat_core::authorization::{OperationRefusalKind, OperationRefused};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &OperationRefused,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.kind().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<OperationRefused, D::Error> {
+        OperationRefusalKind::deserialize(deserializer).map(OperationRefused::new)
+    }
 }
 
 /// Provider error codes that name exhausted quota, prepaid credit, or a spend
@@ -399,6 +433,44 @@ impl ProviderErrorObject {
 }
 
 impl LlmError {
+    pub fn operation_refused(kind: meerkat_core::authorization::OperationRefusalKind) -> Self {
+        Self::OperationRefused {
+            refusal: meerkat_core::authorization::OperationRefused::new(kind),
+        }
+    }
+
+    pub fn from_operation_refused(refusal: meerkat_core::authorization::OperationRefused) -> Self {
+        Self::operation_refused(refusal.kind())
+    }
+
+    pub fn from_operation_authorization(error: meerkat_core::OperationAuthorizationError) -> Self {
+        match error {
+            meerkat_core::OperationAuthorizationError::Refused(refusal) => {
+                Self::from_operation_refused(refusal)
+            }
+            meerkat_core::OperationAuthorizationError::Unavailable => {
+                Self::OperationAuthorizationUnavailable
+            }
+            meerkat_core::OperationAuthorizationError::ObservationUnavailable(error) => {
+                Self::from_operation_observation(error)
+            }
+        }
+    }
+
+    pub fn from_operation_observation(
+        _: meerkat_core::authorization::OperationObservationError,
+    ) -> Self {
+        Self::OperationObservationUnavailable
+    }
+
+    /// Preserve local refusal separately from provider failure/retry policy.
+    pub fn into_agent_error(self, provider: &'static str) -> meerkat_core::AgentError {
+        if let Self::OperationRefused { refusal } = self {
+            return meerkat_core::AgentError::OperationRefused { refusal };
+        }
+        meerkat_core::AgentError::llm(provider, self.failure_reason(), self.to_string())
+    }
+
     pub fn from_authorizer(error: meerkat_core::AuthError) -> Self {
         match error {
             meerkat_core::AuthError::ResolveRequired(message) => {
@@ -538,6 +610,20 @@ impl LlmError {
         }
     }
 
+    /// The configured provider endpoint answered with a redirect, which
+    /// provider HTTP clients do not follow. The message is public diagnostic
+    /// data, so it carries only the status: never the `Location` (which can
+    /// hold sensitive URL material) or the unbounded response body.
+    fn redirect_refused(status: u16) -> Self {
+        Self::InvalidConfig {
+            message: format!(
+                "the configured endpoint answered HTTP {status} redirect; the request reached \
+                 that endpoint, and the redirect was not followed. Configure the final endpoint \
+                 as the base URL"
+            ),
+        }
+    }
+
     /// Create from HTTP status code and message
     pub fn from_http_status(status: u16, message: String, retry_after_ms: Option<u64>) -> Self {
         // Structured conversation stops take precedence over generic status
@@ -550,6 +636,11 @@ impl LlmError {
             return stop;
         }
         match status {
+            // Provider HTTP clients never follow redirects, so a 3xx is the
+            // configured endpoint's own answer: the request reached it (and
+            // may have had effect there); only the follow-up was not sent.
+            // Retrying would get the same answer, so it is terminal.
+            300..=399 => Self::redirect_refused(status),
             401 => Self::AuthenticationFailed { message },
             // 402 is a billing failure (Anthropic `billing_error`): the key is
             // valid, the account cannot pay, and no retry clears it.
@@ -589,6 +680,11 @@ impl LlmError {
         message: String,
         headers: &reqwest::header::HeaderMap,
     ) -> Self {
+        // A redirect is terminal, so it needs nothing from the headers: its
+        // refusal is decided before any header (such as Retry-After) is read.
+        if (300..=399).contains(&status) {
+            return Self::redirect_refused(status);
+        }
         let retry_after_ms = headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
@@ -614,6 +710,24 @@ impl LlmError {
         }
 
         match self {
+            Self::OperationRefused { refusal } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::OperationRefused,
+                    json!({ "kind": refusal.kind() }),
+                ))
+            }
+            Self::OperationObservationUnavailable => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::OperationObservationUnavailable,
+                    serde_json::Value::Null,
+                ))
+            }
+            Self::OperationAuthorizationUnavailable => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::OperationAuthorizationUnavailable,
+                    serde_json::Value::Null,
+                ))
+            }
             Self::RateLimited { retry_after_ms } => LlmFailureReason::RateLimited {
                 retry_after: retry_after_ms.map(Duration::from_millis),
             },
@@ -1004,6 +1118,41 @@ mod tests {
 
         let err = LlmError::ServerOverloaded;
         assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn a_redirect_answer_is_a_terminal_typed_error() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LOCATION,
+            reqwest::header::HeaderValue::from_static(
+                "https://elsewhere.example/v1?token=location-secret",
+            ),
+        );
+        // An out-of-range Retry-After is never read for a redirect.
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("18446744073709551615"),
+        );
+        for status in [301, 302, 303, 307, 308] {
+            let error = LlmError::from_http_response(status, "body-secret".to_string(), &headers);
+            let LlmError::InvalidConfig { message } = &error else {
+                panic!("HTTP {status}: a typed redirect refusal, got {error:?}");
+            };
+            assert!(message.contains(&format!("HTTP {status} redirect")));
+            // Neither the Location nor the response body reaches the
+            // diagnostic.
+            for raw in ["elsewhere.example", "location-secret", "body-secret"] {
+                assert!(!message.contains(raw), "HTTP {status}: {raw} in {message}");
+            }
+            // The first request did reach the configured endpoint.
+            assert!(message.contains("the request reached that endpoint"));
+            assert!(!error.is_retryable(), "HTTP {status} is terminal");
+            assert!(matches!(
+                LlmError::from_http_status(status, "body-secret".to_string(), None),
+                LlmError::InvalidConfig { message } if !message.contains("body-secret")
+            ));
+        }
     }
 
     #[test]
@@ -1531,5 +1680,27 @@ mod tests {
                 "{body:?} must stay a rate limit: {err:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod authorization_unavailable_wire_tests {
+    use super::*;
+    #[test]
+    fn payload_free_unavailable_roundtrips_without_retry_or_refusal() {
+        let error = LlmError::from_operation_authorization(
+            meerkat_core::OperationAuthorizationError::Unavailable,
+        );
+        let encoded = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!("OperationAuthorizationUnavailable")
+        );
+        let decoded: LlmError = serde_json::from_value(encoded).unwrap();
+        assert!(!decoded.is_retryable());
+        let projected = decoded.into_agent_error("fixture");
+        assert!(projected.operation_authorization_unavailable());
+        assert!(projected.operation_refusal().is_none());
     }
 }

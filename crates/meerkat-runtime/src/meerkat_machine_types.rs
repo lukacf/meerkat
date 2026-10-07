@@ -854,6 +854,7 @@ meerkat_machine_runtime_internal_inputs!(
         AbandonInput,
         AdvanceSessionContext,
         ArchiveTerminalInput,
+        BindInputAuthority,
         BudgetExhausted,
         ChangeLane,
         CoalesceInput,

@@ -337,6 +337,8 @@ pub fn job_delivery_event_input(
             correlation_id: uuid::Uuid::parse_str(interaction_lineage_id.as_str())
                 .ok()
                 .map(meerkat_runtime::CorrelationId::from_uuid),
+            authority_association: None,
+            ingress_context: None,
         },
         event_type: event_type.to_string(),
         payload,

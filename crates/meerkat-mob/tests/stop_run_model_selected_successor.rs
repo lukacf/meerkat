@@ -702,7 +702,8 @@ async fn the_persistent_service_carries_the_surface_machine() {
     let temp = tempfile::tempdir().expect("temp dir");
     let client = Arc::new(ScriptedClient::new());
     let (service, adapter) = build_service(temp.path(), client).await;
-    let served = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
+    let served = meerkat_mob::MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+        .expect("acquire runtime authority")
         .expect("the persistent service serves a runtime adapter");
     assert!(
         Arc::ptr_eq(&served, &adapter),

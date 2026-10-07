@@ -13,6 +13,10 @@
 #[path = "session_runtime/schedule_host.rs"]
 mod schedule_host;
 
+#[cfg(feature = "local-authorization")]
+#[path = "session_runtime/governed.rs"]
+mod governed;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 #[cfg(feature = "mcp")]
@@ -101,6 +105,59 @@ pub(crate) async fn realtime_open_projection_test_guard() -> tokio::sync::OwnedM
         .await
 }
 
+// The existing exact-input capacity ledger also owns a claimed deferred seed.
+// Only actual native admission may make that claim available to the executor.
+struct RuntimePreAdmissionEntry {
+    input_id: InputId,
+    admission: RpcRuntimePreAdmission,
+}
+
+pub(crate) struct RpcRuntimePreAdmission {
+    admission: Option<RuntimePreAdmission>,
+    #[cfg(feature = "local-authorization")]
+    promotion: Option<PendingPromotionCleanup>,
+    #[cfg(feature = "local-authorization")]
+    unresolved: bool,
+}
+
+impl RpcRuntimePreAdmission {
+    fn ordinary(admission: RuntimePreAdmission) -> Self {
+        Self {
+            admission: Some(admission),
+            #[cfg(feature = "local-authorization")]
+            promotion: None,
+            #[cfg(feature = "local-authorization")]
+            unresolved: false,
+        }
+    }
+
+    fn can_apply(&self) -> bool {
+        #[cfg(feature = "local-authorization")]
+        if self.unresolved {
+            return false;
+        }
+        true
+    }
+
+    async fn prepare(mut self) -> Result<RuntimePreAdmission, RpcError> {
+        #[cfg(feature = "local-authorization")]
+        if let Some(mut promotion) = self.promotion.take() {
+            if !promotion.finish_now().await {
+                promotion.retain_unresolved();
+                return Err(runtime_driver_error_to_rpc(
+                    crate::governed_jsonl::unsupported(),
+                ));
+            }
+            promotion.disarm();
+        }
+        self.admission.take().ok_or_else(|| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "native input has no retained capacity".into(),
+            data: None,
+        })
+    }
+}
+
 /// Whether the current caller must acquire the stable service turn boundary
 /// before applying an LLM identity reconfiguration.
 #[derive(Clone, Copy)]
@@ -152,9 +209,9 @@ pub(crate) use meerkat::session_runtime::admission::{
 };
 
 pub(crate) use meerkat::session_runtime::admission::{
-    RuntimePreAdmission, RuntimePreAdmissionEntry, RuntimePreAdmissionGuard,
-    RuntimePreAdmissionRegistration, RuntimePreAdmissionRestore, RuntimeRegistrationLockLease,
-    StagedAdmissionRestore, StagedArchiveRollbackGuard,
+    RuntimePreAdmission, RuntimePreAdmissionGuard, RuntimePreAdmissionRegistration,
+    RuntimePreAdmissionRestore, RuntimeRegistrationLockLease, StagedAdmissionRestore,
+    StagedArchiveRollbackGuard,
 };
 pub(crate) use meerkat::session_runtime::recovery::{
     RecoveredCreateRequest, RecoveryRuntimeBindingMode,
@@ -1481,8 +1538,24 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<MeerkatMachine>> {
-        Some(Arc::clone(&self.runtime_adapter))
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<
+        Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>>,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        let owner = Some(Arc::clone(&self.runtime_adapter));
+        if let (Some(owner), Some(requested)) = (owner.as_ref(), explicit.as_ref())
+            && !owner.shares_runtime_execution_owner_with(requested)
+        {
+            return Err(
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: meerkat_runtime::traits::ControllerReadinessFailure::AuthorityChanged,
+                },
+            );
+        }
+        Ok(owner.or(explicit))
     }
 
     fn supports_runtime_turn_apply(&self) -> bool {
@@ -1870,7 +1943,22 @@ fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionErro
     ))
 }
 
-fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+    #[cfg(feature = "local-authorization")]
+    if let Some(detail) = meerkat::surface::native_admission_error_detail(&err) {
+        return match detail.to_wire_error() {
+            Ok(wire) => RpcError {
+                code: wire.code.jsonrpc_code(),
+                message: wire.message.into_owned(),
+                data: wire.details,
+            },
+            Err(_) => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: "input error projection unavailable".into(),
+                data: None,
+            },
+        };
+    }
     // A teardown that outlived its bounded wait is still running: answer the
     // retryable busy class with its typed data, not an internal error.
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
@@ -1907,13 +1995,10 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
 
 fn combine_rpc_cleanup_error(
     mut primary_error: RpcError,
-    cleanup_error: impl std::fmt::Display,
-    context: &str,
+    _cleanup_error: impl std::fmt::Display,
+    _context: &str,
 ) -> RpcError {
-    primary_error.message = format!(
-        "{}; additionally failed to {context}: {cleanup_error}",
-        primary_error.message
-    );
+    primary_error.message.push_str("; required cleanup failed");
     primary_error
 }
 
@@ -2152,6 +2237,7 @@ pub struct SessionRuntime {
     /// Phase 4 R1: slot-shared with the inner [`MeerkatSessionRuntime`].
     backend: Arc<StdRwLock<Option<String>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+    commissioned_config_store: Option<Arc<dyn ConfigStore>>,
     /// Per-realm config-document source for inheritance composition (decision
     /// 2/3). When present, the auth-resolution read path composes the active
     /// realm's parent chain (workspace head ⊕ home-rooted `global`) into the
@@ -2505,6 +2591,7 @@ impl SessionRuntime {
                 .and_then(|provider| parse_provider_override(provider).ok())
         });
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            work_authorization: None,
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_directive(ov.keep_alive)),
             skill_references,
@@ -2869,6 +2956,7 @@ impl SessionRuntime {
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
+            commissioned_config_store: None,
             runtime_actor_witness_slots: Arc::new(StdRwLock::new(HashMap::new())),
             runtime_publication_handles: Arc::new(StdRwLock::new(HashMap::new())),
             #[cfg(test)]
@@ -3016,6 +3104,7 @@ impl SessionRuntime {
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
+            commissioned_config_store: None,
             runtime_actor_witness_slots: Arc::new(StdRwLock::new(HashMap::new())),
             runtime_publication_handles: Arc::new(StdRwLock::new(HashMap::new())),
             #[cfg(test)]
@@ -3057,6 +3146,11 @@ impl SessionRuntime {
             live_adapter_host,
             inner,
         }
+    }
+
+    #[cfg(feature = "local-authorization")]
+    pub(crate) fn use_commissioned_config_store(&mut self, store: Arc<dyn ConfigStore>) {
+        self.commissioned_config_store = Some(store);
     }
 
     /// Attach realm context defaults used for session metadata.
@@ -3338,7 +3432,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         input_ids: &[InputId],
-    ) -> Option<RuntimePreAdmission> {
+    ) -> Option<RpcRuntimePreAdmission> {
         if input_ids.is_empty() {
             return None;
         }
@@ -3349,7 +3443,7 @@ impl SessionRuntime {
         let entries = pre_admissions.get_mut(session_id)?;
         let index = entries
             .iter()
-            .position(|entry| input_ids.contains(&entry.input_id))?;
+            .position(|entry| input_ids.contains(&entry.input_id) && entry.admission.can_apply())?;
         let entry = entries.remove(index);
         if entries.is_empty() {
             pre_admissions.remove(session_id);
@@ -3377,7 +3471,7 @@ impl SessionRuntime {
         }
         entries.push(RuntimePreAdmissionEntry {
             input_id,
-            admission: admission.into(),
+            admission: RpcRuntimePreAdmission::ordinary(admission.into()),
         });
         Ok(())
     }
@@ -4286,7 +4380,15 @@ impl SessionRuntime {
             .await
         {
             Ok(()) => primary_error,
-            Err(cleanup_error) => combine_rpc_cleanup_error(primary_error, cleanup_error, context),
+            Err(cleanup_error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %cleanup_error,
+                    context,
+                    "recovered runtime cleanup failed"
+                );
+                combine_rpc_cleanup_error(primary_error, cleanup_error, context)
+            }
         }
     }
 
@@ -5251,6 +5353,12 @@ impl SessionRuntime {
                     message: format!("Failed to load config: {e}"),
                     data: None,
                 })?
+        } else if let Some(store) = &self.commissioned_config_store {
+            store.get().await.map_err(|_| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: "commissioned config unavailable".into(),
+                data: None,
+            })?
         } else {
             meerkat_core::Config::default()
         };
@@ -7597,6 +7705,8 @@ impl SessionRuntime {
         let input = Input::ExternalEvent(ExternalEventInput {
             objective_id: None,
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::External {
@@ -7983,9 +8093,31 @@ impl SessionRuntime {
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
-        pre_admission: Option<RuntimePreAdmission>,
+        pre_admission: Option<RpcRuntimePreAdmission>,
         llm_reconfigure_boundary: LlmReconfigureBoundaryOwnership,
     ) -> Result<CoreApplyOutput, RpcError> {
+        // The configured native owner must hand this executor both the admitted
+        // work context and the exact-input capacity/seed claim. A missing or
+        // unresolved claim must never fall through to ordinary live/cold setup.
+        if self.runtime_adapter.has_native_work_authorization_host()
+            && (primitive
+                .turn_metadata()
+                .and_then(|meta| meta.work_authorization.as_ref())
+                .is_none()
+                || !pre_admission
+                    .as_ref()
+                    .is_some_and(RpcRuntimePreAdmission::can_apply))
+        {
+            return Err(runtime_driver_error_to_rpc(
+                RuntimeDriverError::ControllerReadinessUnavailable {
+                    reason: meerkat_runtime::traits::ControllerReadinessFailure::UnsupportedScope,
+                },
+            ));
+        }
+        let pre_admission = match pre_admission {
+            Some(admission) => Some(admission.prepare().await?),
+            None => None,
+        };
         let mut pre_admission = pre_admission.map(RuntimePreAdmissionGuard::new);
         let workgraph_service = self.workgraph_service().ok();
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
@@ -8093,6 +8225,11 @@ impl SessionRuntime {
                     meerkat_core::types::HandlingMode::Queue,
                     turn_tool_overlay.clone(),
                     primitive.turn_metadata().cloned(),
+                )
+                .with_work_authorization(
+                    primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.work_authorization.clone()),
                 )
                 .with_typed_turn_appends(primitive.typed_turn_appends()),
             };
@@ -8332,6 +8469,11 @@ impl SessionRuntime {
                     turn_tool_overlay,
                     primitive.turn_metadata().cloned(),
                 )
+                .with_work_authorization(
+                    primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.work_authorization.clone()),
+                )
                 .with_typed_turn_appends(typed_turn_appends),
             };
             if let Some(workgraph_service) = workgraph_service.as_ref() {
@@ -8418,6 +8560,11 @@ impl SessionRuntime {
                 meerkat_core::types::HandlingMode::Queue,
                 turn_tool_overlay,
                 primitive.turn_metadata().cloned(),
+            )
+            .with_work_authorization(
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.work_authorization.clone()),
             )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
         };
@@ -11665,6 +11812,13 @@ fn instruction_activation_host_error_to_rpc(
 }
 
 pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
+    if let SessionError::RuntimeUnavailable { .. } = &err {
+        return RpcError {
+            code: meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(),
+            message: err.to_string(),
+            data: meerkat_contracts::error::session_error_details(&err),
+        };
+    }
     let code = match &err {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         SessionError::Busy { .. } => error::SESSION_BUSY,
@@ -11936,6 +12090,9 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
+    // The module-level import is `mcp`-gated; tests use Duration in every
+    // feature set (the governed JSONL lane builds without `mcp`).
+    use std::time::Duration;
 
     fn mutate_test_session(session: &mut Session, mutate: impl FnOnce(&mut Session)) {
         mutate(session);
@@ -13026,6 +13183,7 @@ mod tests {
         fail_lifecycle_after_successes: AtomicUsize,
         fail_delete_ops_once: AtomicBool,
         fail_catalog_read_once: AtomicBool,
+        cleanup_wire_store_calls: StdMutex<Vec<(&'static str, meerkat_runtime::LogicalRuntimeId)>>,
     }
 
     impl FailingLifecycleRuntimeStore {
@@ -13038,7 +13196,19 @@ mod tests {
                 fail_lifecycle_after_successes: AtomicUsize::new(usize::MAX),
                 fail_delete_ops_once: AtomicBool::new(false),
                 fail_catalog_read_once: AtomicBool::new(false),
+                cleanup_wire_store_calls: StdMutex::new(Vec::new()),
             }
+        }
+
+        fn record_cleanup_wire_store_call(
+            &self,
+            method: &'static str,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) {
+            self.cleanup_wire_store_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((method, runtime_id.clone()));
         }
 
         fn set_fail_snapshot(&self, fail: bool) {
@@ -13402,9 +13572,20 @@ mod tests {
                     "synthetic service-turn lifecycle commit failure".to_string(),
                 ));
             }
-            self.inner
+            let result = self
+                .inner
                 .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
-                .await
+                .await;
+            if matches!(
+                &result,
+                Ok(meerkat_runtime::store::MachineLifecycleCasOutcome::Applied { .. })
+            ) {
+                self.record_cleanup_wire_store_call(
+                    "compare_and_swap_machine_lifecycle_applied",
+                    runtime_id,
+                );
+            }
+            result
         }
 
         async fn compare_and_swap_machine_lifecycle_with_fence(
@@ -13786,7 +13967,9 @@ mod tests {
             commit: meerkat_runtime::store::MachineLifecycleCommit,
             input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.record_cleanup_wire_store_call("commit_machine_lifecycle", runtime_id);
             if self.take_lifecycle_failure() {
+                self.record_cleanup_wire_store_call("commit_machine_lifecycle_failed", runtime_id);
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                     "synthetic service-turn lifecycle commit failure".to_string(),
                 ));
@@ -13801,7 +13984,12 @@ mod tests {
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
             finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.record_cleanup_wire_store_call("commit_unregister_finalization", runtime_id);
             if self.take_lifecycle_failure() {
+                self.record_cleanup_wire_store_call(
+                    "commit_unregister_finalization_failed",
+                    runtime_id,
+                );
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                     "synthetic service-turn lifecycle commit failure".to_string(),
                 ));
@@ -13854,6 +14042,7 @@ mod tests {
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.record_cleanup_wire_store_call("delete_ops_lifecycle", runtime_id);
             if self
                 .fail_delete_ops_once
                 .swap(false, AtomicOrdering::AcqRel)
@@ -13880,7 +14069,8 @@ mod tests {
                 factory,
                 Config::default(),
                 max_sessions,
-                meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+                meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                    .expect("construct runtime authority"),
                 crate::router::NotificationSink::noop(),
             )),
             runtime_store,
@@ -13899,7 +14089,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let session_id = SessionId::new();
@@ -14245,7 +14436,8 @@ mod tests {
             factory,
             config,
             max_sessions,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14265,7 +14457,8 @@ mod tests {
                 store,
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 blob_store,
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14283,7 +14476,8 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14365,7 +14559,8 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ))
     }
@@ -14384,7 +14579,8 @@ mod tests {
                 factory,
                 Config::default(),
                 max_sessions,
-                meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
+                meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store)
+                    .expect("construct runtime authority"),
                 crate::router::NotificationSink::noop(),
             )),
             runtime_store,
@@ -16098,7 +16294,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         *runtime
@@ -16119,10 +16316,14 @@ mod tests {
             "combined error must retain the create failure: {failed:?}"
         );
         assert!(
-            failed
+            failed.message.ends_with("; required cleanup failed"),
+            "combined error must retain the finite cleanup indication: {failed:?}"
+        );
+        assert!(
+            !failed
                 .message
                 .contains("synthetic service-turn lifecycle commit failure"),
-            "combined error must retain the unregister failure: {failed:?}"
+            "private unregister diagnostic must stay off the wire: {failed:?}"
         );
         let retry_session_id = runtime
             .create_session_after_prepare_bindings_session_id
@@ -16689,6 +16890,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -16807,6 +17010,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -16981,6 +17186,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -17101,6 +17308,8 @@ mod tests {
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
+                        ingress_context: None,
+                        authority_association: None,
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
@@ -17348,7 +17557,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -17437,7 +17647,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -17586,7 +17797,8 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
             Arc::new(meerkat::MemoryScheduleStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let runtime = Arc::new(SessionRuntime::new(
             temp_factory(&temp),
             Config::default(),
@@ -17664,7 +17876,8 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let persistence = meerkat::PersistenceBundle::new(store, runtime_store, blob_store);
+        let persistence = meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+            .expect("construct runtime authority");
         let adapter = persistence.runtime_adapter();
         let target = test_auth_binding("dev", "default_openai");
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -18864,7 +19077,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, runtime_store_dyn.clone(), blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store_dyn.clone(), blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
 
@@ -19636,7 +19850,8 @@ mod tests {
                 Arc::clone(&store),
                 Arc::clone(&runtime_store),
                 Arc::clone(&blob_store),
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let build_config = mock_build_config();
@@ -19684,7 +19899,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         assert!(
@@ -19731,6 +19947,7 @@ mod tests {
     }
 
     /// set_mob_tools writes through to the builder, so sessions get mob tools.
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn set_mob_tools_delivers_tools_to_created_sessions() {
         let temp = tempfile::tempdir().unwrap();
@@ -19741,10 +19958,10 @@ mod tests {
 
         // Create a MobMcpState and set it via set_mob_tools.
         let mob_svc = runtime.session_service();
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            mob_svc,
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(mob_svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mob_state,
         )));
@@ -20064,7 +20281,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let session_id = runtime
@@ -20668,6 +20886,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::Peer {
@@ -20740,6 +20960,8 @@ mod tests {
         let operation_id = meerkat_core::OperationId::new();
         let input = meerkat_runtime::Input::Operation(meerkat_runtime::OperationInput {
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::System,
@@ -21100,7 +21322,8 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             1,
-            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store)
+                .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         let session_id = runtime
@@ -21538,10 +21761,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         let service = runtime.session_service();
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            service.clone(),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                service.clone(),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        );
         runtime.set_mob_state(mob_state.clone());
         let created = service
             .create_session(service_create_request(
@@ -24427,10 +24653,13 @@ mod tests {
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let service = runtime.session_service();
-        runtime.set_mob_state(Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            Arc::clone(&service),
-            meerkat_mob::MobControlPrincipal::Owner,
-        )));
+        runtime.set_mob_state(Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                Arc::clone(&service),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        ));
 
         let created = service
             .create_session(service_create_request(
@@ -24674,10 +24903,13 @@ mod tests {
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let mob_service = runtime.session_service();
-        runtime.set_mob_state(Arc::new(meerkat_mob_mcp::MobMcpState::new(
-            Arc::clone(&mob_service),
-            meerkat_mob::MobControlPrincipal::Owner,
-        )));
+        runtime.set_mob_state(Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                Arc::clone(&mob_service),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        ));
 
         let created = mob_service
             .create_session(service_create_request(
@@ -25966,6 +26198,7 @@ mod tests {
             .expect("rejected archived recovery must not leak active admission");
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn recovered_runtime_apply_create_authority_failure_discards_live_deferred_admission() {
         let temp = tempfile::tempdir().unwrap();
@@ -27735,7 +27968,8 @@ mod tests {
                 session_store,
                 runtime_store.clone(),
                 Arc::new(meerkat_store::MemoryBlobStore::new()),
-            ),
+            )
+            .expect("construct runtime authority"),
             crate::router::NotificationSink::noop(),
         ));
         runtime_store.fail_next_catalog_read();
@@ -28953,6 +29187,23 @@ mod tests {
     }
 
     #[test]
+    fn session_error_to_rpc_preserves_runtime_readiness() {
+        let error = session_error_to_rpc(SessionError::RuntimeUnavailable {
+            reason: meerkat_core::authorization::ControllerReadinessFailure::Busy,
+        });
+        assert_eq!(
+            error.code,
+            meerkat_contracts::ErrorCode::SessionRuntimeUnavailable.jsonrpc_code()
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "code": "SESSION_RUNTIME_UNAVAILABLE", "reason": { "kind": "busy" },
+            }))
+        );
+    }
+
+    #[test]
     fn session_error_to_rpc_surfaces_cancelled_as_request_cancelled() {
         let session_err = SessionError::Agent(meerkat_core::AgentError::Cancelled);
         let rpc_err = session_error_to_rpc(session_err);
@@ -29851,5 +30102,292 @@ mod tests {
             !matches!(parked, Err(SessionError::Busy { .. })),
             "the parked projection was never refused as released: {parked:?}"
         );
+    }
+
+    // Current-API generic setup failure only, not governed native refusal.
+    mod setup_cleanup_wire_privacy {
+        use super::*;
+        use futures::FutureExt;
+        use meerkat_runtime::RuntimeStore;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        const PRIMARY_SETUP_MESSAGE: &str = "synthetic public post-prepare setup failure";
+        const PRIVATE_CLEANUP_CANARY: &str = "synthetic service-turn lifecycle commit failure";
+        const PROMPT: &str = "ordinary setup-cleanup JSONL control";
+
+        async fn send_jsonl(writer: &mut tokio::io::DuplexStream, request: serde_json::Value) {
+            writer
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .expect("write JSONL request");
+            writer.flush().await.expect("flush JSONL request");
+        }
+
+        async fn response_for(
+            frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+            id: u64,
+        ) -> serde_json::Value {
+            while let Some(frame) = frames.recv().await {
+                if frame.get("method").is_none() && frame["id"] == id {
+                    return frame;
+                }
+            }
+            panic!("JSONL stream ended before response {id}");
+        }
+
+        async fn run_wire_case(fail_cleanup: bool) {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let store = Arc::new(FailingLifecycleRuntimeStore::new());
+            let client = Arc::new(RecordingMessagesLlmClient::default());
+            let config = Config::default();
+            let runtime = Arc::new(SessionRuntime::new(
+                temp_factory(&temp),
+                config.clone(),
+                1,
+                meerkat::PersistenceBundle::new(
+                    Arc::new(meerkat::MemoryStore::new()),
+                    store.clone(),
+                    Arc::new(meerkat_store::MemoryBlobStore::new()),
+                )
+                .expect("construct runtime authority"),
+                crate::router::NotificationSink::noop(),
+            ));
+            runtime.set_default_llm_client(Some(client.clone()));
+            let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+                meerkat_core::MemoryConfigStore::new(config, meerkat_models::canonical()),
+            );
+            runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+                config_store.clone(),
+                temp.path().join("config_state.json"),
+            )));
+            if fail_cleanup {
+                *runtime
+                    .create_session_after_prepare_bindings_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(PRIMARY_SETUP_MESSAGE.to_string());
+                // Preserve the existing real preparation commit, then fault the
+                // following cleanup lifecycle commit at its actual store method.
+                store.fail_lifecycle_commit_after(1);
+            }
+            assert!(
+                store
+                    .cleanup_wire_store_calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+            );
+
+            let (server_reader, mut writer) = tokio::io::duplex(65_536);
+            let (client_reader, server_writer) = tokio::io::duplex(65_536);
+            let wire = Arc::new(StdMutex::new(Vec::<String>::new()));
+            let capture = wire.clone();
+            let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut reader_task = tokio::spawn(async move {
+                let mut lines = BufReader::new(client_reader).lines();
+                while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+                    capture
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(line.clone());
+                    let frame = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+                    frames_tx.send(frame).map_err(|error| error.to_string())?;
+                }
+                Ok::<(), String>(())
+            });
+            let server_runtime = runtime.clone();
+            let mut server_task = tokio::spawn(async move {
+                let mut server = crate::server::RpcServer::new(
+                    BufReader::new(server_reader),
+                    server_writer,
+                    server_runtime,
+                    config_store,
+                )
+                .expect("construct runtime authority");
+                // The failure case must retain its actual repair-blocked owner.
+                // Use the existing shared-connection EOF behavior, not a test
+                // erasure or a forced successful cleanup of that owner.
+                server.skip_shutdown_on_eof = fail_cleanup;
+                server.run().await
+            });
+
+            let scenario = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                std::panic::AssertUnwindSafe(async {
+                    send_jsonl(&mut writer, serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "session/create",
+                        "params": {
+                            "prompt": [], "initial_turn": "deferred",
+                            "model": "claude-sonnet-4-5", "provider": "anthropic",
+                            "enable_builtins": false, "enable_shell": false,
+                            "enable_web_search": false,
+                        }
+                    })).await;
+                    let created = response_for(&mut frames_rx, 1).await;
+                    if fail_cleanup {
+                        assert_eq!(created["error"]["code"], error::INTERNAL_ERROR,
+                            "preserve the real generic setup class: {created}");
+                        assert!(created.get("result").is_none());
+                        assert!(created["error"]["message"].as_str().unwrap()
+                            .contains(PRIMARY_SETUP_MESSAGE), "primary setup failure: {created}");
+                        assert!(created["error"].get("data").is_none(),
+                            "this current setup hook has no native refusal detail: {created}");
+                        let session_id = runtime.create_session_after_prepare_bindings_session_id
+                            .lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+                            .expect("real post-prepare hook reached after registration");
+                        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+                        let observed = store.cleanup_wire_store_calls.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                        assert_eq!(observed.iter().filter(|(method, id)|
+                            *method == "commit_machine_lifecycle_failed" && id == &runtime_id)
+                            .count(), 1, "actual cleanup commit must fail before privacy is checked: {observed:?}");
+                        assert_eq!(observed, vec![
+                            ("compare_and_swap_machine_lifecycle_applied", runtime_id.clone()),
+                            ("commit_machine_lifecycle", runtime_id.clone()),
+                            ("commit_machine_lifecycle_failed", runtime_id.clone()),
+                        ], "real preparation CAS succeeds before the cleanup commit fails");
+                        assert!(runtime.runtime_adapter.contains_session(&session_id).await,
+                            "failed cleanup retains its real registration");
+                        assert!(client.requests().is_empty(), "setup failure cannot execute a model request");
+                        assert!(store.load_input_states_strict(&runtime_id).await.unwrap().is_empty(),
+                            "no input was admitted before the setup hook");
+                        assert!(store.load_committed_whole_blob_snapshot(&runtime_id).await.unwrap().is_none(),
+                            "failed pre-actor setup did not publish a session document");
+                        assert!(!runtime.service.live_session_actor_registered(&session_id).await,
+                            "do not manufacture cleanup eligibility by removing an actor");
+                        let retry = runtime.archive_runtime_cleanup().run(&session_id).await
+                            .expect_err("genuine lifecycle failure remains repair-blocked");
+                        assert!(retry.to_string().contains("Runtime recovery is repair-blocked"));
+                        assert!(retry.to_string().contains("ordinary_lifecycle_commit"));
+                        assert!(runtime.runtime_adapter.contains_session(&session_id).await);
+                        assert_eq!(store.cleanup_wire_store_calls.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner).len(), observed.len(),
+                            "repair-blocked retry must not reach another store mutation");
+                    } else {
+                        assert!(created.get("error").is_none(), "real healthy creation: {created}");
+                        let session_id: SessionId = serde_json::from_value(
+                            created["result"]["session_id"].clone()).expect("actual session id");
+                        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+                        assert!(client.requests().is_empty(), "deferred create is not a model turn");
+                        assert!(store.load_input_states_strict(&runtime_id).await.unwrap().is_empty());
+                        send_jsonl(&mut writer, serde_json::json!({
+                            "jsonrpc": "2.0", "id": 2, "method": "turn/start",
+                            "params": {"session_id": session_id, "prompt": PROMPT}
+                        })).await;
+                        let completed = response_for(&mut frames_rx, 2).await;
+                        assert!(completed.get("error").is_none(), "healthy wire turn: {completed}");
+                        assert_eq!(completed["result"]["text"], "recorded");
+                        assert_eq!(completed["result"]["tool_calls"], 0);
+                        assert_eq!(client.requests().len(), 1, "actual configured model invocation");
+                        let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].seed.phase,
+                            meerkat_runtime::input_state::InputLifecycleState::Consumed);
+                        assert_eq!(rows[0].seed.terminal_outcome,
+                            Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed));
+                        let document = store.load_committed_whole_blob_snapshot(&runtime_id).await.unwrap()
+                            .expect("actual stock session document");
+                        assert!(document.session().messages().iter().any(|message|
+                            matches!(message, Message::User(user) if user.text_content() == PROMPT)));
+                        assert!(serde_json::to_string(document.session().messages()).unwrap().contains("recorded"));
+                    }
+                }).catch_unwind(),
+            ).await;
+
+            // Both tasks are joined or aborted and joined on every assertion,
+            // transport error and scenario timeout path. Keep all output lines.
+            drop(writer);
+            let server_cleanup =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server_task)
+                    .await
+                {
+                    Ok(joined) => Some(joined),
+                    Err(_) => {
+                        server_task.abort();
+                        let _ = server_task.await;
+                        None
+                    }
+                };
+            let reader_cleanup =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut reader_task)
+                    .await
+                {
+                    Ok(joined) => Some(joined),
+                    Err(_) => {
+                        reader_task.abort();
+                        let _ = reader_task.await;
+                        None
+                    }
+                };
+            match scenario {
+                Ok(Ok(())) => {}
+                Ok(Err(payload)) => std::panic::resume_unwind(payload),
+                Err(error) => panic!("bounded setup/cleanup JSONL scenario: {error}"),
+            }
+            server_cleanup
+                .expect("bounded server shutdown")
+                .expect("server joined")
+                .expect("server result");
+            reader_cleanup
+                .expect("bounded output EOF")
+                .expect("reader joined")
+                .expect("all JSONL output parsed");
+            let lines = wire
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let frames: Vec<serde_json::Value> = lines
+                .iter()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(!frames.is_empty(), "actual wire output is required");
+            assert!(
+                !frames.iter().any(|frame| frame["method"] == "tool/execute"),
+                "no callback receiver effect in either fixture"
+            );
+            assert!(
+                !lines.join("\n").contains(PRIVATE_CLEANUP_CANARY),
+                "private cleanup diagnostic must never enter any response or notification"
+            );
+        }
+
+        #[tokio::test]
+        async fn setup_cleanup_failure_keeps_primary_code_and_private_detail_off_jsonl() {
+            run_wire_case(true).await;
+        }
+
+        #[tokio::test]
+        async fn healthy_setup_and_turn_use_real_jsonl_and_persist_the_result() {
+            run_wire_case(false).await;
+        }
+    }
+
+    #[test]
+    fn cleanup_error_projection_preserves_primary_fields_and_redacts_private_detail() {
+        const PRIMARY_MESSAGE: &str = "synthetic primary setup failure";
+        const PRIVATE_DETAIL: &str = "PRIVATE_CLEANUP_DISPLAY_CANARY";
+        const PRIVATE_CONTEXT: &str = "PRIVATE_CLEANUP_CONTEXT_CANARY";
+        let primary_data = serde_json::json!({
+            "kind": "synthetic_primary_data",
+            "nested": { "items": [2, 1, 2], "present": true }
+        });
+        let combined = combine_rpc_cleanup_error(
+            RpcError {
+                code: error::INVALID_PARAMS,
+                message: PRIMARY_MESSAGE.to_string(),
+                data: Some(primary_data.clone()),
+            },
+            PRIVATE_DETAIL,
+            PRIVATE_CONTEXT,
+        );
+
+        assert_eq!(combined.code, error::INVALID_PARAMS);
+        assert_eq!(combined.data, Some(primary_data));
+        assert_eq!(
+            combined.message,
+            "synthetic primary setup failure; required cleanup failed"
+        );
+        let public_error = serde_json::to_string(&combined).expect("serialize public RPC error");
+        assert!(!public_error.contains(PRIVATE_DETAIL));
+        assert!(!public_error.contains(PRIVATE_CONTEXT));
     }
 }

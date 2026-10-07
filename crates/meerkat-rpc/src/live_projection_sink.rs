@@ -1528,6 +1528,7 @@ mod tests {
                 tool_use_id: call.id,
                 is_error: false,
                 content: ContentBlock::text_vec("ok".to_string()),
+                settlement_failures: Vec::new(),
             }))
         }
     }

@@ -497,7 +497,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             &runtime,
             &config_store,
             controlling_acceptor,
-        );
+        )?;
         runtime.set_mob_state(mob_state);
     }
 

@@ -463,7 +463,8 @@ fn identity_session_load_error_class(
         SessionError::WholeBlobAuditedEndpointDivergence { .. } => {
             IdentitySessionLoadErrorClass::Malformed
         }
-        SessionError::NotFound { .. }
+        SessionError::RuntimeUnavailable { .. }
+        | SessionError::NotFound { .. }
         | SessionError::Busy { .. }
         | SessionError::CompactionDisabled
         | SessionError::NotRunning { .. }

@@ -294,7 +294,8 @@ async fn make_stack(
         store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         blob_store,
-    );
+    )
+    .expect("construct runtime authority");
     let runtime = SessionRuntime::new(
         factory,
         config.clone(),
@@ -315,6 +316,7 @@ async fn make_stack(
             Some(runtime.runtime_adapter()),
             meerkat_mob::MobControlPrincipal::Owner,
         )
+        .expect("construct runtime authority")
         .with_default_llm_client(Some(client)),
     );
     let runtime = Arc::new(runtime);
@@ -407,6 +409,8 @@ fn request_only_peer_steer() -> meerkat_runtime::Input {
         injected_context: Vec::new(),
         sender_taint: None,
         header: meerkat_runtime::InputHeader {
+            ingress_context: None,
+            authority_association: None,
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: meerkat_runtime::InputOrigin::Peer {
@@ -461,7 +465,8 @@ async fn run_scenario(gate: Gate, steer: meerkat_runtime::Input) -> Outcome {
     let (router, mob_state) = make_stack(temp.path(), client, gate_tools).await;
     let runtime = mob_state
         .session_service()
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime adapter")
         .expect("runtime-backed stack");
     let mob_id = format!("durable-steer-{}", uuid::Uuid::new_v4().simple());
     let mob_id = mob_state

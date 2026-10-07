@@ -574,7 +574,8 @@ async fn copilot_live_account_routes_tools_images_and_switches() {
         session_store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         blob_store,
-    );
+    )
+    .expect("construct runtime authority");
     let runtime = Arc::new(SessionRuntime::new(
         factory,
         config.clone(),

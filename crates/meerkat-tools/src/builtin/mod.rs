@@ -270,9 +270,27 @@ pub enum BuiltinToolError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// Required operation observation could not be recorded.
+    #[error("operation observation unavailable")]
+    OperationObservationUnavailable,
+    #[error("operation authorization unavailable")]
+    OperationAuthorizationUnavailable,
+
     /// An async task error occurred
     #[error("Task error: {0}")]
     TaskError(String),
+
+    /// Mechanical requirements refused this launch before target code entered.
+    #[error("{refusal}")]
+    ConfinementRefused {
+        refusal: meerkat_core::confinement::ConfinementRefusal,
+    },
+}
+
+impl From<meerkat_core::confinement::ConfinementRefusal> for BuiltinToolError {
+    fn from(refusal: meerkat_core::confinement::ConfinementRefusal) -> Self {
+        Self::ConfinementRefused { refusal }
+    }
 }
 
 impl BuiltinToolError {

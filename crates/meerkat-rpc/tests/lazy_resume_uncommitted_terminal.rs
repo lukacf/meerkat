@@ -201,7 +201,8 @@ impl RpcClient {
                 server_writer,
                 runtime,
                 config_store,
-            );
+            )
+            .expect("construct runtime authority");
             let _ = server.run().await;
         });
         Self {

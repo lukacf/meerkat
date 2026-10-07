@@ -346,7 +346,8 @@ mod tests {
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 memory_blob_store(),
                 Arc::new(MemoryScheduleStore::new()),
-            ),
+            )
+            .unwrap(),
             crate::router::NotificationSink::noop(),
         ))
     }

@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-pub const SESSION_VERSION: u32 = 3;
+pub const SESSION_VERSION: u32 = 4;
 pub const STORED_INPUT_STATE_VERSION: u32 = 5;
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
 
@@ -72,7 +72,7 @@ pub fn restore_session_envelope_version(
         SessionPersistenceVersionField::SessionEnvelope,
         observed,
         SESSION_VERSION,
-        &[3],
+        &[3, 4],
     )
 }
 

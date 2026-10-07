@@ -264,6 +264,10 @@ ci-lanes-selftest:
 	@echo "$(GREEN)Self-testing the CI lane classifier (fail-closed contracts)...$(NC)"
 	@node scripts/ci-cargo-lanes-selftest.mjs
 
+.PHONY: native-cost-analysis-selftest
+native-cost-analysis-selftest:
+	@$(PYTHON) scripts/test_analyze_native_cost.py
+
 # Path classifiers (machine-authority-changed, buildbuddy-edge-changes,
 # cargo-agent-gate) and gate wiring contracts. Pure shell, no cargo build.
 path-classifier-selftest:
@@ -1016,7 +1020,7 @@ help:
 	@echo "  $(GREEN)verify-machine-poster-coverage$(NC)- Check posters cover every canonical machine and advertise only canonical states/triggers"
 	@echo "  $(GREEN)path-classifier-selftest$(NC)- Check the shell path classifiers still route gate inputs"
 	@echo "  $(GREEN)check-rust-release-config$(NC)- Verify release Rust crate list and binary metadata"
-	@echo "  $(GREEN)check-crate-license-files$(NC)- Verify every release crate packages LICENSE-MIT and LICENSE-APACHE"
+	@echo "  $(GREEN)check-crate-license-files$(NC)- Verify every release crate packages exactly the license texts its license field names"
 	@echo "  $(GREEN)verify-lock-consistency$(NC)- Verify Cargo.lock resolves under --locked (merge danglers)"
 	@echo "  $(GREEN)verify-bazel-locks$(NC)    - Verify generated BUILD files + MODULE.bazel.lock freshness"
 	@echo "  $(GREEN)verify-bazel-locks-strict$(NC)- Same, with the bb lockfile check required"

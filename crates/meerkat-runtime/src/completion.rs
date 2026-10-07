@@ -201,6 +201,7 @@ pub fn interaction_terminal_event(
                 tool_use_id,
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                settlement_failures: Vec::new(),
             }],
             tool_name,
             args,
@@ -211,6 +212,7 @@ pub fn interaction_terminal_event(
                     tool_use_id: String::new(),
                     tool_name: "callback_batch".to_string(),
                     args: Value::Null,
+                    settlement_failures: Vec::new(),
                 },
             );
             AgentEvent::InteractionCallbackPending {
@@ -1740,11 +1742,13 @@ mod tests {
                 tool_use_id: "call-a".to_string(),
                 tool_name: "ask_a".to_string(),
                 args: serde_json::json!({"tool_use_id": "call-a", "question": "a"}),
+                settlement_failures: Vec::new(),
             },
             meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id: "call-b".to_string(),
                 tool_name: "ask_b".to_string(),
                 args: serde_json::json!({"tool_use_id": "call-b", "question": "b"}),
+                settlement_failures: Vec::new(),
             },
         ];
 

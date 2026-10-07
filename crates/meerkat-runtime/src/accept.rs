@@ -65,6 +65,8 @@ pub struct CoarseAdmissionFlags {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MachineAdmissionAuthority {
     input_id: String,
+    authority_binding: Option<String>,
+    authority_batch_key: Option<String>,
     input_kind: mm_dsl::AdmissionInputKind,
     requested_lane: Option<mm_dsl::InputLane>,
     continuation_kind: mm_dsl::AdmissionContinuationKind,
@@ -92,6 +94,8 @@ impl MachineAdmissionAuthority {
     ) -> Self {
         Self {
             input_id,
+            authority_binding: None,
+            authority_batch_key: None,
             input_kind,
             requested_lane,
             continuation_kind,
@@ -102,6 +106,15 @@ impl MachineAdmissionAuthority {
             active_turn_boundary_available,
             without_wake,
         }
+    }
+
+    pub(crate) fn with_authority_binding(
+        mut self,
+        binding: (Option<String>, Option<String>),
+    ) -> Self {
+        self.authority_binding = binding.0;
+        self.authority_batch_key = binding.1;
+        self
     }
 
     pub(crate) fn input_id(&self) -> &str {
@@ -119,6 +132,8 @@ impl MachineAdmissionAuthority {
     pub(crate) fn to_dsl_input(&self) -> mm_dsl::MeerkatMachineInput {
         mm_dsl::MeerkatMachineInput::ResolveAdmissionPlan {
             input_id: self.input_id.clone(),
+            authority_binding: self.authority_binding.clone(),
+            authority_batch_key: self.authority_batch_key.clone(),
             input_kind: self.input_kind,
             requested_lane: self.requested_lane,
             continuation_kind: self.continuation_kind,

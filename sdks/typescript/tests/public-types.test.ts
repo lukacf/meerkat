@@ -2010,3 +2010,108 @@ async function liveChannelRefreshShape(ch: LiveChannel) {
   return result;
 }
 void liveChannelRefreshShape;
+
+
+// Audit compatibility consumes generated closed types, not string assertions.
+import type { LlmProviderErrorKind as ObservationProviderKind } from "../src/generated/event_types.js";
+import type { WireToolResult as ObservationWireToolResult } from "../src/generated/types.js";
+const observationProviderKind: ObservationProviderKind = "operation_observation_unavailable";
+const ordinaryProviderKind: ObservationProviderKind = "server_overloaded";
+const observationCompanion: NonNullable<ObservationWireToolResult["settlement_failures"]>[number] = {
+  admission_source: "authorization_audit",
+  effect_kind: "tool_dispatch",
+  physical_outcome: "committed",
+  failure_kind: "operation_observation_unavailable",
+};
+const observedToolResult: ObservationWireToolResult = {
+  tool_use_id: "call-1",
+  content: "physical result",
+  is_error: false,
+  settlement_failures: [observationCompanion],
+};
+const legacyToolResult: ObservationWireToolResult = {
+  tool_use_id: "legacy", content: "unchanged", is_error: false,
+};
+void [observationProviderKind, ordinaryProviderKind, observedToolResult, legacyToolResult];
+
+// Current authority unavailable, audit failure and actual refusal remain distinct.
+const authorizationProviderKind: ObservationProviderKind = "operation_authorization_unavailable";
+const refusalProviderKind: ObservationProviderKind = "operation_refused";
+const authorizationCompanion: NonNullable<ObservationWireToolResult["settlement_failures"]>[number] = {
+  admission_source: "configured_gate", effect_kind: "tool_dispatch",
+  physical_outcome: "failed", failure_kind: "operation_authorization_unavailable",
+};
+const refusalCompanion: NonNullable<ObservationWireToolResult["settlement_failures"]>[number] = {
+  admission_source: "context_gate", effect_kind: "tool_dispatch",
+  physical_outcome: "unknown", failure_kind: "authorization_refused",
+};
+const orderedAuthorizationResult: ObservationWireToolResult = {
+  tool_use_id: "ordered-wire", content: "retained physical result", is_error: false,
+  settlement_failures: [authorizationCompanion, observationCompanion, refusalCompanion],
+};
+// @ts-expect-error The generated provider kind must remain a closed union.
+const inventedAuthorizationKind: ObservationProviderKind = "invented_authorization_kind";
+void [authorizationProviderKind, refusalProviderKind, orderedAuthorizationResult, inventedAuthorizationKind];
+
+
+const canonicalHookFailedEvent: import("../src/index.js").HookFailedEvent = {
+  type: "hook_failed", hookId: "hook-1", point: "post_tool_execution",
+  error: "process exited",
+  reason: { reason_code: "execution_failed", message: "process exited" },
+};
+const canonicalHookLaunchRefusedEvent: Extract<
+  import("../src/generated/event_types.js").AgentEvent,
+  { type: "hook_launch_refused" }
+> = {
+  type: "hook_launch_refused", hook_id: "hook-1", point: "pre_tool_execution",
+  tool_use_id: "  call-1  ",
+  reason: { reason_code: "confinement_refused", refusal: "preparation_failed" },
+};
+void [canonicalHookFailedEvent, canonicalHookLaunchRefusedEvent];
+
+
+// Future native tags use an explicit SDK wrapper and retain the exact wire cause.
+const futureHookFailedReason: import("../src/index.js").HookFailureReason = {
+  reason_code: "unknown", rawReasonCode: "future_guard_busy",
+  raw: { reason_code: "future_guard_busy", retry_after_ms: 23,
+    details: { owner: "future-native-owner", token: null } },
+};
+const futureHookConfinementCause: import("../src/index.js").UnknownHookFailureReason = {
+  reason_code: "unknown", rawReasonCode: "confinement_refused",
+  raw: { reason_code: "confinement_refused", refusal: "future_backend_busy",
+    detail: { generation: 9, resource: null } },
+};
+const publicConfinementCause: import("../src/index.js").ConfinementRefusal = "preparation_failed";
+// @ts-expect-error The generated known confinement causes remain a closed union.
+const inventedConfinementCause: import("../src/index.js").ConfinementRefusal = "future_backend_busy";
+void [futureHookFailedReason, futureHookConfinementCause, publicConfinementCause, inventedConfinementCause];
+
+
+// Known generated variants retain ordinary discriminant narrowing.
+function narrowHookFailureReason(reason: NonNullable<import("../src/index.js").HookFailedEvent["reason"]>): string {
+  switch (reason.reason_code) {
+    case "timeout": {
+      const timeoutMs: number = reason.timeout_ms;
+      return `${timeoutMs}`;
+    }
+    case "execution_failed":
+    case "config_invalid": {
+      const message: string = reason.message;
+      return message;
+    }
+    case "observe_only_violation": return "observe-only";
+    case "confinement_refused": {
+      const refusal: import("../src/generated/event_types.js").ConfinementRefusal = reason.refusal;
+      return refusal;
+    }
+    case "unknown": {
+      const raw: Readonly<Record<string, unknown>> = reason.raw;
+      return typeof raw.reason_code === "string" ? raw.reason_code : "unknown";
+    }
+    default: {
+      const exhausted: never = reason;
+      return exhausted;
+    }
+  }
+}
+void narrowHookFailureReason;

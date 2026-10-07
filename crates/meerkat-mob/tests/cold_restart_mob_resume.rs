@@ -494,7 +494,10 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
         .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
         .await
         .expect("w1 session id");
-    let runtime_1 = service_1.runtime_adapter().expect("runtime adapter");
+    let runtime_1 = service_1
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
+        .expect("runtime adapter");
     let initial_binding = runtime_1
         .live_webrtc_runtime_binding(&w1_sid)
         .await
@@ -611,7 +614,10 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
     };
     let (service_2, _store_2) = persistent_service(&paths, runtime_store_2);
-    let runtime_2 = service_2.runtime_adapter().expect("new runtime adapter");
+    let runtime_2 = service_2
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
+        .expect("new runtime adapter");
     assert!(
         runtime_2
             .current_executor_attachment_witness(&w1_sid)
@@ -2763,7 +2769,8 @@ async fn mob_retirement_recovers_reload_required_runtime_before_normal_archive()
         .expect("reload-required worker session id");
     let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
     let adapter = service
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
         .expect("persistent session service exposes its runtime adapter");
     let old_registration = adapter
         .current_session_registration_witness(&session_id)

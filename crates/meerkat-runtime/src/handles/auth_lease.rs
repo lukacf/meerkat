@@ -39,8 +39,10 @@ fn current_time_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Emit a structured audit record for every accepted auth-lease DSL
-/// transition. REST/RPC surfaces (and any other `tracing::Subscriber`
+/// Emit a structured audit record for accepted auth-lease DSL mutations.
+/// Unchanged credential-freshness observations are omitted; observations that
+/// change lifecycle facts and all explicit mutations retain their records.
+/// REST/RPC surfaces (and any other `tracing::Subscriber`
 /// consumer) can filter on `target = "meerkat::auth::audit"` to build
 /// a persistent audit log without the shell inventing the fact set
 /// (dogma §17 — surfaces observe, they do not own lifecycle truth).
@@ -79,6 +81,9 @@ fn emit_audit(
 #[derive(Clone)]
 pub struct RuntimeAuthLeaseHandle {
     machines: Arc<Mutex<AuthLeaseRegistry>>,
+    // Exported credential capabilities retain the actual backend execution
+    // owner independently of the MeerkatMachine that published them.
+    _execution_custody: Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
     #[cfg(not(target_arch = "wasm32"))]
     release_observers: Arc<Mutex<Vec<Weak<dyn AuthLeaseReleaseObserver>>>>,
 }
@@ -565,9 +570,208 @@ impl RuntimeAuthLeaseHandle {
     pub fn new() -> Self {
         Self {
             machines: Arc::new(Mutex::new(AuthLeaseRegistry::default())),
+            _execution_custody: None,
             #[cfg(not(target_arch = "wasm32"))]
             release_observers: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub(crate) fn with_execution_custody(
+        &self,
+        execution_custody: Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
+    ) -> Self {
+        Self {
+            machines: Arc::clone(&self.machines),
+            _execution_custody: execution_custody,
+            #[cfg(not(target_arch = "wasm32"))]
+            release_observers: Arc::clone(&self.release_observers),
+        }
+    }
+
+    pub(crate) fn shares_authority_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.machines, &other.machines)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_empty_authority<T>(
+        &self,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T, crate::traits::ControllerReadinessFailure> {
+        use crate::traits::ControllerReadinessFailure;
+        let registry = self.machines.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => ControllerReadinessFailure::Busy,
+            std::sync::TryLockError::Poisoned(_) => {
+                ControllerReadinessFailure::AuthorityUnavailable
+            }
+        })?;
+        if !registry.authorities.is_empty() {
+            return Err(ControllerReadinessFailure::ReplacementNotEmpty);
+        }
+        let result = publish();
+        drop(registry);
+        Ok(result)
+    }
+
+    fn release_lease_inner(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        let context = "AuthLeaseHandle::release_lease";
+        // Two-phase machine-owned release drain (D1).
+        //
+        // Phase 1 - BeginRelease: fire the machine-owned drain input to record
+        // release intent and obtain the typed CancelOAuthFlowsForRelease
+        // obligation carrying the in-flight membership. Only fires if a local
+        // machine exists; the stale-authority case (no local machine) has an
+        // empty obligation and relies entirely on the observer's durable-store
+        // scan (phase 2) for cleanup.
+        //
+        // Phase 2 - observer collect: gather registry-payload-only ids from the
+        // durable store. Merged with the machine-emitted obligation so the
+        // observer's auth_lease_released prune covers both the machine-owned
+        // flows and any flows admitted by a stale authority that the local
+        // machine never saw.
+        //
+        // Release-commit ordering: observer notify (phase 3) and drain discharge
+        // (phase 4) are both fallible and both precede the Release commit
+        // (phase 5). An error in either aborts the release - the machine stays
+        // in release_draining (or un-created in the stale case) and the caller
+        // retries. No credential Release committed: its prior generated
+        // usability remains authoritative after the lease guard is dropped.
+        // Partial OAuth-flow cleanup is not credential revocation. Retried release re-fires BeginRelease which re-emits the
+        // remaining membership (idempotent). No machine entry is synthesized in
+        // the registry for the stale-authority path until Release commits.
+        #[cfg(not(target_arch = "wasm32"))]
+        let release_observers = self.live_release_observers();
+        #[cfg(not(target_arch = "wasm32"))]
+        let release_permits = release_observers
+            .iter()
+            .map(|observer| observer.begin_auth_lease_release(lease_key))
+            .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Phase 1: BeginRelease under the machines lock.
+            // Extract the machine-owned drain obligation (empty for stale authority).
+            let machine_drain_obligation = {
+                let mut guard = self
+                    .machines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = guard.authorities.get_mut(lease_key) {
+                    let transition = auth_dsl::AuthMachineMutator::apply(
+                        entry,
+                        auth_dsl::AuthMachineInput::BeginRelease,
+                    )
+                    .map_err(|err| map_auth_machine_error(err, context))?;
+                    // BeginRelease emits no EmitLifecycleEvent; use the
+                    // maybe_-variant (strict variant errors on missing
+                    // publication which BeginRelease legitimately omits).
+                    maybe_auth_lease_transition_from_generated_publication(
+                        lease_key,
+                        entry,
+                        &transition,
+                        context,
+                    )?;
+                    crate::protocol_auth_release_oauth_flow_drain::extract_obligations(&transition)
+                        .into_iter()
+                        .next()
+                } else {
+                    None
+                }
+            };
+
+            // Phase 2: Observer-only durable-store scan (stale-authority
+            // flows the local machine never admitted). Merged with the
+            // machine-emitted obligation so observers see the full prune set.
+            let mut released =
+                self.collect_release_observer_flows(&release_observers, lease_key)?;
+            if let Some(ref obligation) = machine_drain_obligation {
+                released
+                    .browser_flow_ids
+                    .extend(obligation.browser_flow_ids.iter().cloned());
+                released
+                    .device_flow_ids
+                    .extend(obligation.device_flow_ids.iter().cloned());
+            }
+            released.dedup();
+
+            // Phase 3: Notify observers - prune payloads from registry and
+            // durable store. Fallible: abort on error, machine stays draining.
+            self.notify_release_observers(&release_observers, &released)?;
+
+            // Phase 4: Discharge machine-owned drain obligations.
+            // Fire typed terminal Expire* feedback per drained flow id.
+            // Each is total (Released no-op + Absent no-op exist); Err is
+            // a genuine fault (machine absent/poisoned), propagated.
+            if let Some(obligation) = machine_drain_obligation {
+                let mut guard = self
+                    .machines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = guard.authorities.get_mut(lease_key) {
+                    for flow_id in obligation.browser_flow_ids {
+                        let transition = auth_dsl::AuthMachineMutator::apply(
+                            entry,
+                            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow { flow_id },
+                        )
+                        .map_err(|err| map_auth_machine_error(err, context))?;
+                        maybe_auth_lease_transition_from_generated_publication(
+                            lease_key,
+                            entry,
+                            &transition,
+                            context,
+                        )?;
+                    }
+                    for flow_id in obligation.device_flow_ids {
+                        let transition = auth_dsl::AuthMachineMutator::apply(
+                            entry,
+                            auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow { flow_id },
+                        )
+                        .map_err(|err| map_auth_machine_error(err, context))?;
+                        maybe_auth_lease_transition_from_generated_publication(
+                            lease_key,
+                            entry,
+                            &transition,
+                            context,
+                        )?;
+                    }
+                }
+            }
+        }
+        #[cfg(test)]
+        run_release_before_commit_hook(lease_key);
+        // Phase 5: Commit - Release transition through generated machine
+        // authority. The oauth_release_drained guard passes (count == 0 after
+        // the drain discharge above). For the stale-authority path (no local
+        // machine), or_insert_with creates a fresh machine whose initial
+        // count is already 0. Nothing fallible follows the Release commit.
+        let (from_phase, to_phase) = {
+            let mut guard = self
+                .machines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = guard
+                .authorities
+                .entry(lease_key.clone())
+                .or_insert_with(auth_dsl::AuthMachineAuthority::new);
+            let from_phase = map_phase(entry.state().lifecycle_phase);
+            let transition =
+                auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
+                    .map_err(|err| map_auth_machine_error(err, context))?;
+            auth_lease_transition_from_generated_publication(
+                lease_key,
+                entry,
+                &transition,
+                context,
+            )?;
+            let to_phase = map_phase(entry.state().lifecycle_phase);
+            (from_phase, to_phase)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(release_permits);
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(release_observers);
+        emit_audit(lease_key, "release_lease", from_phase, to_phase);
+        #[cfg(test)]
+        run_release_after_accept_hook(lease_key);
+        Ok(())
     }
 
     /// Alias for [`Self::new`]; kept for parity with other runtime
@@ -646,6 +850,10 @@ impl RuntimeAuthLeaseHandle {
         create_if_missing: bool,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let action = Self::audit_action_for(&input);
+        let freshness_observation = matches!(
+            &input,
+            auth_dsl::AuthMachineInput::ObserveCredentialFreshness { .. }
+        );
         let mut guard = self
             .machines
             .lock()
@@ -656,7 +864,7 @@ impl RuntimeAuthLeaseHandle {
                 format!("no auth lease registered for lease_key `{lease_key}`"),
             ));
         }
-        let (from_phase, to_phase, auth_transition) = {
+        let (from_phase, to_phase, auth_transition, changed_observation) = {
             let entry = if create_if_missing {
                 guard
                     .authorities
@@ -674,6 +882,18 @@ impl RuntimeAuthLeaseHandle {
                 }
             };
             let from_phase = map_phase(entry.state().lifecycle_phase);
+            let freshness_before = freshness_observation.then(|| {
+                let state = entry.state();
+                (
+                    state.lifecycle_phase,
+                    state.expires_at,
+                    state.last_refresh,
+                    state.refresh_attempt,
+                    state.credential_present,
+                    state.credential_generation,
+                    state.credential_published_at_millis,
+                )
+            });
             let transition = auth_dsl::AuthMachineMutator::apply(entry, input)
                 .map_err(|err| map_auth_machine_error(err, context))?;
             let auth_transition = auth_lease_transition_from_generated_publication(
@@ -683,9 +903,24 @@ impl RuntimeAuthLeaseHandle {
                 context,
             )?;
             let to_phase = map_phase(entry.state().lifecycle_phase);
-            (from_phase, to_phase, auth_transition)
+            let changed_observation = freshness_before.is_none_or(|before| {
+                let state = entry.state();
+                before
+                    != (
+                        state.lifecycle_phase,
+                        state.expires_at,
+                        state.last_refresh,
+                        state.refresh_attempt,
+                        state.credential_present,
+                        state.credential_generation,
+                        state.credential_published_at_millis,
+                    )
+            });
+            (from_phase, to_phase, auth_transition, changed_observation)
         };
-        emit_audit(lease_key, action, from_phase, to_phase);
+        if changed_observation {
+            emit_audit(lease_key, action, from_phase, to_phase);
+        }
         Ok(auth_transition)
     }
 
@@ -1148,13 +1383,12 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         &self,
         lease_key: &LeaseKey,
         observation: RefreshFailureObservation,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let disposition = self.resolve_refresh_failure_disposition(lease_key, observation)?;
         let input = auth_dsl::AuthMachineInput::RefreshFailed {
             disposition: refresh_failure_disposition_to_dsl(disposition),
         };
         self.apply(lease_key, input, "AuthLeaseHandle::refresh_failed", false)
-            .map(|_| ())
     }
 
     fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -1168,163 +1402,34 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
     }
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        let context = "AuthLeaseHandle::release_lease";
-        // Two-phase machine-owned release drain (D1).
-        //
-        // Phase 1 — BeginRelease: fire the machine-owned drain input to record
-        // release intent and obtain the typed CancelOAuthFlowsForRelease
-        // obligation carrying the in-flight membership. Only fires if a local
-        // machine exists; the stale-authority case (no local machine) has an
-        // empty obligation and relies entirely on the observer's durable-store
-        // scan (phase 2) for cleanup.
-        //
-        // Phase 2 — observer collect: gather registry-payload-only ids from the
-        // durable store. Merged with the machine-emitted obligation so the
-        // observer's auth_lease_released prune covers both the machine-owned
-        // flows and any flows admitted by a stale authority that the local
-        // machine never saw.
-        //
-        // Fail-closed ordering: observer notify (phase 3) and drain discharge
-        // (phase 4) are both fallible and both precede the Release commit
-        // (phase 5). An error in either aborts the release — the machine stays
-        // in release_draining (or un-created in the stale case) and the caller
-        // retries. Retried release re-fires BeginRelease which re-emits the
-        // remaining membership (idempotent). No machine entry is synthesized in
-        // the registry for the stale-authority path until Release commits.
-        #[cfg(not(target_arch = "wasm32"))]
-        let release_observers = self.live_release_observers();
-        #[cfg(not(target_arch = "wasm32"))]
-        let release_permits = release_observers
-            .iter()
-            .map(|observer| observer.begin_auth_lease_release(lease_key))
-            .collect::<Result<Vec<_>, _>>()?;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // Phase 1: BeginRelease under the machines lock.
-            // Extract the machine-owned drain obligation (empty for stale authority).
-            let machine_drain_obligation = {
-                let mut guard = self
-                    .machines
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(entry) = guard.authorities.get_mut(lease_key) {
-                    let transition = auth_dsl::AuthMachineMutator::apply(
-                        entry,
-                        auth_dsl::AuthMachineInput::BeginRelease,
+            let guard = meerkat_core::try_acquire_auth_login_lifecycle_guard(lease_key)
+                .ok_or_else(|| {
+                    DslTransitionError::no_matching(
+                        "AuthLeaseHandle::release_lease::Busy",
+                        "credential lifecycle owner is busy",
                     )
-                    .map_err(|err| map_auth_machine_error(err, context))?;
-                    // BeginRelease emits no EmitLifecycleEvent; use the
-                    // maybe_-variant (strict variant errors on missing
-                    // publication which BeginRelease legitimately omits).
-                    maybe_auth_lease_transition_from_generated_publication(
-                        lease_key,
-                        entry,
-                        &transition,
-                        context,
-                    )?;
-                    crate::protocol_auth_release_oauth_flow_drain::extract_obligations(&transition)
-                        .into_iter()
-                        .next()
-                } else {
-                    None
-                }
-            };
-
-            // Phase 2: Observer-only durable-store scan (stale-authority
-            // flows the local machine never admitted). Merged with the
-            // machine-emitted obligation so observers see the full prune set.
-            let mut released =
-                self.collect_release_observer_flows(&release_observers, lease_key)?;
-            if let Some(ref obligation) = machine_drain_obligation {
-                released
-                    .browser_flow_ids
-                    .extend(obligation.browser_flow_ids.iter().cloned());
-                released
-                    .device_flow_ids
-                    .extend(obligation.device_flow_ids.iter().cloned());
-            }
-            released.dedup();
-
-            // Phase 3: Notify observers — prune payloads from registry and
-            // durable store. Fallible: abort on error, machine stays draining.
-            self.notify_release_observers(&release_observers, &released)?;
-
-            // Phase 4: Discharge machine-owned drain obligations.
-            // Fire typed terminal Expire* feedback per drained flow id.
-            // Each is total (Released no-op + Absent no-op exist); Err is
-            // a genuine fault (machine absent/poisoned), propagated.
-            if let Some(obligation) = machine_drain_obligation {
-                let mut guard = self
-                    .machines
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(entry) = guard.authorities.get_mut(lease_key) {
-                    for flow_id in obligation.browser_flow_ids {
-                        let transition = auth_dsl::AuthMachineMutator::apply(
-                            entry,
-                            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow { flow_id },
-                        )
-                        .map_err(|err| map_auth_machine_error(err, context))?;
-                        maybe_auth_lease_transition_from_generated_publication(
-                            lease_key,
-                            entry,
-                            &transition,
-                            context,
-                        )?;
-                    }
-                    for flow_id in obligation.device_flow_ids {
-                        let transition = auth_dsl::AuthMachineMutator::apply(
-                            entry,
-                            auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow { flow_id },
-                        )
-                        .map_err(|err| map_auth_machine_error(err, context))?;
-                        maybe_auth_lease_transition_from_generated_publication(
-                            lease_key,
-                            entry,
-                            &transition,
-                            context,
-                        )?;
-                    }
-                }
-            }
+                })?;
+            self.release_lease_with_guard(lease_key, &guard)
         }
-        #[cfg(test)]
-        run_release_before_commit_hook(lease_key);
-        // Phase 5: Commit — Release transition through generated machine
-        // authority. The oauth_release_drained guard passes (count == 0 after
-        // the drain discharge above). For the stale-authority path (no local
-        // machine), or_insert_with creates a fresh machine whose initial
-        // count is already 0. Nothing fallible follows the Release commit.
-        let (from_phase, to_phase) = {
-            let mut guard = self
-                .machines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let entry = guard
-                .authorities
-                .entry(lease_key.clone())
-                .or_insert_with(auth_dsl::AuthMachineAuthority::new);
-            let from_phase = map_phase(entry.state().lifecycle_phase);
-            let transition =
-                auth_dsl::AuthMachineMutator::apply(entry, auth_dsl::AuthMachineInput::Release)
-                    .map_err(|err| map_auth_machine_error(err, context))?;
-            auth_lease_transition_from_generated_publication(
-                lease_key,
-                entry,
-                &transition,
-                context,
-            )?;
-            let to_phase = map_phase(entry.state().lifecycle_phase);
-            (from_phase, to_phase)
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        drop(release_permits);
-        #[cfg(not(target_arch = "wasm32"))]
-        drop(release_observers);
-        emit_audit(lease_key, "release_lease", from_phase, to_phase);
-        #[cfg(test)]
-        run_release_after_accept_hook(lease_key);
-        Ok(())
+        #[cfg(target_arch = "wasm32")]
+        self.release_lease_inner(lease_key)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn release_lease_with_guard(
+        &self,
+        lease_key: &LeaseKey,
+        guard: &meerkat_core::auth::AuthLoginLifecycleGuard,
+    ) -> Result<(), DslTransitionError> {
+        if guard.lease_key() != lease_key {
+            return Err(DslTransitionError::no_matching(
+                "AuthLeaseHandle::release_lease_with_guard::LeaseMismatch",
+                "credential lifecycle guard belongs to another lease",
+            ));
+        }
+        self.release_lease_inner(lease_key)
     }
 
     fn release_credential_lifecycle(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -1999,9 +2104,17 @@ mod tests {
             before,
             "the generated classifier must be read-only before durable cleanup"
         );
-        h.refresh_failed(&k, RefreshFailureObservation::local_credential_unusable())
+        let transition = h
+            .refresh_failed(&k, RefreshFailureObservation::local_credential_unusable())
             .unwrap();
 
+        assert_eq!(transition.lease_key(), &k);
+        assert_eq!(transition.phase(), AuthLeasePhase::ReauthRequired);
+        assert_eq!(transition.generation(), h.snapshot(&k).generation);
+        assert_eq!(
+            transition.credential_published_at_millis(),
+            h.snapshot(&k).credential_published_at_millis
+        );
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::ReauthRequired));
     }
 
@@ -2026,9 +2139,17 @@ mod tests {
             before,
             "the generated classifier must be read-only before lifecycle commit"
         );
-        h.refresh_failed(&k, RefreshFailureObservation::transient())
+        let transition = h
+            .refresh_failed(&k, RefreshFailureObservation::transient())
             .unwrap();
 
+        assert_eq!(transition.lease_key(), &k);
+        assert_eq!(transition.phase(), AuthLeasePhase::Expiring);
+        assert_eq!(transition.generation(), h.snapshot(&k).generation);
+        assert_eq!(
+            transition.credential_published_at_millis(),
+            h.snapshot(&k).credential_published_at_millis
+        );
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expiring));
     }
 
@@ -2631,27 +2752,40 @@ mod tests {
             account_id: None,
             metadata: serde_json::Value::Null,
         };
-        meerkat_core::publish_token_lifecycle_acquired(&generated, &binding, &tokens)
-            .expect("acquire lease");
-        let store = RecordingStore {
+        let acquired =
+            meerkat_core::publish_token_lifecycle_acquired(&generated, &binding, &tokens)
+                .expect("acquire lease");
+        let tokens =
+            meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &tokens, &acquired)
+                .expect("owned clear validates the actual durable predecessor");
+        let before_tokens = tokens.clone();
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&binding);
+        let before_snapshot = handle.snapshot(&lease_key);
+        let store = Arc::new(RecordingStore {
             tokens: StdMutex::new(Some(tokens)),
             key: key.clone(),
             clear_called: std::sync::atomic::AtomicBool::new(false),
-        };
+        });
 
         let observer: Arc<dyn AuthLeaseReleaseObserver> = Arc::new(FailingReleaseObserver);
         handle.add_release_observer(Arc::downgrade(&observer));
 
-        let err =
-            meerkat_core::clear_tokens_and_publish_lifecycle_released(&store, &generated, &binding)
-                .await
-                .expect_err("staged release observer fault must fail the clear typed");
+        let err = meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+            meerkat_core::auth::ProviderAuthPersistence::new(
+                store.clone(),
+                Arc::new(meerkat_auth_core::InMemoryCoordinator::new()),
+            ),
+            generated.clone(),
+            binding.clone(),
+        )
+        .await
+        .expect_err("staged release observer fault must fail the owned clear typed");
         assert!(
             matches!(
                 err,
-                meerkat_core::TokenLifecycleClearError::AuthMachineRelease(_)
+                meerkat_core::auth::CredentialMutationError::AuthLifecycle(_)
             ),
-            "expected typed AuthMachineRelease fault, got: {err:?}"
+            "expected typed coordinated AuthLifecycle fault, got: {err:?}"
         );
 
         // The durable clear must never run after a staging fault: fail closed.
@@ -2661,7 +2795,8 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             "durable clear must not run when release staging faulted"
         );
-        assert!(store.tokens.lock().unwrap().is_some());
+        assert_eq!(store.tokens.lock().unwrap().as_ref(), Some(&before_tokens));
+        assert_eq!(handle.snapshot(&lease_key), before_snapshot);
 
         // Fail-closed consistency: durable truth still holds the credential
         // and the lease projection still matches it (live) — the clear is
@@ -2939,6 +3074,407 @@ mod tests {
         )
         .expect("present flow still expires");
         assert_eq!(machine.state().oauth_outstanding_flow_count, 0);
+    }
+
+    // These are observer-boundary controls, not a replacement for the native
+    // controller-use inventory exercised in local_authorization tests.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn credential_pre_release_veto_preserves_exact_machine_and_vault_for_both_clear_apis() {
+        use meerkat_auth_core::auth_store::{EphemeralTokenStore, InMemoryCoordinator};
+        use meerkat_core::auth::{
+            PersistedTokens, ProviderAuthPersistence, TokenKey, TokenStore, TokenStoreError,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Veto {
+            begin: AtomicUsize,
+            collect: AtomicUsize,
+            notify: AtomicUsize,
+        }
+        impl AuthLeaseReleaseObserver for Veto {
+            fn begin_auth_lease_release<'a>(
+                &'a self,
+                _: &LeaseKey,
+            ) -> Result<Option<Box<dyn AuthLeaseReleasePermit + 'a>>, DslTransitionError>
+            {
+                self.begin.fetch_add(1, Ordering::SeqCst);
+                Err(DslTransitionError::no_matching(
+                    "credential_custody_test",
+                    "retained controller use",
+                ))
+            }
+            fn oauth_flows_for_release(
+                &self,
+                key: &LeaseKey,
+            ) -> Result<ReleasedOAuthFlows, DslTransitionError> {
+                self.collect.fetch_add(1, Ordering::SeqCst);
+                Ok(ReleasedOAuthFlows::empty(key.clone()))
+            }
+            fn auth_lease_released(
+                &self,
+                _: &ReleasedOAuthFlows,
+            ) -> Result<(), DslTransitionError> {
+                self.notify.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        struct Vault {
+            actual: EphemeralTokenStore,
+            clears: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl TokenStore for Vault {
+            async fn load(
+                &self,
+                key: &TokenKey,
+            ) -> Result<Option<PersistedTokens>, TokenStoreError> {
+                self.actual.load(key).await
+            }
+            async fn save(
+                &self,
+                key: &TokenKey,
+                tokens: &PersistedTokens,
+            ) -> Result<(), TokenStoreError> {
+                self.actual.save(key, tokens).await
+            }
+            async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+                self.clears.fetch_add(1, Ordering::SeqCst);
+                self.actual.clear(key).await
+            }
+            async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+                self.actual.list().await
+            }
+            fn backend_name(&self) -> &'static str {
+                "credential-custody-test"
+            }
+        }
+        for binding_route in [true, false] {
+            let raw = Arc::new(RuntimeAuthLeaseHandle::new());
+            let handle =
+                crate::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                    raw.clone(),
+                )
+                .unwrap();
+            let binding = auth_binding(
+                "credential-pre-veto",
+                if binding_route {
+                    "owned-binding"
+                } else {
+                    "owned-account-alias"
+                },
+            );
+            let identity = if binding_route {
+                AuthCredentialIdentity::from_auth_binding(&binding)
+            } else {
+                AuthCredentialIdentity::Account(meerkat_core::CredentialAccountRef {
+                    realm: binding.realm.clone(),
+                    account: meerkat_core::CredentialAccountId::parse("owned-account").unwrap(),
+                })
+            };
+            let key = TokenKey::from_credential_identity(&identity);
+            let lease_key = LeaseKey::from_credential_identity(&identity);
+            let tokens = PersistedTokens::api_key("synthetic-pre-release-veto");
+            let acquired = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                &handle, &identity, &tokens,
+            )
+            .unwrap();
+            let tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key, &tokens, &acquired,
+            )
+            .unwrap();
+            let vault = Arc::new(Vault {
+                actual: EphemeralTokenStore::new(),
+                clears: AtomicUsize::new(0),
+            });
+            vault.save(&key, &tokens).await.unwrap();
+            let before_bytes = serde_json::to_vec(&vault.load(&key).await.unwrap()).unwrap();
+            let before_state = raw
+                .machines
+                .lock()
+                .unwrap()
+                .authorities
+                .get(&lease_key)
+                .unwrap()
+                .state()
+                .clone();
+            let before_snapshot = raw.snapshot(&lease_key);
+            let veto = Arc::new(Veto {
+                begin: AtomicUsize::new(0),
+                collect: AtomicUsize::new(0),
+                notify: AtomicUsize::new(0),
+            });
+            let observer: Arc<dyn AuthLeaseReleaseObserver> = veto.clone();
+            raw.add_release_observer(Arc::downgrade(&observer));
+            let persistence =
+                ProviderAuthPersistence::new(vault.clone(), Arc::new(InMemoryCoordinator::new()));
+            let result = if binding_route {
+                meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+                    persistence,
+                    handle.clone(),
+                    binding.clone(),
+                )
+                .await
+            } else {
+                assert_ne!(lease_key, LeaseKey::from_auth_binding(&binding));
+                meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+                    persistence,
+                    handle.clone(),
+                    identity.clone(),
+                )
+                .await
+            };
+            assert!(matches!(
+                result,
+                Err(meerkat_core::auth::CredentialMutationError::AuthLifecycle(
+                    _
+                ))
+            ));
+            assert_eq!(veto.begin.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                veto.collect.load(Ordering::SeqCst),
+                0,
+                "no OAuth collection after the pre-release veto"
+            );
+            assert_eq!(
+                veto.notify.load(Ordering::SeqCst),
+                0,
+                "no OAuth cleanup after the pre-release veto"
+            );
+            assert_eq!(vault.clears.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                serde_json::to_vec(&vault.load(&key).await.unwrap()).unwrap(),
+                before_bytes
+            );
+            assert_eq!(raw.snapshot(&lease_key), before_snapshot);
+            assert_eq!(
+                raw.machines
+                    .lock()
+                    .unwrap()
+                    .authorities
+                    .get(&lease_key)
+                    .unwrap()
+                    .state(),
+                &before_state,
+                "including release_draining and all OAuth membership, no BeginRelease occurred"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod credential_freshness_audit_tests {
+    use super::*;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct AuditRecord {
+        action: String,
+        from_phase: String,
+        to_phase: String,
+    }
+
+    impl tracing::field::Visit for AuditRecord {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            match field.name() {
+                "action" => self.action = value.to_owned(),
+                "from_phase" => self.from_phase = value.to_owned(),
+                "to_phase" => self.to_phase = value.to_owned(),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if matches!(field.name(), "action" | "from_phase" | "to_phase") {
+                self.record_str(field, &format!("{value:?}"));
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct AuditLayer(Arc<Mutex<Vec<AuditRecord>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AuditLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == "meerkat::auth::audit" {
+                let mut record = AuditRecord::default();
+                event.record(&mut record);
+                self.0.lock().unwrap().push(record);
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_freshness_is_quiet_but_real_lifecycle_changes_remain_observable() {
+        use meerkat_core::handles::{CredentialUseDisposition, CredentialUseIntent};
+
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber =
+            tracing_subscriber::Registry::default().with(AuditLayer(Arc::clone(&records)));
+        tracing::subscriber::with_default(subscriber, || {
+            let owner = RuntimeAuthLeaseHandle::new();
+            let key = LeaseKey::new(
+                meerkat_core::RealmId::parse("managed-current-audit").unwrap(),
+                meerkat_core::BindingId::parse("counted-owner").unwrap(),
+                None,
+            );
+            owner.acquire_lease(&key, 1000).unwrap();
+            let current = owner.snapshot(&key);
+            for now in [100, 200, 300] {
+                owner.observe_credential_freshness(&key, now, 60).unwrap();
+                assert_eq!(owner.snapshot(&key), current);
+                assert_eq!(
+                    owner
+                        .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential,)
+                        .unwrap(),
+                    CredentialUseDisposition::Authorized,
+                );
+            }
+            owner.observe_credential_freshness(&key, 941, 60).unwrap();
+            assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Expiring));
+            owner.observe_credential_freshness(&key, 950, 60).unwrap();
+            owner.observe_credential_freshness(&key, 1001, 60).unwrap();
+            assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Expired));
+            owner.observe_credential_freshness(&key, 1002, 60).unwrap();
+            owner.begin_refresh(&key).unwrap();
+            owner.observe_credential_freshness(&key, 1100, 60).unwrap();
+            owner.complete_refresh(&key, 2000, 1100).unwrap();
+            owner.observe_credential_freshness(&key, 1200, 60).unwrap();
+            let generation = owner.snapshot(&key).generation;
+            // Same phase, new actual credential publication: this must still log.
+            owner.acquire_lease(&key, 3000).unwrap();
+            assert!(owner.snapshot(&key).generation > generation);
+            owner.begin_refresh(&key).unwrap();
+            owner
+                .refresh_failed(&key, RefreshFailureObservation::transient())
+                .unwrap();
+            owner.mark_reauth_required(&key).unwrap();
+            owner.observe_credential_freshness(&key, 1300, 60).unwrap();
+            assert_eq!(
+                owner
+                    .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                    .unwrap(),
+                CredentialUseDisposition::ReauthRequired,
+            );
+            owner.release_lease(&key).unwrap();
+            owner.observe_credential_freshness(&key, 1400, 60).unwrap();
+            assert_eq!(
+                owner
+                    .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                    .unwrap(),
+                CredentialUseDisposition::LeaseAbsent,
+            );
+        });
+        let records = records.lock().unwrap();
+        let actions = records
+            .iter()
+            .map(|record| record.action.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            [
+                "acquire_lease",
+                "observe_credential_freshness",
+                "observe_credential_freshness",
+                "begin_refresh",
+                "complete_refresh",
+                "acquire_lease",
+                "begin_refresh",
+                "refresh_failed",
+                "mark_reauth_required",
+                "release_lease",
+            ],
+            "unchanged checks must be quiet; mutation/revocation logs must survive: {records:?}",
+        );
+        let observed_changes = records
+            .iter()
+            .filter(|record| record.action == "observe_credential_freshness")
+            .map(|record| (record.from_phase.as_str(), record.to_phase.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed_changes,
+            [("Valid", "Expiring"), ("Expiring", "Expired")]
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod credential_freshness_boundary_tests {
+    use super::*;
+    use meerkat_core::handles::{
+        AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, CredentialUseIntent,
+    };
+
+    fn boundary_lease(binding: &str) -> LeaseKey {
+        LeaseKey::new(
+            meerkat_core::RealmId::parse("freshness-boundary-owner").unwrap(),
+            meerkat_core::BindingId::parse(binding).unwrap(),
+            None,
+        )
+    }
+
+    #[test]
+    fn zero_window_expires_at_exact_boundary() {
+        let owner = RuntimeAuthLeaseHandle::new();
+        let key = boundary_lease("zero-window");
+        owner.acquire_lease(&key, 1_000).unwrap();
+
+        owner.observe_credential_freshness(&key, 999, 0).unwrap();
+        assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::Authorized,
+        );
+
+        owner.observe_credential_freshness(&key, 1_000, 0).unwrap();
+        assert_eq!(
+            owner.snapshot(&key).phase,
+            Some(AuthLeasePhase::Expired),
+            "a zero refresh window cannot extend the actual credential expiry",
+        );
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::RefreshRequired,
+        );
+    }
+
+    #[test]
+    fn normal_window_expires_at_exact_boundary() {
+        let owner = RuntimeAuthLeaseHandle::new();
+        let key = boundary_lease("normal-window");
+        owner.acquire_lease(&key, 1_000).unwrap();
+
+        owner
+            .observe_credential_freshness(&key, 940, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)
+            .unwrap();
+        assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::Authorized,
+        );
+
+        owner
+            .observe_credential_freshness(&key, 1_000, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)
+            .unwrap();
+        assert_eq!(owner.snapshot(&key).phase, Some(AuthLeasePhase::Expired));
+        assert_eq!(
+            owner
+                .resolve_credential_use_admission(&key, CredentialUseIntent::UseCredential)
+                .unwrap(),
+            CredentialUseDisposition::RefreshRequired,
+        );
     }
 }
 

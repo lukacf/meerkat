@@ -498,7 +498,9 @@ async fn fixture_with(
         seed_committed_boundary_receipt(inner.as_ref(), &session_id, run).await;
     }
     let store: Arc<dyn RuntimeStore> = inner;
-    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(store).expect("construct runtime authority"),
+    );
     let host = Arc::new(ScriptedReconfigureHost::new(history));
     adapter.set_session_llm_reconfigure_host(host.clone());
     adapter

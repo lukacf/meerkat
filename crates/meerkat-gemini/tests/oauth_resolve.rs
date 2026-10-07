@@ -17,7 +17,32 @@ use meerkat_core::{
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
 use meerkat_gemini::runtime::oauth;
+use meerkat_llm_core::provider_runtime::binding::ResolvedConnection;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
+
+async fn assert_google_oauth_authorizer_token(connection: &ResolvedConnection, token: &str) {
+    let authorizer = connection
+        .resolved_authorizer()
+        .expect("Google OAuth should retain a credential authorizer");
+    let mut headers = Vec::new();
+    let mut request = meerkat_core::HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://cloudcode-pa.googleapis.com/v1internal:generateContent",
+        headers: &mut headers,
+    };
+    authorizer
+        .authorize(&mut request)
+        .await
+        .expect("current generated credential authority authorizes the request");
+    assert_eq!(
+        headers,
+        vec![("Authorization".to_string(), format!("Bearer {token}"))]
+    );
+    assert!(
+        connection.resolved_secret().is_none(),
+        "managed OAuth must retain its credential owner instead of exporting an inline secret"
+    );
+}
 
 fn in_memory_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {
     ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new()))
@@ -284,10 +309,7 @@ async fn google_oauth_fresh_token_resolves_with_auth_lifecycle() {
         .await
         .expect("fresh Google OAuth tokens should resolve");
 
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("fresh-google-access".to_string())
-    );
+    assert_google_oauth_authorizer_token(&connection, "fresh-google-access").await;
 }
 
 #[tokio::test]
@@ -465,10 +487,7 @@ async fn google_oauth_expired_authmachine_lease_refreshes_through_provider_runti
         .await
         .expect("expired Google OAuth lease should refresh through AuthMachine gate");
 
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("refreshed-google-access".to_string())
-    );
+    assert_google_oauth_authorizer_token(&connection, "refreshed-google-access").await;
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(
         stored.primary_secret.as_deref(),
@@ -542,10 +561,7 @@ async fn google_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() {
         .await
         .expect("forced Google OAuth refresh should resolve through AuthMachine gate");
 
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("forced-google-access".to_string())
-    );
+    assert_google_oauth_authorizer_token(&connection, "forced-google-access").await;
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(
         stored.primary_secret.as_deref(),

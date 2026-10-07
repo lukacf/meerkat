@@ -8121,6 +8121,272 @@ def test_run_result_carries_cache_reasoning_run_and_request_usage():
     assert bare.usage.reasoning_tokens is None
 
 
+def test_operation_observation_provider_kind_remains_nonretryable_wire_reason():
+    from meerkat.generated.event_types import LlmProviderErrorKind
+
+    kinds = {
+        value
+        for member in get_args(LlmProviderErrorKind)
+        for value in (get_args(member) if get_origin(member) is Literal else (member,))
+    }
+    assert "operation_observation_unavailable" in kinds
+    assert "operation_authorization_unavailable" in kinds
+    assert "operation_refused" in kinds
+    for kind, retryability in [
+        ("operation_observation_unavailable", "non_retryable"),
+        ("operation_authorization_unavailable", "non_retryable"),
+        ("operation_refused", "non_retryable"),
+        ("server_overloaded", "retryable"),
+    ]:
+        reason = {
+            "reason_type": "llm_provider_error",
+            "provider_error_kind": kind,
+            "provider_error_retryability": retryability,
+            "provider_error": None,
+        }
+        event = parse_event({
+            "type": "run_failed",
+            "session_id": "s1",
+            "terminal_cause_kind": "llm_failure",
+            "error_report": {"class": "llm", "message": "diagnostic", "reason": reason},
+        })
+        assert isinstance(event, RunFailed)
+        assert event.error_report.reason.provider_error_kind == kind
+        assert event.error_report.reason.provider_error_retryability == retryability
+        assert event.error_report.reason.provider_error is None
+
+
+def test_operation_observation_diagnostic_is_known_and_retains_exact_payload():
+    from meerkat.generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+
+    raw = {
+        "type": "operation_observation_failed",
+        "operation_id": "01900000-0000-7000-8000-000000000001",
+        "phase": "outcome",
+    }
+    assert raw["type"] in KNOWN_AGENT_EVENT_TYPES
+    event = parse_event(raw)
+    # No specialized adapter class is required. The declared raw-event path
+    # preserves a newly schema-known diagnostic without treating it as failure.
+    assert isinstance(event, UnknownEvent)
+    assert event.type == raw["type"]
+    assert event.data == raw
+    control = parse_event({"type": "text_delta", "delta": "continued"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued"
+
+
+def test_wire_tool_result_retains_typed_observation_settlement_companions():
+    from dataclasses import asdict
+    import json
+    from typing import get_type_hints
+    from meerkat.generated import types as generated
+
+    hints = get_type_hints(generated.WireToolResult)
+    assert "settlement_failures" in hints
+    assert hints["settlement_failures"] == list[generated.ToolDispatchSettlementFailure]
+    markers = [
+        generated.ToolDispatchSettlementFailure(
+            admission_source="authorization_audit",
+            effect_kind="tool_dispatch",
+            physical_outcome=outcome,
+            failure_kind="operation_observation_unavailable",
+        )
+        for outcome in ("committed", "failed")
+    ]
+    result = generated.WireToolResult(
+        tool_use_id="call-1", content="physical result", is_error=False,
+        settlement_failures=markers,
+    )
+    wire = json.loads(json.dumps(asdict(result)))
+    assert wire["content"] == "physical result"
+    assert wire["is_error"] is False
+    assert [item["physical_outcome"] for item in wire["settlement_failures"]] == [
+        "committed", "failed",
+    ]
+    assert all(item["failure_kind"] == "operation_observation_unavailable"
+               for item in wire["settlement_failures"])
+    legacy = generated.WireToolResult("legacy", "unchanged", False)
+    other = generated.WireToolResult("other", "unchanged", False)
+    assert legacy.settlement_failures == []
+    legacy.settlement_failures.append(markers[0])
+    assert other.settlement_failures == []
+
+
+def test_operation_authorization_unavailable_retains_ordered_typed_wire_companions():
+    from dataclasses import asdict
+    import json
+    from meerkat.generated import types as generated
+
+    kinds = {
+        value
+        for member in get_args(generated.ToolDispatchTerminalErrorKind)
+        for value in (get_args(member) if get_origin(member) is Literal else (member,))
+    }
+    assert "operation_authorization_unavailable" in kinds
+    assert "operation_observation_unavailable" in kinds
+    assert "authorization_refused" in kinds
+    markers = [
+        generated.ToolDispatchSettlementFailure(
+            admission_source=source,
+            effect_kind="tool_dispatch",
+            physical_outcome=outcome,
+            failure_kind=kind,
+        )
+        for source, outcome, kind in [
+            ("configured_gate", "failed", "operation_authorization_unavailable"),
+            ("authorization_audit", "committed", "operation_observation_unavailable"),
+            ("context_gate", "unknown", "authorization_refused"),
+        ]
+    ]
+    # Wire carriers preserve observed physical results and ordered companions.
+    # The SDK does not infer permissions or retryability from these diagnostics.
+    result = generated.WireToolResult(
+        tool_use_id="ordered-wire", content="retained physical result", is_error=False,
+        settlement_failures=markers,
+    )
+    wire = json.loads(json.dumps(asdict(result)))
+    restored = generated.WireToolResult(
+        **{key: value for key, value in wire.items() if key != "settlement_failures"},
+        settlement_failures=[generated.ToolDispatchSettlementFailure(**item)
+                             for item in wire["settlement_failures"]],
+    )
+    assert asdict(restored) == wire
+    assert restored.content == "retained physical result"
+    assert restored.is_error is False
+    assert [item.failure_kind for item in restored.settlement_failures] == [
+        "operation_authorization_unavailable", "operation_observation_unavailable",
+        "authorization_refused",
+    ]
+    assert [item.physical_outcome for item in restored.settlement_failures] == [
+        "failed", "committed", "unknown",
+    ]
+
+
+def _settlement_history_wire_row():
+    return {
+        "role": "tool_results", "created_at": "2026-10-01T12:00:00Z",
+        "results": [{
+            "tool_use_id": "observed-effect", "content": "physical result retained",
+            "is_error": False, "settlement_failures": [
+                {"admission_source": "configured_gate", "effect_kind": "tool_dispatch",
+                 "physical_outcome": "failed", "failure_kind": "operation_authorization_unavailable"},
+                {"admission_source": "authorization_audit", "effect_kind": "tool_dispatch",
+                 "physical_outcome": "committed", "failure_kind": "operation_observation_unavailable"},
+                {"admission_source": "context_gate", "effect_kind": "tool_dispatch",
+                 "physical_outcome": "unknown", "failure_kind": "authorization_refused"},
+            ],
+        }],
+    }
+
+
+def test_settlement_history_decoder_preserves_ordered_typed_companions():
+    from dataclasses import asdict
+    from meerkat.generated.types import ToolDispatchSettlementFailure
+
+    row = _settlement_history_wire_row()
+    message = MeerkatClient._parse_session_message(row)
+    result = message.results[0]
+    companions = getattr(result, "settlement_failures", None)
+    assert companions is not None, "the public history result must expose settlement facts"
+    assert all(isinstance(item, ToolDispatchSettlementFailure) for item in companions)
+    assert [asdict(item) for item in companions] == row["results"][0]["settlement_failures"]
+    assert result.content == "physical result retained"
+    assert result.is_error is False
+
+
+def test_settlement_history_rewrite_preserves_the_observed_wire_result():
+    row = _settlement_history_wire_row()
+    message = MeerkatClient._parse_session_message(row)
+    rewritten = MeerkatClient._serialize_transcript_rewrite_message(message)
+    assert rewritten == row, "rewriting a decoded history row cannot erase settlement facts"
+
+
+def test_settlement_history_legacy_result_roundtrip_stays_compatible():
+    row = _settlement_history_wire_row()
+    row["results"][0].pop("settlement_failures")
+    message = MeerkatClient._parse_session_message(row)
+    assert not getattr(message.results[0], "settlement_failures", [])
+    assert MeerkatClient._serialize_transcript_rewrite_message(message) == row
+
+
+def _settlement_history_known_companion():
+    # Existing generated values keep these tests independent of the pending
+    # operation_authorization_unavailable schema regeneration.
+    return {
+        "admission_source": "configured_gate",
+        "effect_kind": "tool_dispatch",
+        "physical_outcome": "committed",
+        "failure_kind": "operation_observation_unavailable",
+    }
+
+
+def _settlement_history_malformed_cases():
+    cases = [
+        pytest.param(None, id="null-vector"),
+        pytest.param({}, id="object-vector"),
+        pytest.param("not-a-vector", id="string-vector"),
+        pytest.param([None], id="null-entry"),
+        pytest.param([[]], id="array-entry"),
+        pytest.param([False], id="boolean-entry"),
+    ]
+    for field in _settlement_history_known_companion():
+        missing = _settlement_history_known_companion()
+        missing.pop(field)
+        cases.append(pytest.param([missing], id=f"missing-{field}"))
+        non_string = _settlement_history_known_companion()
+        non_string[field] = False
+        cases.append(pytest.param([non_string], id=f"non-string-{field}"))
+        unknown = _settlement_history_known_companion()
+        unknown[field] = "not_a_canonical_value"
+        cases.append(pytest.param([unknown], id=f"unknown-{field}"))
+    extra = _settlement_history_known_companion()
+    extra["invented_authority"] = True
+    cases.append(pytest.param([extra], id="unknown-record-field"))
+    cases.append(pytest.param(
+        [_settlement_history_known_companion(), None],
+        id="malformed-after-valid-prefix",
+    ))
+    return cases
+
+
+@pytest.mark.parametrize("malformed", _settlement_history_malformed_cases())
+def test_settlement_history_rejects_malformed_companions(malformed):
+    row = _settlement_history_wire_row()
+    row["results"][0]["settlement_failures"] = malformed
+    with pytest.raises(MeerkatError) as raised:
+        MeerkatClient._parse_session_message(row)
+    assert raised.value.code == "INVALID_RESPONSE"
+
+
+def test_settlement_history_preserves_known_order_and_duplicates():
+    from dataclasses import asdict
+    from meerkat.generated.types import ToolDispatchSettlementFailure
+
+    first = _settlement_history_known_companion()
+    second = {**first, "physical_outcome": "unknown", "failure_kind": "authorization_refused"}
+    companions = [first, second, dict(first)]
+    row = _settlement_history_wire_row()
+    row["results"][0]["settlement_failures"] = companions
+    message = MeerkatClient._parse_session_message(row)
+    retained = getattr(message.results[0], "settlement_failures", None)
+    assert retained is not None
+    assert all(isinstance(item, ToolDispatchSettlementFailure) for item in retained)
+    assert [asdict(item) for item in retained] == companions
+    assert MeerkatClient._serialize_transcript_rewrite_message(message) == row
+
+
+def test_settlement_history_explicit_empty_vector_stays_empty():
+    row = _settlement_history_wire_row()
+    row["results"][0]["settlement_failures"] = []
+    message = MeerkatClient._parse_session_message(row)
+    assert not getattr(message.results[0], "settlement_failures", [])
+    rewritten = MeerkatClient._serialize_transcript_rewrite_message(message)
+    assert rewritten["results"][0].get("settlement_failures", []) == []
+    assert rewritten["results"][0]["content"] == "physical result retained"
+    assert rewritten["results"][0]["is_error"] is False
+
+
 # ---------------------------------------------------------------------------
 # Turn tool-choice plan reaches the wire on every turn path
 # ---------------------------------------------------------------------------
@@ -8207,3 +8473,170 @@ async def test_mob_turn_start_payload_carries_tool_choice_plan():
         "allowed_tools": ["read"],
         "tool_choice_plan": _TOOL_CHOICE_PLAN,
     }
+
+
+@pytest.mark.parametrize("refusal", [
+    "invalid_requirement", "invalid_launch", "unsupported_requirement",
+    "backend_unavailable", "preparation_failed",
+])
+def test_hook_launch_refusal_raw_event_retains_cause_and_exact_call_id(refusal):
+    from meerkat.generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+
+    raw = {
+        "type": "hook_launch_refused", "hook_id": "hook-1",
+        "point": "pre_tool_execution", "tool_use_id": "  call-1  ",
+        "reason": {"reason_code": "confinement_refused", "refusal": refusal},
+    }
+    assert raw["type"] in KNOWN_AGENT_EVENT_TYPES
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "hook_launch_refused"
+    assert event.data == raw
+    control = parse_event({"type": "text_delta", "delta": "continued"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued"
+
+
+def test_hook_failed_canonical_reason_is_not_a_malformed_event():
+    from meerkat.events import HookFailed
+
+    raw = {
+        "type": "hook_failed", "hook_id": "hook-1",
+        "point": "post_tool_execution",
+        "reason": {"reason_code": "execution_failed", "message": "process exited"},
+    }
+    event = parse_event(raw)
+    assert isinstance(event, HookFailed)
+    assert event.reason == raw["reason"]
+
+
+@pytest.mark.parametrize("reason", [
+    {"reason_code": "timeout", "timeout_ms": 10},
+    {"reason_code": "config_invalid", "message": "invalid config"},
+    {"reason_code": "observe_only_violation"},
+    *[{"reason_code": "confinement_refused", "refusal": cause} for cause in [
+        "invalid_requirement", "invalid_launch", "unsupported_requirement",
+        "backend_unavailable", "preparation_failed",
+    ]],
+])
+def test_hook_failed_preserves_each_canonical_reason(reason):
+    from meerkat.events import HookFailed
+
+    event = parse_event({
+        "type": "hook_failed", "hook_id": "hook-1",
+        "point": "post_tool_execution", "reason": reason,
+    })
+    assert isinstance(event, HookFailed)
+    assert event.reason == reason
+    assert isinstance(event.error, str)
+
+
+@pytest.mark.parametrize("reason", [
+    None, {}, {"reason_code": 7},
+    {"reason_code": "confinement_refused"},
+    {"reason_code": "confinement_refused", "refusal": None},
+    {"reason_code": "execution_failed"},
+    {"reason_code": "execution_failed", "message": {}},
+    {"reason_code": "timeout", "timeout_ms": -1},
+])
+def test_hook_failed_malformed_reason_does_not_fall_back_to_legacy_error(reason):
+    raw = {
+        "type": "hook_failed", "hook_id": "hook-1", "point": "post_tool_execution",
+        "reason": reason, "error": "legacy diagnostic",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
+
+
+def test_hook_failed_legacy_string_wire_remains_compatible():
+    from meerkat.events import HookFailed
+
+    event = parse_event({
+        "type": "hook_failed", "hook_id": "hook-1",
+        "point": "post_tool_execution", "error": "legacy diagnostic",
+    })
+    assert isinstance(event, HookFailed)
+    assert event.error == "legacy diagnostic"
+    assert event.reason is None
+
+
+@pytest.mark.parametrize("reason", [
+    *[{"reason_code": code, "retry_after_ms": 23,
+       "details": {"owner": "future-native-owner", "token": None, "stages": ["prepared"]}}
+      for code in ["future_guard_busy", "unknown"]],
+    *[{"reason_code": "confinement_refused", "refusal": refusal,
+       "detail": {"generation": 9, "resource": None}}
+      for refusal in ["future_backend_busy", "constructor", "__proto__"]],
+])
+def test_hook_failed_preserves_unknown_future_causes(reason):
+    from meerkat.events import HookFailed
+
+    raw = {
+        "type": "hook_failed", "hook_id": "  hook-future  ", "point": "post_tool_execution",
+        "reason": reason, "error": "permission denied by legacy string",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, HookFailed)
+    assert event.hook_id == raw["hook_id"]
+    assert event.point == raw["point"]
+    assert event.reason == {
+        "reason_code": "unknown", "raw_reason_code": reason["reason_code"], "raw": reason,
+    }
+    assert event.error == "unknown hook failure"
+    control = parse_event({"type": "text_delta", "delta": "continued after future cause"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued after future cause"
+
+
+@pytest.mark.parametrize(("refusal", "message"), [
+    ("invalid_requirement", "invalid execution confinement requirement"),
+    ("invalid_launch", "invalid confined process launch"),
+    ("unsupported_requirement", "required execution confinement is unsupported by this backend"),
+    ("backend_unavailable", "required execution confinement backend is unavailable"),
+    ("preparation_failed", "confined process preparation failed"),
+])
+def test_hook_failed_displays_each_known_confinement_cause_exactly(refusal, message):
+    from meerkat.events import HookFailed
+
+    reason = {"reason_code": "confinement_refused", "refusal": refusal}
+    event = parse_event({"type": "hook_failed", "hook_id": "hook-1", "point": "post_tool_execution", "reason": reason})
+    assert isinstance(event, HookFailed)
+    assert event.reason == reason
+    assert event.error == message
+
+
+def test_hook_failed_display_mapping_matches_generated_confinement_causes():
+    from meerkat.events import _CONFINEMENT_REFUSAL_MESSAGES
+    from meerkat.generated.event_types import ConfinementRefusal
+
+    assert set(_CONFINEMENT_REFUSAL_MESSAGES) == set(get_args(ConfinementRefusal))
+
+
+@pytest.mark.parametrize(("reason", "display"), [
+    ({"reason_code": "timeout", "timeout_ms": 23}, "hook timed out after 23ms"),
+    ({"reason_code": "execution_failed", "message": "process exited"}, "process exited"),
+    ({"reason_code": "config_invalid", "message": "invalid config"}, "invalid config"),
+    ({"reason_code": "observe_only_violation"}, "background hooks are observe-only"),
+])
+def test_hook_failed_displays_every_remaining_known_reason_exactly(reason, display):
+    from meerkat.events import HookFailed
+
+    event = parse_event({"type": "hook_failed", "hook_id": "hook-1", "point": "post_tool_execution", "reason": reason})
+    assert isinstance(event, HookFailed)
+    assert event.reason == reason
+    assert event.error == display
+
+
+
+def test_hook_failed_public_reason_exports_keep_generated_known_causes_and_unknown_wrapper():
+    import meerkat
+    from meerkat import ConfinementRefusal, HookFailureReason, UnknownHookFailureReason
+    from meerkat.events import HookFailed
+    from meerkat.generated.event_types import ConfinementRefusal as NativeConfinementRefusal
+
+    assert ConfinementRefusal is NativeConfinementRefusal
+    assert UnknownHookFailureReason in get_args(HookFailureReason)
+    assert UnknownHookFailureReason in get_args(get_type_hints(HookFailed)["reason"])
+    assert {"HookFailureReason", "UnknownHookFailureReason", "ConfinementRefusal"} <= set(meerkat.__all__)

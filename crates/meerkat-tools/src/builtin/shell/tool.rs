@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -127,7 +126,7 @@ impl ShellTool {
         self
     }
 
-    fn foreground_process_group(&self, child: &tokio::process::Child) -> OwnedProcessGroup {
+    fn foreground_process_group(&self, child: &meerkat_sandbox::ProcessChild) -> OwnedProcessGroup {
         #[cfg(all(test, unix))]
         if let Some(config) = self.foreground_process_group_test_config.as_ref() {
             return OwnedProcessGroup::with_control(
@@ -142,7 +141,7 @@ impl ShellTool {
 
     async fn retain_foreground_containment_retry(
         &self,
-        mut child: tokio::process::Child,
+        mut child: meerkat_sandbox::ProcessChild,
         mut process_group: OwnedProcessGroup,
     ) {
         let handle = tokio::spawn(async move {
@@ -249,7 +248,7 @@ impl ShellTool {
     ///
     /// When durable process custody is bound, the process is spawned behind a
     /// spawn gate that is released only after its identity is durably
-    /// recorded, and the record is settled only after containment is proven.
+    /// recorded, and the record is settled only after group exit is observed.
     async fn execute_command_for_call(
         &self,
         command: &str,
@@ -281,6 +280,11 @@ impl ShellTool {
         // the command runs only after its leader is recorded, and the group
         // guard exists before it may run.
         let timeout_duration = Duration::from_secs(timeout_secs);
+        let confinement = self
+            .job_manager
+            .confinement_binding(&self.config.confinement)
+            .map_err(std::io::Error::other)?;
+        let environment = super::custody_spawn::environment(&self.config, &effective_dir);
         let spawned = super::custody_spawn::spawn_in_custody(
             &self.job_manager.custody_binding(),
             super::custody_spawn::SpawnIdentity {
@@ -288,26 +292,15 @@ impl ShellTool {
                 tool_call_id,
                 run_id,
             },
-            shell_path.as_os_str(),
-            &[
-                std::ffi::OsString::from("-c"),
-                std::ffi::OsString::from(command),
-            ],
-            |cmd| {
-                cmd.current_dir(&effective_dir);
-                cmd.env("PWD", &effective_dir);
-                // Inject per-agent environment variables
-                cmd.envs(&self.config.env_vars);
-                // Capture stdout/stderr
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-                // Ensure cancellation contains the direct child even on
-                // platforms without Unix process-group signalling.
-                cmd.kill_on_drop(true);
-                // New process group on Unix so every child of the command is
-                // contained with it.
-                #[cfg(unix)]
-                cmd.process_group(0);
+            confinement,
+            super::custody_spawn::ShellLaunch {
+                program: shell_path.as_os_str(),
+                args: &[
+                    std::ffi::OsString::from("-c"),
+                    std::ffi::OsString::from(command),
+                ],
+                directory: &effective_dir,
+                environment: &environment,
             },
             |child| self.foreground_process_group(child),
         )
@@ -319,8 +312,8 @@ impl ShellTool {
             hold: custody,
         } = spawned;
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let stdout = child.take_stdout();
+        let stderr = child.take_stderr();
 
         let caps = OutputCaps::from_max_output_chars(self.config.max_output_chars);
         let stdout_side_bytes = capture_bytes_for_chars(caps.stdout_chars);
@@ -362,14 +355,10 @@ impl ShellTool {
         };
 
         let containment_error = containment_result.err();
-        // Settle durable custody only on proven containment. Otherwise the
-        // record stays until the group is proven exited, or for a later
-        // incarnation to recover.
-        if containment_error.is_none() {
-            custody.settle().await;
-        } else {
-            custody.retain();
-        }
+        // A dispatched kill fences execution but does not observe every
+        // descendant's exit. The existing watcher retains durable custody
+        // until the whole group is observed exited, including on errors.
+        custody.retain();
         if containment_error.is_some() {
             // Returning an error must not drop the only ownership proof for a
             // still-live process group. Move the armed guard and child handle
@@ -433,18 +422,21 @@ impl ShellTool {
         let _invocation = self
             .config
             .check_allowlist(&input.command)
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
         let working_dir = if let Some(ref dir) = input.working_dir {
             let resolved = self
                 .config
                 .validate_working_dir_async(std::path::Path::new(dir))
                 .await
-                .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+                .map_err(BuiltinToolError::from)?;
             Some(resolved)
         } else {
             None
         };
 
+        self.job_manager
+            .confinement_binding(&self.config.confinement)
+            .map_err(BuiltinToolError::from)?;
         if input.background {
             if !self.job_manager.exports_canonical_async_ops() {
                 return Err(BuiltinToolError::execution_failed(
@@ -469,7 +461,7 @@ impl ShellTool {
                         .await
                 }
             }
-            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
 
             return Ok(ToolOutput::Json(serde_json::json!({
                 "job_id": job_id.to_string(),
@@ -491,7 +483,7 @@ impl ShellTool {
             .await
             .map_err(|error| {
                 warn!(%error, "Command execution failed");
-                BuiltinToolError::execution_failed(error.to_string())
+                BuiltinToolError::from(error)
             })?;
         // Completion metadata only (never the command or its output): with
         // the start line it attributes a slow tool round to its call.
@@ -1232,6 +1224,157 @@ mod tests {
             containment_owner_retired,
             "managed containment retry owner did not retire after absence proof"
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn accepted_kill_fence_retains_custody_until_descendant_exit_is_observed() {
+        use crate::builtin::shell::process_lifecycle::{ProcessGroupControl, ProcessGroupSignal};
+        use crate::builtin::shell::{ProcessCustody, ProcessCustodyScope};
+        use nix::sys::signal::{Signal, kill, killpg};
+        use nix::unistd::{Pid, getpgid};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AcceptedKillWithoutExitNotification {
+            signals: AtomicUsize,
+        }
+
+        impl ProcessGroupControl for AcceptedKillWithoutExitNotification {
+            fn signal(&self, _pgid: i32, _signal: ProcessGroupSignal) -> std::io::Result<bool> {
+                // Model successful dispatch before cessation becomes observable.
+                // The real fixture descendant is kept alive until the test releases it.
+                self.signals.fetch_add(1, Ordering::SeqCst);
+                Ok(true)
+            }
+
+            fn exists(&self, pgid: i32) -> std::io::Result<bool> {
+                match kill(Pid::from_raw(-pgid), None) {
+                    Ok(()) => Ok(true),
+                    Err(nix::errno::Errno::ESRCH) => Ok(false),
+                    Err(error) => Err(std::io::Error::from(error)),
+                }
+            }
+        }
+
+        struct FixtureCleanup {
+            readiness: PathBuf,
+            armed: bool,
+        }
+
+        impl Drop for FixtureCleanup {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                let Ok(readiness) = std::fs::read_to_string(&self.readiness) else {
+                    return;
+                };
+                let mut fields = readiness
+                    .split_whitespace()
+                    .filter_map(|s| s.parse::<i32>().ok());
+                let (Some(leader), Some(descendant)) = (fields.next(), fields.next()) else {
+                    return;
+                };
+                if process_can_execute(descendant)
+                    && getpgid(Some(Pid::from_raw(descendant))) == Ok(Pid::from_raw(leader))
+                {
+                    let _ = killpg(Pid::from_raw(leader), Signal::SIGKILL);
+                }
+            }
+        }
+
+        let temp = TempDir::new().expect("tempdir");
+        let readiness = temp.path().join("readiness");
+        let mut cleanup = FixtureCleanup {
+            readiness: readiness.clone(),
+            armed: true,
+        };
+        let config = ShellConfig {
+            enabled: true,
+            restrict_to_project: false,
+            shell: "sh".to_string(),
+            shell_path: Some(PathBuf::from("/bin/sh")),
+            project_root: temp.path().to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            ..Default::default()
+        };
+        let control = Arc::new(AcceptedKillWithoutExitNotification {
+            signals: AtomicUsize::new(0),
+        });
+        let tool = ShellTool::new(config).with_foreground_process_control_for_test(
+            control.clone(),
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        let session_id = meerkat_core::SessionId::new();
+        let root = temp.path().join("custody");
+        let (custody, _) =
+            ProcessCustody::recover_and_open(&root, ProcessCustodyScope::session(&session_id))
+                .await
+                .expect("open custody");
+        tool.job_manager
+            .bind_process_custody(custody)
+            .expect("bind custody");
+        let scope = root.join(session_id.to_string());
+        let records = || {
+            std::fs::read_dir(&scope)
+                .expect("custody directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                .count()
+        };
+        let command = format!(
+            "/bin/sleep 300 </dev/null >/dev/null 2>&1 & descendant=$!; printf '%s %s\\n' \"$$\" \"$descendant\" > '{}'; exit 0",
+            readiness.display(),
+        );
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(2),
+            tool.execute_command(&command, None, 30),
+        )
+        .await
+        .expect("accepted execution fence must not block the call")
+        .expect("accepted execution fence preserves the local call result");
+        assert_eq!(output.exit_code, Some(0));
+        assert!(!output.timed_out);
+        assert!(control.signals.load(Ordering::SeqCst) >= 2);
+        let ready = std::fs::read_to_string(&readiness).expect("real child readiness");
+        let pids = ready
+            .split_whitespace()
+            .map(|s| s.parse::<i32>().expect("pid"))
+            .collect::<Vec<_>>();
+        assert_eq!(pids.len(), 2);
+        let (leader, descendant) = (pids[0], pids[1]);
+        assert_eq!(
+            kill(Pid::from_raw(leader), None),
+            Err(nix::errno::Errno::ESRCH)
+        );
+        assert!(
+            process_can_execute(descendant),
+            "a real descendant must still be alive"
+        );
+        assert_eq!(
+            getpgid(Some(Pid::from_raw(descendant))),
+            Ok(Pid::from_raw(leader))
+        );
+        assert_eq!(
+            records(),
+            1,
+            "kill dispatch must not release durable custody before observed exit"
+        );
+
+        killpg(Pid::from_raw(leader), Signal::SIGKILL).expect("release fixture descendant");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !process_can_execute(descendant) && records() == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("existing exit watcher must release custody after real cessation");
+        cleanup.armed = false;
     }
 
     #[test]

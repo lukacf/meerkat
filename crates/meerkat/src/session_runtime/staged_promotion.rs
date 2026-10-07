@@ -1059,6 +1059,8 @@ pub enum PendingPromotionCleanupMode {
     Restore,
     /// Reap promoting metadata on Drop, but do not restore.
     Finish,
+    /// Keep the actual Promoting slot unavailable after uncertain admission.
+    RetainUnresolved,
 }
 
 /// RAII bookkeeping around a staged session that is in the middle of
@@ -1126,9 +1128,23 @@ impl PendingPromotionCleanup {
         }
     }
 
+    /// Retain the existing Promoting owner when native admission may have
+    /// committed. Neither Drop nor later surface errors may restore its seed.
+    pub fn retain_unresolved(&mut self) {
+        if self.armed {
+            self.mode = PendingPromotionCleanupMode::RetainUnresolved;
+        }
+    }
+
     /// Detach the staged-capacity admission for the caller to consume.
     pub fn take_staged_capacity_admission(&mut self) -> Option<ActiveCapacityGuard> {
         self.staged_capacity_admission.take()
+    }
+
+    /// Return capacity obtained from the exact materialized actor to this
+    /// still-owned promotion before native input admission.
+    pub fn replace_staged_capacity_admission(&mut self, admission: ActiveCapacityGuard) {
+        self.staged_capacity_admission = Some(admission);
     }
 
     /// Reserve a fresh staged-capacity admission if the guard does not
@@ -1413,6 +1429,7 @@ impl Drop for PendingPromotionCleanup {
                     let _ = staged_sessions.finish_promotion(&session_id).await;
                 });
             }
+            PendingPromotionCleanupMode::RetainUnresolved => {}
         }
     }
 }

@@ -53,7 +53,11 @@ uuid = { workspace = true }
 clap = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 
+meerkat-authorization-contracts = { workspace = true, optional = true }
+meerkat-llm-core = { workspace = true, optional = true }
+
 [features]
+local-authorization = ["meerkat/local-authorization", "meerkat-runtime/local-authorization", "dep:meerkat-authorization-contracts", "dep:meerkat-llm-core"]
 default = ["comms", "mcp", "mob", "schedule", "workgraph", "openai-realtime"]
 comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
@@ -76,6 +80,9 @@ experimental-gpt-live = [
 ]
 
 [dev-dependencies]
+meerkat-authorization = { workspace = true }
+meerkat-auth-core = { workspace = true }
+meerkat-authorization-contracts = { workspace = true }
 # OAuth-protected MCP fixture for the MCP OAuth canaries (test-only).
 meerkat = { workspace = true, features = ["test-mcp-oauth-fixtures"] }
 meerkat-llm-core = { workspace = true }

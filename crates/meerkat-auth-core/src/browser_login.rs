@@ -68,6 +68,7 @@ pub async fn save_tokens_and_publish_lifecycle(
                             &auth_lease,
                             &credential_identity,
                             chrono::Utc::now(),
+                            &_guard,
                         )
                         .await
                         .map_err(|error| {
@@ -190,6 +191,7 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                         &auth_lease,
                         &credential_identity,
                         chrono::Utc::now(),
+                        &_guard,
                     )
                     .await
                     .map_err(|error| {
@@ -333,6 +335,7 @@ pub async fn save_oauth_tokens_and_consume_device_flow(
                             &auth_lease,
                             &credential_identity,
                             chrono::Utc::now(),
+                            &_guard,
                         )
                         .await
                         .map_err(|error| {

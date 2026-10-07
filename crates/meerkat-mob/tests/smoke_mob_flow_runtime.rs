@@ -2786,7 +2786,8 @@ async fn setup_flow_mob(
     let session_service = persistent_service(&paths);
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
     let runtime_adapter = mob_service
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
         .expect("persistent flow smoke service should expose a runtime adapter");
     let storage =
         MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage");
@@ -3263,7 +3264,8 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
     let session_service = persistent_service(&paths);
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
     let runtime_adapter = mob_service
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
         .expect("persistent smoke service should expose a runtime adapter");
     let storage =
         MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage");
@@ -3601,7 +3603,8 @@ async fn e2e_flow_runtime_adaptive_layer_marquee_smoke() {
     let session_service = persistent_service(&paths);
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
     let runtime_adapter = mob_service
-        .runtime_adapter()
+        .acquire_runtime_adapter(None)
+        .expect("acquire runtime authority")
         .expect("persistent adaptive flow smoke service should expose a runtime adapter");
     let storage =
         MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage");

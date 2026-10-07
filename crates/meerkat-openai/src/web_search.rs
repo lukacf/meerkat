@@ -160,6 +160,7 @@ fn map_agent_error_to_llm_error(err: meerkat_core::AgentError) -> LlmError {
     use meerkat_core::error::{LlmFailureReason, LlmProviderErrorKind};
 
     match err {
+        AgentError::OperationRefused { refusal } => LlmError::from_operation_refused(refusal),
         AgentError::Llm {
             reason, message, ..
         } => match reason {
@@ -179,6 +180,23 @@ fn map_agent_error_to_llm_error(err: meerkat_core::AgentError) -> LlmError {
                 LlmError::NetworkTimeout { duration_ms }
             }
             LlmFailureReason::ProviderError(provider_error) => match provider_error.kind {
+                LlmProviderErrorKind::OperationRefused => {
+                    let kind = provider_error
+                        .details
+                        .get("kind")
+                        .cloned()
+                        .and_then(|kind| serde_json::from_value(kind).ok())
+                        .unwrap_or(
+                            meerkat_core::authorization::OperationRefusalKind::MalformedFacts,
+                        );
+                    LlmError::operation_refused(kind)
+                }
+                LlmProviderErrorKind::OperationObservationUnavailable => {
+                    LlmError::OperationObservationUnavailable
+                }
+                LlmProviderErrorKind::OperationAuthorizationUnavailable => {
+                    LlmError::OperationAuthorizationUnavailable
+                }
                 LlmProviderErrorKind::InvalidRequest => LlmError::InvalidRequest { message },
                 LlmProviderErrorKind::AuthorizationRouteChanged => {
                     LlmError::AuthorizationRouteChanged { message }
@@ -310,6 +328,24 @@ mod tests {
     use meerkat_core::types::Usage;
     use meerkat_core::{AgentError, StopReason, ToolDef};
     use std::sync::Mutex;
+
+    #[test]
+    fn local_refusal_projection_preserves_kind_without_provider_retry() {
+        use meerkat_core::authorization::{OperationRefusalKind, OperationRefused};
+        let refusal = OperationRefused::new(OperationRefusalKind::Denied);
+        let direct = map_agent_error_to_llm_error(AgentError::OperationRefused { refusal });
+        let projected = map_agent_error_to_llm_error(AgentError::llm(
+            "openai",
+            direct.failure_reason(),
+            "operation refused",
+        ));
+        for error in [direct, projected] {
+            assert!(!error.is_retryable());
+            assert!(matches!(error.into_agent_error("openai"),
+                AgentError::OperationRefused { refusal }
+                    if refusal.kind() == OperationRefusalKind::Denied));
+        }
+    }
 
     #[test]
     fn policy_stop_projection_preserves_terminal_kind_and_code() {
@@ -464,5 +500,39 @@ mod tests {
             matches!(err, LlmError::RateLimited { .. }),
             "expected the typed RateLimited class to survive, got Unknown laundering: {err:?}"
         );
+    }
+
+    #[test]
+    fn observation_infrastructure_projection_preserves_type_and_safe_diagnostic() {
+        use meerkat_core::error::{LlmProviderError, LlmProviderErrorKind};
+
+        let canonical =
+            map_agent_error_to_llm_error(AgentError::operation_observation_unavailable());
+        // Compatibility metadata and provider text cannot turn this class
+        // into a retryable error or escape through the fixed diagnostic.
+        let contradictory = map_agent_error_to_llm_error(AgentError::llm(
+            "openai",
+            LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::OperationObservationUnavailable,
+                serde_json::json!({"private_detail": "must not escape"}),
+            )),
+            "sensitive provider message must not escape",
+        ));
+        for error in [canonical, contradictory] {
+            assert!(matches!(&error, LlmError::OperationObservationUnavailable));
+            assert_eq!(error.to_string(), "operation observation unavailable");
+            assert!(!error.is_retryable());
+            let reason = error.failure_reason();
+            assert!(matches!(
+                &reason,
+                LlmFailureReason::ProviderError(provider)
+                    if provider.kind == LlmProviderErrorKind::OperationObservationUnavailable
+                        && !provider.is_retryable()
+            ));
+            let projected = error.into_agent_error("openai");
+            assert!(projected.operation_refusal().is_none());
+            assert!(meerkat_core::retry::LlmRetryFailure::from_agent_error(&projected).is_none());
+            assert!(meerkat_core::model_fallback::model_fallback_trigger(&projected).is_none());
+        }
     }
 }

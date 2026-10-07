@@ -587,12 +587,15 @@ fn build_service_infrastructure_with_default_llm_client(
 
     let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
     let session_service = service.clone();
-    let mob_state = Arc::new(MobMcpState::new(
-        service as Arc<dyn meerkat_mob::MobSessionService>,
-        // Browser mobs are single-host owner consoles (§17.6): the embedding
-        // page IS the operator (A16, phase 5 explicit mint).
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let mob_state = Arc::new(
+        MobMcpState::new(
+            service as Arc<dyn meerkat_mob::MobSessionService>,
+            // Browser mobs are single-host owner consoles (§17.6): the embedding
+            // page IS the operator (A16, phase 5 explicit mint).
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .map_err(|error| err_js("RUNTIME_UNAVAILABLE", &error.to_string()))?,
+    );
     Ok((session_service, mob_state))
 }
 
@@ -834,6 +837,10 @@ fn err_mob_destroy(e: MobMcpDestroyError) -> JsValue {
 /// `internal_error` and never laundered into an Ok-with-status payload.
 fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
     match e {
+        error @ meerkat_core::SessionError::RuntimeUnavailable { .. } => serde_json::json!({
+            "code": error.code(), "message": error.to_string(),
+            "details": meerkat_contracts::error::session_error_details(&error),
+        }),
         meerkat_core::SessionError::CapabilityUnavailable(refusal) => serde_json::json!(refusal),
         meerkat_core::SessionError::NotFound { .. } => {
             serde_json::json!({ "code": "SESSION_NOT_FOUND", "message": "session not found" })
@@ -1523,12 +1530,15 @@ pub async fn init_runtime(
     let instance_handle = uuid::Uuid::new_v4().to_string();
     install_runtime_state(RuntimeState {
         instance_handle: instance_handle.clone(),
-        machine: session_service.runtime_adapter().ok_or_else(|| {
-            err_js(
-                "RUNTIME_UNAVAILABLE",
-                "ephemeral service has no canonical runtime",
-            )
-        })?,
+        machine: session_service
+            .acquire_runtime_adapter(None)
+            .map_err(|error| err_js("RUNTIME_UNAVAILABLE", &error.to_string()))?
+            .ok_or_else(|| {
+                err_js(
+                    "RUNTIME_UNAVAILABLE",
+                    "ephemeral service has no canonical runtime",
+                )
+            })?,
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
@@ -1596,12 +1606,15 @@ pub async fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsVa
     let instance_handle = uuid::Uuid::new_v4().to_string();
     install_runtime_state(RuntimeState {
         instance_handle: instance_handle.clone(),
-        machine: session_service.runtime_adapter().ok_or_else(|| {
-            err_js(
-                "RUNTIME_UNAVAILABLE",
-                "ephemeral service has no canonical runtime",
-            )
-        })?,
+        machine: session_service
+            .acquire_runtime_adapter(None)
+            .map_err(|error| err_js("RUNTIME_UNAVAILABLE", &error.to_string()))?
+            .ok_or_else(|| {
+                err_js(
+                    "RUNTIME_UNAVAILABLE",
+                    "ephemeral service has no canonical runtime",
+                )
+            })?,
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
@@ -2075,11 +2088,23 @@ async fn destroy_session_with_services(
     mob_state: Arc<MobMcpState>,
     registration: &RuntimeSessionRegistrationWitness,
 ) -> Result<(), WebDestroySessionError> {
-    let machine = session_service.runtime_adapter().ok_or_else(|| {
-        WebDestroySessionError::Session(meerkat_core::SessionError::Unsupported(
-            "session service has no runtime authority".into(),
-        ))
-    })?;
+    let machine = session_service
+        .acquire_runtime_adapter(None)
+        .map_err(|error| {
+            WebDestroySessionError::Session(match error {
+                meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
+                    meerkat_core::SessionError::RuntimeUnavailable { reason }
+                }
+                other => meerkat_core::SessionError::Agent(
+                    meerkat_core::AgentError::InternalError(other.to_string()),
+                ),
+            })
+        })?
+        .ok_or_else(|| {
+            WebDestroySessionError::Session(meerkat_core::SessionError::Unsupported(
+                "session service has no runtime authority".into(),
+            ))
+        })?;
     // The handle retains the machine's exact registration witness. Its
     // absence is idempotent completed cleanup, including when a prior caller
     // dropped its future while the owned teardown saga continued. Never
@@ -3996,8 +4021,10 @@ capabilities = [{capability_values}]
     async fn destroy_session_joins_unregister_after_caller_grace() {
         let (service, mob_state) =
             build_service_infrastructure(Config::default(), 8).expect("runtime services");
-        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
-            .expect("runtime machine");
+        let machine =
+            meerkat_mob::MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+                .expect("acquire runtime authority")
+                .expect("runtime machine");
         let session_id = meerkat_core::SessionId::new();
         let cleanup_started = Arc::new(tokio::sync::Notify::new());
         let release_cleanup = Arc::new(tokio::sync::Notify::new());
@@ -4055,8 +4082,10 @@ capabilities = [{capability_values}]
     async fn destroy_session_accepts_machine_terminalized_registration() {
         let (service, mob_state) =
             build_service_infrastructure(Config::default(), 8).expect("runtime services");
-        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
-            .expect("runtime machine");
+        let machine =
+            meerkat_mob::MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+                .expect("acquire runtime authority")
+                .expect("runtime machine");
         let session_id = meerkat_core::SessionId::new();
         let cleanup_started = Arc::new(tokio::sync::Notify::new());
         let release_cleanup = Arc::new(tokio::sync::Notify::new());
@@ -4134,8 +4163,10 @@ capabilities = [{capability_values}]
             .expect("terminalized session must not strand whole-runtime teardown");
         let (service, mob_state) =
             build_service_infrastructure(Config::default(), 8).expect("replacement services");
-        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
-            .expect("replacement machine");
+        let machine =
+            meerkat_mob::MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+                .expect("acquire runtime authority")
+                .expect("replacement machine");
         super::install_runtime_state(super::RuntimeState {
             instance_handle: uuid::Uuid::new_v4().to_string(),
             mob_state,
@@ -4163,8 +4194,10 @@ capabilities = [{capability_values}]
         );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
-        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
-            .expect("runtime machine");
+        let machine =
+            meerkat_mob::MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+                .expect("acquire runtime authority")
+                .expect("runtime machine");
         let created = meerkat::surface::materialize_ephemeral_runtime_session(
             &service,
             &machine,
@@ -4224,8 +4257,10 @@ capabilities = [{capability_values}]
         );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
-        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
-            .expect("runtime machine");
+        let machine =
+            meerkat_mob::MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+                .expect("acquire runtime authority")
+                .expect("runtime machine");
         let created = meerkat::surface::materialize_ephemeral_runtime_session(
             &service,
             &machine,

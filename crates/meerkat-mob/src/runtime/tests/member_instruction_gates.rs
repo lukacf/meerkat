@@ -1066,8 +1066,12 @@ impl MobSessionService for NonForwardingDecorator {
         .await
     }
     #[cfg(feature = "runtime-adapter")]
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        <Service as MobSessionService>::runtime_adapter(&self.inner)
+    fn acquire_runtime_adapter(
+        &self,
+        explicit: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> Result<Option<Arc<meerkat_runtime::MeerkatMachine>>, meerkat_runtime::RuntimeDriverError>
+    {
+        <Service as MobSessionService>::acquire_runtime_adapter(&self.inner, explicit)
     }
     #[cfg(feature = "runtime-adapter")]
     fn supports_runtime_turn_apply(&self) -> bool {

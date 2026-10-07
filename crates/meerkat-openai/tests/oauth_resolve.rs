@@ -1,10 +1,9 @@
 //! Phase 4b — OpenAI ChatGPT + Google Code Assist OAuth resolution
 //! through the provider runtime.
 //!
-//! Covers the same choke-point as the Anthropic test: persisted tokens
-//! → resolve returns an inline secret. Also verifies
-//! the external_chatgpt_tokens path and the Google api_key_express path
-//! (which routes through the simple-secret resolver).
+//! Covers persisted tokens resolving through the provider runtime. Managed OAuth
+//! resolves to an owner-backed bearer authorizer; external ChatGPT tokens
+//! retain the inline-secret path.
 
 #![cfg(all(not(target_arch = "wasm32"), feature = "oauth",))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -26,8 +25,33 @@ use meerkat_core::{
     AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
+use meerkat_llm_core::provider_runtime::binding::ResolvedConnection;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 use meerkat_openai::runtime::oauth as o_oauth;
+
+async fn assert_chatgpt_oauth_authorizer_token(connection: &ResolvedConnection, token: &str) {
+    let authorizer = connection
+        .resolved_authorizer()
+        .expect("managed ChatGPT OAuth should retain a credential authorizer");
+    let mut headers = Vec::new();
+    let mut request = meerkat_core::HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://chatgpt.com/backend-api/codex/responses",
+        headers: &mut headers,
+    };
+    authorizer
+        .authorize(&mut request)
+        .await
+        .expect("current generated credential authority authorizes the request");
+    assert_eq!(
+        headers,
+        vec![("Authorization".to_string(), format!("Bearer {token}"))]
+    );
+    assert!(
+        connection.resolved_secret().is_none(),
+        "managed OAuth must retain its credential owner instead of exporting an inline secret"
+    );
+}
 
 fn in_memory_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {
     ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new()))
@@ -343,10 +367,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
         .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("fresh ChatGPT tokens should resolve");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("fresh-chatgpt-access".to_string()),
-    );
+    assert_chatgpt_oauth_authorizer_token(&connection, "fresh-chatgpt-access").await;
 }
 
 #[tokio::test]
@@ -393,10 +414,7 @@ async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
         .await
         .expect("forced refresh should resolve through OAuth refresh path");
 
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("forced-refresh-chatgpt-access".to_string())
-    );
+    assert_chatgpt_oauth_authorizer_token(&connection, "forced-refresh-chatgpt-access").await;
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(
         stored.primary_secret.as_deref(),
@@ -581,10 +599,7 @@ async fn openai_managed_chatgpt_oauth_restores_marker_with_empty_auth_lifecycle(
         .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("marked tokens should restore through generated AuthMachine authority");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("fresh-chatgpt-access".to_string())
-    );
+    assert_chatgpt_oauth_authorizer_token(&connection, "fresh-chatgpt-access").await;
     let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&default_auth_binding()));
     assert_eq!(
         snapshot.phase,
@@ -702,10 +717,7 @@ async fn openai_managed_chatgpt_oauth_refreshes_expired_marker_with_empty_auth_l
         .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("expired marked tokens should restore then refresh through AuthMachine authority");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("refreshed-chatgpt-access".to_string())
-    );
+    assert_chatgpt_oauth_authorizer_token(&connection, "refreshed-chatgpt-access").await;
     let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&default_auth_binding()));
     assert_eq!(
         snapshot.phase,
@@ -879,10 +891,11 @@ async fn openai_managed_chatgpt_oauth_refresh_publishes_through_generated_auth_l
         .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("refresh should publish through generated AuthMachine authority");
-    assert_eq!(
-        connection.resolved_secret().as_deref(),
-        refreshed_access.as_deref()
-    );
+    assert_chatgpt_oauth_authorizer_token(
+        &connection,
+        refreshed_access.as_deref().expect("fixture access token"),
+    )
+    .await;
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(stored.primary_secret, refreshed_access);
     assert_eq!(stored.refresh_token, refreshed_refresh);

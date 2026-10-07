@@ -84,6 +84,8 @@ impl std::fmt::Display for CanonicalNamedTypeMismatchKind {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompositionTlaError {
+    #[error("machine `{machine}`: invalid finite TLC model: {reason}")]
+    InvalidTlcModel { machine: String, reason: String },
     /// A route's `from_machine` is not a declared machine instance.
     #[error(
         "composition `{composition}`: route `{route}` source machine `{machine}` is not a declared machine instance"
@@ -607,8 +609,27 @@ fn update_calls_helper(update: &Update, helper: &str) -> bool {
     }
 }
 
+fn explicit_value_uses_u64_max(value: &meerkat_machine_schema::TlcValue) -> bool {
+    use meerkat_machine_schema::TlcValue;
+    match value {
+        TlcValue::U64(number) => *number == u64::MAX,
+        TlcValue::Some(value) => explicit_value_uses_u64_max(value),
+        TlcValue::Record(fields) => fields.values().any(explicit_value_uses_u64_max),
+        TlcValue::Set(values) => values.iter().any(explicit_value_uses_u64_max),
+        TlcValue::Bool(_) | TlcValue::String(_) | TlcValue::None => false,
+    }
+}
+
 fn machine_uses_u64_max(schema: &MachineSchema) -> bool {
-    schema
+    schema.tlc_model.as_ref().is_some_and(|model| {
+        [&model.ci, &model.deep].iter().any(|profile| {
+            profile
+                .named_values
+                .values()
+                .flatten()
+                .any(explicit_value_uses_u64_max)
+        })
+    }) || schema
         .state
         .init
         .fields
@@ -1336,7 +1357,13 @@ pub fn render_composition_contract_markdown(
     out
 }
 
-pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
+pub fn render_machine_ci_cfg(
+    schema: &MachineSchema,
+    deep: bool,
+) -> Result<String, CompositionTlaError> {
+    if schema.tlc_model.is_some() {
+        validate_machine_model(schema)?;
+    }
     let mut out = String::new();
     let domains = collect_binding_domains(schema);
     let named_samples = collect_machine_named_type_samples(schema);
@@ -1378,7 +1405,9 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
             ) {
                 continue;
             }
-            if cfg_assignment_requires_model_operator(&ty, &named_bindings) {
+            if machine_explicit_values(schema, deep, &ty).is_some()
+                || cfg_assignment_requires_model_operator(&ty, &named_bindings)
+            {
                 writeln!(
                     &mut out,
                     "  {} <- {}",
@@ -1437,7 +1466,7 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     )
     .expect("write to string");
 
-    out
+    Ok(out)
 }
 
 pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> String {
@@ -1889,6 +1918,7 @@ fn max_named_sample_cardinality(named_samples: &BTreeMap<String, BTreeSet<String
 
 struct CfgAssignmentOperatorProfile<'a> {
     suffix: String,
+    explicit_values: Option<&'a meerkat_machine_schema::MachineTlcProfile>,
     sample_cardinality: usize,
     domain_overrides: Option<&'a BTreeMap<String, usize>>,
     named_samples: &'a BTreeMap<String, BTreeSet<String>>,
@@ -2039,20 +2069,25 @@ fn push_cfg_assignment_operator_definitions(
 ) -> bool {
     let mut wrote = false;
     for (name, ty) in domains {
+        let explicit = profile
+            .explicit_values
+            .and_then(|values| profile_explicit_values(values, ty));
         if cfg_domain_is_skipped_in_cfg(ty)
-            || !cfg_assignment_requires_model_operator(ty, named_bindings)
+            || (explicit.is_none() && !cfg_assignment_requires_model_operator(ty, named_bindings))
         {
             continue;
         }
         let sample_cardinality =
             profile_sample_cardinality_for_domain(profile, name, ty, named_bindings);
-        let assignment = render_default_domain_assignment(
-            ty,
-            sample_cardinality,
-            profile.named_samples,
-            named_bindings,
-            profile.include_string_samples,
-        );
+        let assignment = explicit.map(render_explicit_values).unwrap_or_else(|| {
+            render_default_domain_assignment(
+                ty,
+                sample_cardinality,
+                profile.named_samples,
+                named_bindings,
+                profile.include_string_samples,
+            )
+        });
         writeln!(
             out,
             "{} == {}",
@@ -2066,6 +2101,94 @@ fn push_cfg_assignment_operator_definitions(
         pushln!(out);
     }
     wrote
+}
+
+fn validate_machine_model(schema: &MachineSchema) -> Result<(), CompositionTlaError> {
+    let invalid = |reason| CompositionTlaError::InvalidTlcModel {
+        machine: schema.machine.to_string(),
+        reason,
+    };
+    schema
+        .validate()
+        .map_err(|error| invalid(error.to_string()))?;
+    if let Some(model) = &schema.tlc_model {
+        let domains = collect_binding_domains(schema);
+        for profile in [&model.ci, &model.deep] {
+            for name in profile.named_values.keys() {
+                if !domains.values().any(|ty| match ty {
+                    TypeRef::Named(id) => id == name,
+                    TypeRef::Enum(id) => id.as_str() == name.as_str(),
+                    _ => false,
+                }) {
+                    return Err(invalid(format!(
+                        "explicit sample type {name} has no standalone model domain"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn profile_explicit_values<'a>(
+    profile: &'a meerkat_machine_schema::MachineTlcProfile,
+    ty: &TypeRef,
+) -> Option<&'a [meerkat_machine_schema::TlcValue]> {
+    let name = match ty {
+        TypeRef::Named(name) => name.as_str(),
+        TypeRef::Enum(name) => name.as_str(),
+        _ => return None,
+    };
+    profile
+        .named_values
+        .iter()
+        .find(|(id, _)| id.as_str() == name)
+        .map(|(_, values)| values.as_slice())
+}
+
+fn machine_explicit_values<'a>(
+    schema: &'a MachineSchema,
+    deep: bool,
+    ty: &TypeRef,
+) -> Option<&'a [meerkat_machine_schema::TlcValue]> {
+    let model = schema.tlc_model.as_ref()?;
+    profile_explicit_values(if deep { &model.deep } else { &model.ci }, ty)
+}
+
+fn render_explicit_values(values: &[meerkat_machine_schema::TlcValue]) -> String {
+    format!(
+        "{{{}}}",
+        values
+            .iter()
+            .map(render_explicit_value)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn render_explicit_value(value: &meerkat_machine_schema::TlcValue) -> String {
+    use meerkat_machine_schema::TlcValue;
+    match value {
+        TlcValue::Bool(value) => if *value { "TRUE" } else { "FALSE" }.into(),
+        TlcValue::U64(value) if *value == u64::MAX => TLA_RUST_U64_MAX_CONSTANT.to_owned(),
+        TlcValue::U64(value) => value.to_string(),
+        TlcValue::String(value) => tla_string(value),
+        TlcValue::None => "None".into(),
+        TlcValue::Some(value) => format!("Some({})", render_explicit_value(value)),
+        TlcValue::Set(values) => render_explicit_values(values),
+        TlcValue::Record(fields) => format!(
+            "[{}]",
+            fields
+                .iter()
+                .map(|(field, value)| format!(
+                    "{} |-> {}",
+                    tla_ident(field.as_str()),
+                    render_explicit_value(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn cfg_domain_is_skipped_in_cfg(ty: &TypeRef) -> bool {
@@ -2996,6 +3119,9 @@ pub fn render_machine_semantic_model(
     schema: &MachineSchema,
 ) -> std::result::Result<String, CompositionTlaError> {
     check_canonical_named_bindings(schema)?;
+    if schema.tlc_model.is_some() {
+        validate_machine_model(schema)?;
+    }
     let mut compiler = MachineTlaCompiler::new(schema);
     compiler.render()
 }
@@ -5868,7 +5994,7 @@ mod tests {
         assert!(constants_line.contains(TLA_RUST_U64_MAX_CONSTANT));
 
         for deep in [false, true] {
-            let cfg = render_machine_ci_cfg(&schema, deep);
+            let cfg = render_machine_ci_cfg(&schema, deep).expect("valid machine CFG");
             assert!(
                 cfg.contains(&format!(
                     "  {TLA_RUST_U64_MAX_CONSTANT} = {TLC_SAFE_RUST_U64_MAX_VALUE}"
@@ -5884,7 +6010,7 @@ mod tests {
         let schema = meerkat_machine();
         assert!(machine_uses_session_id_string_bridge(&schema));
 
-        let deep_cfg = render_machine_ci_cfg(&schema, true);
+        let deep_cfg = render_machine_ci_cfg(&schema, true).expect("valid deep CFG");
         assert_session_id_string_overlap(&deep_cfg, "MeerkatMachine Deep config");
         assert_eq!(
             cfg_string_domain_values(&deep_cfg, "StringValues").len(),
@@ -5892,7 +6018,7 @@ mod tests {
             "bridge reachability must substitute a Deep string sample, not add one"
         );
 
-        let ci_cfg = render_machine_ci_cfg(&schema, false);
+        let ci_cfg = render_machine_ci_cfg(&schema, false).expect("valid CI CFG");
         assert!(
             cfg_string_domain_values(&ci_cfg, "SessionIdValues").is_empty()
                 && cfg_string_domain_values(&ci_cfg, "StringValues").is_empty(),
@@ -5905,7 +6031,7 @@ mod tests {
         let schema = mob_machine();
         assert!(!machine_uses_session_id_string_bridge(&schema));
 
-        let deep_cfg = render_machine_ci_cfg(&schema, true);
+        let deep_cfg = render_machine_ci_cfg(&schema, true).expect("valid deep CFG");
         let session_ids = cfg_string_domain_values(&deep_cfg, "SessionIdValues");
         let strings = cfg_string_domain_values(&deep_cfg, "StringValues");
         assert!(
@@ -6486,6 +6612,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             &self.named_bindings,
             &CfgAssignmentOperatorProfile {
                 suffix: "Ci".to_owned(),
+                explicit_values: None,
                 sample_cardinality: default_sample_cardinality(false),
                 domain_overrides: None,
                 named_samples: &named_samples,
@@ -6498,6 +6625,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             &self.named_bindings,
             &CfgAssignmentOperatorProfile {
                 suffix: "Deep".to_owned(),
+                explicit_values: None,
                 sample_cardinality: self.schema.deep_domain_cardinality,
                 domain_overrides: Some(&self.schema.deep_domain_overrides),
                 named_samples: &named_samples,
@@ -6516,6 +6644,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 &self.named_bindings,
                 &CfgAssignmentOperatorProfile {
                     suffix: witness_cfg_operator_suffix(witness),
+                    explicit_values: None,
                     sample_cardinality: self
                         .schema
                         .witness_domain_cardinality
@@ -9552,6 +9681,7 @@ impl<'a> MachineTlaCompiler<'a> {
             &named_bindings,
             &CfgAssignmentOperatorProfile {
                 suffix: "Ci".to_owned(),
+                explicit_values: self.schema.tlc_model.as_ref().map(|model| &model.ci),
                 sample_cardinality: machine_cfg_sample_cardinality(self.schema, false),
                 domain_overrides: None,
                 named_samples: &named_samples,
@@ -9564,6 +9694,7 @@ impl<'a> MachineTlaCompiler<'a> {
             &named_bindings,
             &CfgAssignmentOperatorProfile {
                 suffix: "Deep".to_owned(),
+                explicit_values: self.schema.tlc_model.as_ref().map(|model| &model.deep),
                 sample_cardinality: machine_cfg_sample_cardinality(self.schema, true),
                 domain_overrides: Some(&self.schema.deep_domain_overrides),
                 named_samples: &with_guard_binding_string_samples(&named_samples, self.schema),
@@ -13066,6 +13197,18 @@ fn render_machine_state_constraint(schema: &MachineSchema, deep: bool) -> String
     let seq_limit = if deep { 2 } else { 1 };
     let set_limit = if deep { 2 } else { 1 };
     let map_limit = if deep { 2 } else { 1 };
+    let (step_limit, seq_limit, set_limit, map_limit) =
+        if !deep && let Some(model) = &schema.tlc_model {
+            let limits = &model.ci_limits;
+            (
+                limits.step_limit as usize,
+                limits.seq_limit as usize,
+                limits.set_limit as usize,
+                limits.map_limit as usize,
+            )
+        } else {
+            (step_limit, seq_limit, set_limit, map_limit)
+        };
     let mut clauses = vec![format!("model_step_count <= {step_limit}")];
 
     for field in &schema.state.fields {

@@ -248,6 +248,7 @@ async fn oversized_terminal_event_resolves_promptly_via_sidecar() {
 async fn remote_overlay_enforced_member_side_denied_tool_yields_access_denied() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let mut opts = HostFixtureOptions::named("xhf-t2-host-b").with_member_build();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // The member calls the (installed, comms-tools) `send_message` tool once,
     // then completes. The step overlay blocks it, so the call must be denied
     // INSIDE the remote turn by the member-side dispatcher gate.
@@ -255,6 +256,7 @@ async fn remote_overlay_enforced_member_side_denied_tool_yields_access_denied() 
         "send_message",
         serde_json::json!({"to": "nobody", "message": "hi"}),
         "overlay-done",
+        requests.clone(),
     ));
     let fixture = spawn_host_daemon_fixture(opts)
         .await
@@ -281,25 +283,48 @@ async fn remote_overlay_enforced_member_side_denied_tool_yields_access_denied() 
         .await
         .expect("run overlay flow");
     let run = wait_for_flow_run_terminal(&controlling.handle, &run_id, RUN_WAIT).await;
-    // The overlay is enforced ON THE MEMBER HOST: the blocked tool leaves
-    // the turn's visible set, and a (scripted) rogue call to an invisible
-    // tool is core-canonically a TYPED `access_denied` run failure — the
-    // same semantics a local flow step with this client exhibits. The step
-    // fails typed with the member-side denial, attributed through the
-    // journal + sidecar (a failed terminal rides the same machinery).
+    // The member-side denial returns as a tool result to the same model,
+    // which completes the flow step without failing its run.
     assert_eq!(
         run.status,
-        MobRunStatus::Failed,
-        "the member-side overlay denial fails the step typed; failures={:?}",
+        MobRunStatus::Completed,
+        "the member continues after local permission feedback; failures={:?}",
         run.failure_ledger
     );
-    assert!(
-        run.failure_ledger.iter().any(|entry| {
-            entry.step_id.as_str() == "step-1" && entry.reason.contains("not allowed by policy")
-        }),
-        "the step failure carries the member-side typed denial: {:?}",
-        run.failure_ledger
+    assert!(run.failure_ledger.is_empty(), "{:?}", run.failure_ledger);
+    assert_eq!(
+        run.root_step_outputs.get(&StepId::from("step-1")),
+        Some(&serde_json::json!({"b2": "overlay-done"}))
     );
+    {
+        let requests = requests.lock().expect("member request log");
+        assert_eq!(requests.len(), 2, "one denied call and one continuation");
+        let messages = &requests[1];
+        let calls: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::BlockAssistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .flat_map(|assistant| assistant.tool_calls())
+            .collect();
+        assert_eq!(calls.len(), 1, "the model observes its exact denied call");
+        assert_eq!(calls[0].name, "send_message");
+        let results: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(results.len(), 1, "exactly one operation-local refusal");
+        assert_eq!(results[0].tool_use_id, calls[0].id);
+        assert!(results[0].is_error);
+        let feedback: serde_json::Value = serde_json::from_str(&results[0].text_content())
+            .expect("typed permission feedback reaches the next model request");
+        assert_eq!(feedback["error"], "access_denied", "{feedback}");
+    }
 
     // Member-side session history records the denied call INSIDE the remote
     // turn (the call reached the member host; the denial happened THERE).
@@ -321,9 +346,8 @@ async fn remote_overlay_enforced_member_side_denied_tool_yields_access_denied() 
         "member transcript records the denied tool call: {rendered}"
     );
 
-    // Failed terminals ride the same exact-ack prune path as successful
-    // terminals after the failure has been consumed controlling-side.
-    wait_until("consumed failed turn outcome pruned", || async {
+    // The continued turn completes through the ordinary exact-ack prune path.
+    wait_until("consumed continued turn outcome pruned", || async {
         fixture.turn_outcome_rows(&mob_id).await.is_empty()
     })
     .await;

@@ -1701,6 +1701,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-authorization-contracts"
+version = "0.8.51"
+dependencies = [
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "meerkat-capabilities"
 version = "0.8.51"
 dependencies = [
@@ -1945,6 +1957,7 @@ name = "meerkat-machine-kernels"
 version = "0.8.51"
 dependencies = [
  "indexmap",
+ "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-machine-schema",
  "serde",
@@ -1956,6 +1969,7 @@ name = "meerkat-machine-schema"
 version = "0.8.51"
 dependencies = [
  "indexmap",
+ "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-machine-dsl",
  "serde",
@@ -2100,6 +2114,7 @@ dependencies = [
  "futures",
  "indexmap",
  "meerkat-auth-core",
+ "meerkat-authorization-contracts",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-machine-derive",
@@ -2114,6 +2129,15 @@ dependencies = [
  "tokio_with_wasm",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "meerkat-sandbox"
+version = "0.8.51"
+dependencies = [
+ "meerkat-core",
+ "nix 0.29.0",
+ "tokio",
 ]
 
 [[package]]
@@ -2235,6 +2259,7 @@ dependencies = [
  "meerkat-jobs",
  "meerkat-llm-core",
  "meerkat-runtime",
+ "meerkat-sandbox",
  "meerkat-skills",
  "meerkat-store",
  "nix 0.29.0",

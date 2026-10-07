@@ -587,6 +587,7 @@ impl MobUpcallSeams {
             Ok(value) => UpcallToolOutcome::Ok {
                 content: value.to_string(),
                 is_error: false,
+                settlement_failures: Vec::new(),
             },
             Err(error) => UpcallToolOutcome::from_tool_error(&error),
         }
@@ -602,6 +603,7 @@ impl MobUpcallSeams {
             Ok(value) => UpcallToolOutcome::Ok {
                 content: value.to_string(),
                 is_error: false,
+                settlement_failures: Vec::new(),
             },
             Err(error) => UpcallToolOutcome::from_tool_error(&error),
         }
@@ -1776,6 +1778,7 @@ mod tests {
             Ok(UpcallToolOutcome::Ok {
                 content: "{\"ok\":true}".to_string(),
                 is_error: false,
+                settlement_failures: Vec::new(),
             })
         }
     }

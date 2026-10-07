@@ -25,7 +25,8 @@ fn build_runtime() -> meerkat::session_runtime::MeerkatSessionRuntime {
         session_store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let temp = tempfile::tempdir().expect("tempdir");
     let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
     let builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -82,7 +83,8 @@ fn builder_with_skill_identity_roots_pre_populates_inner() {
         session_store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let temp = tempfile::tempdir().expect("tempdir");
     let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
     let builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -108,7 +110,8 @@ fn builder_with_realm_id_pre_populates_inner() {
         session_store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let temp = tempfile::tempdir().expect("tempdir");
     let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
     let builder = FactoryAgentBuilder::new(factory, Config::default());

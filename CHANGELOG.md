@@ -763,6 +763,12 @@ them.
 
 ### Testing
 
+- REST unit tests keep persisted credentials under each test's own root.
+  `AppState::load_from` opened the user's default credential store, so
+  every run left MCP OAuth fixture credentials in it, keyed by a random
+  loopback port, and a later run whose fixture reused a port found a stale
+  credential and was refused (`mcp_oauth_rest_entry_points_keep_secrets_out_of_logs`
+  failed intermittently). Served instances still use the default store.
 - The xtask machine workflow test
   (`machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts`)
   now reserves its whole nextest lane in every profile, so no other test runs

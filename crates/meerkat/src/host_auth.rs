@@ -1403,25 +1403,28 @@ oauth_account_selection = "unverified"
     #[test]
     fn mcp_status_reports_account_verification_and_never_an_unverified_account() {
         use meerkat_contracts::WireMcpAccountVerification as Wire;
+        use meerkat_core::mcp_config::McpOAuthAccountSelection as Selection;
         let base = McpServerIdentity::from_server_config("s", "https://s.example/mcp");
+        let configured = |selection| {
+            let mut config = meerkat_core::McpServerConfig::streamable_http(
+                "s",
+                "https://s.example/mcp",
+                std::collections::HashMap::new(),
+            );
+            if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport
+            {
+                http.oauth_account_selection = Some(selection);
+            }
+            McpServerIdentity::from_config(&config).unwrap()
+        };
         for (target, expected) in [
             (base.clone(), Wire::Legacy),
             (
-                base.clone().with_expected_account("subject-7").unwrap(),
+                base.with_expected_account("subject-7").unwrap(),
                 Wire::Verified,
             ),
-            (
-                base.clone().with_account_selection(
-                    meerkat_core::mcp_config::McpOAuthAccountSelection::Discover,
-                ),
-                Wire::Verified,
-            ),
-            (
-                base.with_account_selection(
-                    meerkat_core::mcp_config::McpOAuthAccountSelection::Unverified,
-                ),
-                Wire::Unverified,
-            ),
+            (configured(Selection::Discover), Wire::Verified),
+            (configured(Selection::Unverified), Wire::Unverified),
         ] {
             let status = HostMcpAuthStatus {
                 account_verification: target.account_verification(),

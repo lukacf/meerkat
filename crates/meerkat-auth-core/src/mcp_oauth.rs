@@ -143,9 +143,10 @@ impl McpServerIdentity {
     }
 
     /// Select account discovery or the explicitly unverified resource-bound
-    /// mode. Only host configuration may call this; agent input, start
-    /// parameters, a failed verification or a legacy credential never do.
-    pub fn with_account_selection(
+    /// mode. Only [`Self::from_config`] calls this, so the mode always comes
+    /// from host configuration; agent input, start parameters, a failed
+    /// verification or a legacy credential never select it.
+    pub(crate) fn with_account_selection(
         mut self,
         selection: meerkat_core::mcp_config::McpOAuthAccountSelection,
     ) -> Self {
@@ -1296,13 +1297,17 @@ impl McpOAuthAuthority {
         record: crate::oauth_flow::OAuthFlowRecord,
     ) -> Result<Option<McpOAuthLoginStart>, McpOAuthError> {
         if !pending_attempt_matches(target, &record) || !preflight_receipt_retained(state) {
+            // A failed retirement is propagated: no fresh attempt is admitted
+            // beside one the flow owner still holds.
             if let Some((authority, _)) = self.interactive.as_ref() {
-                let _ = authority.expire(
-                    state,
-                    &record.target,
-                    record.provider.clone(),
-                    &record.redirect_uri,
-                );
+                authority
+                    .expire(
+                        state,
+                        &record.target,
+                        record.provider.clone(),
+                        &record.redirect_uri,
+                    )
+                    .map_err(McpOAuthError::Flow)?;
             }
             return Ok(None);
         }

@@ -4265,9 +4265,22 @@ async fn admit_and_authorize(
     Ok((start, callback))
 }
 
+/// A target with `selection`, built the only way a mode is selected: from
+/// host configuration.
+fn configured_target(
+    name: &str,
+    url: &str,
+    selection: McpOAuthAccountSelection,
+) -> McpServerIdentity {
+    let mut config = meerkat_core::McpServerConfig::streamable_http(name, url, HashMap::new());
+    if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut config.transport {
+        http.oauth_account_selection = Some(selection);
+    }
+    McpServerIdentity::from_config(&config).unwrap()
+}
+
 fn mode_target(base: &str, selection: McpOAuthAccountSelection) -> McpServerIdentity {
-    McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
-        .with_account_selection(selection)
+    configured_target("glean", &format!("{base}/mcp"), selection)
 }
 
 fn userinfo_or_openid_requests(state: &TestState) -> usize {
@@ -4283,12 +4296,16 @@ fn userinfo_or_openid_requests(state: &TestState) -> usize {
 fn every_selection_mode_has_its_own_slot_and_only_config_selects_it() {
     let base = McpServerIdentity::from_server_config("glean", "https://glean.example/mcp");
     let known = base.clone().with_expected_account("subject-7").unwrap();
-    let discover = base
-        .clone()
-        .with_account_selection(McpOAuthAccountSelection::Discover);
-    let unverified = base
-        .clone()
-        .with_account_selection(McpOAuthAccountSelection::Unverified);
+    let discover = configured_target(
+        "glean",
+        "https://glean.example/mcp",
+        McpOAuthAccountSelection::Discover,
+    );
+    let unverified = configured_target(
+        "glean",
+        "https://glean.example/mcp",
+        McpOAuthAccountSelection::Unverified,
+    );
     let keys = [&base, &known, &discover, &unverified]
         .map(|target| target.token_key().unwrap())
         .into_iter()

@@ -3468,6 +3468,16 @@ async fn handle_meerkat_mcp_add(
     if server_name.trim().is_empty() {
         return Err(ToolCallError::invalid_params("server_name cannot be empty"));
     }
+    // An OAuth account selection is a host-file or host-API decision. A host
+    // may expose this management tool to an agent, so it never carries one;
+    // nothing is staged or written.
+    if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &input.server_config.transport
+        && (http.oauth_account.is_some() || http.oauth_account_selection.is_some())
+    {
+        return Err(ToolCallError::invalid_params(
+            "oauth_account and oauth_account_selection are host configuration and cannot be set through meerkat_mcp_add",
+        ));
+    }
     let session_id = meerkat::SessionId::parse(&input.session_id)
         .map_err(|error| ToolCallError::invalid_params(invalid_session_id_message(error)))?;
     let router_lease = state.live_mcp_router_lease(&session_id).await?;
@@ -6259,6 +6269,62 @@ mod tests {
         assert!(result.is_err());
         assert!(!state.runtime_adapter.contains_session(&missing).await);
         assert!(!state.runtime_ingress_context().has_sidecar(&missing).await);
+    }
+
+    #[tokio::test]
+    async fn mcp_add_tool_refuses_oauth_account_selection_without_staging() {
+        let (state, session_id) = state_with_persisted_session().await;
+        let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
+        attach_test_mcp_router(
+            &state,
+            &parsed,
+            Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())),
+        )
+        .await;
+        for selection in [
+            serde_json::json!({"oauth_account_selection": "unverified"}),
+            serde_json::json!({"oauth_account_selection": "discover"}),
+            serde_json::json!({"oauth_account": "provider-subject-7"}),
+        ] {
+            let mut server_config = serde_json::json!({
+                "name": "selected",
+                "url": "https://mcp.example.invalid/mcp",
+            });
+            for (key, value) in selection.as_object().expect("object") {
+                server_config[key] = value.clone();
+            }
+            let error = handle_tools_call(
+                &state,
+                "meerkat_mcp_add",
+                &serde_json::json!({"session_id": session_id, "server_config": server_config}),
+            )
+            .await
+            .expect_err("an agent-reachable tool cannot select an account mode");
+            assert_eq!(error.code, -32602, "{}", error.message);
+            assert!(
+                error.message.contains("host configuration"),
+                "{}",
+                error.message
+            );
+        }
+        // Paired control: the same server without a selection passes this
+        // guard (the refusal is specific to the account selection).
+        let control = handle_tools_call(
+            &state,
+            "meerkat_mcp_add",
+            &serde_json::json!({
+                "session_id": session_id,
+                "server_config": {"name": "plain", "url": "https://mcp.example.invalid/mcp"},
+            }),
+        )
+        .await;
+        if let Err(error) = control {
+            assert!(
+                !error.message.contains("host configuration"),
+                "{}",
+                error.message
+            );
+        }
     }
 
     #[tokio::test]

@@ -165,10 +165,15 @@ them.
     `account_verification: WireMcpAccountVerification`.
 - Behaviour-only (not measured by the gate), MCP OAuth account binding:
   - A Known (`oauth_account`) login over an occupied credential slot reuses
-    the slot's registered client and must match its issuer, resource and
-    strategy. A Known credential stored before account bindings were
-    recorded cannot be replaced by a login: disconnect it first
-    (`DisconnectRequired`).
+    the slot's registered client with a new loopback port (RFC 8252
+    section 7.3) and must match its issuer, resource and strategy. A
+    provider that pins the redirect port, or a registration that needs any
+    other change, needs a disconnect and a fresh login; the account mode is
+    never weakened to recover. A Known credential stored before account
+    bindings were recorded keeps its previous stored-use behaviour, but a
+    new login over it is refused until it is disconnected
+    (`DisconnectRequired`); such old credentials have not acquired the new
+    binding checks.
   - A refresh of a Known credential observes the refreshed token's subject
     through the account strategy and refuses a different one; an authority
     without that strategy cannot refresh it.
@@ -177,12 +182,23 @@ them.
   - The MCP OAuth authority, the connector login owner and the OpenID
     Connect UserInfo strategy no longer fall back to a default HTTP client,
     which follows redirects, when their redirect-free client fails to
-    build. The build failure is kept: their requests fail with
-    `HttpClientUnavailable` (the strategy refuses with
-    `VerificationUnavailable`), and `ConnectorOAuthAuthority::new` returns it.
+    build. The build failure is kept: the authority's login steps fail with
+    `HttpClientUnavailable`, and a refresh checks for it before any
+    refresh begins and surfaces it as `RefreshFailed` (an infrastructure
+    failure, not a refusal). `OidcUserInfoAccountStrategy::new` still
+    returns `Self` and keeps the failure internally, so the strategy refuses
+    with `VerificationUnavailable`. `ConnectorOAuthAuthority::new` returns
+    `ConnectorLoginError::HttpClientUnavailable`.
   - A start joins a pending attempt only if this process admitted it after
-    its strategy preflight; another pending attempt is retired and a fresh
-    one admitted.
+    its strategy preflight (the receipt is process-local); another pending
+    attempt is retired, a retirement failure is returned, and a fresh one is
+    admitted.
+  - The `meerkat_mcp_add` management tool refuses a server configuration
+    with `oauth_account` or `oauth_account_selection` (invalid params,
+    nothing staged); it used to accept `oauth_account`. A host may expose
+    that tool to an agent, so an account selection is set only through host
+    configuration: the project or user `mcp.toml`, or the host's RPC and
+    REST `mcp/add`.
 
 
 ### Added
@@ -351,6 +367,14 @@ them.
     status and completion report `account_verification`
     (`verified`, `unverified` or `legacy`). Mob portable profiles refuse a
     server with an account selection mode.
+    Limits of this release: MCP OAuth credentials are installation-scoped
+    (the host's token store), not realm-scoped, and realm identity and
+    binding-use admission are not yet applied to them. Whoever administers
+    host configuration (the files, or RPC and REST `mcp/add`) selects the
+    mode; there is no separate per-call administrator check. The login
+    audit records the account verification mode, not a local actor or
+    issuer. Portable and agent-managed surfaces refuse a mode rather than
+    carry it.
   - The MCP credential slot now enforces the connector race controls: a
     Discover or unverified commit publishes only into a still-empty slot,
     and a Known commit replaces only the same verified account with the same

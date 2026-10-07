@@ -55,7 +55,7 @@ source of truth for tool names and availability.
 | `meerkat_skills` | List or inspect available skills |
 | `meerkat_schedule_*` tools | Agent-facing schedule create/get/list/update/pause/resume/delete/occurrences tools |
 | `workgraph_*` tools | Agent-facing WorkGraph create/read/claim/update/link/evidence/close tools |
-| `meerkat_mcp_add` | Stage a live MCP server addition on an active session |
+| `meerkat_mcp_add` | Stage a live MCP server addition on an active session (refuses `oauth_account` and `oauth_account_selection`) |
 | `meerkat_mcp_remove` | Stage a live MCP server removal on an active session |
 | `meerkat_mcp_reload` | Stage a live MCP server reload on an active session |
 | `meerkat_event_stream_open` | Open a session-level agent event stream |
@@ -267,17 +267,26 @@ ask its user.
     (host UI should say "account not verified"). No account strategy runs,
     and a re-login over an existing credential needs `auth/logout` first.
 
-  The two keys conflict. Each selection has its own credential slot: changing
-  it never reuses or migrates another selection's credential, and a failed
+  Whoever administers the host's configuration sets these keys: the
+  project or user `mcp.toml`, or the host's RPC and REST `mcp/add`. The
+  `meerkat_mcp_add` management tool refuses both keys, because a host may
+  expose that tool to an agent. The two keys conflict. Each selection has
+  its own credential slot: changing it never reuses or migrates another
+  selection's credential, and a failed
   verification never falls back to `unverified` or to an unselected
   credential. A selected server must use streamable HTTP without a static
   `Authorization` header and a host OAuth resolver. Mob portable profiles
-  cannot carry `oauth_account_selection` and refuse it. The default account
+  cannot carry `oauth_account_selection` and refuse it. Credentials are
+  stored per installation (the host's token store), not per realm, and a
+  reconnect of a Known credential stored before account bindings were
+  recorded needs a disconnect first. The default account
   strategy is OpenID Connect UserInfo: it
   requests `openid`, calls the issuer's `userinfo_endpoint` with the new
   access token and reports `sub`, which must equal `oauth_account` when one
   is named. A refresh of a verified credential observes the subject again
-  and refuses a different one. Hosts whose
+  and refuses a different one; if the subject cannot be observed (for
+  example no account strategy is installed) the refresh fails transiently
+  and nothing is published. Hosts whose
   servers prove the account another way supply their own
   `McpOAuthAccountStrategy`. Start checks first that the account can be
   proven: for the default strategy, the issuer's OpenID Connect discovery

@@ -11274,9 +11274,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<SessionMutationGuard, SessionError> {
-        let turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-        self.realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
-            .await
+        meerkat_core::slow_await::warn_if_slow(
+            id,
+            "session: realtime write guard",
+            Box::pin(async {
+                let turn_finalization_guard =
+                    self.acquire_runtime_turn_finalization_guard(id).await;
+                self.realtime_transcript_mutation_guard_with_turn_boundary(
+                    id,
+                    turn_finalization_guard,
+                )
+                .await
+            }),
+        )
+        .await
     }
 
     /// Stop this channel's live projections from waiting behind a held turn
@@ -11404,6 +11415,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// close, in which case the projection is refused with
     /// [`SessionError::Busy`] so the transport can defer it to the boundary.
     async fn realtime_transcript_mutation_guard_for_channel(
+        &self,
+        id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<SessionMutationGuard, SessionError> {
+        meerkat_core::slow_await::warn_if_slow(
+            id,
+            "session: realtime write guard for a channel",
+            Box::pin(self.realtime_transcript_mutation_guard_for_channel_unwatched(id, channel_id)),
+        )
+        .await
+    }
+
+    async fn realtime_transcript_mutation_guard_for_channel_unwatched(
         &self,
         id: &SessionId,
         channel_id: &meerkat_core::LiveChannelId,
@@ -15831,7 +15855,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// commits it without exporting or encoding the full Session.
     /// Returns the committed message count and transcript digest so callers can
     /// seed a checkpointer without a second actor round-trip.
+    /// Save the full live session; WARNs while the save stays pending past
+    /// the slow-await threshold (diagnostics only).
     async fn persist_full_session(&self, id: &SessionId) -> Result<(usize, String), SessionError> {
+        meerkat_core::slow_await::warn_if_slow(
+            id,
+            "session: full-session save",
+            Box::pin(self.persist_full_session_unwatched(id)),
+        )
+        .await
+    }
+
+    async fn persist_full_session_unwatched(
+        &self,
+        id: &SessionId,
+    ) -> Result<(usize, String), SessionError> {
         match self.runtime_store.session_persistence_profile() {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
                 let session = self.export_session_with_labels(id).await?;

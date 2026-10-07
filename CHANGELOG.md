@@ -122,6 +122,21 @@ them.
   error on process-restart restore now fails only that member's restore,
   with the error as its restore failure reason; the rest of the mob comes
   up. It used to fail the whole mob resume (#1701).
+- Behaviour-only (not measured by the gate): native provider HTTP clients
+  (`meerkat_llm_core::http::build_http_client_for_base_url`, used by the
+  Anthropic, OpenAI, OpenAI-compatible and Gemini clients) no longer follow
+  redirects, same-origin included. A model request goes only to the endpoint
+  the client was built for. A 3xx answer from it is now the terminal
+  `LlmError::InvalidConfig` (it used to be followed, or mapped to the
+  retryable `LlmError::Unknown`). The error carries only the status and
+  says the request reached the configured endpoint; it never includes the
+  `Location` or the response body. Before, a cross-host
+  redirect re-sent the request elsewhere with provider key headers such as
+  `x-api-key` and `x-goog-api-key`, which reqwest does not strip. The
+  OpenAI, OpenAI-compatible and Gemini constructors no longer fall back to
+  `reqwest::Client::new()` (which follows redirects) when the configured
+  client fails to build: each request fails with that build error instead.
+  Browser (wasm32) redirect handling is unchanged.
 
 
 ### Added
@@ -261,6 +276,36 @@ them.
   TLC checked a guard the runtime did not evaluate. Every operand that is not
   self-delimiting is now parenthesized. No machine on `main` used such a
   form, so no generated authority changes.
+- Turbo S S106: a reopen whose retained conversation summary was followed by
+  more rows than the startup input holds generated a fresh summary, and when
+  that missed the 2.5 s pre-open bound the channel opened without it and
+  received it as a late append at the onset of the user's first question.
+  Landing there, it made gpt-live answer inside the utterance (0.65 s in) in
+  10 of 26 runs, against 0 of 30 when it landed earlier. An answer that ended
+  before the user did was never followed by a reply (haul_e7 timeouts, about
+  1 in 28 runs, #1784). Such a stale-retained reopen now waits for its fresh
+  summary's own outcome and seeds it at creation in the startup
+  `session.input`, the carrier seeded reopens already use. Its summary is
+  never appended into its open channel: a seeded reopen stages no
+  preparation lease, so the generated bootstrap guard refuses one. Rows
+  committed while the summary is generated ride verbatim after it through
+  the retained path. A reopen that still cannot seed fails typed
+  (`LiveContextSummaryError::StaleSnapshot`; RPC `live/open` answers the
+  retryable `SESSION_BUSY`, -32002) for the client to retry, and a failed
+  generation opens with nothing to deliver. The wait does not use the
+  pre-open bound: the policy's summarizer timeout ends it, so hosts that
+  set a zero bound (`with_pre_open_bound`, "never wait") now wait on such
+  reopens too. First opens, and reopens without a usable retained summary
+  (for example after a host restart, an eviction or a transcript rewrite),
+  are unchanged and can still receive the summary as a late append. The
+  trade: stale-retained reopens can connect slightly later, in exchange
+  for no unprompted speech and correct recall. Measured on S106 (20 such
+  reopens), open request to connected had a median of 4.2 s (4.4 s before)
+  and a maximum of 5.9 s (4.7 s before), because the open now waits for the
+  summary's own outcome instead of a fixed 2.5 s. Two measured
+  alternatives were rejected: holding the summary behind the user's turn
+  (the model answered without it) and sending it as soon as it was ready
+  (spoken unprompted, 1 in 4 open-time appends).
 - Members spawned through the mob operator tools (`spawn_member`,
   `spawn_many_members`) now record the member that spawned them as their
   creator. Before, every such child was recorded as unproven, so
@@ -472,6 +517,10 @@ them.
 
 ### Testing
 
+- Turbo S S106's haul_e7 (the project codename asked on the reopened
+  channel, whose only source is the summary) must now contain the codename.
+  Before, an answer that never gave it ("I don't have it in front of me yet")
+  still passed (#1784).
 - The fork_off build-parity e2e test selects the forker's tool-round request
   by the position of `call_fork`'s output instead of the last user text
   (#1798). The child's background completion notice can be that request's

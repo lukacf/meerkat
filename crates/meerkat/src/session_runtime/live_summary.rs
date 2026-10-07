@@ -75,6 +75,11 @@ pub enum LiveContextBootstrapMode {
 /// open under the 5 s time-to-talk budget while still catching most cold
 /// generations. Configurable per policy with
 /// [`LiveContextSummaryPolicy::with_pre_open_bound`].
+///
+/// A stale-retained reopen does not use this bound: when the rows committed
+/// since its still-matching retained summary exceed the startup bounds, the
+/// reopen waits for its fresh summary's own outcome, which the policy's
+/// summarizer timeout ends, and seeds it at creation (#1784).
 pub const LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND: Duration = Duration::from_millis(2500);
 
 /// Native lane that carries a summary which was not ready at open, once the
@@ -163,7 +168,10 @@ impl LiveContextSummaryPolicy {
     /// without it (see [`LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND`]). Zero means
     /// never wait: the summary is always delivered once the conversation has
     /// started (the user speaks, or a typed row the channel will voice is
-    /// queued).
+    /// queued). A stale-retained reopen is the exception at any bound, zero
+    /// included: it waits for its fresh summary's own outcome, up to the
+    /// summarizer timeout, and seeds it at creation instead of delivering it
+    /// late (#1784).
     #[must_use]
     pub const fn with_pre_open_bound(mut self, bound: Duration) -> Self {
         self.pre_open_bound = bound;
@@ -599,6 +607,36 @@ pub(crate) enum RetainedSeedAdmission {
     /// cursor, which a retained seed reading to the committed head could
     /// overrun.
     Refused,
+}
+
+/// How a retained summary can seed an open (#1784).
+pub(crate) enum RetainedOpening {
+    /// The retained summary and every row committed since it ride the
+    /// startup `session.input`.
+    Seed(LiveContextSummary, RealtimeSessionOpenConfig),
+    /// No retained summary can seed this open (none retained, the session
+    /// archived or gone, the prefix or identity changed, the source
+    /// unreadable): the open takes the fresh-summary path with the
+    /// pre-open bound, and a summary that misses it is delivered late, as on
+    /// a first open.
+    Unavailable,
+    /// A retained summary still matches the session, but the rows committed
+    /// since it exceed the startup bounds. A reopen then seeds a fresh
+    /// summary at creation and waits for it: a summary is never appended
+    /// into an open reopened channel (appended at the onset of the user's
+    /// first question it was answered inside the utterance; appended into
+    /// silence it was spoken unprompted).
+    TailExceedsStartupBounds(RetainedTailOverflow),
+}
+
+/// Which startup bound the rows after a retained summary exceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedTailOverflow {
+    /// More conversation turns than the recent-turns window
+    /// (`LIVE_STARTUP_RECENT_TURNS`).
+    RecentTurnsWindow { following_turns: usize },
+    /// More than the provider's startup input holds verbatim.
+    StartupInputFit { following_rows: usize },
 }
 
 /// Outcome of the bounded pre-open summary wait for one concurrent boundary.

@@ -496,6 +496,13 @@ pub enum RealtimeSessionOpenProjectionError {
     },
 }
 
+/// Test hook: the next ready summary's seeded projection reports
+/// `ConflictingProjection`, as when the committed head no longer projects
+/// exactly from the summary's snapshot (S106 R1 on #1784).
+#[cfg(all(test, feature = "openai-live"))]
+pub(crate) static FORCE_SEEDED_PROJECTION_CONFLICT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Typed failure for the shared strict execution-identity open flow.
 #[cfg(feature = "openai-live")]
 #[derive(Debug, thiserror::Error)]
@@ -3041,6 +3048,16 @@ mod orchestrator {
         /// meanwhile) opens without it; the generation keeps running and the
         /// preparation job adopts it, delivering the summary after the first
         /// user turn on the channel.
+        ///
+        /// A stale-retained reopen (its retained summary still matches, but
+        /// the rows committed since exceed the startup bounds) waits for the
+        /// generation's own outcome instead, whatever the bound, zero
+        /// included; the policy's summarizer timeout ends that wait. A ready
+        /// summary seeds at creation, directly or through the retained path
+        /// with the rows after its prefix; one that still cannot seed fails
+        /// the open with `StaleSnapshot`; a failed generation opens with
+        /// nothing to deliver. Such a reopen never receives a late summary
+        /// (#1784).
         #[cfg(feature = "openai-live")]
         #[allow(clippy::too_many_arguments)]
         pub(crate) async fn pre_open_concurrent_summary(
@@ -3060,29 +3077,41 @@ mod orchestrator {
             // summarizes the committed prefix it was generated from: seed it
             // with every row committed since, verbatim, and open at once. No
             // generation starts and nothing waits on one.
-            if retained_seed == super::live_summary::RetainedSeedAdmission::Allowed
-                && let Some((summary, open_config)) = self
+            // A reopen whose retained summary is followed by more rows than
+            // the startup input holds seeds a fresh summary at creation and
+            // waits for it (#1784): no summary is ever appended into an open
+            // reopened channel.
+            let mut reopen_overflow = None;
+            if retained_seed == super::live_summary::RetainedSeedAdmission::Allowed {
+                match self
                     .retained_opening_summary(
                         session_id,
                         turning_mode,
                         policy,
                         &mut *pending,
-                        &boundary,
+                        boundary_cursor,
                         &projection.open_config,
                     )
                     .await
-            {
-                tracing::info!(
-                    %session_id,
-                    following_history = summary.following_history().map_or(0, |rows| rows.len()),
-                    "seeding the retained live context summary and the rows committed since as startup input"
-                );
-                pending.set_context_summary(summary.clone())?;
-                policy.retention().retain(&summary);
-                projection.open_config = open_config;
-                projection.seed_status = LiveSeedProjectionStatus::Summarized;
-                projection.summary = Some(summary);
-                return Ok(LivePreOpenSummary::Seeded);
+                {
+                    super::live_summary::RetainedOpening::Seed(summary, open_config) => {
+                        tracing::info!(
+                            %session_id,
+                            following_history = summary.following_history().map_or(0, |rows| rows.len()),
+                            "seeding the retained live context summary and the rows committed since as startup input"
+                        );
+                        pending.set_context_summary(summary.clone())?;
+                        policy.retention().retain(&summary);
+                        projection.open_config = open_config;
+                        projection.seed_status = LiveSeedProjectionStatus::Summarized;
+                        projection.summary = Some(summary);
+                        return Ok(LivePreOpenSummary::Seeded);
+                    }
+                    super::live_summary::RetainedOpening::TailExceedsStartupBounds(overflow) => {
+                        reopen_overflow = Some(overflow);
+                    }
+                    super::live_summary::RetainedOpening::Unavailable => {}
+                }
             }
             // Started before the generation takes the boundary and read beside
             // the summary wait: if the summary is not ready at open, the newest
@@ -3095,7 +3124,17 @@ mod orchestrator {
             );
             let pregeneration = LiveContextSummaryPregeneration::spawn(boundary);
             let bound = policy.pre_open_bound();
-            let ready = if bound.is_zero() {
+            let ready = if let Some(overflow) = reopen_overflow {
+                // The generation's own typed outcome ends the wait, not the
+                // pre-open bound: a reopen opens only seeded (or, if the
+                // generation fails, without a summary to deliver at all).
+                tracing::info!(
+                    %session_id,
+                    ?overflow,
+                    "reopen: the rows since the retained live context summary exceed the startup bounds; seeding a fresh summary at creation"
+                );
+                Some(pregeneration.wait_ready().await)
+            } else if bound.is_zero() {
                 None
             } else {
                 tokio::time::timeout(bound, pregeneration.wait_ready())
@@ -3125,6 +3164,54 @@ mod orchestrator {
                         projection.seed_status = LiveSeedProjectionStatus::Summarized;
                         projection.summary = Some(summary);
                         return Ok(LivePreOpenSummary::Seeded);
+                    }
+                    unseedable if reopen_overflow.is_some() => {
+                        // The reopen's fresh summary cannot seed the
+                        // re-projected head as is: rows were committed while
+                        // it was generated, or the head no longer projects
+                        // exactly from its snapshot (ConflictingProjection).
+                        // It is retained and seeds through the retained path,
+                        // which proves the committed prefix by digest and
+                        // carries the rows after it verbatim. A reopen that
+                        // still cannot seed fails typed (retryable) instead
+                        // of delivering a summary into the open channel.
+                        tracing::info!(
+                            %session_id,
+                            reason = match &unseedable {
+                                Ok(_) => "rows committed during the generation".to_owned(),
+                                Err(error) => error.to_string(),
+                            },
+                            "reopen: the fresh summary seeds through the retained path"
+                        );
+                        self.retain_live_context_summary(policy, &summary);
+                        if let super::live_summary::RetainedOpening::Seed(summary, open_config) =
+                            self.retained_opening_summary(
+                                session_id,
+                                turning_mode,
+                                policy,
+                                &mut *pending,
+                                boundary_cursor,
+                                &projection.open_config,
+                            )
+                            .await
+                        {
+                            tracing::info!(
+                                %session_id,
+                                "reopen: the fresh summary seeds with the rows after its prefix"
+                            );
+                            pending.set_context_summary(summary.clone())?;
+                            projection.open_config = open_config;
+                            projection.seed_status = LiveSeedProjectionStatus::Summarized;
+                            projection.summary = Some(summary);
+                            return Ok(LivePreOpenSummary::Seeded);
+                        }
+                        tracing::warn!(
+                            %session_id,
+                            "reopen: the fresh summary went stale again during the open; refusing rather than appending it"
+                        );
+                        return Err(super::ExperimentalLiveChannelOpenError::Summary(
+                            super::live_summary::LiveContextSummaryError::StaleSnapshot,
+                        ));
                     }
                     Ok(None) => tracing::info!(
                         %session_id,
@@ -3191,6 +3278,14 @@ mod orchestrator {
             boundary_cursor: u64,
             body_free: &RealtimeSessionOpenConfig,
         ) -> Result<Option<RealtimeSessionOpenConfig>, RealtimeSessionOpenProjectionError> {
+            #[cfg(test)]
+            if super::FORCE_SEEDED_PROJECTION_CONFLICT
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(
+                    super::live_summary::LiveContextSummaryError::ConflictingProjection.into(),
+                );
+            }
             let current = self
                 .service
                 .export_realtime_refresh_session_snapshot(session_id)
@@ -3223,13 +3318,17 @@ mod orchestrator {
         }
 
         /// The retained summary of `session_id` as an opening summary over
-        /// the committed head, with the open config it seeds, or `None` when
-        /// the open must take the fresh-summary path: nothing retained, the
-        /// session archived or gone (the entry is forgotten), a committed head
-        /// that is not the retained prefix plus the rows read after it, or a
-        /// changed rewrite generation or identity (the entry is forgotten), or
-        /// rows since the summary that the provider cannot seed verbatim in
-        /// full.
+        /// the committed head, with the open config it seeds
+        /// ([`RetainedOpening::Seed`](super::live_summary::RetainedOpening)).
+        /// `Unavailable` when the open must take the fresh-summary path as a
+        /// first open does: nothing retained, the session archived or gone
+        /// (the entry is forgotten), a committed head that is not the
+        /// retained prefix plus the rows read after it, or a changed rewrite
+        /// generation or identity (the entry is forgotten).
+        /// `TailExceedsStartupBounds` when the retained summary still matches
+        /// but the rows since it exceed the recent-turns window or the
+        /// startup input: the reopen seeds a fresh summary at creation
+        /// (#1784).
         ///
         /// O(tail) and never behind the member's actor or a turn guard: only
         /// the committed head and the rows after the retained prefix are read,
@@ -3244,16 +3343,14 @@ mod orchestrator {
             turning_mode: RealtimeTurningMode,
             policy: &super::live_summary::LiveContextSummaryPolicy,
             pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
-            boundary: &super::live_summary::LiveContextSummaryBoundary,
+            admitted_cursor: u64,
             body_free: &RealtimeSessionOpenConfig,
-        ) -> Option<(
-            super::live_summary::LiveContextSummary,
-            RealtimeSessionOpenConfig,
-        )> {
+        ) -> super::live_summary::RetainedOpening {
+            use super::live_summary::{RetainedOpening, RetainedTailOverflow};
             let retention = policy.retention();
             let Some(retained) = retention.get(session_id) else {
                 tracing::info!(%session_id, "no retained live context summary for the session; generating a fresh summary");
-                return None;
+                return RetainedOpening::Unavailable;
             };
             match self.service.observe_live_durable_source(session_id).await {
                 Ok(meerkat_session::LiveDurableSourceObservation::Committed { .. }) => {}
@@ -3262,15 +3359,15 @@ mod orchestrator {
                     | meerkat_session::LiveDurableSourceObservation::Absent,
                 ) => {
                     retention.forget(session_id);
-                    return None;
+                    return RetainedOpening::Unavailable;
                 }
                 Ok(observation) => {
                     tracing::info!(%session_id, ?observation, "retained live context summary: durable source not committed; generating a fresh summary");
-                    return None;
+                    return RetainedOpening::Unavailable;
                 }
                 Err(error) => {
                     tracing::warn!(%session_id, %error, "retained live context summary source unobservable; generating a fresh summary");
-                    return None;
+                    return RetainedOpening::Unavailable;
                 }
             }
             use super::live_summary::LiveSummarySource as _;
@@ -3287,10 +3384,9 @@ mod orchestrator {
                 Ok(tail) => tail,
                 Err(error) => {
                     tracing::warn!(%session_id, %error, "retained live context summary: committed tail unreadable; generating a fresh summary");
-                    return None;
+                    return RetainedOpening::Unavailable;
                 }
             };
-            let admitted_cursor = boundary.canonical_message_cursor();
             let tail_rows = tail.rows.len();
             let summary = match retained.opening_from_committed_tail(
                 session_id.clone(),
@@ -3303,7 +3399,7 @@ mod orchestrator {
                 Err(error) => {
                     tracing::info!(%session_id, %error, "retained live context summary no longer matches the session; generating a fresh summary");
                     retention.forget(session_id);
-                    return None;
+                    return RetainedOpening::Unavailable;
                 }
             };
             // A retained seed carries at most the recent-turns window of
@@ -3319,12 +3415,15 @@ mod orchestrator {
                 && super::live_summary::conversation_turns(&following)
                     > crate::experimental_gpt_live::LIVE_STARTUP_RECENT_TURNS
             {
+                let following_turns = super::live_summary::conversation_turns(&following);
                 tracing::info!(
                     %session_id,
-                    following_turns = super::live_summary::conversation_turns(&following),
+                    following_turns,
                     "turns since the retained live context summary exceed the recent-turns window; generating a fresh summary"
                 );
-                return None;
+                return RetainedOpening::TailExceedsStartupBounds(
+                    RetainedTailOverflow::RecentTurnsWindow { following_turns },
+                );
             }
             if let Some(following) = summary.following_history()
                 && !pending.accepts_preceding_history_summary(summary.text(), &following)
@@ -3334,7 +3433,11 @@ mod orchestrator {
                     following_history = following.len(),
                     "rows committed since the retained live context summary do not fit the startup input; generating a fresh summary"
                 );
-                return None;
+                return RetainedOpening::TailExceedsStartupBounds(
+                    RetainedTailOverflow::StartupInputFit {
+                        following_rows: following.len(),
+                    },
+                );
             }
             // The rows after the retained prefix only, at the committed head's
             // cursor; the prefix is never read. The tools are the body-free
@@ -3359,7 +3462,7 @@ mod orchestrator {
                 Ok(config) => summary.adopt_seeded_projection(session_id, body_free, config),
                 Err(error) => {
                     tracing::warn!(%session_id, %error, "retained live context summary projection failed; generating a fresh summary");
-                    return None;
+                    return RetainedOpening::Unavailable;
                 }
             };
             match adopted {
@@ -3371,12 +3474,12 @@ mod orchestrator {
                         tail_rows,
                         "retained live context summary seeds the committed head; later rows are caught up by the live-context owner"
                     );
-                    Some((summary, open_config))
+                    RetainedOpening::Seed(summary, open_config)
                 }
-                Ok(None) => None,
+                Ok(None) => RetainedOpening::Unavailable,
                 Err(error) => {
                     tracing::warn!(%session_id, %error, "retained live context summary projection failed; generating a fresh summary");
-                    None
+                    RetainedOpening::Unavailable
                 }
             }
         }

@@ -1604,7 +1604,7 @@
         "oneOf": [
           {
             "const": "none",
-            "description": "OpenAI `reasoning.effort: \"none\"` — reasoning disabled.",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
             "type": "string"
           },
           {
@@ -10253,7 +10253,7 @@
         "oneOf": [
           {
             "const": "none",
-            "description": "OpenAI `reasoning.effort: \"none\"` — reasoning disabled.",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
             "type": "string"
           },
           {

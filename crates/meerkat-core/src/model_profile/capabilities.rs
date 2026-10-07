@@ -500,7 +500,7 @@ impl ThinkingSupport {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
-    /// OpenAI `reasoning.effort: "none"` — reasoning disabled.
+    /// OpenAI `reasoning.effort: "none"` - reasoning disabled.
     None,
     /// OpenAI realtime `reasoning.effort: "minimal"`.
     Minimal,

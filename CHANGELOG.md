@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- `RuntimeTurnMetadata` gains `request_reasoning` and
+  `request_reasoning_disposition`, and `AgentEvent::RunStarted` gains
+  `request_reasoning` (#1823). Code that builds either with a full struct
+  literal must add the fields (`None`) or use `..Default::default()`; an
+  exhaustive `RunStarted { .. }` pattern without `..` must add `..`. The wire
+  shapes are additive (absent when unset).
 - `McpError` gains `CallContext(McpCallContextError)` for fixed host context
   refusals. Native MCP transports now enforce a 64 MiB JSON-RPC frame bound
   (behavior-only break). Typed MCP dispatch preserves `isError` as a failed

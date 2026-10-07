@@ -18752,6 +18752,7 @@
           "execution_failed",
           "timeout",
           "access_denied",
+          "outcome_uncertain",
           "authorization_refused",
           "operation_observation_unavailable",
           "operation_authorization_unavailable",

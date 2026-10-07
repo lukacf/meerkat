@@ -1896,6 +1896,247 @@ async fn reopen_generates_a_fresh_summary_when_the_rows_since_do_not_fit() {
     env.activate_and_close(&reopened).await;
 }
 
+/// #1784: a reopen whose retained summary is followed by more rows than the
+/// startup input holds seeds its fresh summary at creation even when the
+/// generation outlasts the pre-open bound. It waits for the generation's own
+/// outcome instead of opening without it: no preparation lease is staged, so
+/// the generated bootstrap guard refuses any summary appended into the
+/// reopened channel (S106 haul_e7: appended at the onset of the user's
+/// question it was answered inside the utterance; appended into silence it
+/// was spoken unprompted).
+#[tokio::test]
+async fn reopen_overflow_waits_for_its_fresh_summary_and_seeds_it_at_creation() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    // The 50 ms pre-open bound: a first open with a held generation is late.
+    let env = build_environment().await;
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    tokio::time::timeout(Duration::from_secs(10), env.producer.entered.notified())
+        .await
+        .expect("the first open's generation starts");
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&first))
+        .await
+        .expect("media activation");
+    env.producer.release.notify_one();
+    env.user_speaks(&sideband, &first).await;
+    env.wait_for_preparation(&first, |status| {
+        *status == LiveContextPreparationStatus::ProviderAcknowledged
+    })
+    .await;
+    assert!(
+        env.member_host
+            .retained_live_context_summary(&env.session_id)
+            .is_some(),
+        "the first call's late summary is retained"
+    );
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            first.channel_id(),
+            first.pending_receipt(),
+        )
+        .await
+        .expect("close the first call");
+    // About 12,000 estimated tokens: over the 8,192-token startup budget.
+    env.commit_typed(&format!("Typed at length: {}", "notes ".repeat(6_000)))
+        .await;
+    let rows = env
+        .service
+        .export_realtime_refresh_session_snapshot(&env.session_id)
+        .await
+        .expect("snapshot")
+        .messages()
+        .len();
+
+    let reopen = env.open();
+    tokio::pin!(reopen);
+    let opened_before_the_summary = tokio::select! {
+        _ = &mut reopen => true,
+        () = async {
+            env.producer.entered.notified().await;
+            // Well past the 50 ms pre-open bound.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        } => false,
+    };
+    assert!(
+        !opened_before_the_summary,
+        "the overflowing reopen waits for its fresh summary"
+    );
+    env.producer.release.notify_one();
+    let (reopened, _, _) = tokio::time::timeout(Duration::from_secs(20), reopen)
+        .await
+        .expect("the reopen completes once its summary is ready");
+    let observed = env.producer.observed();
+    assert_eq!(observed.len(), 2, "the reopen generated a fresh summary");
+    assert_eq!(observed[1].cursor, rows as u64);
+    let (summary, _) = env.staged_summary_seed().await;
+    assert_eq!(
+        summary.text(),
+        format!("Factual context summary covering {rows} canonical rows.")
+    );
+    assert_eq!(
+        env.preparation_status(&reopened).await,
+        LiveContextPreparationStatus::NotRequested,
+        "seeded at creation: no preparation lease, so no late summary"
+    );
+    assert_eq!(
+        env.member_host
+            .retained_live_context_summary(&env.session_id)
+            .expect("the fresh summary is retained")
+            .canonical_message_cursor(),
+        rows as u64
+    );
+    env.activate_and_close(&reopened).await;
+}
+
+/// #1784: a reopen-overflow's fresh summary that is ready but no longer
+/// projects exactly from its snapshot (`ConflictingProjection`, S106 R1 on
+/// 67687ce6d) seeds through the retained path. It is never delivered late:
+/// no preparation lease is staged and no summary reaches the channel after
+/// the user speaks.
+#[tokio::test]
+async fn reopen_overflow_with_a_conflicting_projection_seeds_through_the_retained_path() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment().await;
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    tokio::time::timeout(Duration::from_secs(10), env.producer.entered.notified())
+        .await
+        .expect("the first open's generation starts");
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&first))
+        .await
+        .expect("media activation");
+    env.producer.release.notify_one();
+    env.user_speaks(&sideband, &first).await;
+    env.wait_for_preparation(&first, |status| {
+        *status == LiveContextPreparationStatus::ProviderAcknowledged
+    })
+    .await;
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            first.channel_id(),
+            first.pending_receipt(),
+        )
+        .await
+        .expect("close the first call");
+    env.commit_typed(&format!("Typed at length: {}", "notes ".repeat(6_000)))
+        .await;
+
+    env.producer.release.notify_one();
+    crate::session_runtime::live_orchestration::FORCE_SEEDED_PROJECTION_CONFLICT
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (reopened, _, _) = tokio::time::timeout(Duration::from_secs(20), env.open())
+        .await
+        .expect("the reopen completes");
+    assert!(
+        !crate::session_runtime::live_orchestration::FORCE_SEEDED_PROJECTION_CONFLICT
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the fresh summary's seeded projection met the conflict"
+    );
+    assert_eq!(
+        env.preparation_status(&reopened).await,
+        LiveContextPreparationStatus::NotRequested,
+        "seeded through the retained path: no preparation lease"
+    );
+    let (summary, _) = env.staged_summary_seed().await;
+    assert!(summary.summarizes_preceding_history());
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&reopened))
+        .await
+        .expect("media activation");
+    env.user_speaks(&sideband, &reopened).await;
+    assert!(
+        !sideband
+            .context_commands
+            .lock()
+            .await
+            .iter()
+            .any(|command| matches!(
+                command,
+                LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                    if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
+            )),
+        "no summary is delivered into the reopened channel"
+    );
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            reopened.channel_id(),
+            reopened.pending_receipt(),
+        )
+        .await
+        .expect("close the reopened call");
+}
+
+/// #1784: the overflowing reopen's wait always ends. A summary generation
+/// that never returns is ended by the policy's own generation timeout as a
+/// typed failure; the reopen then opens without a summary and never delivers
+/// one into the channel, even after the user speaks.
+#[tokio::test]
+async fn reopen_overflow_with_a_failed_generation_opens_without_a_summary() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment().await;
+    env.store.set_gate(MaterializeGate::Pass);
+    let (first, _, _) = env.open().await;
+    tokio::time::timeout(Duration::from_secs(10), env.producer.entered.notified())
+        .await
+        .expect("the first open's generation starts");
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&first))
+        .await
+        .expect("media activation");
+    env.producer.release.notify_one();
+    env.user_speaks(&sideband, &first).await;
+    env.wait_for_preparation(&first, |status| {
+        *status == LiveContextPreparationStatus::ProviderAcknowledged
+    })
+    .await;
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            first.channel_id(),
+            first.pending_receipt(),
+        )
+        .await
+        .expect("close the first call");
+    env.commit_typed(&format!("Typed at length: {}", "notes ".repeat(6_000)))
+        .await;
+
+    // Never released: the 5 s policy generation timeout fails it.
+    let (reopened, _, _) = tokio::time::timeout(Duration::from_secs(30), env.open())
+        .await
+        .expect("a reopen whose summary generation fails still opens");
+    assert_eq!(env.producer.observed().len(), 2);
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&reopened))
+        .await
+        .expect("media activation");
+    env.user_speaks(&sideband, &reopened).await;
+    env.wait_for_preparation(&reopened, |status| {
+        matches!(status, LiveContextPreparationStatus::Failed(_))
+    })
+    .await;
+    assert!(
+        !sideband
+            .context_commands
+            .lock()
+            .await
+            .iter()
+            .any(|command| matches!(
+                command,
+                LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                    if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
+            )),
+        "no summary is ever delivered into the reopened channel"
+    );
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            reopened.channel_id(),
+            reopened.pending_receipt(),
+        )
+        .await
+        .expect("close the reopened call");
+}
+
 /// Retained summaries leave with their sessions: a sweep forgets a session
 /// the service never knew (gone) and an archived one, and a host can forget
 /// one directly.

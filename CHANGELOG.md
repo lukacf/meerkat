@@ -37,6 +37,14 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): MCP Streamable HTTP and
+  legacy SSE connections and HTTP skills sources follow only same-origin
+  redirects (same scheme, host and port; at most 3 hops). A redirect to
+  another origin, a scheme change such as https to http, or a longer chain
+  is now a typed refusal instead of being followed. A server or source
+  that relied on a cross-origin redirect needs its final URL configured.
+  The `rkat doctor` self-hosted probe follows no redirect.
+
 - The credential routes listed under Fixed (token, refresh and
   device-code exchanges; the Claude, ChatGPT and Code Assist OAuth runtimes;
   the Google and Azure credential exchanges; Code Assist onboarding; the
@@ -283,6 +291,19 @@ them.
     `authConnectorStatus`.
 
 ### Fixed
+
+- Credential-bearing MCP HTTP, skills and doctor requests could follow a
+  redirect to another host with their credentials. The pinned reqwest
+  strips `Authorization`, `Cookie` and `Proxy-Authorization` on a
+  cross-host redirect, but never configured custom headers (an MCP
+  `headers` entry or a skills auth header), and it compares only host and
+  port, so `https://h:8443` to `http://h:8443` kept `Authorization` over
+  cleartext. MCP Streamable HTTP and SSE connections and HTTP skills
+  sources now follow only same-origin redirects through
+  `auth_oauth::same_origin_credential_http_client` (a trailing-slash `307`
+  keeps working), and refuse anything else by its status before reading
+  any header or body. The doctor's self-hosted probe follows none. A
+  client that fails to build is a typed error, never a default client.
 
 - These credential routes no longer follow redirects: the token and
   refresh exchange, device-code requests, the Claude, ChatGPT and Code Assist OAuth

@@ -32,6 +32,37 @@ impl std::fmt::Debug for HttpSkillAuth {
     }
 }
 
+/// Same-origin redirects a skills fetch follows at most.
+const MAX_SAME_ORIGIN_REDIRECTS: usize = 3;
+
+/// Whether two URLs share an origin: scheme, host and port all equal.
+fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// Every fetch carries the source's credential (Bearer or a custom header),
+/// so the client follows only same-origin redirects: the credential never
+/// leaves the configured origin and never downgrades to plain http.
+fn same_origin_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let follow = attempt.previous().len() <= MAX_SAME_ORIGIN_REDIRECTS
+                && attempt
+                    .previous()
+                    .last()
+                    .is_some_and(|previous| same_origin(previous, attempt.url()));
+            if follow {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .map_err(|_| "the redirect-limited HTTP client could not be built".to_owned())
+}
+
 pub struct HttpSkillSource {
     source_uuid: SourceUuid,
     url: String,
@@ -39,7 +70,9 @@ pub struct HttpSkillSource {
     refresh_interval: Duration,
     request_timeout: Duration,
     thresholds: SourceHealthThresholds,
-    client: reqwest::Client,
+    /// Follows only same-origin redirects; a build failure is kept and every
+    /// fetch fails with it.
+    client: Result<reqwest::Client, String>,
     cache: Arc<RwLock<RemoteCache>>,
     failure_streak: Arc<RwLock<u32>>,
 }
@@ -77,7 +110,7 @@ impl HttpSkillSource {
             refresh_interval,
             request_timeout,
             thresholds,
-            client: reqwest::Client::new(),
+            client: same_origin_http_client(),
             cache: Arc::new(RwLock::new(RemoteCache::default())),
             failure_streak: Arc::new(RwLock::new(0)),
         }
@@ -166,7 +199,10 @@ impl HttpSkillSource {
     }
 
     async fn fetch_url(&self, url: &str) -> Result<String, SkillError> {
-        let mut request = self.client.get(url).timeout(self.request_timeout);
+        let client = self.client.as_ref().map_err(|error| {
+            SkillError::Load(format!("HTTP skill source client unavailable: {error}").into())
+        })?;
+        let mut request = client.get(url).timeout(self.request_timeout);
         if let Some(auth) = &self.auth {
             request = match auth {
                 HttpSkillAuth::Bearer(token) => request.bearer_auth(token),
@@ -183,6 +219,18 @@ impl HttpSkillSource {
                 .into(),
             )
         })?;
+        // A redirect the client did not follow (another origin, or past the
+        // hop limit) is refused by its status; its `Location` is not read.
+        if response.status().is_redirection() {
+            return Err(SkillError::Load(
+                format!(
+                    "HTTP skill source {} answered with a redirect (status {}) to another origin or past {MAX_SAME_ORIGIN_REDIRECTS} same-origin hops; refused",
+                    redacted_url(url),
+                    response.status().as_u16()
+                )
+                .into(),
+            ));
+        }
         if !response.status().is_success() {
             return Err(SkillError::Load(
                 format!(
@@ -338,5 +386,95 @@ mod tests {
             redacted_url("https://example.com/catalog?email=user@example.com&token=secret"),
             "https://example.com/catalog?email=user@example.com&token=<redacted>"
         );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn same_origin_compares_scheme_host_and_port() {
+        let url = |raw: &str| reqwest::Url::parse(raw).unwrap();
+        assert!(same_origin(
+            &url("https://h.example/a"),
+            &url("https://h.example:443/b")
+        ));
+        assert!(!same_origin(
+            &url("https://h.example:8443/a"),
+            &url("http://h.example:8443/a")
+        ));
+        assert!(!same_origin(
+            &url("https://h.example/a"),
+            &url("https://cdn.example/a")
+        ));
+    }
+
+    fn source(url: String, auth: HttpSkillAuth) -> HttpSkillSource {
+        HttpSkillSource::new_with_thresholds(
+            SourceUuid::builtin(),
+            url,
+            Some(auth),
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            SourceHealthThresholds::default(),
+        )
+    }
+
+    /// A CDN redirect to another origin is refused: the source's custom
+    /// header never reaches the other host, and nothing is rendered from the
+    /// `Location`.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn cross_origin_redirect_is_refused_without_following_it() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let target = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&target)
+            .await;
+        let origin = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "location",
+                format!("{}/signed?leak=redirect-location-canary", target.uri()).as_str(),
+            ))
+            .mount(&origin)
+            .await;
+        let source = source(
+            origin.uri(),
+            HttpSkillAuth::Header {
+                name: "x-skills-key".into(),
+                value: "skills-header-canary".into(),
+            },
+        );
+        let error = source
+            .fetch_url(&format!("{}/skills", origin.uri()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("redirect"), "{error}");
+        assert!(!error.contains("redirect-location-canary"), "{error}");
+        assert!(target.received_requests().await.unwrap().is_empty());
+    }
+
+    /// A same-origin redirect (for example a trailing slash) is followed.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn same_origin_redirect_is_followed() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let origin = MockServer::start().await;
+        Mock::given(path("/skills"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", "/skills/"))
+            .mount(&origin)
+            .await;
+        Mock::given(path("/skills/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("listed"))
+            .mount(&origin)
+            .await;
+        let source = source(origin.uri(), HttpSkillAuth::Bearer("skills-bearer".into()));
+        let body = source
+            .fetch_url(&format!("{}/skills", origin.uri()))
+            .await
+            .unwrap();
+        assert_eq!(body, "listed");
     }
 }

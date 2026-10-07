@@ -28,7 +28,9 @@ use rmcp::transport::streamable_http_client::{
 /// A default client is created via `new()`, or pass an existing client via `with_client()`.
 #[derive(Clone)]
 pub(crate) struct ReqwestStreamableHttpClient {
-    client: reqwest::Client,
+    /// Follows only same-origin redirects. A build failure is kept, and every
+    /// request fails with it; nothing falls back to a default client.
+    client: Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
     headers: HeaderMap,
     auth_challenge: AuthChallengeRecorder,
     protected_metadata: ProtectedMetadataState,
@@ -101,9 +103,28 @@ impl AuthChallengeState {
     }
 }
 
-/// Lazy-initialized shared reqwest client for Streamable HTTP transports
-static DEFAULT_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
-    std::sync::LazyLock::new(reqwest::Client::new);
+/// Lazy-initialized shared client for Streamable HTTP transports. Every
+/// request carries the configured headers (which can hold credentials) and
+/// any bearer, so it follows only same-origin redirects.
+static DEFAULT_HTTP_CLIENT: std::sync::LazyLock<
+    Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
+> = std::sync::LazyLock::new(meerkat_auth_core::auth_oauth::same_origin_credential_http_client);
+
+/// A redirect the client did not follow (to another origin, or past the hop
+/// limit), refused by its status before any header or body is read.
+fn refuse_redirect(status: reqwest::StatusCode) -> Result<(), StreamableHttpError<reqwest::Error>> {
+    if status.is_redirection() {
+        return Err(StreamableHttpError::UnexpectedServerResponse(
+            format!(
+                "MCP server answered with a redirect (status {}) to another origin or past {} same-origin hops; refused",
+                status.as_u16(),
+                meerkat_auth_core::auth_oauth::MAX_SAME_ORIGIN_REDIRECTS
+            )
+            .into(),
+        ));
+    }
+    Ok(())
+}
 
 impl ReqwestStreamableHttpClient {
     pub(crate) fn new_with_auth_challenge(
@@ -122,7 +143,7 @@ impl ReqwestStreamableHttpClient {
     #[allow(dead_code)]
     pub(crate) fn with_client(client: reqwest::Client, headers: HeaderMap) -> Self {
         Self {
-            client,
+            client: Ok(client),
             headers,
             auth_challenge: AuthChallengeRecorder::default(),
             protected_metadata: Default::default(),
@@ -132,6 +153,12 @@ impl ReqwestStreamableHttpClient {
     pub(crate) fn with_protected_metadata(mut self, state: ProtectedMetadataState) -> Self {
         self.protected_metadata = state;
         self
+    }
+
+    fn client(&self) -> Result<&reqwest::Client, StreamableHttpError<reqwest::Error>> {
+        self.client.as_ref().map_err(|_| {
+            StreamableHttpError::UnexpectedServerResponse("MCP HTTP client unavailable".into())
+        })
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -210,7 +237,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
     ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
     {
         let mut request_builder = self
-            .client
+            .client()?
             .get(uri.as_ref())
             .header(ACCEPT, [EVENT_STREAM_MIME_TYPE, JSON_MIME_TYPE].join(", "))
             .header(HEADER_SESSION_ID, session_id.as_ref());
@@ -226,6 +253,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .send()
             .await
             .map_err(StreamableHttpError::Client)?;
+        refuse_redirect(response.status())?;
         self.auth_challenge.record(&response);
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
@@ -258,7 +286,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
-        let mut request_builder = self.client.delete(uri.as_ref());
+        let mut request_builder = self.client()?.delete(uri.as_ref());
         request_builder = self.apply_headers(request_builder);
         request_builder = Self::apply_custom_headers(request_builder, custom_headers)?;
         if let Some(auth_header) = auth_token {
@@ -269,6 +297,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .send()
             .await
             .map_err(StreamableHttpError::Client)?;
+        refuse_redirect(response.status())?;
 
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Ok(());
@@ -295,7 +324,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
                 )
             })?
         } else {
-            &self.client
+            self.client()?
         };
         let mut request = client
             .post(uri.as_ref())
@@ -324,6 +353,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .execute(request)
             .await
             .map_err(StreamableHttpError::Client)?;
+        refuse_redirect(response.status())?;
         self.auth_challenge.record(&response);
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && let Some(header) = response.headers().get(WWW_AUTHENTICATE)

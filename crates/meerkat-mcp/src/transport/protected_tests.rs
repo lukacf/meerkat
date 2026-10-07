@@ -489,7 +489,7 @@ async fn protected_connection_session_expiry_never_enters_rmcp_replay_branch() {
 }
 
 #[tokio::test]
-async fn protected_posts_do_not_follow_redirects_for_http_or_legacy_sse() {
+async fn posts_do_not_follow_cross_origin_redirects_for_http_or_legacy_sse() {
     let forwarded = Arc::new(AtomicUsize::new(0));
     let count = forwarded.clone();
     let destination = HttpFixture::start(axum::Router::new().route(
@@ -517,38 +517,32 @@ async fn protected_posts_do_not_follow_redirects_for_http_or_legacy_sse() {
         }),
     ))
     .await;
-    let http = ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
-    let sse = ReqwestSseClient::new(Default::default());
-    assert!(
-        http.post_message(
-            source.url.clone().into(),
-            message(true),
-            None,
-            None,
-            Default::default()
-        )
-        .await
-        .is_err()
+    let http = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
     );
-    assert!(
-        sse.post_message(source.url.parse().unwrap(), message(true), None)
+    let sse = ReqwestSseClient::new(Default::default());
+    // Protected and ordinary posts alike: a redirect to another origin is
+    // refused, and nothing reaches the destination.
+    for protected in [true, false] {
+        assert!(
+            http.post_message(
+                source.url.clone().into(),
+                message(protected),
+                None,
+                None,
+                Default::default()
+            )
             .await
             .is_err()
-    );
+        );
+        assert!(
+            sse.post_message(source.url.parse().unwrap(), message(protected), None)
+                .await
+                .is_err()
+        );
+    }
     assert_eq!(forwarded.load(Ordering::SeqCst), 0);
-    http.post_message(
-        source.url.clone().into(),
-        message(false),
-        None,
-        None,
-        Default::default(),
-    )
-    .await
-    .unwrap();
-    sse.post_message(source.url.parse().unwrap(), message(false), None)
-        .await
-        .unwrap();
-    assert_eq!(forwarded.load(Ordering::SeqCst), 2);
 }
 
 #[derive(Clone)]
@@ -742,4 +736,133 @@ async fn real_rmcp_stdio_trace_keeps_live_metadata_and_malformed_input_private()
     assert!(logs.contains("MCP input refused: invalid JSON-RPC frame"));
     assert!(!logs.contains(SECRET));
     println!("{CHILD_COMPLETE}");
+}
+
+/// A target that counts the requests reaching it, and an origin that
+/// answers every request with a redirect to it.
+async fn cross_origin_redirect_fixture() -> (HttpFixture, HttpFixture, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let target = HttpFixture::start(axum::Router::new().fallback(move || {
+        let count = count.clone();
+        async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            axum::http::StatusCode::ACCEPTED
+        }
+    }))
+    .await;
+    let location = format!("{}?leak=redirect-location-canary", target.url);
+    let origin = HttpFixture::start(axum::Router::new().fallback(move || {
+        let location = location.clone();
+        async move {
+            (
+                axum::http::StatusCode::TEMPORARY_REDIRECT,
+                [("location", location)],
+                "redirect-body-canary",
+            )
+        }
+    }))
+    .await;
+    (origin, target, hits)
+}
+
+/// The production Streamable HTTP client refuses a redirect to another
+/// origin (the configured headers would follow it) without reaching the
+/// target or rendering the `Location`.
+#[tokio::test]
+async fn streamable_http_refuses_a_cross_origin_redirect() {
+    let (origin, _target, hits) = cross_origin_redirect_fixture().await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-api-key", "configured-header-canary".parse().unwrap());
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(headers, Default::default());
+    let error = client
+        .post_message(
+            origin.url.clone().into(),
+            message(false),
+            None,
+            None,
+            Default::default(),
+        )
+        .await
+        .expect_err("a cross-origin redirect is refused");
+    let rendered = format!("{error} {error:?}");
+    assert!(rendered.contains("redirect"), "{rendered}");
+    assert!(!rendered.contains("redirect-location-canary"), "{rendered}");
+    assert!(!rendered.contains("redirect-body-canary"), "{rendered}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+/// The production legacy SSE client refuses the same way.
+#[tokio::test]
+async fn sse_refuses_a_cross_origin_redirect() {
+    let (origin, _target, hits) = cross_origin_redirect_fixture().await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-api-key", "configured-header-canary".parse().unwrap());
+    let client = ReqwestSseClient::new(headers);
+    let error = client
+        .post_message(origin.url.parse().unwrap(), message(false), None)
+        .await
+        .expect_err("a cross-origin redirect is refused");
+    let rendered = format!("{error} {error:?}");
+    assert!(rendered.contains("redirect"), "{rendered}");
+    assert!(!rendered.contains("redirect-location-canary"), "{rendered}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+/// A same-origin `307` (the Starlette `/mcp` to `/mcp/` case) is followed
+/// with its method and body, by the production client.
+#[tokio::test]
+async fn streamable_http_follows_a_same_origin_trailing_slash_redirect() {
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = bodies.clone();
+    let server = HttpFixture::start(
+        axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(|| async {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [("location", "/mcp/")],
+                    )
+                }),
+            )
+            .route(
+                "/mcp/",
+                axum::routing::post(move |body: String| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(body);
+                        axum::http::StatusCode::ACCEPTED
+                    }
+                }),
+            ),
+    )
+    .await;
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
+    );
+    let accepted = client
+        .post_message(
+            server.url.clone().into(),
+            message(false),
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            accepted,
+            Ok(rmcp::transport::streamable_http_client::StreamableHttpPostResponse::Accepted)
+        ),
+        "{accepted:?}"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "the redirect target received the request once"
+    );
+    assert!(bodies[0].contains("tools/call"), "{}", bodies[0]);
 }

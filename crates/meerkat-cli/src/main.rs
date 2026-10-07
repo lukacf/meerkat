@@ -8161,10 +8161,7 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
     if config.self_hosted.servers.is_empty() {
         println!("ok\tself_hosted\tno self-hosted servers configured");
     } else {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| anyhow::anyhow!("failed to build doctor HTTP client: {e}"))?;
+        let http = doctor_probe_http_client()?;
 
         for (server_id, server) in &config.self_hosted.servers {
             let resolved = match resolve_doctor_self_hosted_probe_connection(
@@ -8294,6 +8291,17 @@ fn env_var_present(env_key: &str) -> bool {
         .ok()
         .filter(|value| !value.is_empty())
         .is_some()
+}
+
+/// The doctor's self-hosted probe sends the server's configured credential,
+/// so it follows no redirect at all: a `3xx` is reported by its status (the
+/// non-success branch), and nothing reaches a redirect target.
+fn doctor_probe_http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build doctor HTTP client: {e}"))
 }
 
 fn doctor_openai_env_default_message<F>(mut env_present: F) -> &'static str
@@ -21747,6 +21755,44 @@ mod tests {
             auth_header
         });
         (base_url, handle)
+    }
+
+    #[tokio::test]
+    async fn doctor_probe_client_never_follows_a_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = target.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = origin.accept().await {
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nlocation: http://{target_addr}/models\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let response = doctor_probe_http_client()
+            .unwrap()
+            .get(format!("http://{origin_addr}/models"))
+            .bearer_auth("doctor-probe-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 302);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     fn doctor_openai_message_for_env(keys: &[&str]) -> &'static str {

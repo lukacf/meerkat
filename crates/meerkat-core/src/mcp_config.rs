@@ -73,6 +73,33 @@ pub struct McpHttpConfig {
     /// A selection is an expectation; native OAuth verifies the credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_account: Option<String>,
+    /// Account binding when no `oauth_account` is named: `discover` binds the
+    /// provider-verified account at the first login, `unverified` is an
+    /// explicit opt-in to resource-bound access with no account evidence.
+    /// Only host configuration sets it; it conflicts with `oauth_account`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account_selection: Option<McpOAuthAccountSelection>,
+}
+
+/// Account binding of an OAuth-protected MCP server that names no account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthAccountSelection {
+    /// Bind the account the provider verifies at the first login; later
+    /// logins must prove that same account.
+    Discover,
+    /// Resource-bound access without account evidence. The credential never
+    /// establishes, verifies or represents an account.
+    Unverified,
+}
+
+impl McpOAuthAccountSelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Discover => "discover",
+            Self::Unverified => "unverified",
+        }
+    }
 }
 
 /// Keeps the command and env names but redacts argument and env values,
@@ -103,6 +130,7 @@ impl std::fmt::Debug for McpHttpConfig {
                 "oauth_account",
                 &self.oauth_account.as_ref().map(|_| "<redacted>"),
             )
+            .field("oauth_account_selection", &self.oauth_account_selection)
             .finish()
     }
 }
@@ -178,6 +206,7 @@ impl McpServerConfig {
                 headers,
                 transport: None,
                 oauth_account: None,
+                oauth_account_selection: None,
             }),
             connect_timeout_secs: None,
             tool_names: BTreeMap::new(),
@@ -196,6 +225,7 @@ impl McpServerConfig {
                 headers,
                 transport: Some(McpHttpTransport::Sse),
                 oauth_account: None,
+                oauth_account_selection: None,
             }),
             connect_timeout_secs: None,
             tool_names: BTreeMap::new(),
@@ -907,6 +937,9 @@ fn server_table(server: &McpServerConfig) -> Table {
             if let Some(account) = &http.oauth_account {
                 table["oauth_account"] = toml_edit::value(account);
             }
+            if let Some(selection) = http.oauth_account_selection {
+                table["oauth_account_selection"] = toml_edit::value(selection.as_str());
+            }
         }
     }
     if !server.tool_names.is_empty() {
@@ -1051,6 +1084,7 @@ where
                 headers,
                 transport: http.transport,
                 oauth_account: http.oauth_account,
+                oauth_account_selection: http.oauth_account_selection,
             })
         }
     };
@@ -1823,6 +1857,42 @@ future_server_key = "leave-this-too"
                 .unwrap()
                 .contains("oauth_account = \"provider-subject-42\"")
         );
+    }
+
+    #[tokio::test]
+    async fn http_oauth_account_selection_survives_persisted_config_reload() {
+        for selection in [
+            McpOAuthAccountSelection::Discover,
+            McpOAuthAccountSelection::Unverified,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let authority =
+                McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+            let mut selected = McpServerConfig::streamable_http(
+                "display-name",
+                "https://mcp.example/mcp",
+                HashMap::new(),
+            );
+            if let McpTransportConfig::Http(http) = &mut selected.transport {
+                http.oauth_account_selection = Some(selection);
+            }
+            McpConfig::persist_add_with_rollback(&authority, selected.clone())
+                .await
+                .unwrap();
+
+            let path = authority.resolved_path().unwrap();
+            let reloaded = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+            assert_eq!(reloaded.servers, vec![selected]);
+            assert!(
+                tokio::fs::read_to_string(path)
+                    .await
+                    .unwrap()
+                    .contains(&format!(
+                        "oauth_account_selection = \"{}\"",
+                        selection.as_str()
+                    ))
+            );
+        }
     }
 
     #[tokio::test]

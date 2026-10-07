@@ -268,6 +268,7 @@ export interface McpStdioConfig {
 export interface McpHttpConfig {
   headers?: Record<string, string>;
   oauth_account?: string | null;
+  oauth_account_selection?: unknown | null;
   transport?: McpHttpTransport | null;
   url: string;
 }
@@ -509,8 +510,15 @@ export type ConfigSetParams = Record<string, unknown>;
 
 export interface WireMcpAuthTarget {
   oauth_account?: string | null;
+  oauth_account_selection?: "discover" | "unverified" | null;
   server_name: string;
   server_url: string;
+}
+
+export interface WireMcpAuthAttempt {
+  expires_at: string;
+  phase: "pending";
+  ref: string;
 }
 
 export interface WireConnectorSlot {
@@ -662,6 +670,18 @@ export interface WireDeviceCompleteResultReady {
 
 export type WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady;
 
+export interface AuthLogoutParamsBindingIdParams {
+  binding_id: string;
+  profile_id?: string | null;
+  realm_id: string;
+}
+
+export interface AuthLogoutParamsMcpLoginTarget {
+  mcp: WireMcpAuthTarget;
+}
+
+export type AuthLogoutParams = AuthLogoutParamsBindingIdParams | AuthLogoutParamsMcpLoginTarget;
+
 export interface AuthStatusParamsBindingIdParams {
   binding_id: string;
   profile_id?: string | null;
@@ -683,12 +703,17 @@ export interface LoginCancelParamsMcpLoginCancelParams {
   state: string;
 }
 
+export interface LoginCancelParamsMcpLoginCancelAttemptParams {
+  attempt_ref: string;
+  mcp: WireMcpAuthTarget;
+}
+
 export interface LoginCancelParamsConnectorLoginCancelParams {
   connector: WireConnectorSlot;
   state: string;
 }
 
-export type LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCancelParamsConnectorLoginCancelParams;
+export type LoginCancelParams = LoginCancelParamsMcpLoginCancelParams | LoginCancelParamsMcpLoginCancelAttemptParams | LoginCancelParamsConnectorLoginCancelParams;
 
 export interface LoginCompleteParamsProviderLoginTarget {
   code: string;
@@ -736,6 +761,21 @@ export interface LoginStartParamsConnectorLoginTarget {
 
 export type LoginStartParams = LoginStartParamsProviderLoginTarget | LoginStartParamsMcpLoginTarget | LoginStartParamsConnectorLoginTarget;
 
+export interface WireAuthLogoutResultAuthProfileCleared {
+  auth_binding: WireAuthBindingRef;
+  binding_id: string;
+  cleared: boolean;
+  profile_id: string;
+  realm_id: string;
+}
+
+export interface WireAuthLogoutResultMcpLoggedOut {
+  cleared: boolean;
+  mcp: WireMcpAuthTarget;
+}
+
+export type WireAuthLogoutResult = WireAuthLogoutResultAuthProfileCleared | WireAuthLogoutResultMcpLoggedOut;
+
 export interface WireAuthStatusResultAuthStatusDetail {
   account_id?: string | null;
   auth_binding: WireAuthBindingRef;
@@ -752,6 +792,8 @@ export interface WireAuthStatusResultAuthStatusDetail {
 
 export interface WireAuthStatusResultMcpAuthStatus {
   account_id?: string | null;
+  account_verification: "verified" | "unverified" | "legacy";
+  attempt?: WireMcpAuthAttempt | null;
   expires_at?: string | null;
   mcp: WireMcpAuthTarget;
   phase: "authorized" | "reauth_required" | "authorization_required";
@@ -6290,6 +6332,8 @@ export interface WireAuthProfileCleared {
 
 export interface WireMcpAuthStatus {
   account_id?: string | null;
+  account_verification: "verified" | "unverified" | "legacy";
+  attempt?: WireMcpAuthAttempt | null;
   expires_at?: string | null;
   mcp: WireMcpAuthTarget;
   phase: "authorized" | "reauth_required" | "authorization_required";
@@ -6337,6 +6381,7 @@ export interface WireLoginReadyMcpLoginReady {
   scopes: string[];
   state?: string | null;
   account_id?: string | null;
+  account_verification: "verified" | "unverified" | "legacy";
   mcp: WireMcpAuthTarget;
 }
 

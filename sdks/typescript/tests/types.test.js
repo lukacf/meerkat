@@ -2931,6 +2931,42 @@ describe("Auth wrappers", () => {
       },
     ]);
   });
+
+  it("logs out an MCP server target and refuses a binding result", async () => {
+    const client = new MeerkatClient();
+    const mcp = { server_name: "glean", server_url: "https://glean.example/mcp" };
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { mcp, cleared: true };
+    };
+
+    assert.deepEqual(await client.authMcpLogout(mcp), { mcp, cleared: true });
+    assert.deepEqual(calls, [{ method: "auth/logout", params: { mcp } }]);
+
+    client.request = async () => ({
+      realm_id: "prod",
+      binding_id: "b",
+      profile_id: "p",
+      cleared: true,
+    });
+    await assert.rejects(() => client.authMcpLogout(mcp), /binding result/);
+  });
+
+  it("cancels an MCP attempt by its reference", async () => {
+    const client = new MeerkatClient();
+    const mcp = { server_name: "glean", server_url: "https://glean.example/mcp" };
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { mcp, cancelled: true };
+    };
+
+    await client.authLoginCancel({ mcp, attempt_ref: "oauth-action:00ff" });
+    assert.deepEqual(calls, [
+      { method: "auth/login/cancel", params: { mcp, attempt_ref: "oauth-action:00ff" } },
+    ]);
+  });
 });
 
 describe("Parity wrappers", () => {

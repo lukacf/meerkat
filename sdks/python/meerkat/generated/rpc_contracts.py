@@ -25,6 +25,7 @@ from .types import (
     ArtifactRecord,
     AttentionListRequest,
     AttentionListResult,
+    AuthLogoutParams,
     AuthStatusParams,
     BindingIdParams,
     BlobGetParams,
@@ -266,6 +267,7 @@ from .types import (
     ToolsRegisterResult,
     UpdateScheduleParams,
     UpdateSystemPromptParams,
+    WireAuthLogoutResult,
     WireAuthProfileCleared,
     WireAuthProfileCreated,
     WireAuthProfileDetail,
@@ -780,9 +782,9 @@ class RpcRequest(Protocol):
     def __call__(
         self,
         method: Literal["auth/logout"],
-        params: BindingIdParams,
+        params: AuthLogoutParams,
         /,
-    ) -> Awaitable[WireAuthProfileCleared]: ...
+    ) -> Awaitable[WireAuthLogoutResult]: ...
 
     @overload
     def __call__(

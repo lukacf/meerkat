@@ -22,6 +22,8 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpPostResponse,
 };
 
+use meerkat_auth_core::{McpOAuthError, McpServerIdentity};
+
 /// Shared HTTP client for Streamable HTTP connections.
 ///
 /// Reuses a single `reqwest::Client` for connection pooling and better performance.
@@ -32,6 +34,7 @@ pub(crate) struct ReqwestStreamableHttpClient {
     headers: HeaderMap,
     auth_challenge: AuthChallengeRecorder,
     protected_metadata: ProtectedMetadataState,
+    bearer: Option<OAuthBearer>,
 }
 
 impl std::fmt::Debug for ReqwestStreamableHttpClient {
@@ -39,7 +42,61 @@ impl std::fmt::Debug for ReqwestStreamableHttpClient {
         f.debug_struct("ReqwestStreamableHttpClient")
             .field("headers", &super::RedactedHeaders(&self.headers))
             .field("auth_challenge", &self.auth_challenge)
+            .field("bearer", &self.bearer)
             .finish_non_exhaustive()
+    }
+}
+
+/// Per-request bearer of an OAuth-protected server. Every request reads the
+/// credential owner's current credential through its resolver, so a
+/// refreshed credential is used without a reconnect and a lost one is never
+/// sent. It holds no token itself.
+#[derive(Clone)]
+pub(crate) struct OAuthBearer {
+    resolver: Arc<dyn crate::McpAuthResolver>,
+    target: McpServerIdentity,
+}
+
+impl std::fmt::Debug for OAuthBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthBearer")
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OAuthBearer {
+    pub(crate) fn new(
+        resolver: Arc<dyn crate::McpAuthResolver>,
+        target: McpServerIdentity,
+    ) -> Self {
+        Self { resolver, target }
+    }
+
+    pub(crate) fn target(&self) -> &McpServerIdentity {
+        &self.target
+    }
+
+    /// The bearer for one request. Without a usable credential the request
+    /// is refused as `AuthRequired` before anything is sent; an unselected
+    /// target with no stored credential sends none, as it always has.
+    async fn resolve(&self) -> Result<Option<String>, StreamableHttpError<reqwest::Error>> {
+        match self.resolver.stored_bearer_token(&self.target).await {
+            Ok(Some(token)) => Ok(Some(token)),
+            Ok(None) if !self.target.is_selected() => Ok(None),
+            Ok(None)
+            | Err(
+                McpOAuthError::ReauthRequired { .. }
+                | McpOAuthError::MissingStoredToken { .. }
+                | McpOAuthError::HumanAuthorizationRequired { .. }
+                | McpOAuthError::Verification(_),
+            ) => Err(StreamableHttpError::AuthRequired(AuthRequiredError::new(
+                String::new(),
+            ))),
+            Err(_) => Err(StreamableHttpError::UnexpectedServerResponse(
+                "MCP credential unavailable".into(),
+            )),
+        }
     }
 }
 
@@ -115,6 +172,7 @@ impl ReqwestStreamableHttpClient {
             headers,
             auth_challenge,
             protected_metadata: Default::default(),
+            bearer: None,
         }
     }
 
@@ -126,12 +184,32 @@ impl ReqwestStreamableHttpClient {
             headers,
             auth_challenge: AuthChallengeRecorder::default(),
             protected_metadata: Default::default(),
+            bearer: None,
         }
     }
 
     pub(crate) fn with_protected_metadata(mut self, state: ProtectedMetadataState) -> Self {
         self.protected_metadata = state;
         self
+    }
+
+    /// Resolve the bearer of every request through `bearer` instead of a
+    /// connect-time token.
+    pub(crate) fn with_oauth_bearer(mut self, bearer: OAuthBearer) -> Self {
+        self.bearer = Some(bearer);
+        self
+    }
+
+    /// The bearer for one request: the per-request credential when one is
+    /// installed, else the transport's own token.
+    async fn request_bearer(
+        &self,
+        transport_token: Option<String>,
+    ) -> Result<Option<String>, StreamableHttpError<reqwest::Error>> {
+        match &self.bearer {
+            Some(bearer) => bearer.resolve().await,
+            None => Ok(transport_token),
+        }
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -173,6 +251,17 @@ fn validate_custom_header(name: &HeaderName) -> Result<(), String> {
         return Err(name.to_string());
     }
     Ok(())
+}
+
+/// A `401` as the typed `AuthRequired`, with the server's challenge when it
+/// sent a readable one.
+fn auth_required(response: &reqwest::Response) -> StreamableHttpError<reqwest::Error> {
+    let challenge = response
+        .headers()
+        .get(WWW_AUTHENTICATE)
+        .and_then(|header| header.to_str().ok())
+        .unwrap_or_default();
+    StreamableHttpError::AuthRequired(AuthRequiredError::new(challenge.to_owned()))
 }
 
 fn extract_scope_from_header(header: &str) -> Option<String> {
@@ -219,7 +308,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         if let Some(last_event_id) = last_event_id {
             request_builder = request_builder.header(HEADER_LAST_EVENT_ID, last_event_id);
         }
-        if let Some(auth_header) = auth_token {
+        if let Some(auth_header) = self.request_bearer(auth_token).await? {
             request_builder = request_builder.bearer_auth(auth_header);
         }
         let response = request_builder
@@ -229,6 +318,9 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         self.auth_challenge.record(&response);
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
+        }
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(auth_required(&response));
         }
         let response = response
             .error_for_status()
@@ -261,7 +353,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         let mut request_builder = self.client.delete(uri.as_ref());
         request_builder = self.apply_headers(request_builder);
         request_builder = Self::apply_custom_headers(request_builder, custom_headers)?;
-        if let Some(auth_header) = auth_token {
+        if let Some(auth_header) = self.request_bearer(auth_token).await? {
             request_builder = request_builder.bearer_auth(auth_header);
         }
         let response = request_builder
@@ -302,7 +394,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .header(ACCEPT, [EVENT_STREAM_MIME_TYPE, JSON_MIME_TYPE].join(", "));
         request = self.apply_headers(request);
         request = Self::apply_custom_headers(request, custom_headers)?;
-        if let Some(auth_header) = auth_token {
+        if let Some(auth_header) = self.request_bearer(auth_token).await? {
             request = request.bearer_auth(auth_header);
         }
         let session_was_attached = session_id.is_some();
@@ -325,20 +417,15 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .await
             .map_err(StreamableHttpError::Client)?;
         self.auth_challenge.record(&response);
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED
-            && let Some(header) = response.headers().get(WWW_AUTHENTICATE)
-        {
-            let header = header
-                .to_str()
-                .map_err(|_| {
-                    StreamableHttpError::UnexpectedServerResponse(
-                        "invalid www-authenticate header value".into(),
-                    )
-                })?
-                .to_string();
-            return Err(StreamableHttpError::AuthRequired(AuthRequiredError::new(
-                header,
-            )));
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(header) = response.headers().get(WWW_AUTHENTICATE)
+                && header.to_str().is_err()
+            {
+                return Err(StreamableHttpError::UnexpectedServerResponse(
+                    "invalid www-authenticate header value".into(),
+                ));
+            }
+            return Err(auth_required(&response));
         }
         if response.status() == reqwest::StatusCode::FORBIDDEN
             && let Some(header) = response.headers().get(WWW_AUTHENTICATE)

@@ -413,7 +413,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/login/cancel",
-            "Retire a pending MCP or connector OAuth attempt by its state",
+            "Retire a pending MCP or connector OAuth attempt by its state, or an MCP attempt by its attempt_ref",
             "LoginCancelParams",
             "WireLoginCancelled",
         ),
@@ -443,9 +443,9 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/logout",
-            "Revoke + remove persisted credentials",
-            "BindingIdParams",
-            "WireAuthProfileCleared",
+            "Revoke + remove persisted credentials of a provider binding, or remove the stored credential of an MCP server target",
+            "AuthLogoutParams",
+            "WireAuthLogoutResult",
         ),
         RpcMethodDescriptor::result_only(
             "realm/list",
@@ -1562,7 +1562,7 @@ mod tests {
             ("auth/login/cancel", "WireLoginCancelled"),
             ("auth/login/device_start", "WireDeviceStart"),
             ("auth/status/get", "WireAuthStatusResult"),
-            ("auth/logout", "WireAuthProfileCleared"),
+            ("auth/logout", "WireAuthLogoutResult"),
             ("realm/list", "WireRealmList"),
             ("realm/get", "WireRealmConnectionSet"),
         ] {
@@ -1639,8 +1639,8 @@ mod tests {
             ),
             (
                 "auth/logout",
-                Some("BindingIdParams"),
-                Some("WireAuthProfileCleared"),
+                Some("AuthLogoutParams"),
+                Some("WireAuthLogoutResult"),
             ),
             ("realm/list", None, Some("WireRealmList")),
             (

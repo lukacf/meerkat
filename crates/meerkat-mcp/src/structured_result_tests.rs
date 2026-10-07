@@ -96,6 +96,7 @@ async fn invoke(surface: Surface, reply: Reply, text_only: bool) -> Result<Outpu
                 protected_metadata: Default::default(),
                 service: service.into(),
                 stdio_child: None,
+                oauth_target: None,
             };
             let result = tokio::time::timeout(Duration::from_secs(3), async {
                 if text_only {

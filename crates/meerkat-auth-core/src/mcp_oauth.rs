@@ -646,6 +646,7 @@ enum PendingCompletion {
 
 /// The attempt cleanup that [`McpOAuthPendingLogin::close`] observed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum McpOAuthAttemptCleanup {
     /// The attempt was retired through its flow owner (by this close, or by
     /// the completion's own retire guard, whose result was recorded).
@@ -664,6 +665,7 @@ pub enum McpOAuthAttemptCleanup {
 /// The callback listener cleanup that [`McpOAuthPendingLogin::close`]
 /// observed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum McpOAuthListenerCleanup {
     /// The listener is closed and its accepted-connection drain was joined.
     Joined(LoopbackClosed),

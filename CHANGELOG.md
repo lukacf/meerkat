@@ -218,6 +218,10 @@ them.
   Browser (wasm32) redirect handling is unchanged.
 
 
+- Behaviour-only (not measured by the gate): `McpOAuthPendingLogin::cancel`
+  now returns a failed callback listener retirement as
+  `McpOAuthError::Callback` where it used to return `Ok(())` (see Fixed).
+
 ### Added
 
 - An MCP OAuth loopback login can be cancelled while it waits, with both
@@ -230,7 +234,8 @@ them.
   awaits its drain, and returns `McpOAuthPendingClose` with the two
   outcomes kept apart: `attempt` (`Retired`, `Consumed`, `Absent`, or
   `RetirementFailed` with the owner's error) and `listener` (`Joined` with
-  its `LoopbackClosed` receipt, or `Failed`). `Absent` is the owner having
+  its `LoopbackClosed` receipt, `Failed`, or `NotReported` after the
+  consuming `complete` wait). `Absent` is the owner having
   no such attempt, which does not say whether it was consumed, retired or
   expired. The deadline bounds only the callback wait: it neither extends
   the attempt nor bounds the completion after delivery, which has no

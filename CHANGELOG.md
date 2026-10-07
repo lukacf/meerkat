@@ -220,6 +220,22 @@ them.
 
 ### Added
 
+- The loopback OAuth callback can be cancelled during an active wait with a
+  joined cleanup receipt. `LoopbackHandle::wait_until(&mut self, Instant)` is
+  cancel-safe: dropping it loses neither the receiver, a callback already
+  received, nor the server. `LoopbackHandle::close` terminates accepted I/O,
+  awaits the actual connection drain and only then returns `LoopbackClosed`,
+  which reports whether a callback arrived but was never handed out (its code
+  and state are never exposed). `LoopbackHandle::wait_or_cancel` races a
+  caller-owned cancellation future and always joins before it returns
+  `LoopbackWaitEnd` (`Completed`, `Refused`, `TimedOut`, `Cancelled`, or
+  `RetirementFailed` with no receipt). The earliest deadline given to a handle
+  bounds both the callback and the graceful drain and is never renewed; a
+  callback is handed out at most once; a failed retirement stays failed on
+  every later wait or close. Dropping a consuming `wait`, `wait_or_cancel`,
+  or `close` future signals termination without a receipt. Dropping
+  `wait_until` retains the handle for explicit `close`. `wait` and `cancel`
+  are unchanged.
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
   runtime delivery inbox's exclusive delivery ownership
   (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is

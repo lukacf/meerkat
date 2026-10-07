@@ -111,6 +111,7 @@ pub enum ToolDispatchTerminalErrorKind {
     ExecutionFailed,
     Timeout,
     AccessDenied,
+    OutcomeUncertain,
     PolicyDenied,
     PolicyIndeterminate,
     Other,
@@ -128,6 +129,7 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             }
             ToolError::Timeout { .. } | ToolError::InactivityTimeout { .. } => Self::Timeout,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
+            ToolError::OutcomeUncertain { .. } => Self::OutcomeUncertain,
             ToolError::PolicyDenied { .. } => Self::PolicyDenied,
             ToolError::PolicyIndeterminate { .. } => Self::PolicyIndeterminate,
             ToolError::Other(_) => Self::Other,

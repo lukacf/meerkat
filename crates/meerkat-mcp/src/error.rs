@@ -22,6 +22,16 @@ pub enum McpError {
     #[error("Connection failed: {reason}")]
     ConnectionFailed { reason: String },
 
+    /// The server dropped the connection's session (HTTP 404) while a
+    /// `tools/call` was in flight. The call was sent once and never
+    /// re-sent, so whether it took effect is unknown: neither success nor
+    /// denial. The connection is dead; later calls are refused unsent until
+    /// the server is reconnected.
+    #[error(
+        "MCP session of server '{server}' expired during tool call '{tool}'; its outcome is uncertain and the server must be reconnected"
+    )]
+    SessionExpired { server: String, tool: String },
+
     #[error("Server not found: {0}")]
     ServerNotFound(String),
 

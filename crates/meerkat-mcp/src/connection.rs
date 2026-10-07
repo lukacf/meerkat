@@ -6,6 +6,9 @@ use crate::transport::protected::{
     ProtectedMetadata, ProtectedMetadataState, ProtectedStdioTransport,
 };
 use crate::transport::sse::{SseClientConfig, SseClientTransport};
+use crate::transport::streamable_http::{
+    RequestDispatch, RequestDisposition, SessionExpiryRecorder,
+};
 use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
 };
@@ -31,6 +34,9 @@ pub struct McpConnection {
     service: ConnectedClient,
     /// The stdio server's process, owned until `close` observes its exit.
     stdio_child: Option<StdioChildCustody>,
+    /// Set once a Streamable HTTP server drops this connection's session.
+    /// Never set for stdio or SSE connections.
+    session_expiry: SessionExpiryRecorder,
 }
 
 /// After the process group is killed, how long [`StdioChildCustody::terminate`]
@@ -361,6 +367,7 @@ impl McpConnection {
             protected_metadata,
             service,
             stdio_child,
+            session_expiry: Default::default(),
         })
     }
 
@@ -505,11 +512,17 @@ impl McpConnection {
                 auth: Default::default(),
             })?;
         let protected_metadata = ProtectedMetadataState::default();
+        let session_expiry = SessionExpiryRecorder::default();
         let recorder = recorder.unwrap_or_default();
         let http_client =
             ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone())
-                .with_protected_metadata(protected_metadata.clone());
-        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+                .with_protected_metadata(protected_metadata.clone())
+                .with_session_expiry(session_expiry.clone());
+        // Never re-initialize and re-send a request after a session expiry
+        // (rmcp defaults to one transparent replay): a call's effect may
+        // already have happened, so its outcome is reported as uncertain.
+        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string())
+            .reinit_on_expired_session(false);
         if let Some(token) = bearer_token {
             transport_config = transport_config.auth_header(token);
         }
@@ -527,6 +540,7 @@ impl McpConnection {
             protected_metadata,
             service,
             stdio_child: None,
+            session_expiry,
         })
     }
 
@@ -639,7 +653,13 @@ impl McpConnection {
     /// Transfer this exact connected owner into the protocol wrapper without
     /// another handshake or host-service selection.
     pub fn into_protocol(self) -> crate::McpProtocol {
-        crate::McpProtocol::from_client(self.service, self.stdio_child)
+        crate::McpProtocol::from_connection(
+            self.service,
+            self.stdio_child,
+            self.config.name,
+            self.protected_metadata,
+            self.session_expiry,
+        )
     }
 
     /// Get the config used to create this connection.
@@ -683,31 +703,16 @@ impl McpConnection {
         args: &Value,
         metadata: Option<serde_json::Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
-        let params = match args.as_object().cloned() {
-            Some(arguments) => {
-                CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
-            }
-            None => CallToolRequestParams::new(name.to_string()),
-        };
-        let mut request = CallToolRequest::new(params);
-        if let Some(metadata) = metadata {
-            self.protected_metadata.register(&metadata)?;
-            request.extensions.insert(ProtectedMetadata(metadata));
-        }
-        let result = self
-            .service
-            .send_request(request.into())
-            .await
-            .map_err(|error| McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: error.to_string(),
-            })?;
-        match result {
-            ServerResult::CallToolResult(result) => Ok(result),
-            _ => Err(McpError::ProtocolError {
-                message: "unexpected MCP tools/call response".into(),
-            }),
-        }
+        call_tool_on(
+            &self.service,
+            &self.config.name,
+            &self.protected_metadata,
+            &self.session_expiry,
+            name,
+            args,
+            metadata,
+        )
+        .await
     }
 
     /// Call a tool, returning only the text content as a concatenated string.
@@ -724,6 +729,81 @@ impl McpConnection {
     /// this returns.
     pub async fn close(self) -> Result<(), McpError> {
         close_connected(self.service, self.stdio_child).await
+    }
+}
+
+/// The one `tools/call` path of a connected service, shared by
+/// [`McpConnection`] and the [`crate::McpProtocol`] it converts into.
+///
+/// A known-dead session refuses the call before it is queued. Otherwise the
+/// call carries its own [`RequestDispatch`] witness through the transport,
+/// and a failure is typed from that witness alone: sent and then answered
+/// `404` for its session is uncertain ([`McpError::SessionExpired`]);
+/// refused at transport entry is affirmatively unsent
+/// ([`McpError::ServerUnavailable`]); anything else, including no recorded
+/// disposition, keeps the ordinary [`McpError::ToolCallFailed`].
+pub(crate) async fn call_tool_on(
+    service: &rmcp::service::Peer<rmcp::RoleClient>,
+    server: &str,
+    protected_metadata: &ProtectedMetadataState,
+    session_expiry: &SessionExpiryRecorder,
+    name: &str,
+    args: &Value,
+    metadata: Option<serde_json::Map<String, Value>>,
+) -> Result<CallToolResult, McpError> {
+    let params = match args.as_object().cloned() {
+        Some(arguments) => CallToolRequestParams::new(name.to_string()).with_arguments(arguments),
+        None => CallToolRequestParams::new(name.to_string()),
+    };
+    // A dropped session is never resumed under another session.
+    if session_expiry.expired() {
+        return Err(session_dead(server));
+    }
+    let dispatch = RequestDispatch::default();
+    let mut request = CallToolRequest::new(params);
+    request.extensions.insert(dispatch.clone());
+    if let Some(metadata) = metadata {
+        protected_metadata.register(&metadata)?;
+        request.extensions.insert(ProtectedMetadata(metadata));
+    }
+    let result = service
+        .send_request(request.into())
+        .await
+        .map_err(|error| tool_call_failure(server, name, dispatch.disposition(), &error))?;
+    match result {
+        ServerResult::CallToolResult(result) => Ok(result),
+        _ => Err(McpError::ProtocolError {
+            message: "unexpected MCP tools/call response".into(),
+        }),
+    }
+}
+
+fn session_dead(server: &str) -> McpError {
+    McpError::ServerUnavailable {
+        server: server.to_owned(),
+        state: "session expired; reconnect required".into(),
+    }
+}
+
+/// The typed failure of one `tools/call`, from its own disposition.
+fn tool_call_failure(
+    server: &str,
+    tool: &str,
+    disposition: Option<RequestDisposition>,
+    error: &dyn std::fmt::Display,
+) -> McpError {
+    match disposition {
+        // Sent once, never re-sent, result lost with the session.
+        Some(RequestDisposition::SentSessionExpired) => McpError::SessionExpired {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+        },
+        // Nothing was sent: the session was already known dead.
+        Some(RequestDisposition::RefusedExpired) => session_dead(server),
+        Some(RequestDisposition::Sent) | None => McpError::ToolCallFailed {
+            tool: tool.to_owned(),
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -798,6 +878,146 @@ fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
 pub mod tests {
     use super::*;
     use crate::protocol::{extract_content_blocks, tool_error_reason};
+
+    /// A Streamable HTTP server whose background GET answer is configurable,
+    /// and which counts `tools/call` POSTs.
+    mod get_ordering {
+        use super::*;
+        use std::sync::Arc;
+
+        pub(super) struct Server {
+            pub(super) get_status: StatusCode,
+            pub(super) tool_posts: AtomicUsize,
+            pub(super) gets: tokio::sync::Notify,
+        }
+
+        async fn post_handler(
+            State(server): State<Arc<Server>>,
+            body: String,
+        ) -> axum::response::Response {
+            let message: Value = serde_json::from_str(&body).unwrap();
+            let id = message.get("id").cloned();
+            let reply = |result: Value| {
+                (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "application/json"),
+                        ("mcp-session-id", "s-1"),
+                    ],
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+                )
+                    .into_response()
+            };
+            match message["method"].as_str().unwrap_or_default() {
+                "initialize" => reply(serde_json::json!({
+                    "protocolVersion": message["params"]["protocolVersion"],
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "get-ordering", "version": "1"},
+                })),
+                _ if id.is_none() => StatusCode::ACCEPTED.into_response(),
+                "tools/call" => {
+                    server.tool_posts.fetch_add(1, Ordering::SeqCst);
+                    reply(serde_json::json!({"content": [{"type": "text", "text": "done"}]}))
+                }
+                _ => reply(serde_json::json!({})),
+            }
+        }
+
+        async fn get_handler(State(server): State<Arc<Server>>) -> StatusCode {
+            server.gets.notify_one();
+            server.get_status
+        }
+
+        pub(super) async fn start(get_status: StatusCode) -> (Arc<Server>, String) {
+            let server = Arc::new(Server {
+                get_status,
+                tool_posts: AtomicUsize::new(0),
+                gets: tokio::sync::Notify::new(),
+            });
+            let app = Router::new()
+                .route(
+                    "/mcp",
+                    post(post_handler)
+                        .get(get_handler)
+                        .delete(|| async { StatusCode::OK }),
+                )
+                .with_state(Arc::clone(&server));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (server, url)
+        }
+    }
+
+    /// A session the server invalidated before its first GET: the GET 404
+    /// expires it, and a later tool call is refused unsent.
+    #[tokio::test]
+    async fn a_session_invalidated_before_its_first_get_refuses_calls_unsent() {
+        let (server, url) = get_ordering::start(StatusCode::NOT_FOUND).await;
+        let config = McpServerConfig::streamable_http("get-ordering", url, HashMap::new());
+        let connection = McpConnection::connect(&config).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.session_expiry.recorded(),
+        )
+        .await
+        .expect("the background GET 404 is recorded");
+        let refused = connection
+            .call_tool("effect", &serde_json::json!({}))
+            .await
+            .expect_err("an expired session refuses the call");
+        assert!(
+            matches!(refused, McpError::ServerUnavailable { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(server.tool_posts.load(Ordering::SeqCst), 0);
+        let _ = connection.close().await;
+    }
+
+    /// Paired control: a healthy POST-only server answering the GET with 405
+    /// (the spec's "no SSE stream") stays usable.
+    #[tokio::test]
+    async fn a_post_only_server_answering_get_with_405_stays_usable() {
+        let (server, url) = get_ordering::start(StatusCode::METHOD_NOT_ALLOWED).await;
+        let config = McpServerConfig::streamable_http("get-ordering", url, HashMap::new());
+        let connection = McpConnection::connect(&config).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), server.gets.notified())
+            .await
+            .expect("the background GET was answered");
+        connection
+            .call_tool("effect", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(server.tool_posts.load(Ordering::SeqCst), 1);
+        assert!(!connection.session_expiry.expired());
+        let _ = connection.close().await;
+    }
+
+    /// A call's failure is typed from its own disposition only: there is no
+    /// connection-wide input, so a queued call that failed before sending is
+    /// never labelled uncertain because another call expired the session.
+    #[test]
+    fn call_failures_are_typed_from_their_own_request_disposition() {
+        let failure = |disposition| tool_call_failure("srv", "effect", disposition, &"cause");
+        assert!(matches!(
+            failure(Some(RequestDisposition::SentSessionExpired)),
+            McpError::SessionExpired { ref server, ref tool } if server == "srv" && tool == "effect"
+        ));
+        assert!(matches!(
+            failure(Some(RequestDisposition::RefusedExpired)),
+            McpError::ServerUnavailable { .. }
+        ));
+        // No final disposition recorded (a pre-send failure such as the frame
+        // bound, or an unfinished send): ordinary failure, never typed as
+        // uncertain from connection state.
+        assert!(matches!(failure(None), McpError::ToolCallFailed { .. }));
+        assert!(matches!(
+            failure(Some(RequestDisposition::Sent)),
+            McpError::ToolCallFailed { .. }
+        ));
+    }
     use async_trait::async_trait;
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode};

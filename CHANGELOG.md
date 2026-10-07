@@ -37,6 +37,23 @@ them.
 
 ### Breaking
 
+- MCP Streamable HTTP no longer re-sends a request after a session expiry
+  (see Fixed), which changes these Rust types:
+  - `ToolError` gains `OutcomeUncertain { name, reason }` (error code
+    `outcome_uncertain`), and `ToolDispatchTerminalErrorKind` gains
+    `OutcomeUncertain`;
+  - `McpError` gains `SessionExpired { server, tool }`.
+  Behaviour-only (not measured by the gate): a `tools/call` whose session
+  the server drops (`404`) is reported as `outcome_uncertain` instead of
+  being re-sent in a new session, and later calls on that connection are
+  refused unsent until the server is reconnected. The mob member upcall
+  envelope gains an `outcome_uncertain` class; a member on an older
+  version cannot decode it and fails that upcall with a decode error
+  rather than misreporting it. A `404` on the session's background SSE GET
+  expires the session too: a server that answers an unsupported GET with
+  `404` instead of the specified `405` will see its sessions treated as
+  expired and must be fixed to answer `405`.
+
 - Behaviour-only (not measured by the gate): MCP Streamable HTTP and
   legacy SSE connections and HTTP skills sources follow only same-origin
   redirects (same scheme, host and port; at most 3 hops). A redirect to
@@ -292,6 +309,20 @@ them.
 
 ### Fixed
 
+- An MCP `tools/call` over Streamable HTTP could run twice. On a `404`
+  session expiry the transport re-initialized and re-sent the in-flight
+  request (rmcp's default), so a server or proxy that ran the call before
+  answering `404` ran it again under the same JSON-RPC id, and the caller
+  saw one result. The transport now never re-sends: the call is sent
+  exactly once, its outcome is the typed `ToolError::OutcomeUncertain`
+  (neither success nor denial, and the dispatch gate settles it as
+  `Unknown`), and the dead connection refuses later calls unsent until an
+  explicit reconnect. Each call's outcome comes from what the transport did
+  with that call: a call queued behind the expiring one is refused at the
+  transport, unsent, and a call that failed before it was sent stays an
+  ordinary failure. A `404` on the session's GET stream expires the
+  session the same way. `McpConnection::into_protocol` keeps this, so
+  `McpProtocol::call_tool` reports the same outcomes.
 - Credential-bearing MCP HTTP, skills and doctor requests could follow a
   redirect to another host with their credentials. The pinned reqwest
   strips `Authorization`, `Cookie` and `Proxy-Authorization` on a

@@ -277,6 +277,15 @@ them.
   answered "Cobalt and daffodil" instead of "cobalt and marigold" in 6 of 182
   runs since 2026-10-04). Both the prefix and the closing reassertion now say
   the typed content replaces what the summary says about it.
+- The protocol codegen owners for `ApprovalLifecycleMachine`,
+  `SessionDocumentMachine` and `SessionTurnAdmissionMachine` now keep a
+  compound operand of a comparison or arithmetic operator grouped. Before,
+  a DSL guard such as `(a && b) == false` rendered into the generated Rust
+  authority as `(a) && (b) == false`, which Rust parses as
+  `a && (b == false)`, while the generated TLA model kept the grouping, so
+  TLC checked a guard the runtime did not evaluate. Every operand that is not
+  self-delimiting is now parenthesized. No machine on `main` used such a
+  form, so no generated authority changes.
 - A failed actor materialization's rollback joins its registration's
   unregister saga until terminal. It waited with the ordinary 2 s caller
   grace, so under heavy host load it answered `UnregisterInProgress` and

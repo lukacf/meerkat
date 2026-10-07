@@ -15,9 +15,9 @@ use meerkat_auth_core::connector_oauth::{
 };
 use meerkat_auth_core::mcp_oauth::{
     MCP_INTERACTIVE_LOGIN_TIMEOUT, MCP_OAUTH_CALLBACK_PATH, McpOAuthAccountStrategy,
-    McpOAuthAttemptRetirement, McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback,
-    McpOAuthCeremonyContext, McpOAuthError, McpOAuthLoginDisposition, McpOAuthLoginStart,
-    McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpServerIdentity,
+    McpOAuthAttemptCleanup, McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback,
+    McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup, McpOAuthLoginDisposition,
+    McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpServerIdentity,
 };
 use meerkat_auth_core::oauth_flow::OAuthFlowError;
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
@@ -4929,7 +4929,7 @@ async fn started_loopback_login(
 }
 
 /// An accepted connection to the callback listener whose request headers
-/// never finish: it holds the listener's graceful drain until terminated.
+/// never finish.
 async fn held_callback_connection(start: &McpOAuthLoginStart) -> tokio::net::TcpStream {
     use tokio::io::AsyncWriteExt;
     let address = start
@@ -4964,7 +4964,8 @@ async fn assert_callback_binding_retired(start: &McpOAuthLoginStart) {
     }
 }
 
-/// A later login for the same target admits a fresh attempt, not a join.
+/// After an observed retirement or consumption, a later login for the same
+/// target admits a fresh attempt instead of joining the old one.
 async fn assert_fresh_continuation(
     authority: &McpOAuthAuthority,
     target: &McpServerIdentity,
@@ -4973,55 +4974,61 @@ async fn assert_fresh_continuation(
     let fresh = started_loopback_login(authority, target).await;
     assert_eq!(fresh.start().disposition, McpOAuthLoginDisposition::Started);
     assert_ne!(fresh.start().state, previous.state);
-    let _ = fresh.close().await.unwrap();
+    let _closed = fresh.close().await;
+}
+
+/// Poll `future` once and require it to be pending.
+async fn poll_once_pending<F: std::future::Future + Unpin>(future: &mut F) {
+    futures::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(std::pin::Pin::new(&mut *future), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
 }
 
 #[tokio::test]
-async fn close_retires_the_attempt_and_joins_a_held_listener() {
-    use tokio::io::AsyncReadExt;
+async fn close_retires_the_attempt_before_its_joined_drain() {
     let (base, state) = spawn_oauth_fixture().await;
     let store = Arc::new(EphemeralTokenStore::new());
     let authority = split_authority(&state, store.clone());
-    let target = split_target(&base, "close-held");
-    let pending = started_loopback_login(&authority, &target).await;
-    let start = pending.start().clone();
-    let mut peer = held_callback_connection(&start).await;
-
-    let closed = pending.close().await.unwrap();
-    assert_eq!(closed.attempt, McpOAuthAttemptRetirement::Retired);
-    assert!(!closed.listener.undelivered_callback);
-    // The joined drain retired the held connection before the receipt.
-    let mut rest = Vec::new();
-    // Ok (EOF) or a reset: either way the server side is gone.
-    let _closed_by_server =
-        tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut rest))
-            .await
-            .expect("the held connection was retired by the joined drain");
-    assert_callback_binding_retired(&start).await;
-    assert_attempt_retired(&authority, &target, &start).await;
-    assert!(state.token_requests.lock().is_empty());
-    assert!(store.list().await.unwrap().is_empty());
-    assert_fresh_continuation(&authority, &target, &start).await;
-}
-
-/// The defect this closes: a cancel future dropped while the listener
-/// drains must still have retired the attempt.
-#[tokio::test]
-async fn dropping_close_mid_drain_still_retires_the_attempt() {
-    let (base, state) = spawn_oauth_fixture().await;
-    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
-    let target = split_target(&base, "close-dropped");
+    let target = split_target(&base, "close-before-drain");
     let pending = started_loopback_login(&authority, &target).await;
     let start = pending.start().clone();
     let _peer = held_callback_connection(&start).await;
 
     let mut closing = Box::pin(pending.close());
-    futures::future::poll_fn(|cx| {
-        // The listener's drain is still pending on this first poll.
-        assert!(std::future::Future::poll(closing.as_mut(), cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
+    // First poll: the retirement ran and the listener's join is pending.
+    poll_once_pending(&mut closing).await;
+    assert_attempt_retired(&authority, &target, &start).await;
+
+    let closed = closing.await;
+    assert!(
+        matches!(closed.attempt, McpOAuthAttemptCleanup::Retired),
+        "{closed:?}"
+    );
+    assert!(
+        matches!(&closed.listener, McpOAuthListenerCleanup::Joined(receipt) if !receipt.undelivered_callback),
+        "{closed:?}"
+    );
+    assert_callback_binding_retired(&start).await;
+    assert!(state.token_requests.lock().is_empty());
+    assert!(store.list().await.unwrap().is_empty());
+    assert_fresh_continuation(&authority, &target, &start).await;
+}
+
+/// The defect this closes: a cancel abandoned while the listener drains
+/// must already have retired the attempt.
+#[tokio::test]
+async fn dropping_a_polled_close_during_its_drain_keeps_the_retirement() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "close-polled-dropped");
+    let pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    let _peer = held_callback_connection(&start).await;
+
+    let mut closing = Box::pin(pending.close());
+    poll_once_pending(&mut closing).await;
     drop(closing);
 
     assert_attempt_retired(&authority, &target, &start).await;
@@ -5029,16 +5036,85 @@ async fn dropping_close_mid_drain_still_retires_the_attempt() {
     assert_fresh_continuation(&authority, &target, &start).await;
 }
 
+/// A close future that was never polled ran nothing: the pending login's
+/// own `Drop` retires the attempt and signals the listener, with no receipt.
 #[tokio::test]
-async fn cancel_keeps_its_signature_and_now_reports_the_joined_close() {
+async fn dropping_a_never_polled_close_retires_through_drop() {
     let (base, state) = spawn_oauth_fixture().await;
     let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
-    let target = split_target(&base, "cancel-joined");
+    let target = split_target(&base, "close-never-polled");
     let pending = started_loopback_login(&authority, &target).await;
     let start = pending.start().clone();
-    let _peer = held_callback_connection(&start).await;
-    pending.cancel().await.unwrap();
+
+    let closing = pending.close();
+    drop(closing);
+
     assert_attempt_retired(&authority, &target, &start).await;
+    assert_callback_binding_retired(&start).await;
+    assert_fresh_continuation(&authority, &target, &start).await;
+}
+
+/// A loopback authority whose flow owner persists through `runtime_store`.
+/// Dropping the store makes every later flow persistence fail.
+fn persistent_flow_authority(
+    runtime_store: &Arc<dyn meerkat_runtime::store::RuntimeStore>,
+) -> McpOAuthAuthority {
+    let auth = test_auth_lease();
+    let flows = Arc::new(
+        RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            MCP_INTERACTIVE_LOGIN_TIMEOUT,
+            auth.lifecycle,
+            runtime_store,
+        ),
+    );
+    McpOAuthAuthority::with_http(
+        ProviderAuthPersistence::new(
+            Arc::new(EphemeralTokenStore::new()),
+            Arc::new(InMemoryCoordinator::new()),
+        ),
+        no_redirect_client(),
+        auth.generated,
+    )
+    .with_interactive_strategy(flows, Arc::new(FixtureAccountStrategy))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_failed_attempt_retirement_is_reported_beside_the_joined_listener() {
+    use meerkat_runtime::store::{RuntimeStore, memory::InMemoryRuntimeStore};
+    let (base, _state) = spawn_oauth_fixture().await;
+    let target = split_target(&base, "retirement-fails");
+
+    let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+    let authority = persistent_flow_authority(&runtime_store);
+    let pending = started_loopback_login(&authority, &target).await;
+    drop(runtime_store);
+    let closed = pending.close().await;
+    // No fabricated success: the retirement failure stays an error, and the
+    // listener cleanup still ran and was joined.
+    assert!(
+        matches!(
+            closed.attempt,
+            McpOAuthAttemptCleanup::RetirementFailed(McpOAuthError::Flow(_))
+        ),
+        "{closed:?}"
+    );
+    assert!(
+        matches!(closed.listener, McpOAuthListenerCleanup::Joined(_)),
+        "{closed:?}"
+    );
+
+    // The legacy projection returns the retirement failure, and still
+    // retires the listener.
+    let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+    let authority = persistent_flow_authority(&runtime_store);
+    let pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    drop(runtime_store);
+    assert!(matches!(
+        pending.cancel().await,
+        Err(McpOAuthError::Flow(_))
+    ));
     assert_callback_binding_retired(&start).await;
 }
 
@@ -5061,9 +5137,15 @@ async fn dropped_borrowed_wait_then_close_counts_a_late_callback() {
     // The browser's callback arrives after the wait was abandoned.
     follow_authorize(&start.authorize_url).await;
 
-    let closed = pending.close().await.unwrap();
-    assert_eq!(closed.attempt, McpOAuthAttemptRetirement::Retired);
-    assert!(closed.listener.undelivered_callback);
+    let closed = pending.close().await;
+    assert!(
+        matches!(closed.attempt, McpOAuthAttemptCleanup::Retired),
+        "{closed:?}"
+    );
+    assert!(
+        matches!(&closed.listener, McpOAuthListenerCleanup::Joined(receipt) if receipt.undelivered_callback),
+        "{closed:?}"
+    );
     assert!(!format!("{closed:?}").contains("fixture-code"));
     assert_attempt_retired(&authority, &target, &start).await;
     assert!(state.token_requests.lock().is_empty());
@@ -5071,8 +5153,62 @@ async fn dropped_borrowed_wait_then_close_counts_a_late_callback() {
     assert_fresh_continuation(&authority, &target, &start).await;
 }
 
+/// The borrowed wait's strict deadline: an already-passed deadline wins
+/// over a queued callback, which stays undelivered.
 #[tokio::test]
-async fn dropping_complete_until_mid_exchange_publishes_nothing() {
+async fn complete_until_an_elapsed_deadline_leaves_a_queued_callback_undelivered() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "deadline-first");
+    let mut pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    follow_authorize(&start.authorize_url).await;
+
+    let waited = pending
+        .complete_until(tokio::time::Instant::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(waited, McpOAuthError::Callback { .. }),
+        "{waited:?}"
+    );
+    assert!(state.token_requests.lock().is_empty());
+    let closed = pending.close().await;
+    assert!(
+        matches!(&closed.listener, McpOAuthListenerCleanup::Joined(receipt) if receipt.undelivered_callback),
+        "{closed:?}"
+    );
+    assert!(matches!(closed.attempt, McpOAuthAttemptCleanup::Retired));
+}
+
+/// The legacy tie: `complete` with a zero window still polls a queued
+/// callback once, as its consuming wait always did. Whether the drain also
+/// finishes before the timer fires is timing, so either a completed login
+/// or a timeout is accepted; the attempt is never left admitted.
+#[tokio::test]
+async fn complete_with_a_zero_window_keeps_the_legacy_poll_first_tie() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "legacy-poll-first");
+    let pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    follow_authorize(&start.authorize_url).await;
+
+    match pending.complete(Duration::ZERO).await {
+        Ok(_) => assert_eq!(state.token_requests.lock().len(), 1),
+        Err(McpOAuthError::Callback { .. }) => {
+            assert!(state.token_requests.lock().is_empty());
+        }
+        Err(other) => panic!("unexpected completion: {other:?}"),
+    }
+    assert_attempt_retired(&authority, &target, &start).await;
+}
+
+/// Pre-commit barrier: the completion is dropped while the token endpoint
+/// holds the exchange. Its own retire guard retires the attempt and nothing
+/// is published locally; the provider may still have issued a token.
+#[tokio::test]
+async fn dropping_complete_until_at_the_token_exchange_publishes_nothing() {
     let (base, state) = spawn_oauth_fixture().await;
     let store = Arc::new(EphemeralTokenStore::new());
     let authority = split_authority(&state, store.clone());
@@ -5092,17 +5228,135 @@ async fn dropping_complete_until_mid_exchange_publishes_nothing() {
         }
         () = state.code_exchange_started.notified() => {}
     }
-    // The completion was dropped mid-exchange; its guard retired the attempt.
     state.code_exchange_release.notify_one();
     browser.await.unwrap();
-    assert!(store.list().await.unwrap().is_empty());
     assert_eq!(state.token_requests.lock().len(), 1);
+    assert!(store.list().await.unwrap().is_empty());
 
-    let closed = pending.close().await.unwrap();
-    assert_eq!(closed.attempt, McpOAuthAttemptRetirement::AlreadyConsumed);
-    assert!(!closed.listener.undelivered_callback);
+    let closed = pending.close().await;
+    assert!(
+        matches!(closed.attempt, McpOAuthAttemptCleanup::Retired),
+        "the guard's recorded retirement: {closed:?}"
+    );
+    assert!(
+        matches!(&closed.listener, McpOAuthListenerCleanup::Joined(receipt) if !receipt.undelivered_callback),
+        "{closed:?}"
+    );
     assert!(!format!("{closed:?}").contains("fixture-code"));
     assert_attempt_retired(&authority, &target, &start).await;
     assert!(store.list().await.unwrap().is_empty());
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
     assert_fresh_continuation(&authority, &target, &start).await;
+}
+
+/// Holds the first credential save until released.
+struct PausedSaveStore {
+    inner: Arc<EphemeralTokenStore>,
+    pause: AtomicBool,
+    save_started: Notify,
+    save_release: Notify,
+    saved: Notify,
+}
+
+#[async_trait]
+impl TokenStore for PausedSaveStore {
+    async fn load(
+        &self,
+        key: &TokenKey,
+    ) -> Result<Option<PersistedTokens>, meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.load(key).await
+    }
+
+    async fn save(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        if self.pause.swap(false, Ordering::SeqCst) {
+            self.save_started.notify_one();
+            self.save_release.notified().await;
+        }
+        let saved = self.inner.save(key, tokens).await;
+        self.saved.notify_one();
+        saved
+    }
+
+    async fn clear(
+        &self,
+        key: &TokenKey,
+    ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.clear(key).await
+    }
+
+    async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
+        self.inner.list().await
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "paused-save"
+    }
+}
+
+/// Paired post-consume barrier: the completion is dropped after the flow
+/// owner consumed the attempt and while the credential save is held. The
+/// commit's owner still finishes after the waiter is gone; the close reports
+/// the outcome as unobserved rather than as a rollback or a retirement.
+#[tokio::test]
+async fn dropping_complete_until_after_consume_lets_the_commit_owner_finish() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let inner = Arc::new(EphemeralTokenStore::new());
+    let paused = Arc::new(PausedSaveStore {
+        inner: inner.clone(),
+        pause: AtomicBool::new(true),
+        save_started: Notify::new(),
+        save_release: Notify::new(),
+        saved: Notify::new(),
+    });
+    let authority = FixtureAuthority::with_fixture_http(
+        ProviderAuthPersistence::new(paused.clone(), Arc::new(InMemoryCoordinator::new())),
+        recording_browser(Arc::clone(&state)),
+        no_redirect_client(),
+        test_auth_lease(),
+    );
+    let target = split_target(&base, "commit-owner-finishes");
+    let mut pending = started_loopback_login(&authority, &target).await;
+    let start = pending.start().clone();
+    let browser = tokio::spawn({
+        let url = start.authorize_url.clone();
+        async move { follow_authorize(&url).await }
+    });
+
+    let far = tokio::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
+    tokio::select! {
+        completed = pending.complete_until(far) => {
+            panic!("the held save cannot complete: {completed:?}");
+        }
+        () = paused.save_started.notified() => {}
+    }
+    // Only the waiter was dropped. Release the commit owner's save.
+    let saved = paused.saved.notified();
+    paused.save_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), saved)
+        .await
+        .expect("the commit owner finishes its save after the waiter dropped");
+    browser.await.unwrap();
+    assert_eq!(inner.list().await.unwrap().len(), 1);
+    assert_eq!(state.token_requests.lock().len(), 1, "no code replay");
+
+    let closed = pending.close().await;
+    assert!(
+        matches!(
+            closed.attempt,
+            McpOAuthAttemptCleanup::Absent {
+                completion_unobserved: true
+            }
+        ),
+        "{closed:?}"
+    );
+    assert!(matches!(
+        closed.listener,
+        McpOAuthListenerCleanup::Joined(_)
+    ));
+    assert!(!format!("{closed:?}").contains("fixture-code"));
+    assert_eq!(inner.list().await.unwrap().len(), 1);
 }

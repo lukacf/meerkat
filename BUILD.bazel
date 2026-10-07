@@ -716,6 +716,7 @@ test_suite(
         "//crates/meerkat-mob-mcp:child_tool_bundles_test",
         "//crates/meerkat-mob-mcp:child_tool_policy_test",
         "//crates/meerkat-mob-mcp:council_relink_test",
+        "//crates/meerkat-mob-mcp:delegate_profile_family_clamp_test",
         "//crates/meerkat-mob-mcp:fork_off_surface_test",
         "//crates/meerkat-mob-mcp:fork_relink_test",
         "//crates/meerkat-mob-mcp:meerkat_mob_mcp_unit_test",

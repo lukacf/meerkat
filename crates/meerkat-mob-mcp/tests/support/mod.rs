@@ -691,6 +691,42 @@ impl CouncilFixture {
             .into_shared()
     }
 
+    /// Restart over the SAME durable stores with a FRESH session service, the
+    /// way a restarted process comes back: the previous lifetime's mobs and
+    /// sessions are shut down and no live actor survives, so a member returns
+    /// only through the factory's resume path. `script` drives the new
+    /// service's model and `customize` composes the new state (its policy
+    /// registry, child policy and host tools), which may differ from the
+    /// previous lifetime's. Not for runtime-backed fixtures.
+    pub async fn restart_cold_with(
+        &mut self,
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
+    ) {
+        assert!(
+            self.runtime_adapter.is_none(),
+            "a cold restart of a runtime-backed fixture is not modelled here"
+        );
+        for (_, handle) in self.state.mob_handles_snapshot().await.unwrap_or_default() {
+            handle
+                .shutdown()
+                .await
+                .expect("shut the previous lifetime's mob down");
+        }
+        self.service
+            .try_shutdown()
+            .await
+            .expect("shut the previous lifetime's sessions down");
+        let client = Arc::new(ScriptedCouncilClient::new(script));
+        self.calls = client.calls();
+        self.service = persistent_service(&self.root, self.runtime_store.clone(), client);
+        let state_root = self.root.join("state");
+        self.state = customize(Self::state_over(&self.service, None), &state_root)
+            .try_with_persistent_storage_root(Some(state_root))
+            .expect("reopen rooted council + capability custody")
+            .into_shared();
+    }
+
     /// A second session service over the SAME durable stores, with no live
     /// sessions of its own. A read through it sees only what was persisted,
     /// which is how a test distinguishes durable state from a live actor's

@@ -12010,7 +12010,8 @@ mod tests {
                     spec.identity.clone(),
                     view,
                 ));
-            spec.application_tool_policy = meerkat_core::ApplicationToolPolicyBinding::Unmanaged;
+            spec.application_tool_policy =
+                Some(meerkat_core::ApplicationToolPolicyBinding::Unmanaged);
         }
 
         fn calls(

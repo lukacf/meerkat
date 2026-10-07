@@ -5440,7 +5440,10 @@ struct DeferredResumeProvision {
     tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     web_search_override: meerkat_core::ToolCategoryOverride,
-    application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
+    /// The member's optional policy choice, kept optional through clones and
+    /// retries until the final build (see
+    /// `build::apply_application_tool_policy_choice`).
+    application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     system_prompt_override: Option<super::handle::SpawnSystemPromptOverride>,
     resume_from_role: Option<ProfileName>,
@@ -5590,7 +5593,7 @@ impl DeferredResumeProvision {
         config.tool_dispatch_admission = tool_dispatch_admission;
         config.keep_alive = keep_alive;
         config.override_web_search = web_search_override;
-        config.application_tool_policy = application_tool_policy;
+        build::apply_application_tool_policy_choice(&mut config, application_tool_policy);
         config.tool_consequence_policy_registry = tool_consequence_policy_registry;
         config.fork_source = fork_source;
         if let Some(client) = default_llm_client {
@@ -30321,7 +30324,10 @@ impl MobActor {
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                     config.override_web_search = tool_category_overrides.web_search;
-                    config.application_tool_policy = application_tool_policy.clone();
+                    build::apply_application_tool_policy_choice(
+                        &mut config,
+                        application_tool_policy.clone(),
+                    );
                     config.tool_consequence_policy_registry =
                         preparation_context.tool_consequence_policy_registry.clone();
                     config.fork_source = fork_source.clone();
@@ -30425,7 +30431,7 @@ impl MobActor {
             config.keep_alive =
                 selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             config.override_web_search = tool_category_overrides.web_search;
-            config.application_tool_policy = application_tool_policy.clone();
+            build::apply_application_tool_policy_choice(&mut config, application_tool_policy.clone());
             config.tool_consequence_policy_registry = preparation_context.tool_consequence_policy_registry.clone();
             // Fork lineage rides only fork seatings, which resume; a fresh
             // spawn carries `None` here.
@@ -32033,6 +32039,10 @@ impl MobActor {
         };
 
         // §3.2 compile (pure; skill-file reads are small local reads).
+        // The portable overlay carries a concrete binding, so a placed member
+        // cannot yet tell "no choice" from an explicit choice: the host's
+        // absent choice compiles to the default, as before.
+        let placed_application_tool_policy = application_tool_policy.clone().unwrap_or_default();
         let base_prompt = self.spawn_base_prompt_source.clone();
         let compiled = match super::spec_compiler::compile_portable_member_spec(
             super::spec_compiler::CompileMemberSpecParams {
@@ -32047,7 +32057,7 @@ impl MobActor {
                 system_prompt_override: system_prompt_override.as_ref(),
                 tool_access_policy: tool_access_policy.as_ref(),
                 tool_category_overrides,
-                application_tool_policy: &application_tool_policy,
+                application_tool_policy: &placed_application_tool_policy,
                 auth_binding: auth_binding.as_ref(),
                 budget_limits: budget_limits.as_ref(),
                 runtime_mode: selected_runtime_mode,
@@ -33440,7 +33450,7 @@ impl MobActor {
         );
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         config.override_web_search = tool_category_overrides.web_search;
-        config.application_tool_policy = application_tool_policy;
+        build::apply_application_tool_policy_choice(&mut config, application_tool_policy);
         config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());

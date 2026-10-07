@@ -385,7 +385,9 @@ pub(crate) fn spawn_spec_from_desired_member(
                 }
             });
     spec.tool_category_overrides.web_search = material.overlay.tool_category_overrides.web_search;
-    spec.application_tool_policy = material.overlay.application_tool_policy.clone();
+    // Validated desired material is a selected policy value (an intentional
+    // Unmanaged included), never an absent choice.
+    spec.application_tool_policy = Some(material.overlay.application_tool_policy.clone());
     spec.auth_binding = material.overlay.auth_binding.clone().map(Into::into);
     spec.budget_limits = material.overlay.budget_limits.clone();
     spec.system_prompt_override =

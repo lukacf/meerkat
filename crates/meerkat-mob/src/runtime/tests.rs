@@ -1674,6 +1674,11 @@ struct CreateSessionRecord {
     /// over the durable identity's (`ResumeOverrideMask::provider_params`).
     provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     provider_params_masked: bool,
+    /// Whether the build carries the host's consequence-policy registry, and
+    /// whether a resume build carries its application policy over the durable
+    /// binding (`ResumeOverrideMask::application_tool_policy`).
+    has_policy_registry: bool,
+    application_tool_policy_masked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3809,6 +3814,14 @@ impl MockSessionService {
                     .build
                     .as_ref()
                     .is_some_and(|build| build.resume_override_mask.provider_params),
+                has_policy_registry: req
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.tool_consequence_policy_registry.is_some()),
+                application_tool_policy_masked: req
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.resume_override_mask.application_tool_policy),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -27396,6 +27409,52 @@ async fn revived_member_keeps_its_context_and_its_forks_inherit_it() {
             .app_context,
         Some(fork_source_app_context()),
         "a fork of the revived source inherits the source's original context"
+    );
+}
+
+/// Warm revival forwards the host's current consequence-policy registry and
+/// makes no policy choice of its own: the member keeps its durable binding,
+/// which only that registry can realize.
+#[tokio::test]
+async fn warm_revival_forwards_the_policy_registry_without_a_policy_choice() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let registry = Arc::new(
+        meerkat_core::ToolConsequencePolicyRegistry::new(
+            Vec::new(),
+            meerkat_core::PolicyEvaluationSupervisorConfig::default(),
+            None,
+        )
+        .expect("empty policy registry"),
+    );
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_tool_consequence_policy_registry(registry)
+        .create()
+        .await
+        .expect("create mob");
+    let identity = AgentIdentity::from("revived-under-registry");
+    let session = spawn_fork_source_with_build_inputs(&handle, &identity).await;
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard the member's live session");
+    handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("warm revival rebuilds the member");
+    wait_for_fork_source_settled(&handle, &session).await;
+    let revived = last_member_build(&service, &identity).await;
+    assert_eq!(revived.resume_session_id.as_ref(), Some(&session));
+    assert!(
+        revived.has_policy_registry,
+        "the revived build carries the host's current registry"
+    );
+    assert!(
+        !revived.application_tool_policy_masked,
+        "warm revival keeps the member's durable policy binding"
     );
 }
 

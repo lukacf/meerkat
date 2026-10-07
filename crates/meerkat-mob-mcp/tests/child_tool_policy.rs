@@ -203,32 +203,45 @@ fn child_definition(mob_id: &str) -> Value {
     })
 }
 
+/// The member calls `DENIED`, then `ALLOWED`, then answers.
+fn denied_then_allowed() -> impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static {
+    let step = AtomicUsize::new(0);
+    move |_request| match step.fetch_add(1, Ordering::SeqCst) {
+        0 => ScriptedTurn::ToolCall {
+            id: "call-denied".to_string(),
+            name: DENIED.to_string(),
+            args: json!({}),
+        },
+        1 => ScriptedTurn::ToolCall {
+            id: "call-allowed".to_string(),
+            name: ALLOWED.to_string(),
+            args: json!({}),
+        },
+        _ => ScriptedTurn::Text("done".to_string()),
+    }
+}
+
+/// `configure` over a state that offers every mob the recording host tools.
+fn with_host_tools(
+    dispatched: &Arc<Mutex<Vec<String>>>,
+    configure: impl FnOnce(MobMcpState) -> MobMcpState,
+) -> impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState {
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(HostTools(Arc::clone(dispatched)));
+    move |state, _root| {
+        let provider: meerkat_mob::ExternalToolsProvider =
+            Arc::new(move || Some(Arc::clone(&tools)));
+        configure(state.with_external_tools_provider(Some(provider)))
+    }
+}
+
 /// The child member calls `DENIED`, then `ALLOWED`, then answers.
 fn fixture(
     configure: impl FnOnce(MobMcpState) -> MobMcpState,
 ) -> (CouncilFixture, Arc<Mutex<Vec<String>>>) {
     let dispatched = Arc::new(Mutex::new(Vec::new()));
-    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(HostTools(Arc::clone(&dispatched)));
-    let step = AtomicUsize::new(0);
     let fixture = CouncilFixture::new_with(
-        move |_request| match step.fetch_add(1, Ordering::SeqCst) {
-            0 => ScriptedTurn::ToolCall {
-                id: "call-denied".to_string(),
-                name: DENIED.to_string(),
-                args: json!({}),
-            },
-            1 => ScriptedTurn::ToolCall {
-                id: "call-allowed".to_string(),
-                name: ALLOWED.to_string(),
-                args: json!({}),
-            },
-            _ => ScriptedTurn::Text("done".to_string()),
-        },
-        move |state, _root| {
-            let provider: meerkat_mob::ExternalToolsProvider =
-                Arc::new(move || Some(Arc::clone(&tools)));
-            configure(state.with_external_tools_provider(Some(provider)))
-        },
+        denied_then_allowed(),
+        with_host_tools(&dispatched, configure),
     );
     (fixture, dispatched)
 }
@@ -255,8 +268,8 @@ async fn create_child(fixture: &CouncilFixture) -> Result<String, ToolError> {
     .map(|_| mob_id)
 }
 
-/// Spawn one child member and run one turn; return the tools that ran.
-async fn run_child_turn(fixture: &CouncilFixture, dispatched: &Mutex<Vec<String>>) -> Vec<String> {
+/// Create the child mob and seat its one member.
+async fn seat_child_member(fixture: &CouncilFixture) -> MobId {
     let mob_id = create_child(fixture).await.expect("child mob is created");
     let mob_id = MobId::from(mob_id.as_str());
     fixture
@@ -271,15 +284,23 @@ async fn run_child_turn(fixture: &CouncilFixture, dispatched: &Mutex<Vec<String>
         )
         .await
         .expect("spawn the child member");
-    let handle = fixture
-        .state
-        .handle_for(&mob_id)
-        .await
-        .expect("child mob handle");
+    mob_id
+}
+
+/// Run one turn of `member` in `mob_id` (restoring the mob first when this
+/// lifetime has not met it yet); return the tools that reached the host.
+async fn run_member_turn(
+    fixture: &CouncilFixture,
+    mob_id: &MobId,
+    member: &str,
+    dispatched: &Mutex<Vec<String>>,
+) -> Vec<String> {
+    dispatched.lock().unwrap().clear();
+    let handle = fixture.state.handle_for(mob_id).await.expect("mob handle");
     let spec = BoundedResultSpec::new("turn", 4096).expect("bounded result spec");
     let work = handle
         .start_work_for_identity_bounded(
-            AgentIdentity::from("child-worker"),
+            AgentIdentity::from(member),
             WorkSpec::new(ContentInput::Text("go".to_string()), WorkOrigin::Internal),
             HandlingMode::Queue,
             spec.clone(),
@@ -290,7 +311,13 @@ async fn run_child_turn(fixture: &CouncilFixture, dispatched: &Mutex<Vec<String>
         .await
         .expect("turn completes within the failure bound")
         .expect("turn succeeds");
-    let ran = dispatched.lock().unwrap().clone();
+    dispatched.lock().unwrap().clone()
+}
+
+/// Spawn one child member and run one turn; return the tools that ran.
+async fn run_child_turn(fixture: &CouncilFixture, dispatched: &Mutex<Vec<String>>) -> Vec<String> {
+    let mob_id = seat_child_member(fixture).await;
+    let ran = run_member_turn(fixture, &mob_id, "child-worker", dispatched).await;
     fixture.teardown().await;
     ran
 }
@@ -784,6 +811,144 @@ async fn a_refused_delegate_reaches_the_model_as_a_tool_error_and_the_turn_conti
             .await
             .is_none(),
         "no implicit mob is created"
+    );
+    fixture.teardown().await;
+}
+
+/// The host as a managed host with a child policy that denies `DENIED`.
+fn managed(state: MobMcpState) -> MobMcpState {
+    state
+        .with_tool_consequence_policy_registry(registry())
+        .with_child_application_tool_policy(host_policy())
+}
+
+/// A child member seated while the host was unmanaged comes back, after a
+/// cold restart, under the host's current (tightened) child policy: the
+/// denied tool never reaches the host and its permitted sibling still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restored_child_member_runs_under_the_tightened_current_child_policy() {
+    let (mut fixture, dispatched) = fixture(|state| state);
+    let mob_id = seat_child_member(&fixture).await;
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "child-worker", &dispatched).await,
+        [DENIED, ALLOWED],
+        "the first lifetime is unmanaged"
+    );
+    fixture
+        .restart_cold_with(denied_then_allowed(), with_host_tools(&dispatched, managed))
+        .await;
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "child-worker", &dispatched).await,
+        [ALLOWED],
+        "the restored child member is governed by the current child policy"
+    );
+    fixture.teardown().await;
+}
+
+/// A child member seated under a managed policy is restored, after a cold
+/// restart under the same policy, with the host's current registry: it runs,
+/// and its policy still denies `DENIED`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restored_managed_child_member_keeps_its_registry_and_policy() {
+    let (mut fixture, dispatched) = fixture(managed);
+    let mob_id = seat_child_member(&fixture).await;
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "child-worker", &dispatched).await,
+        [ALLOWED]
+    );
+    fixture
+        .restart_cold_with(denied_then_allowed(), with_host_tools(&dispatched, managed))
+        .await;
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "child-worker", &dispatched).await,
+        [ALLOWED],
+        "the restored managed child member runs under its policy"
+    );
+    fixture.teardown().await;
+}
+
+/// Explicitly resuming a child member's existing session under a tightened
+/// child policy builds it with the current policy, not the session's durable
+/// Unmanaged binding.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicitly_resumed_child_member_runs_under_the_current_child_policy() {
+    let (mut fixture, dispatched) = fixture(|state| state);
+    let mob_id = seat_child_member(&fixture).await;
+    let session = fixture
+        .state
+        .handle_for(&mob_id)
+        .await
+        .expect("child mob handle")
+        .resolve_bridge_session_id(&AgentIdentity::from("child-worker"))
+        .await
+        .expect("child member session");
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "child-worker", &dispatched).await,
+        [DENIED, ALLOWED],
+        "the first lifetime is unmanaged"
+    );
+    fixture
+        .state
+        .mob_retire(&mob_id, AgentIdentity::from("child-worker"))
+        .await
+        .expect("retire the member, keeping its session");
+    fixture
+        .restart_cold_with(denied_then_allowed(), with_host_tools(&dispatched, managed))
+        .await;
+    let mut spec = meerkat_mob::SpawnMemberSpec::host_root(
+        meerkat_mob::ProfileName::from("worker"),
+        AgentIdentity::from("child-worker"),
+    );
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    fixture
+        .state
+        .mob_spawn_spec(&mob_id, spec.with_resume_bridge_session_id(session))
+        .await
+        .expect("resume the member's session explicitly");
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "child-worker", &dispatched).await,
+        [ALLOWED],
+        "the explicitly resumed member is governed by the current child policy"
+    );
+    fixture.teardown().await;
+}
+
+/// A host mob member seated under an explicit Provider policy keeps that
+/// durable binding across a cold restart with no replacement choice, and the
+/// current registry realizes it: no restore handoff loosens it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restored_host_mob_member_keeps_its_durable_policy() {
+    let (mut fixture, dispatched) =
+        fixture(|state| state.with_tool_consequence_policy_registry(registry()));
+    fixture.seed_source_mob(&[]).await;
+    let mob_id = fixture.source_mob_id();
+    let mut spec = meerkat_mob::SpawnMemberSpec::host_root(
+        meerkat_mob::ProfileName::from("participant"),
+        AgentIdentity::from("guarded"),
+    );
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    spec.application_tool_policy = Some(host_policy());
+    fixture
+        .state
+        .mob_spawn_spec(&mob_id, spec)
+        .await
+        .expect("seat a host member under an explicit policy");
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "guarded", &dispatched).await,
+        [ALLOWED]
+    );
+    fixture
+        .restart_cold_with(
+            denied_then_allowed(),
+            with_host_tools(&dispatched, |state| {
+                state.with_tool_consequence_policy_registry(registry())
+            }),
+        )
+        .await;
+    assert_eq!(
+        run_member_turn(&fixture, &mob_id, "guarded", &dispatched).await,
+        [ALLOWED],
+        "the restored host member keeps its durable policy"
     );
     fixture.teardown().await;
 }

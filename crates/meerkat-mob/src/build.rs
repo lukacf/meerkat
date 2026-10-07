@@ -998,6 +998,24 @@ fn decode_legacy_member_alias_segment(encoded: &str) -> Option<String> {
     Some(decoded)
 }
 
+/// Apply a member's optional application consequence-policy choice to its
+/// build `config`, the one handoff every local spawn and rebuild uses.
+///
+/// `Some(binding)` is an explicit current host choice (an intentional
+/// `Unmanaged` included): the member is built with it, and the override mask
+/// keeps it over a resumed session's durable binding. `None` is no choice:
+/// `config` keeps its binding, so a fresh member gets the default and a
+/// resumed member keeps the binding its durable session records.
+pub(crate) fn apply_application_tool_policy_choice(
+    config: &mut AgentBuildConfig,
+    choice: Option<meerkat_core::ApplicationToolPolicyBinding>,
+) {
+    if let Some(binding) = choice {
+        config.application_tool_policy = binding;
+        config.resume_override_mask.application_tool_policy = true;
+    }
+}
+
 /// Bridge an [`AgentBuildConfig`] to a [`CreateSessionRequest`].
 ///
 /// This is the second step: the config is converted to the service-level

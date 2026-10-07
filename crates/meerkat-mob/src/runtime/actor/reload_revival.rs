@@ -723,8 +723,10 @@ impl MobActor {
             tool_access_policy: None,
             tool_dispatch_admission: None,
             web_search_override: Default::default(),
-            application_tool_policy: Default::default(),
-            tool_consequence_policy_registry: None,
+            // No policy choice: the member keeps its durable binding, which
+            // the current registry realizes.
+            application_tool_policy: None,
+            tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
             system_prompt_override: None,
             resume_from_role: None,
             resume_id: work.session_id.clone(),

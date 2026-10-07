@@ -5614,8 +5614,14 @@ pub struct SpawnMemberSpec {
     pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     /// Administrative per-category overrides carried by durable identity intent.
     pub tool_category_overrides: meerkat_core::ToolCategoryOverrides,
-    /// Stable application consequence-policy identity for this member.
-    pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
+    /// The host's application consequence-policy choice for this member.
+    ///
+    /// `None` is no choice: a fresh member gets the default (Unmanaged), and
+    /// a member resumed on a durable session keeps the binding that session
+    /// records. `Some(binding)` is an explicit current choice, including an
+    /// intentional `Some(Unmanaged)`: a fresh member is built with it, and a
+    /// resumed member is built with it in place of its durable binding.
+    pub application_tool_policy: Option<meerkat_core::ApplicationToolPolicyBinding>,
     /// Hard resource caps for the spawned member session.
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
     /// When true, automatically wire this member to its spawner.
@@ -5802,7 +5808,7 @@ impl SpawnMemberSpec {
             tool_access_policy: None,
             tool_dispatch_admission: None,
             tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
-            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+            application_tool_policy: None,
             budget_limits: None,
             auto_wire_parent: false,
             additional_instructions: None,

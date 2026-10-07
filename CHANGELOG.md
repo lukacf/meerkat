@@ -37,6 +37,15 @@ them.
 
 ### Breaking
 
+- `SpawnMemberSpec::application_tool_policy` is now
+  `Option<ApplicationToolPolicyBinding>`. `None` (the default) is no host
+  choice: a fresh member gets the default (Unmanaged) and a resumed member
+  keeps the binding its durable session records. `Some(binding)` is an
+  explicit current choice, including an intentional `Some(Unmanaged)`, and
+  wins over a resumed member's durable binding. Migrate direct assignments
+  to `spec.application_tool_policy = Some(binding)`. Stored session metadata
+  and wire bindings are unchanged.
+
 - The credential routes listed under Fixed (token, refresh and
   device-code exchanges; the Claude, ChatGPT and Code Assist OAuth runtimes;
   the Google and Azure credential exchanges; Code Assist onboarding; the
@@ -445,6 +454,16 @@ them.
     the web `loginCancel` accepts `{mcp, attempt_ref}`.
 
 ### Fixed
+
+- Mob members resumed on a durable session now keep their application
+  consequence policy working. Cold restore, its fresh fallback, explicit
+  resume and warm revival now forward the host's current policy registry, so
+  a member with a durable Provider binding no longer fails to resume for lack
+  of a registry. An explicit current policy choice (for example a tightened
+  child-mob policy) now replaces the member's older durable binding on
+  resume instead of being overwritten by it. A placed (remote) member's
+  resume still carries a concrete binding and cannot yet distinguish an
+  explicit choice from none.
 
 - Mob destruction no longer overflows normal 2 MiB worker stacks in debug builds when retiring session-backed children.
 - These credential routes no longer follow redirects: the token and

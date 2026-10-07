@@ -1049,6 +1049,51 @@ AuthorizeLiveContextCausalTailBatchRunning_ForEach2_live_context_queued_disposit
 RECURSIVE AuthorizeLiveContextCausalTailBatchRunning_ForEach2_live_context_queued_session_by_append(_, _)
 AuthorizeLiveContextCausalTailBatchRunning_ForEach2_live_context_queued_session_by_append(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET tail_cursor == item IN LET next_acc == MapRemove(acc, (IF "value" \in DOMAIN (IF (tail_cursor \in DOMAIN live_context_queued_append_by_cursor) THEN Some((IF tail_cursor \in DOMAIN live_context_queued_append_by_cursor THEN live_context_queued_append_by_cursor[tail_cursor] ELSE "None")) ELSE None) THEN (IF (tail_cursor \in DOMAIN live_context_queued_append_by_cursor) THEN Some((IF tail_cursor \in DOMAIN live_context_queued_append_by_cursor THEN live_context_queued_append_by_cursor[tail_cursor] ELSE "None")) ELSE None)["value"] ELSE None)) IN AuthorizeLiveContextCausalTailBatchRunning_ForEach2_live_context_queued_session_by_append(next_acc, remaining \ {item})
 
+RECURSIVE StageVisibilityFilterIdle_ForEach3_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterIdle_ForEach3_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in DOMAIN outer_witnesses)) /\ ~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(active_filter)))) THEN MapRemove(acc, name) ELSE acc IN StageVisibilityFilterIdle_ForEach3_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterIdle_ForEach4_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterIdle_ForEach4_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF "value" \in DOMAIN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)) IN StageVisibilityFilterIdle_ForEach4_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterAttached_ForEach5_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterAttached_ForEach5_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in DOMAIN outer_witnesses)) /\ ~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(active_filter)))) THEN MapRemove(acc, name) ELSE acc IN StageVisibilityFilterAttached_ForEach5_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterAttached_ForEach6_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterAttached_ForEach6_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF "value" \in DOMAIN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)) IN StageVisibilityFilterAttached_ForEach6_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterRunning_ForEach7_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterRunning_ForEach7_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in DOMAIN outer_witnesses)) /\ ~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(active_filter)))) THEN MapRemove(acc, name) ELSE acc IN StageVisibilityFilterRunning_ForEach7_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterRunning_ForEach8_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterRunning_ForEach8_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF "value" \in DOMAIN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)) IN StageVisibilityFilterRunning_ForEach8_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterRetired_ForEach9_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterRetired_ForEach9_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in DOMAIN outer_witnesses)) /\ ~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(active_filter)))) THEN MapRemove(acc, name) ELSE acc IN StageVisibilityFilterRetired_ForEach9_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterRetired_ForEach10_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterRetired_ForEach10_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF "value" \in DOMAIN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)) IN StageVisibilityFilterRetired_ForEach10_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterStopped_ForEach11_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterStopped_ForEach11_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in DOMAIN outer_witnesses)) /\ ~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(active_filter)))) THEN MapRemove(acc, name) ELSE acc IN StageVisibilityFilterStopped_ForEach11_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE StageVisibilityFilterStopped_ForEach12_filter_visibility_witnesses(_, _, _)
+StageVisibilityFilterStopped_ForEach12_filter_visibility_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF "value" \in DOMAIN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN outer_witnesses) THEN Some((IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)) IN StageVisibilityFilterStopped_ForEach12_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE CommitVisibilityFilterIdle_ForEach13_filter_visibility_witnesses(_, _, _)
+CommitVisibilityFilterIdle_ForEach13_filter_visibility_witnesses(acc, remaining, outer_filter) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(outer_filter)))) THEN MapRemove(acc, name) ELSE acc IN CommitVisibilityFilterIdle_ForEach13_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_filter)
+
+RECURSIVE CommitVisibilityFilterAttached_ForEach14_filter_visibility_witnesses(_, _, _)
+CommitVisibilityFilterAttached_ForEach14_filter_visibility_witnesses(acc, remaining, outer_filter) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(outer_filter)))) THEN MapRemove(acc, name) ELSE acc IN CommitVisibilityFilterAttached_ForEach14_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_filter)
+
+RECURSIVE CommitVisibilityFilterRunning_ForEach15_filter_visibility_witnesses(_, _, _)
+CommitVisibilityFilterRunning_ForEach15_filter_visibility_witnesses(acc, remaining, outer_filter) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(outer_filter)))) THEN MapRemove(acc, name) ELSE acc IN CommitVisibilityFilterRunning_ForEach15_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_filter)
+
+RECURSIVE CommitVisibilityFilterRetired_ForEach16_filter_visibility_witnesses(_, _, _)
+CommitVisibilityFilterRetired_ForEach16_filter_visibility_witnesses(acc, remaining, outer_filter) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(outer_filter)))) THEN MapRemove(acc, name) ELSE acc IN CommitVisibilityFilterRetired_ForEach16_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_filter)
+
+RECURSIVE CommitVisibilityFilterStopped_ForEach17_filter_visibility_witnesses(_, _, _)
+CommitVisibilityFilterStopped_ForEach17_filter_visibility_witnesses(acc, remaining, outer_filter) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == IF (~((name \in meerkat_tool_visibility_filter_names(inherited_base_filter))) /\ ~((name \in meerkat_tool_visibility_filter_names(outer_filter)))) THEN MapRemove(acc, name) ELSE acc IN CommitVisibilityFilterStopped_ForEach17_filter_visibility_witnesses(next_acc, remaining \ {item}, outer_filter)
+
 Initialize ==
     /\ phase = "Initializing"
     /\ phase' = "Idle"
@@ -28554,12 +28599,13 @@ StageVisibilityFilterIdle(filter, witnesses) ==
     /\ meerkat_tool_visibility_filter_witnesses_are_catalog_backed(witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(filter, witnesses, filter_visibility_authority_catalog)
+    /\ (\A name \in meerkat_tool_visibility_filter_names(inherited_base_filter) : (IF ~((name \in DOMAIN witnesses)) THEN TRUE ELSE (IF ~((name \in DOMAIN filter_visibility_witnesses)) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None) = (IF "value" \in DOMAIN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)))))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ next_staged_visibility_revision' = (next_staged_visibility_revision + 1)
     /\ staged_filter' = filter
     /\ staged_visibility_revision' = (next_staged_visibility_revision + 1)
-    /\ filter_visibility_witnesses' = witnesses
+    /\ filter_visibility_witnesses' = StageVisibilityFilterIdle_ForEach4_filter_visibility_witnesses(StageVisibilityFilterIdle_ForEach3_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, witnesses), DOMAIN witnesses, witnesses)
     /\ UnchangedFrame_ab44f90d6370390b
 
 
@@ -28568,12 +28614,13 @@ StageVisibilityFilterAttached(filter, witnesses) ==
     /\ meerkat_tool_visibility_filter_witnesses_are_catalog_backed(witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(filter, witnesses, filter_visibility_authority_catalog)
+    /\ (\A name \in meerkat_tool_visibility_filter_names(inherited_base_filter) : (IF ~((name \in DOMAIN witnesses)) THEN TRUE ELSE (IF ~((name \in DOMAIN filter_visibility_witnesses)) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None) = (IF "value" \in DOMAIN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)))))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ next_staged_visibility_revision' = (next_staged_visibility_revision + 1)
     /\ staged_filter' = filter
     /\ staged_visibility_revision' = (next_staged_visibility_revision + 1)
-    /\ filter_visibility_witnesses' = witnesses
+    /\ filter_visibility_witnesses' = StageVisibilityFilterAttached_ForEach6_filter_visibility_witnesses(StageVisibilityFilterAttached_ForEach5_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, witnesses), DOMAIN witnesses, witnesses)
     /\ UnchangedFrame_ab44f90d6370390b
 
 
@@ -28582,12 +28629,13 @@ StageVisibilityFilterRunning(filter, witnesses) ==
     /\ meerkat_tool_visibility_filter_witnesses_are_catalog_backed(witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(filter, witnesses, filter_visibility_authority_catalog)
+    /\ (\A name \in meerkat_tool_visibility_filter_names(inherited_base_filter) : (IF ~((name \in DOMAIN witnesses)) THEN TRUE ELSE (IF ~((name \in DOMAIN filter_visibility_witnesses)) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None) = (IF "value" \in DOMAIN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)))))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ next_staged_visibility_revision' = (next_staged_visibility_revision + 1)
     /\ staged_filter' = filter
     /\ staged_visibility_revision' = (next_staged_visibility_revision + 1)
-    /\ filter_visibility_witnesses' = witnesses
+    /\ filter_visibility_witnesses' = StageVisibilityFilterRunning_ForEach8_filter_visibility_witnesses(StageVisibilityFilterRunning_ForEach7_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, witnesses), DOMAIN witnesses, witnesses)
     /\ UnchangedFrame_ab44f90d6370390b
 
 
@@ -28596,12 +28644,13 @@ StageVisibilityFilterRetired(filter, witnesses) ==
     /\ meerkat_tool_visibility_filter_witnesses_are_catalog_backed(witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(filter, witnesses, filter_visibility_authority_catalog)
+    /\ (\A name \in meerkat_tool_visibility_filter_names(inherited_base_filter) : (IF ~((name \in DOMAIN witnesses)) THEN TRUE ELSE (IF ~((name \in DOMAIN filter_visibility_witnesses)) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None) = (IF "value" \in DOMAIN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)))))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ next_staged_visibility_revision' = (next_staged_visibility_revision + 1)
     /\ staged_filter' = filter
     /\ staged_visibility_revision' = (next_staged_visibility_revision + 1)
-    /\ filter_visibility_witnesses' = witnesses
+    /\ filter_visibility_witnesses' = StageVisibilityFilterRetired_ForEach10_filter_visibility_witnesses(StageVisibilityFilterRetired_ForEach9_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, witnesses), DOMAIN witnesses, witnesses)
     /\ UnchangedFrame_ab44f90d6370390b
 
 
@@ -28610,12 +28659,13 @@ StageVisibilityFilterStopped(filter, witnesses) ==
     /\ meerkat_tool_visibility_filter_witnesses_are_catalog_backed(witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, witnesses, filter_visibility_authority_catalog)
     /\ meerkat_tool_visibility_filter_has_catalog_witnesses(filter, witnesses, filter_visibility_authority_catalog)
+    /\ (\A name \in meerkat_tool_visibility_filter_names(inherited_base_filter) : (IF ~((name \in DOMAIN witnesses)) THEN TRUE ELSE (IF ~((name \in DOMAIN filter_visibility_witnesses)) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN witnesses) THEN Some((IF name \in DOMAIN witnesses THEN witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None) = (IF "value" \in DOMAIN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None) THEN (IF (name \in DOMAIN filter_visibility_witnesses) THEN Some((IF name \in DOMAIN filter_visibility_witnesses THEN filter_visibility_witnesses[name] ELSE "None")) ELSE None)["value"] ELSE None)))))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ next_staged_visibility_revision' = (next_staged_visibility_revision + 1)
     /\ staged_filter' = filter
     /\ staged_visibility_revision' = (next_staged_visibility_revision + 1)
-    /\ filter_visibility_witnesses' = witnesses
+    /\ filter_visibility_witnesses' = StageVisibilityFilterStopped_ForEach12_filter_visibility_witnesses(StageVisibilityFilterStopped_ForEach11_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, witnesses), DOMAIN witnesses, witnesses)
     /\ UnchangedFrame_ab44f90d6370390b
 
 
@@ -28704,7 +28754,7 @@ CommitVisibilityFilterIdle(filter, revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_filter' = filter
     /\ active_visibility_revision' = revision
-    /\ filter_visibility_witnesses' = IF (filter = [tag |-> "All"]) THEN [x \in {} |-> None] ELSE filter_visibility_witnesses
+    /\ filter_visibility_witnesses' = CommitVisibilityFilterIdle_ForEach13_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, filter)
     /\ UnchangedFrame_113400d0fb8182d4
 
 
@@ -28718,7 +28768,7 @@ CommitVisibilityFilterAttached(filter, revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_filter' = filter
     /\ active_visibility_revision' = revision
-    /\ filter_visibility_witnesses' = IF (filter = [tag |-> "All"]) THEN [x \in {} |-> None] ELSE filter_visibility_witnesses
+    /\ filter_visibility_witnesses' = CommitVisibilityFilterAttached_ForEach14_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, filter)
     /\ UnchangedFrame_113400d0fb8182d4
 
 
@@ -28732,7 +28782,7 @@ CommitVisibilityFilterRunning(filter, revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_filter' = filter
     /\ active_visibility_revision' = revision
-    /\ filter_visibility_witnesses' = IF (filter = [tag |-> "All"]) THEN [x \in {} |-> None] ELSE filter_visibility_witnesses
+    /\ filter_visibility_witnesses' = CommitVisibilityFilterRunning_ForEach15_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, filter)
     /\ UnchangedFrame_113400d0fb8182d4
 
 
@@ -28746,7 +28796,7 @@ CommitVisibilityFilterRetired(filter, revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_filter' = filter
     /\ active_visibility_revision' = revision
-    /\ filter_visibility_witnesses' = IF (filter = [tag |-> "All"]) THEN [x \in {} |-> None] ELSE filter_visibility_witnesses
+    /\ filter_visibility_witnesses' = CommitVisibilityFilterRetired_ForEach16_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, filter)
     /\ UnchangedFrame_113400d0fb8182d4
 
 
@@ -28760,7 +28810,7 @@ CommitVisibilityFilterStopped(filter, revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_filter' = filter
     /\ active_visibility_revision' = revision
-    /\ filter_visibility_witnesses' = IF (filter = [tag |-> "All"]) THEN [x \in {} |-> None] ELSE filter_visibility_witnesses
+    /\ filter_visibility_witnesses' = CommitVisibilityFilterStopped_ForEach17_filter_visibility_witnesses(filter_visibility_witnesses, DOMAIN filter_visibility_witnesses, filter)
     /\ UnchangedFrame_113400d0fb8182d4
 
 

@@ -33748,10 +33748,32 @@ macro_rules! meerkat_catalog_machine_dsl {
                 meerkat_tool_visibility_filter_has_catalog_witnesses(
                     filter, witnesses, self.filter_visibility_authority_catalog)
             }
+            // The inherited ceiling's witnesses live in the same map; a stage
+            // may restate them but never re-associate a ceiling name with
+            // another identity.
+            guard "inherited_filter_witnesses_are_not_replaced" {
+                for_all(name in meerkat_tool_visibility_filter_names(self.inherited_base_filter),
+                    !witnesses.contains_key(name)
+                    || !self.filter_visibility_witnesses.contains_key(name)
+                    || witnesses.get_cloned(name).get("value")
+                        == self.filter_visibility_witnesses.get_cloned(name).get("value"))
+            }
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_filter = filter;
-                self.filter_visibility_witnesses = witnesses;
+                // Keep the witnesses the inherited ceiling and the live active
+                // filter still need; drop only those no live filter names.
+                for name in self.filter_visibility_witnesses.keys() {
+                    if !witnesses.contains_key(name)
+                        && !meerkat_tool_visibility_filter_names(self.inherited_base_filter).contains(name)
+                        && !meerkat_tool_visibility_filter_names(self.active_filter).contains(name)
+                    {
+                        self.filter_visibility_witnesses.remove(name);
+                    }
+                }
+                for name in witnesses.keys() {
+                    self.filter_visibility_witnesses.insert(name, witnesses.get_cloned(name).get("value"));
+                }
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
@@ -33817,13 +33839,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_filter = filter;
                 self.active_visibility_revision = revision;
                 // Witnesses authorize named filters only. Once the staged
-                // default becomes active, retaining witnesses from the
-                // predecessor filter would falsely preserve that filter's
+                // filter becomes active, retaining witnesses only the retired
+                // predecessor filter named would falsely preserve its
                 // authority and can pin a resumed session to obsolete tool
-                // visibility. Capability and inherited-base filters have
-                // separate state and are intentionally untouched here.
-                if filter == ToolFilter::All {
-                    self.filter_visibility_witnesses = EmptyMap;
+                // visibility. The inherited ceiling stays live and shares
+                // this map, so its witnesses are kept.
+                for name in self.filter_visibility_witnesses.keys() {
+                    if !meerkat_tool_visibility_filter_names(self.inherited_base_filter).contains(name)
+                        && !meerkat_tool_visibility_filter_names(filter).contains(name)
+                    {
+                        self.filter_visibility_witnesses.remove(name);
+                    }
                 }
             }
             to Idle

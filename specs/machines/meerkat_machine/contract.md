@@ -21476,6 +21476,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Idle`
 
@@ -21486,6 +21487,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Attached`
 
@@ -21496,6 +21498,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Running`
 
@@ -21506,6 +21509,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Retired`
 
@@ -21516,6 +21520,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `filter_witnesses_match_machine_catalog`
   - `active_filter_has_machine_catalog_witnesses`
   - `staged_filter_has_machine_catalog_witnesses`
+  - `inherited_filter_witnesses_are_not_replaced`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Stopped`
 

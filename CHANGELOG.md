@@ -432,6 +432,14 @@ them.
 
 ### Fixed
 
+- Inherited tool ceilings lost their identity witnesses after the first
+  model call, so resuming the session was refused. The session machine keeps
+  one witness map for the ordinary filter and the inherited ceiling, and a
+  model-call boundary that committed an unrestricted filter cleared the whole
+  map; staging a filter replaced it. Stage and commit now keep the witnesses
+  the inherited ceiling and the live active and staged filters still name,
+  drop only those no live filter names, and a stage cannot re-associate a
+  ceiling name with another identity.
 - GPT Live: a typed row delivered late behind a history summary, together
   with newer speech that corrected part of it, is now framed as newer than the
   summary (#1800). The summary was snapshotted before the row was typed, so it

@@ -5181,26 +5181,30 @@ async fn complete_until_an_elapsed_deadline_leaves_a_queued_callback_undelivered
     assert!(matches!(closed.attempt, McpOAuthAttemptCleanup::Retired));
 }
 
-/// The legacy tie: `complete` with a zero window still polls a queued
-/// callback once, as its consuming wait always did. Whether the drain also
-/// finishes before the timer fires is timing, so either a completed login
-/// or a timeout is accepted; the attempt is never left admitted.
+/// The legacy tie: after the strict borrowed wait joins the drain without
+/// delivering its queued callback, the zero-window consuming wait must
+/// poll that callback first and complete through the cached successful join.
 #[tokio::test]
 async fn complete_with_a_zero_window_keeps_the_legacy_poll_first_tie() {
     let (base, state) = spawn_oauth_fixture().await;
     let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
     let target = split_target(&base, "legacy-poll-first");
-    let pending = started_loopback_login(&authority, &target).await;
+    let mut pending = started_loopback_login(&authority, &target).await;
     let start = pending.start().clone();
     follow_authorize(&start.authorize_url).await;
 
-    match pending.complete(Duration::ZERO).await {
-        Ok(_) => assert_eq!(state.token_requests.lock().len(), 1),
-        Err(McpOAuthError::Callback { .. }) => {
-            assert!(state.token_requests.lock().is_empty());
-        }
-        Err(other) => panic!("unexpected completion: {other:?}"),
-    }
+    let waited = pending.complete_until(tokio::time::Instant::now()).await;
+    assert!(
+        matches!(waited, Err(McpOAuthError::Callback { .. })),
+        "{waited:?}"
+    );
+    assert!(state.token_requests.lock().is_empty());
+
+    pending
+        .complete(Duration::ZERO)
+        .await
+        .expect("the queued callback and cached drain are ready on the first poll");
+    assert_eq!(state.token_requests.lock().len(), 1);
     assert_attempt_retired(&authority, &target, &start).await;
 }
 

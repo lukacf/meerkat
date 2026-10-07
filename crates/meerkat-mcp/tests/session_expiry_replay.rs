@@ -29,6 +29,10 @@ struct Fixture {
     execute_then_expire: AtomicBool,
     /// Whether `tools/call` answers `404` (the session was dropped).
     expire_calls: AtomicBool,
+    /// Whether `tools/call` is routed with a same-origin 307 to `/mcp/`,
+    /// whose handler fails.
+    redirect_calls: AtomicBool,
+    redirected_posts: AtomicUsize,
 }
 
 async fn mcp(State(fixture): State<Arc<Fixture>>, headers: HeaderMap, body: String) -> Response {
@@ -63,6 +67,9 @@ async fn mcp(State(fixture): State<Arc<Fixture>>, headers: HeaderMap, body: Stri
                 "a call always carries the session it was admitted in"
             );
             fixture.tool_posts.fetch_add(1, Ordering::SeqCst);
+            if fixture.redirect_calls.load(Ordering::SeqCst) {
+                return (StatusCode::TEMPORARY_REDIRECT, [("location", "/mcp/")]).into_response();
+            }
             if fixture.expire_calls.load(Ordering::SeqCst) {
                 if fixture.execute_then_expire.load(Ordering::SeqCst) {
                     fixture.executions.fetch_add(1, Ordering::SeqCst);
@@ -84,6 +91,13 @@ async fn start(fixture: Arc<Fixture>) -> String {
             post(mcp)
                 .get(|| async { StatusCode::METHOD_NOT_ALLOWED })
                 .delete(|| async { StatusCode::OK }),
+        )
+        .route(
+            "/mcp/",
+            post(|State(fixture): State<Arc<Fixture>>| async move {
+                fixture.redirected_posts.fetch_add(1, Ordering::SeqCst);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }),
         )
         .with_state(fixture);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -204,4 +218,39 @@ async fn the_converted_protocol_wrapper_keeps_the_typed_outcome_and_refusal() {
     assert_eq!(fixture.tool_posts.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.initializes.load(Ordering::SeqCst), 1);
     let _ = protocol.close().await;
+}
+
+/// A tool call routed by a same-origin redirect whose handler then fails:
+/// two physical POSTs, a typed uncertain outcome, and no re-send. A later
+/// independent call on the same connection is unaffected.
+#[tokio::test]
+async fn a_redirected_tool_call_that_fails_is_uncertain_and_not_resent() {
+    let fixture = Arc::new(Fixture::default());
+    fixture.redirect_calls.store(true, Ordering::SeqCst);
+    let url = start(Arc::clone(&fixture)).await;
+    let config = McpServerConfig::streamable_http("redirected", url, HashMap::new());
+    let connection = McpConnection::connect(&config).await.unwrap();
+    let error = connection
+        .call_tool("effect", &json!({"n": 1}))
+        .await
+        .expect_err("the routed handler failed");
+    assert!(
+        matches!(&error, McpError::RedirectedOutcomeUncertain { tool, .. } if tool == "effect"),
+        "{error:?}"
+    );
+    assert_eq!(fixture.tool_posts.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.redirected_posts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.initializes.load(Ordering::SeqCst),
+        1,
+        "no reinitialization"
+    );
+    // Independent control: an unrouted call on the same connection runs.
+    fixture.redirect_calls.store(false, Ordering::SeqCst);
+    connection
+        .call_tool("effect", &json!({"n": 2}))
+        .await
+        .unwrap();
+    assert_eq!(fixture.tool_posts.load(Ordering::SeqCst), 2);
+    let _ = connection.close().await;
 }

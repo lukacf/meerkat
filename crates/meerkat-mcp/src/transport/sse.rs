@@ -230,14 +230,15 @@ static DEFAULT_SSE_CLIENT: std::sync::LazyLock<
     Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
 > = std::sync::LazyLock::new(meerkat_auth_core::auth_oauth::same_origin_credential_http_client);
 
-/// A redirect the client did not follow (another origin, or past the hop
-/// limit), refused by its status before any header or body is read.
+/// A redirect answer the client's configured redirect policy did not follow
+/// (for example another origin, the hop limit, a protected call, or a
+/// missing or invalid `Location`), refused by its status before any header
+/// or body is read.
 fn refuse_redirect(status: reqwest::StatusCode) -> Result<(), SseTransportError<reqwest::Error>> {
     if status.is_redirection() {
         return Err(SseTransportError::Io(std::io::Error::other(format!(
-            "MCP server answered with a redirect (status {}) to another origin or past {} same-origin hops; refused",
-            status.as_u16(),
-            meerkat_auth_core::auth_oauth::MAX_SAME_ORIGIN_REDIRECTS
+            "MCP server answered with a redirect (status {}) that the configured redirect policy does not follow; refused",
+            status.as_u16()
         ))));
     }
     Ok(())
@@ -313,12 +314,8 @@ impl SseClient for ReqwestSseClient {
             request_builder = request_builder.bearer_auth(auth_header);
         }
         let response = request_builder.send().await?;
+        // Every unfollowed redirect, protected or not, is refused here.
         refuse_redirect(response.status())?;
-        if protected && response.status().is_redirection() {
-            return Err(SseTransportError::Io(std::io::Error::other(
-                "protected MCP redirect refused",
-            )));
-        }
         response
             .error_for_status()
             .map_err(SseTransportError::from)

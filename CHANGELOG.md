@@ -42,7 +42,8 @@ them.
   - `ToolError` gains `OutcomeUncertain { name, reason }` (error code
     `outcome_uncertain`), and `ToolDispatchTerminalErrorKind` gains
     `OutcomeUncertain`;
-  - `McpError` gains `SessionExpired { server, tool }`.
+  - `McpError` gains `SessionExpired { server, tool }` and
+    `RedirectedOutcomeUncertain { server, tool, reason }`.
   Behaviour-only (not measured by the gate): a `tools/call` whose session
   the server drops (`404`) is reported as `outcome_uncertain` instead of
   being re-sent in a new session, and later calls on that connection are
@@ -56,11 +57,15 @@ them.
 
 - Behaviour-only (not measured by the gate): MCP Streamable HTTP and
   legacy SSE connections and HTTP skills sources follow only same-origin
-  redirects (same scheme, host and port; at most 3 hops). A redirect to
-  another origin, a scheme change such as https to http, or a longer chain
-  is now a typed refusal instead of being followed. A server or source
-  that relied on a cross-origin redirect needs its final URL configured.
-  The `rkat doctor` self-hosted probe follows no redirect.
+  redirects (same scheme, host and port; at most 3 hops; a revisited URL
+  stops). Any redirect the policy does not follow is a typed refusal by
+  status. A server or source that relied on a cross-origin redirect needs
+  its final URL configured. The `rkat doctor` self-hosted probe follows no
+  redirect. A redirected MCP tool call that then fails is reported as
+  `outcome_uncertain` (`McpError::RedirectedOutcomeUncertain`): a followed
+  redirect means more than one physical request, and whether a server
+  routes before or after acting is a deployment property, not something
+  HTTP or MCP guarantees.
 
 - The credential routes listed under Fixed (token, refresh and
   device-code exchanges; the Claude, ChatGPT and Code Assist OAuth runtimes;
@@ -329,11 +334,13 @@ them.
   cross-host redirect, but never configured custom headers (an MCP
   `headers` entry or a skills auth header), and it compares only host and
   port, so `https://h:8443` to `http://h:8443` kept `Authorization` over
-  cleartext. MCP Streamable HTTP and SSE connections and HTTP skills
-  sources now follow only same-origin redirects through
-  `auth_oauth::same_origin_credential_http_client` (a trailing-slash `307`
-  keeps working), and refuse anything else by its status before reading
-  any header or body. The doctor's self-hosted probe follows none. A
+  cleartext. MCP Streamable HTTP and SSE connections now follow only
+  same-origin redirects through
+  `auth_oauth::same_origin_credential_http_client`, and HTTP skills
+  sources apply the same policy through a local equivalent (the skills
+  crate does not depend on auth-core). A trailing-slash `307` keeps
+  working; anything the policy does not follow is refused by its status
+  before reading any header or body. The doctor's self-hosted probe follows none. A
   client that fails to build is a typed error, never a default client.
 
 - These credential routes no longer follow redirects: the token and

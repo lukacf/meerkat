@@ -2863,7 +2863,7 @@ fn tool_call_error(tool: &str, error: McpError) -> ToolError {
         McpError::ToolNotFound(name) => ToolError::NotFound { name },
         // Sent once, never re-sent, result lost with the session: neither
         // success nor denial.
-        error @ McpError::SessionExpired { .. } => {
+        error @ (McpError::SessionExpired { .. } | McpError::RedirectedOutcomeUncertain { .. }) => {
             ToolError::outcome_uncertain(tool, error.to_string())
         }
         other => ToolError::execution_failed(other.to_string()),

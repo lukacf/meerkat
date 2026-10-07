@@ -1045,3 +1045,130 @@ async fn streamable_http_follows_a_same_origin_trailing_slash_redirect() {
     );
     assert!(bodies[0].contains("tools/call"), "{}", bodies[0]);
 }
+
+/// A same-origin route: `/mcp` answers 307 to `/mcp/`, which answers with
+/// `final_status`. Counts the physical POSTs on each path separately.
+async fn same_origin_redirect_fixture(
+    final_status: axum::http::StatusCode,
+) -> (HttpFixture, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let routed = Arc::new(AtomicUsize::new(0));
+    let handled = Arc::new(AtomicUsize::new(0));
+    let (routed_count, handled_count) = (routed.clone(), handled.clone());
+    let server = HttpFixture::start(
+        axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(move || {
+                    let routed = routed_count.clone();
+                    async move {
+                        routed.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::TEMPORARY_REDIRECT,
+                            [("location", "/mcp/")],
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/mcp/",
+                axum::routing::post(move || {
+                    let handled = handled_count.clone();
+                    async move {
+                        handled.fetch_add(1, Ordering::SeqCst);
+                        final_status
+                    }
+                }),
+            ),
+    )
+    .await;
+    (server, routed, handled)
+}
+
+/// One routed call is two physical POSTs; when it then fails, its own
+/// disposition says it was redirected (typed uncertainty), and nothing is
+/// re-sent.
+#[tokio::test]
+async fn a_redirected_call_that_fails_records_its_redirect() {
+    let (server, routed, handled) =
+        same_origin_redirect_fixture(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
+    );
+    let (call, dispatch) = dispatched(false);
+    let result = client
+        .post_message(
+            server.url.clone().into(),
+            call,
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        dispatch.disposition(),
+        Some(RequestDisposition::SentRedirected)
+    );
+    assert_eq!(
+        routed.load(Ordering::SeqCst),
+        1,
+        "one physical POST to the route"
+    );
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        1,
+        "one physical POST to the handler"
+    );
+}
+
+/// Controls: a protected call is never redirected (stopped at the first
+/// 3xx, still recorded as redirected, the handler never reached); an
+/// independent call that fails without a redirect stays plainly `Sent`.
+#[tokio::test]
+async fn redirect_disposition_controls() {
+    let (server, routed, handled) =
+        same_origin_redirect_fixture(axum::http::StatusCode::ACCEPTED).await;
+    let state = ProtectedMetadataState::default();
+    state.register(&metadata()).unwrap();
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
+    )
+    .with_protected_metadata(state);
+    let (call, dispatch) = dispatched(true);
+    let refused = client
+        .post_message(
+            server.url.clone().into(),
+            call,
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(
+        dispatch.disposition(),
+        Some(RequestDisposition::SentRedirected)
+    );
+    assert_eq!(routed.load(Ordering::SeqCst), 1);
+    assert_eq!(handled.load(Ordering::SeqCst), 0);
+
+    let failing = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+    ))
+    .await;
+    let (call, dispatch) = dispatched(false);
+    let failed = client
+        .post_message(
+            failing.url.clone().into(),
+            call,
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(dispatch.disposition(), Some(RequestDisposition::Sent));
+}

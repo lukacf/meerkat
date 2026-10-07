@@ -800,6 +800,13 @@ fn tool_call_failure(
         },
         // Nothing was sent: the session was already known dead.
         Some(RequestDisposition::RefusedExpired) => session_dead(server),
+        // Redirected (followed or stopped) and then failed: some hop may
+        // have taken effect.
+        Some(RequestDisposition::SentRedirected) => McpError::RedirectedOutcomeUncertain {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+            reason: error.to_string(),
+        },
         Some(RequestDisposition::Sent) | None => McpError::ToolCallFailed {
             tool: tool.to_owned(),
             reason: error.to_string(),
@@ -983,9 +990,14 @@ pub mod tests {
         let (server, url) = get_ordering::start(StatusCode::METHOD_NOT_ALLOWED).await;
         let config = McpServerConfig::streamable_http("get-ordering", url, HashMap::new());
         let connection = McpConnection::connect(&config).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), server.gets.notified())
-            .await
-            .expect("the background GET was answered");
+        // Wait for the client's own classification of the GET, not for the
+        // server's answer: only then is "no expiry" a settled fact.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.session_expiry.stream_unsupported_classified(),
+        )
+        .await
+        .expect("the background GET 405 is classified");
         connection
             .call_tool("effect", &serde_json::json!({}))
             .await
@@ -1016,6 +1028,10 @@ pub mod tests {
         assert!(matches!(
             failure(Some(RequestDisposition::Sent)),
             McpError::ToolCallFailed { .. }
+        ));
+        assert!(matches!(
+            failure(Some(RequestDisposition::SentRedirected)),
+            McpError::RedirectedOutcomeUncertain { ref tool, .. } if tool == "effect"
         ));
     }
     use async_trait::async_trait;

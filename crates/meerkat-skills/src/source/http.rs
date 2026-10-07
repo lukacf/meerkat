@@ -48,7 +48,10 @@ fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
 fn same_origin_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            // A revisited URL stops at once, so the final answer is the 3xx
+            // and the caller sees that the call was redirected.
             let follow = attempt.previous().len() <= MAX_SAME_ORIGIN_REDIRECTS
+                && !attempt.previous().contains(attempt.url())
                 && attempt
                     .previous()
                     .last()
@@ -219,12 +222,13 @@ impl HttpSkillSource {
                 .into(),
             )
         })?;
-        // A redirect the client did not follow (another origin, or past the
-        // hop limit) is refused by its status; its `Location` is not read.
+        // A redirect the configured policy did not follow (for example
+        // another origin, the hop limit, or a missing or invalid `Location`)
+        // is refused by its status; its `Location` is not read.
         if response.status().is_redirection() {
             return Err(SkillError::Load(
                 format!(
-                    "HTTP skill source {} answered with a redirect (status {}) to another origin or past {MAX_SAME_ORIGIN_REDIRECTS} same-origin hops; refused",
+                    "HTTP skill source {} answered with a redirect (status {}) that the configured redirect policy does not follow; refused",
                     redacted_url(url),
                     response.status().as_u16()
                 )

@@ -47,12 +47,18 @@ pub(crate) struct ReqwestStreamableHttpClient {
 #[derive(Clone, Debug)]
 pub(crate) struct SessionExpiryRecorder {
     expired: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Test-only: the client classified the background GET as "no SSE
+    /// stream" (`405`).
+    #[cfg(test)]
+    stream_unsupported: Arc<tokio::sync::Notify>,
 }
 
 impl Default for SessionExpiryRecorder {
     fn default() -> Self {
         Self {
             expired: Arc::new(tokio::sync::watch::Sender::new(false)),
+            #[cfg(test)]
+            stream_unsupported: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -72,6 +78,13 @@ impl SessionExpiryRecorder {
         let mut expired = self.expired.subscribe();
         let _ = expired.wait_for(|expired| *expired).await;
     }
+
+    /// Resolves once the client has classified a background GET as `405`
+    /// (test ordering only).
+    #[cfg(test)]
+    pub(crate) async fn stream_unsupported_classified(&self) {
+        self.stream_unsupported.notified().await;
+    }
 }
 
 /// What the transport did with ONE request, recorded on that request
@@ -84,6 +97,10 @@ pub(crate) enum RequestDisposition {
     RefusedExpired,
     /// Handed to the HTTP client; the server may have received it.
     Sent,
+    /// Sent and answered with a redirect, followed (one routed call, more
+    /// than one physical request) or stopped by the redirect policy. Whether
+    /// any hop took effect is unknown, so a failed outcome is uncertain.
+    SentRedirected,
     /// Sent, then answered `404` for its session: it may have taken effect.
     SentSessionExpired,
 }
@@ -198,15 +215,16 @@ static DEFAULT_HTTP_CLIENT: std::sync::LazyLock<
     Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
 > = std::sync::LazyLock::new(meerkat_auth_core::auth_oauth::same_origin_credential_http_client);
 
-/// A redirect the client did not follow (to another origin, or past the hop
-/// limit), refused by its status before any header or body is read.
+/// A redirect answer the client's configured redirect policy did not follow
+/// (for example another origin, the hop limit, a protected call, or a
+/// missing or invalid `Location`), refused by its status before any header
+/// or body is read.
 fn refuse_redirect(status: reqwest::StatusCode) -> Result<(), StreamableHttpError<reqwest::Error>> {
     if status.is_redirection() {
         return Err(StreamableHttpError::UnexpectedServerResponse(
             format!(
-                "MCP server answered with a redirect (status {}) to another origin or past {} same-origin hops; refused",
-                status.as_u16(),
-                meerkat_auth_core::auth_oauth::MAX_SAME_ORIGIN_REDIRECTS
+                "MCP server answered with a redirect (status {}) that the configured redirect policy does not follow; refused",
+                status.as_u16()
             )
             .into(),
         ));
@@ -351,6 +369,8 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         refuse_redirect(response.status())?;
         self.auth_challenge.record(&response);
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            #[cfg(test)]
+            self.session_expiry.stream_unsupported.notify_one();
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
         }
         // The stream request always carries the session: a 404 means the
@@ -460,14 +480,22 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .entry(CONTENT_TYPE)
             .or_insert(HeaderValue::from_static(JSON_MIME_TYPE));
         *request.body_mut() = Some(bytes.into());
+        let requested_url = request.url().clone();
         let result = client.execute(request).await;
-        // From here the server may have received the request. A session 404
-        // records its own final disposition below instead.
+        // From here the server may have received the request, possibly more
+        // than once if a same-origin redirect was followed. Its own final
+        // disposition is recorded here; a session 404 records its own below.
         if let Some(dispatch) = &dispatch {
-            let session_expired = session_was_attached
-                && matches!(&result, Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND);
-            if !session_expired {
-                dispatch.record(RequestDisposition::Sent);
+            match &result {
+                Ok(response)
+                    if session_was_attached
+                        && response.status() == reqwest::StatusCode::NOT_FOUND => {}
+                Ok(response)
+                    if response.url() != &requested_url || response.status().is_redirection() =>
+                {
+                    dispatch.record(RequestDisposition::SentRedirected);
+                }
+                _ => dispatch.record(RequestDisposition::Sent),
             }
         }
         let response = result.map_err(StreamableHttpError::Client)?;

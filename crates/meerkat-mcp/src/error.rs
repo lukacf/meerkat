@@ -32,6 +32,19 @@ pub enum McpError {
     )]
     SessionExpired { server: String, tool: String },
 
+    /// The `tools/call` was answered with a redirect (followed within its
+    /// origin, so possibly more than one physical request, or stopped by the
+    /// redirect policy) and then failed. Whether any hop took effect is
+    /// unknown: neither success nor denial. It was not re-sent.
+    #[error(
+        "MCP tool call '{tool}' to server '{server}' was redirected and then failed ({reason}); its outcome is uncertain"
+    )]
+    RedirectedOutcomeUncertain {
+        server: String,
+        tool: String,
+        reason: String,
+    },
+
     #[error("Server not found: {0}")]
     ServerNotFound(String),
 

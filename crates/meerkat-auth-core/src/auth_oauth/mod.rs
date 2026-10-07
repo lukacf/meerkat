@@ -258,7 +258,10 @@ pub fn same_origin_credential_http_client()
 -> Result<reqwest::Client, CredentialHttpClientUnavailable> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            // A revisited URL stops at once, so the final answer is the 3xx
+            // and the caller sees that the call was redirected.
             let follow = attempt.previous().len() <= MAX_SAME_ORIGIN_REDIRECTS
+                && !attempt.previous().contains(attempt.url())
                 && attempt
                     .previous()
                     .last()

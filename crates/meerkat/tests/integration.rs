@@ -87,6 +87,9 @@ mod llm_normalization {
                         matches!(block, AssistantBlock::Text { text, .. } if !text.is_empty())
                     });
                 }
+                Ok(LlmEvent::OperationObservationFailed { .. }) => {
+                    // Nonterminal diagnostics preserve the provider result.
+                }
                 Ok(LlmEvent::WireLiveness) => {
                     // Transport liveness carries no content; it only re-arms
                     // the stream inactivity watchdog.

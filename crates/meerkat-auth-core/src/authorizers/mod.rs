@@ -13,12 +13,14 @@ use chrono::{DateTime, Utc};
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 use meerkat_core::AuthError;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-use meerkat_core::RefreshFailureObservation;
+use meerkat_core::handles::AuthLeaseSnapshot;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 use meerkat_core::handles::{
     AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, CredentialUseIntent,
     DslTransitionError, GeneratedAuthLeaseHandle, LeaseKey,
 };
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+use meerkat_core::{AuthLoginLifecycleGuard, RefreshFailureObservation};
 
 /// Shared closure type for env-variable lookup. Used by authorizers that
 /// want to remain hermetic in tests by taking a closure rather than
@@ -138,13 +140,16 @@ impl LeaseFreshnessObserver {
 /// compile this block.
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 impl LeaseFreshnessObserver {
-    pub(crate) fn cached_token_is_fresh(
+    pub(crate) async fn cached_token_is_fresh(
         &self,
         authorizer_label: &str,
         expires_at: DateTime<Utc>,
         lease_generation: Option<u64>,
-        now: DateTime<Utc>,
+        now: impl FnOnce() -> DateTime<Utc> + Send,
     ) -> Result<bool, AuthError> {
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&self.lease_key).await;
+        // Sample only after waiting for custody so the machine sees current time.
+        let now = now();
         self.handle
             .observe_credential_freshness(
                 &self.lease_key,
@@ -242,11 +247,12 @@ impl LeaseFreshnessObserver {
     pub(crate) async fn begin_refresh(
         &self,
         authorizer_label: &str,
-    ) -> Result<LeaseRefreshLifecycle, AuthError> {
+        mode: LeaseRefreshMode,
+    ) -> Result<LeaseRefreshPreparation, AuthError> {
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(AUTH_LEASE_REFRESH_WAIT_TIMEOUT_SECS);
         loop {
-            match self.try_begin_refresh(authorizer_label)? {
+            match self.try_begin_refresh(authorizer_label, mode).await? {
                 LeaseRefreshStart::Started(lifecycle) => return Ok(lifecycle),
                 LeaseRefreshStart::WaitForInFlight => {
                     if tokio::time::Instant::now() >= deadline {
@@ -264,7 +270,12 @@ impl LeaseFreshnessObserver {
         }
     }
 
-    fn try_begin_refresh(&self, authorizer_label: &str) -> Result<LeaseRefreshStart, AuthError> {
+    async fn try_begin_refresh(
+        &self,
+        authorizer_label: &str,
+        mode: LeaseRefreshMode,
+    ) -> Result<LeaseRefreshStart, AuthError> {
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&self.lease_key).await;
         let now = Utc::now();
         // Drive the machine's freshness classification first so the
         // credential-use admission below reads the up-to-date phase.
@@ -295,7 +306,10 @@ impl LeaseFreshnessObserver {
                 self.handle
                     .begin_refresh(&self.lease_key)
                     .map_err(|err| self.observer_error(authorizer_label, "begin_refresh", err))?;
-                Ok(LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh))
+                Ok(LeaseRefreshStart::Started(LeaseRefreshPreparation {
+                    lifecycle: LeaseRefreshLifecycle::Refresh,
+                    started: self.handle.snapshot(&self.lease_key),
+                }))
             }
             CredentialUseDisposition::ReauthRequired => Err(AuthError::UserReauthRequired),
             // `RefreshDisallowed` is only emitted by the OAuth-login disposition,
@@ -303,46 +317,107 @@ impl LeaseFreshnessObserver {
             // error if it ever surfaces here.
             CredentialUseDisposition::RefreshDisallowed => Err(AuthError::RefreshRequired),
             CredentialUseDisposition::AlreadyRefreshing => Ok(LeaseRefreshStart::WaitForInFlight),
-            CredentialUseDisposition::LeaseAbsent => Ok(LeaseRefreshStart::Started(
-                LeaseRefreshLifecycle::InitialAcquire,
-            )),
+            CredentialUseDisposition::LeaseAbsent => match mode {
+                LeaseRefreshMode::AcquireOrRefresh => {
+                    Ok(LeaseRefreshStart::Started(LeaseRefreshPreparation {
+                        lifecycle: LeaseRefreshLifecycle::InitialAcquire,
+                        started: self.handle.snapshot(&self.lease_key),
+                    }))
+                }
+                LeaseRefreshMode::ExistingCredential => Err(AuthError::RefreshRequired),
+            },
         }
     }
 
-    pub(crate) fn complete_refresh(
+    /// Publish only the exact started predecessor. The returned existing lease
+    /// guard keeps the derived cache installation in the same short mutation
+    /// boundary. No caller may retain this guard across token HTTP.
+    pub(crate) async fn complete_refresh(
         &self,
         authorizer_label: &str,
-        lifecycle: LeaseRefreshLifecycle,
+        preparation: LeaseRefreshPreparation,
         expires_at: DateTime<Utc>,
-        now: DateTime<Utc>,
-    ) -> Result<u64, AuthError> {
+        now: impl FnOnce() -> DateTime<Utc> + Send,
+    ) -> Result<(u64, AuthLoginLifecycleGuard), AuthError> {
+        let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&self.lease_key).await;
+        if self.handle.snapshot(&self.lease_key) != preparation.started {
+            return Err(AuthError::StaleCredential);
+        }
+        // A token response may expire while this completion waits for custody.
+        let now = now();
         let expires_at = epoch_secs(expires_at);
-        let transition = match lifecycle {
+        let transition = match preparation.lifecycle {
             LeaseRefreshLifecycle::InitialAcquire => self
                 .handle
                 .acquire_lease(&self.lease_key, expires_at)
                 .map_err(|err| self.observer_error(authorizer_label, "acquire_lease", err))?,
-            LeaseRefreshLifecycle::Refresh => self
-                .handle
-                .complete_refresh(&self.lease_key, expires_at, epoch_secs(now))
-                .map_err(|err| self.observer_error(authorizer_label, "complete_refresh", err))?,
+            LeaseRefreshLifecycle::Refresh => {
+                match self
+                    .handle
+                    .complete_refresh(&self.lease_key, expires_at, epoch_secs(now))
+                {
+                    Ok(transition) => transition,
+                    Err(err) => {
+                        // An error alone does not prove that an owner transition
+                        // was atomic. Close only our unchanged, guard-rejected
+                        // refresh; never settle an advanced or replaced owner.
+                        if self.handle.snapshot(&self.lease_key) != preparation.started {
+                            return Err(AuthError::StaleCredential);
+                        }
+                        if err.is_guard_rejected() {
+                            // A response that expired during custody does not
+                            // establish permanent credential failure. Let the
+                            // generated classifier close this failed attempt.
+                            self.handle
+                                .refresh_failed(
+                                    &self.lease_key,
+                                    RefreshFailureObservation::transient(),
+                                )
+                                .map_err(|err| {
+                                    self.observer_error(authorizer_label, "refresh_failed", err)
+                                })?;
+                        }
+                        return Err(self.observer_error(authorizer_label, "complete_refresh", err));
+                    }
+                }
+            }
         };
-        Ok(transition.generation())
+        Ok((transition.generation(), guard))
     }
 
-    pub(crate) fn refresh_failed(
+    pub(crate) async fn refresh_failed(
         &self,
         authorizer_label: &str,
-        lifecycle: LeaseRefreshLifecycle,
+        preparation: LeaseRefreshPreparation,
         observation: RefreshFailureObservation,
     ) -> Result<(), AuthError> {
-        if lifecycle == LeaseRefreshLifecycle::Refresh {
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&self.lease_key).await;
+        if self.handle.snapshot(&self.lease_key) != preparation.started {
+            return Err(AuthError::StaleCredential);
+        }
+        if preparation.lifecycle == LeaseRefreshLifecycle::Refresh {
             self.handle
                 .refresh_failed(&self.lease_key, observation)
                 .map_err(|err| self.observer_error(authorizer_label, "refresh_failed", err))?;
         }
         Ok(())
     }
+}
+
+/// Initial acquisition belongs to ordinary authorization. Request-free native
+/// maintenance can refresh only an existing generated credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+pub(crate) enum LeaseRefreshMode {
+    AcquireOrRefresh,
+    ExistingCredential,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+pub(crate) struct LeaseRefreshPreparation {
+    lifecycle: LeaseRefreshLifecycle,
+    started: AuthLeaseSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,10 +427,10 @@ pub(crate) enum LeaseRefreshLifecycle {
     Refresh,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 enum LeaseRefreshStart {
-    Started(LeaseRefreshLifecycle),
+    Started(LeaseRefreshPreparation),
     WaitForInFlight,
 }
 
@@ -405,8 +480,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn initial_acquire_returns_generation_from_accepted_transition() {
+    #[tokio::test]
+    async fn initial_acquire_returns_generation_from_accepted_transition() {
         let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let lease_key = lease_key();
         let observer = LeaseFreshnessObserver::new(
@@ -416,24 +491,23 @@ mod tests {
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
 
-        let generation = observer
-            .complete_refresh(
-                "race-test",
-                LeaseRefreshLifecycle::InitialAcquire,
-                expires_at,
-                now,
-            )
+        let preparation = observer
+            .begin_refresh("race-test", LeaseRefreshMode::AcquireOrRefresh)
+            .await
+            .unwrap();
+        let (generation, _guard) = observer
+            .complete_refresh("race-test", preparation, expires_at, || now)
+            .await
             .unwrap();
 
         assert_eq!(generation, 1);
     }
 
-    #[test]
-    fn refresh_returns_generation_from_accepted_transition() {
+    #[tokio::test]
+    async fn refresh_returns_generation_from_accepted_transition() {
         let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let lease_key = lease_key();
         handle.acquire_lease(&lease_key, 1_799_999_500).unwrap();
-        handle.begin_refresh(&lease_key).unwrap();
         let observer = LeaseFreshnessObserver::new(
             generated_auth_lease_handle_for_test(Arc::clone(&handle)),
             lease_key,
@@ -441,11 +515,242 @@ mod tests {
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
 
-        let generation = observer
-            .complete_refresh("race-test", LeaseRefreshLifecycle::Refresh, expires_at, now)
+        let preparation = observer
+            .begin_refresh("race-test", LeaseRefreshMode::ExistingCredential)
+            .await
+            .unwrap();
+        let (generation, _guard) = observer
+            .complete_refresh("race-test", preparation, expires_at, || now)
+            .await
             .unwrap();
 
         assert_eq!(generation, 2);
+    }
+
+    #[tokio::test]
+    async fn cache_clock_is_sampled_after_lifecycle_custody() {
+        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let key = LeaseKey::new(
+            RealmId::parse("dev").unwrap(),
+            BindingId::parse("cloud-cache-clock").unwrap(),
+            None,
+        );
+        let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let transition = handle.acquire_lease(&key, epoch_secs(expires_at)).unwrap();
+        let observer = LeaseFreshnessObserver::new(
+            generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+            key.clone(),
+        );
+        let clock = AtomicI64::new(expires_at.timestamp() - 1_000);
+        let read_clock =
+            || DateTime::<Utc>::from_timestamp(clock.load(Ordering::SeqCst), 0).unwrap();
+        assert!(
+            observer
+                .cached_token_is_fresh(
+                    "clock-control",
+                    expires_at,
+                    Some(transition.generation()),
+                    read_clock,
+                )
+                .await
+                .unwrap(),
+            "the same actual owner is usable before the custody wait"
+        );
+
+        let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&key).await;
+        let samples = AtomicUsize::new(0);
+        let mut check = Box::pin(observer.cached_token_is_fresh(
+            "clock-contention",
+            expires_at,
+            Some(transition.generation()),
+            || {
+                samples.fetch_add(1, Ordering::SeqCst);
+                read_clock()
+            },
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(check.as_mut(), cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(samples.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+        clock.store(expires_at.timestamp() + 1, Ordering::SeqCst);
+        drop(guard);
+
+        assert!(
+            !check.await.unwrap(),
+            "a custody wait cannot retain an old freshness verdict"
+        );
+        assert_eq!(samples.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Expired));
+        assert_eq!(
+            handle
+                .resolve_credential_use_admission(&key, CredentialUseIntent::HoldAuthority)
+                .unwrap(),
+            CredentialUseDisposition::RefreshRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_clock_is_sampled_after_lifecycle_custody() {
+        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        for cross_expiry in [false, true] {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let key = LeaseKey::new(
+                RealmId::parse("dev").unwrap(),
+                BindingId::parse(if cross_expiry {
+                    "cloud-completion-clock-expired"
+                } else {
+                    "cloud-completion-clock-current"
+                })
+                .unwrap(),
+                None,
+            );
+            handle.acquire_lease(&key, u64::MAX).unwrap();
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                key.clone(),
+            );
+            let preparation = observer
+                .begin_refresh("completion-clock", LeaseRefreshMode::ExistingCredential)
+                .await
+                .unwrap();
+            let started = handle.snapshot(&key);
+            assert_eq!(started.phase, Some(AuthLeasePhase::Refreshing));
+            let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+            let clock = AtomicI64::new(expires_at.timestamp() - 1_000);
+            let samples = AtomicUsize::new(0);
+            let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&key).await;
+            let mut completion = Box::pin(observer.complete_refresh(
+                "completion-clock",
+                preparation,
+                expires_at,
+                || {
+                    samples.fetch_add(1, Ordering::SeqCst);
+                    DateTime::<Utc>::from_timestamp(clock.load(Ordering::SeqCst), 0).unwrap()
+                },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(completion.as_mut(), cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert_eq!(samples.load(Ordering::SeqCst), 0);
+            assert_eq!(handle.snapshot(&key), started);
+            if cross_expiry {
+                clock.store(expires_at.timestamp() + 1, Ordering::SeqCst);
+            }
+            drop(guard);
+
+            let result = completion.await;
+            assert_eq!(samples.load(Ordering::SeqCst), 1);
+            if cross_expiry {
+                assert!(
+                    matches!(result, Err(AuthError::Other(_))),
+                    "the actual generated CompleteRefresh must reject the now-expired response"
+                );
+                let closed = handle.snapshot(&key);
+                assert_eq!(closed.phase, Some(AuthLeasePhase::Expiring));
+                assert_eq!(closed.generation, started.generation);
+                assert_eq!(closed.expires_at, started.expires_at);
+                assert_eq!(closed.credential_present, started.credential_present);
+                assert_eq!(
+                    closed.credential_published_at_millis,
+                    started.credential_published_at_millis
+                );
+                let next = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    observer.begin_refresh(
+                        "completion-follow-up",
+                        LeaseRefreshMode::ExistingCredential,
+                    ),
+                )
+                .await
+                .expect("the failed HTTP owner must not strand the next request")
+                .unwrap();
+                let healthy_expiry = expires_at + chrono::Duration::hours(1);
+                let (generation, _guard) = observer
+                    .complete_refresh("completion-follow-up", next, healthy_expiry, || {
+                        DateTime::<Utc>::from_timestamp(clock.load(Ordering::SeqCst), 0).unwrap()
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(generation, started.generation + 1);
+                assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+                assert_eq!(
+                    handle.snapshot(&key).expires_at,
+                    Some(epoch_secs(healthy_expiry))
+                );
+            } else {
+                let (generation, _guard) = result.unwrap();
+                assert_eq!(generation, started.generation + 1);
+                assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+                assert_eq!(
+                    handle.snapshot(&key).expires_at,
+                    Some(epoch_secs(expires_at))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_completion_never_closes_a_replaced_owner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        for successor in ["released", "valid", "refreshing"] {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let key = LeaseKey::new(
+                RealmId::parse("dev").unwrap(),
+                BindingId::parse(format!("cloud-expired-replaced-{successor}")).unwrap(),
+                None,
+            );
+            handle.acquire_lease(&key, u64::MAX).unwrap();
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                key.clone(),
+            );
+            let preparation = observer
+                .begin_refresh("expired-replaced", LeaseRefreshMode::ExistingCredential)
+                .await
+                .unwrap();
+            let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+            let samples = AtomicUsize::new(0);
+            let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&key).await;
+            let mut completion = Box::pin(observer.complete_refresh(
+                "expired-replaced",
+                preparation,
+                expires_at,
+                || {
+                    samples.fetch_add(1, Ordering::SeqCst);
+                    expires_at + chrono::Duration::seconds(1)
+                },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(completion.as_mut(), cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            handle.release_lease_with_guard(&key, &guard).unwrap();
+            if successor != "released" {
+                handle.acquire_lease(&key, u64::MAX).unwrap();
+            }
+            if successor == "refreshing" {
+                handle.begin_refresh(&key).unwrap();
+            }
+            let replacement = handle.snapshot(&key);
+            drop(guard);
+
+            assert!(matches!(completion.await, Err(AuthError::StaleCredential)));
+            assert_eq!(samples.load(Ordering::SeqCst), 0);
+            assert_eq!(handle.snapshot(&key), replacement, "{successor}");
+        }
     }
 
     /// FOLD 1: `try_begin_refresh` mirrors the AuthMachine's machine-routed
@@ -453,8 +758,8 @@ mod tests {
     /// every reachable phase. No handwritten `phase -> disposition` fork lives
     /// in the observer; the per-binding AuthMachine owns the verdict and the
     /// observer only mirrors it onto `LeaseRefreshStart` / the reauth error.
-    #[test]
-    fn try_begin_refresh_mirrors_authmachine_disposition_for_every_phase() {
+    #[tokio::test]
+    async fn try_begin_refresh_mirrors_authmachine_disposition_for_every_phase() {
         // No registered lease (None phase) -> machine reports LeaseAbsent ->
         // InitialAcquire.
         {
@@ -463,9 +768,17 @@ mod tests {
                 generated_auth_lease_handle_for_test(Arc::clone(&handle)),
                 lease_key(),
             );
-            assert_eq!(
-                observer.try_begin_refresh("absent").unwrap(),
-                LeaseRefreshStart::Started(LeaseRefreshLifecycle::InitialAcquire),
+            assert!(
+                matches!(
+                    observer
+                        .try_begin_refresh("absent", LeaseRefreshMode::AcquireOrRefresh)
+                        .await
+                        .unwrap(),
+                    LeaseRefreshStart::Started(LeaseRefreshPreparation {
+                        lifecycle: LeaseRefreshLifecycle::InitialAcquire,
+                        ..
+                    })
+                ),
                 "absent lease must InitialAcquire via the machine's LeaseAbsent disposition"
             );
         }
@@ -482,9 +795,17 @@ mod tests {
                 generated_auth_lease_handle_for_test(Arc::clone(&handle)),
                 key.clone(),
             );
-            assert_eq!(
-                observer.try_begin_refresh("valid").unwrap(),
-                LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh),
+            assert!(
+                matches!(
+                    observer
+                        .try_begin_refresh("valid", LeaseRefreshMode::AcquireOrRefresh)
+                        .await
+                        .unwrap(),
+                    LeaseRefreshStart::Started(LeaseRefreshPreparation {
+                        lifecycle: LeaseRefreshLifecycle::Refresh,
+                        ..
+                    })
+                ),
                 "valid lease must begin refresh via the machine's RefreshRequired disposition"
             );
             assert_eq!(
@@ -505,10 +826,16 @@ mod tests {
                 generated_auth_lease_handle_for_test(Arc::clone(&handle)),
                 key,
             );
-            assert_eq!(
-                observer.try_begin_refresh("expiring").unwrap(),
-                LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh),
-            );
+            assert!(matches!(
+                observer
+                    .try_begin_refresh("expiring", LeaseRefreshMode::AcquireOrRefresh)
+                    .await
+                    .unwrap(),
+                LeaseRefreshStart::Started(LeaseRefreshPreparation {
+                    lifecycle: LeaseRefreshLifecycle::Refresh,
+                    ..
+                })
+            ),);
         }
 
         // Expired + credential present -> RefreshRequired -> Started(Refresh).
@@ -526,10 +853,16 @@ mod tests {
                 generated_auth_lease_handle_for_test(Arc::clone(&handle)),
                 key,
             );
-            assert_eq!(
-                observer.try_begin_refresh("expired").unwrap(),
-                LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh),
-            );
+            assert!(matches!(
+                observer
+                    .try_begin_refresh("expired", LeaseRefreshMode::AcquireOrRefresh)
+                    .await
+                    .unwrap(),
+                LeaseRefreshStart::Started(LeaseRefreshPreparation {
+                    lifecycle: LeaseRefreshLifecycle::Refresh,
+                    ..
+                })
+            ),);
         }
 
         // Refreshing -> AlreadyRefreshing -> WaitForInFlight (no double-begin).
@@ -547,7 +880,10 @@ mod tests {
                 key,
             );
             assert_eq!(
-                observer.try_begin_refresh("refreshing").unwrap(),
+                observer
+                    .try_begin_refresh("refreshing", LeaseRefreshMode::AcquireOrRefresh)
+                    .await
+                    .unwrap(),
                 LeaseRefreshStart::WaitForInFlight,
                 "in-flight refresh must wait via the machine's AlreadyRefreshing disposition"
             );
@@ -569,7 +905,9 @@ mod tests {
             );
             assert!(
                 matches!(
-                    observer.try_begin_refresh("reauth"),
+                    observer
+                        .try_begin_refresh("reauth", LeaseRefreshMode::AcquireOrRefresh)
+                        .await,
                     Err(AuthError::UserReauthRequired)
                 ),
                 "reauth-required lease must surface UserReauthRequired via the machine's ReauthRequired disposition"
@@ -583,8 +921,8 @@ mod tests {
     /// fork lives in the observer; the per-binding AuthMachine owns the verdict
     /// and the observer only mirrors it onto Ok(true) (proceed to coherence) /
     /// Ok(false) (refresh) / Err(UserReauthRequired).
-    #[test]
-    fn cached_token_is_fresh_mirrors_authmachine_disposition_for_every_phase() {
+    #[tokio::test]
+    async fn cached_token_is_fresh_mirrors_authmachine_disposition_for_every_phase() {
         let far_future = DateTime::<Utc>::from_timestamp(2_000_000_000, 0).unwrap();
         let now = DateTime::<Utc>::from_timestamp(1_000_000_000, 0).unwrap();
 
@@ -601,7 +939,13 @@ mod tests {
             );
             assert!(
                 observer
-                    .cached_token_is_fresh("valid", far_future, Some(transition.generation()), now,)
+                    .cached_token_is_fresh(
+                        "valid",
+                        far_future,
+                        Some(transition.generation()),
+                        || now
+                    )
+                    .await
                     .unwrap(),
                 "valid+coherent lease must be fresh via the machine's Authorized disposition"
             );
@@ -624,8 +968,9 @@ mod tests {
                         "expiring",
                         far_future,
                         Some(transition.generation()),
-                        now,
+                        || now,
                     )
+                    .await
                     .unwrap(),
                 "expiring lease must refresh via the machine's RefreshRequired disposition"
             );
@@ -648,8 +993,9 @@ mod tests {
                         "expired",
                         near_past,
                         Some(transition.generation()),
-                        now,
+                        || now,
                     )
+                    .await
                     .unwrap(),
                 "expired lease must refresh via the machine's RefreshRequired disposition"
             );
@@ -675,8 +1021,9 @@ mod tests {
                         "refreshing",
                         far_future,
                         Some(transition.generation()),
-                        now,
+                        || now,
                     )
+                    .await
                     .unwrap(),
                 "refreshing lease must refresh via the machine's RefreshRequired disposition"
             );
@@ -698,12 +1045,14 @@ mod tests {
             );
             assert!(
                 matches!(
-                    observer.cached_token_is_fresh(
-                        "reauth",
-                        far_future,
-                        Some(transition.generation()),
-                        now,
-                    ),
+                    observer
+                        .cached_token_is_fresh(
+                            "reauth",
+                            far_future,
+                            Some(transition.generation()),
+                            || now,
+                        )
+                        .await,
                     Err(AuthError::UserReauthRequired)
                 ),
                 "reauth-required lease must surface UserReauthRequired via the machine's ReauthRequired disposition"
@@ -731,7 +1080,8 @@ mod tests {
             );
             assert!(
                 !observer
-                    .cached_token_is_fresh("released", far_future, Some(1), now)
+                    .cached_token_is_fresh("released", far_future, Some(1), || now)
+                    .await
                     .unwrap(),
                 "released/absent lease must refresh via the machine's LeaseAbsent disposition"
             );

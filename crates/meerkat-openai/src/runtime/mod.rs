@@ -30,7 +30,10 @@ use meerkat_auth_core::resolver::{
 use meerkat_auth_core::{
     auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
 };
-#[cfg(all(not(target_arch = "wasm32"), feature = "copilot"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "copilot", feature = "oauth")
+))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
@@ -52,6 +55,12 @@ fn openai_oauth_refresh_error(
     error: oauth::OpenAiOAuthError,
     authmachine_failure: String,
 ) -> ProviderAuthError {
+    if matches!(
+        &error,
+        oauth::OpenAiOAuthError::Refresh(meerkat_auth_core::RefreshError::StalePreparation)
+    ) {
+        return ProviderAuthError::Auth(AuthError::StaleCredential);
+    }
     let detail = if authmachine_failure.is_empty() {
         error.to_string()
     } else {
@@ -67,6 +76,330 @@ fn openai_oauth_refresh_error(
         }
     }
     ProviderAuthError::Auth(AuthError::RefreshFailed(detail))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+fn chatgpt_metadata_from_tokens(tokens: &meerkat_core::auth::PersistedTokens) -> AuthMetadata {
+    let mut chatgpt_account_id = tokens.account_id.clone();
+    let mut chatgpt_user_id: Option<String> = None;
+    let mut chatgpt_email: Option<String> = None;
+    let mut chatgpt_is_fedramp: Option<bool> = None;
+    let mut chatgpt_plan_type: Option<String> = None;
+    if let Some(id_token) = tokens.id_token.as_deref()
+        && let Ok(claims) = meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
+    {
+        let lifted = oauth::ChatGptIdClaims::lift_from_claims(&claims.raw);
+        if chatgpt_account_id.is_none() {
+            chatgpt_account_id = lifted.account_id;
+        }
+        chatgpt_user_id = lifted.user_id;
+        chatgpt_email = lifted.email;
+        chatgpt_is_fedramp = lifted.is_fedramp;
+        chatgpt_plan_type = lifted.plan_type;
+    }
+    let mut metadata = AuthMetadata::default();
+    if chatgpt_account_id.is_some()
+        || chatgpt_user_id.is_some()
+        || chatgpt_email.is_some()
+        || chatgpt_is_fedramp.is_some()
+        || chatgpt_plan_type.is_some()
+    {
+        metadata.account_id = chatgpt_account_id.clone();
+        metadata.plan = chatgpt_plan_type.clone();
+        metadata.provider_metadata = Some(meerkat_core::ProviderAuthMetadata::OpenAi(
+            meerkat_core::OpenAiAuthMetadata {
+                plan_type: chatgpt_plan_type,
+                user_id: chatgpt_user_id,
+                account_id: chatgpt_account_id,
+                is_fedramp: chatgpt_is_fedramp,
+                email: chatgpt_email,
+            },
+        ));
+    }
+    metadata
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+struct ManagedChatGptCredential {
+    access_token: Arc<str>,
+    publication: meerkat_core::auth::lifecycle::TokenLifecyclePublication,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+struct ManagedChatGptAuthorizer {
+    env: ResolverEnvironment,
+    binding: ValidatedBinding,
+    metadata: AuthMetadata,
+    runtime: oauth::OpenAiOAuthRuntime,
+    cached: std::sync::Mutex<Option<ManagedChatGptCredential>>,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+impl ManagedChatGptAuthorizer {
+    async fn new(
+        env: &ResolverEnvironment,
+        binding: &ValidatedBinding,
+        metadata: &AuthMetadata,
+        tokens: &meerkat_core::auth::PersistedTokens,
+    ) -> Result<Self, ProviderAuthError> {
+        let persistence = env
+            .provider_auth_persistence()
+            .cloned()
+            .ok_or(ProviderAuthError::Auth(AuthError::HostOwnedUnavailable))?;
+        let key =
+            meerkat_core::auth::TokenKey::from_credential_identity(binding.credential_identity());
+        let runtime = oauth::OpenAiOAuthRuntime::new(
+            persistence,
+            oauth::chatgpt_endpoints("http://127.0.0.1:0/callback"),
+            key,
+        );
+        let mut retained_env = env.clone();
+        // Force is a resolution instruction, not a retained per-request policy.
+        retained_env.force_refresh = false;
+        let authorizer = Self {
+            env: retained_env,
+            binding: binding.clone(),
+            metadata: metadata.clone(),
+            runtime,
+            cached: std::sync::Mutex::new(None),
+        };
+        let lease = authorizer.lease_key();
+        let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+        let (snapshot, lifecycle) =
+            meerkat_auth_core::resolver::observe_existing_managed_store_lifecycle_with_guard(
+                &authorizer.env,
+                &authorizer.binding,
+                &guard,
+            )?;
+        if lifecycle != ManagedStoreLifecycle::Authorized {
+            return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
+        }
+        let cached = authorizer
+            .credential_from_tokens(tokens, &snapshot)
+            .map_err(ProviderAuthError::Auth)?;
+        *authorizer
+            .cached
+            .lock()
+            .map_err(|_| ProviderAuthError::Auth(AuthError::HostOwnedUnavailable))? = Some(cached);
+        drop(guard);
+        Ok(authorizer)
+    }
+
+    fn lease_key(&self) -> meerkat_core::handles::LeaseKey {
+        meerkat_core::handles::LeaseKey::from_credential_identity(
+            self.binding.credential_identity(),
+        )
+    }
+
+    fn provider_error(error: ProviderAuthError) -> AuthError {
+        match error {
+            ProviderAuthError::Auth(error) => error,
+            other => AuthError::RefreshFailed(other.to_string()),
+        }
+    }
+
+    fn credential_from_tokens(
+        &self,
+        tokens: &meerkat_core::auth::PersistedTokens,
+        snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+    ) -> Result<ManagedChatGptCredential, AuthError> {
+        use meerkat_core::generated::auth_lease_durable_lifecycle_marker as marker;
+        if marker::marker_relation_for_tokens_and_snapshot(tokens, snapshot, self.runtime.key())
+            != marker::AuthLeaseDurableMarkerRelation::Matches
+        {
+            return Err(AuthError::StaleCredential);
+        }
+        let observed = chatgpt_metadata_from_tokens(tokens);
+        let observed_provider = match &observed.provider_metadata {
+            Some(meerkat_core::ProviderAuthMetadata::OpenAi(value)) => Some(value),
+            _ => None,
+        };
+        let pinned_provider = match &self.metadata.provider_metadata {
+            Some(meerkat_core::ProviderAuthMetadata::OpenAi(value)) => Some(value),
+            _ => None,
+        };
+        let account_changed =
+            observed.account_id.is_some() && observed.account_id != self.metadata.account_id;
+        // A refresh response may preserve the old stored account while carrying
+        // an explicit conflicting ID-token claim. Neither may silently repin.
+        let claimed_account = tokens
+            .id_token
+            .as_deref()
+            .and_then(|token| meerkat_auth_core::auth_oauth::jwt::decode_payload(token).ok())
+            .and_then(|claims| oauth::ChatGptIdClaims::lift_from_claims(&claims.raw).account_id);
+        let claim_changed =
+            claimed_account.is_some() && claimed_account != self.metadata.account_id;
+        let observed_fedramp = observed_provider.and_then(|value| value.is_fedramp);
+        let pinned_fedramp = pinned_provider.and_then(|value| value.is_fedramp);
+        if account_changed
+            || claim_changed
+            || (observed_fedramp.is_some() && observed_fedramp != pinned_fedramp)
+        {
+            return Err(AuthError::ResolveRequired(
+                "managed ChatGPT credential no longer matches the selected account route".into(),
+            ));
+        }
+        let publication =
+            meerkat_core::tokens_lifecycle_publication(tokens).ok_or(AuthError::StaleCredential)?;
+        let access_token = tokens
+            .primary_secret
+            .as_deref()
+            .ok_or(AuthError::MissingSecret)?;
+        Ok(ManagedChatGptCredential {
+            access_token: Arc::from(access_token),
+            publication,
+        })
+    }
+
+    fn cache_matches(
+        cached: &ManagedChatGptCredential,
+        current: &meerkat_core::handles::AuthLeaseSnapshot,
+    ) -> bool {
+        current.credential_present
+            && cached.publication.generation == Some(current.generation)
+            && Some(cached.publication.expires_at) == current.expires_at
+            && cached.publication.credential_published_at_millis
+                == current.credential_published_at_millis
+    }
+
+    // The returned guard keeps the actual owner current through the caller's
+    // synchronous header copy. No cache guard or lifecycle guard spans HTTP.
+    async fn current_credential(
+        &self,
+    ) -> Result<(meerkat_core::AuthLoginLifecycleGuard, Arc<str>), AuthError> {
+        let lease = self.lease_key();
+        let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+        let (snapshot, lifecycle) =
+            match meerkat_auth_core::resolver::observe_existing_managed_store_lifecycle_with_guard(
+                &self.env,
+                &self.binding,
+                &guard,
+            ) {
+                Ok(current) => current,
+                Err(error) => {
+                    *self
+                        .cached
+                        .lock()
+                        .map_err(|_| AuthError::HostOwnedUnavailable)? = None;
+                    return Err(Self::provider_error(error));
+                }
+            };
+        if lifecycle == ManagedStoreLifecycle::Authorized {
+            let cache = self
+                .cached
+                .lock()
+                .map_err(|_| AuthError::HostOwnedUnavailable)?;
+            if let Some(cached) = cache
+                .as_ref()
+                .filter(|cached| Self::cache_matches(cached, &snapshot))
+            {
+                return Ok((guard, Arc::clone(&cached.access_token)));
+            }
+        }
+        drop(guard);
+
+        let mut loaded =
+            meerkat_auth_core::resolver::load_existing_managed_store_tokens_with_lifecycle(
+                &self.env,
+                &self.binding,
+            )
+            .await
+            .map_err(Self::provider_error)?;
+        match resolve_oauth_login_credential_disposition(
+            &self.env,
+            &self.binding,
+            loaded.tokens.primary_secret.is_some(),
+        )
+        .map_err(Self::provider_error)?
+        {
+            OAuthLoginCredentialAdmission::UseCached => {}
+            OAuthLoginCredentialAdmission::BeginRefresh => {
+                loaded.release_prelock_lifecycle_guard();
+                let env = self.env.clone();
+                let binding = self.binding.clone();
+                let prepare: oauth::TokenPrepareFn = Box::new(move |locked, mode| {
+                    Box::pin(async move {
+                        meerkat_auth_core::resolver::prepare_existing_managed_store_oauth_refresh_under_lock(
+                            &env, &binding, loaded, locked, mode,
+                        ).await.map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
+                    })
+                });
+                self.runtime
+                    .refresh_tokens_with_locked_preparation(prepare, false)
+                    .await
+                    .map_err(|error| {
+                        Self::provider_error(openai_oauth_refresh_error(error, String::new()))
+                    })?;
+                // A returned exchange value is not cache authority. Re-read only
+                // on this cold path and bind the exact committed current owner.
+                loaded =
+                    meerkat_auth_core::resolver::load_existing_managed_store_tokens_with_lifecycle(
+                        &self.env,
+                        &self.binding,
+                    )
+                    .await
+                    .map_err(Self::provider_error)?;
+            }
+        }
+        let guard = loaded
+            .lifecycle_guard
+            .take()
+            .ok_or(AuthError::LeaseAbsent)?;
+        let (snapshot, lifecycle) =
+            meerkat_auth_core::resolver::observe_existing_managed_store_lifecycle_with_guard(
+                &self.env,
+                &self.binding,
+                &guard,
+            )
+            .map_err(Self::provider_error)?;
+        if lifecycle != ManagedStoreLifecycle::Authorized {
+            return Err(AuthError::RefreshRequired);
+        }
+        let cached = self.credential_from_tokens(&loaded.tokens, &snapshot)?;
+        let access_token = Arc::clone(&cached.access_token);
+        *self
+            .cached
+            .lock()
+            .map_err(|_| AuthError::HostOwnedUnavailable)? = Some(cached);
+        Ok((guard, access_token))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+#[async_trait]
+impl meerkat_core::HttpAuthorizer for ManagedChatGptAuthorizer {
+    async fn prepare_request(&self) -> Result<(), AuthError> {
+        self.current_credential().await.map(|_| ())
+    }
+
+    async fn authorize(
+        &self,
+        req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+    ) -> Result<(), AuthError> {
+        let (_guard, access_token) = self.current_credential().await?;
+        req.headers
+            .push(("Authorization".into(), format!("Bearer {access_token}")));
+        Ok(())
+    }
+
+    fn label(&self) -> &'static str {
+        "managed-chatgpt-oauth"
+    }
+
+    fn persistence_authority_id(&self) -> Option<meerkat_core::auth::ProviderAuthPersistenceId> {
+        self.env
+            .provider_auth_persistence()
+            .map(|persistence| persistence.authority_id())
+    }
+
+    fn expires_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let snapshot = self
+            .env
+            .auth_lease_handle
+            .as_ref()?
+            .snapshot(&self.lease_key());
+        chrono::DateTime::from_timestamp(i64::try_from(snapshot.expires_at?).ok()?, 0)
+    }
 }
 
 /// The pre-`/codex` ChatGPT backend base URL that older persisted `.rkat`
@@ -319,7 +652,9 @@ fn build_openai_client(
                 .with_image_input_support(supports_image_input)
                 .with_authorizer(authorizer);
         if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
-            client = client.with_chatgpt_backend_wire();
+            client = client
+                .with_extra_headers(chatgpt_backend_extra_headers(&connection))
+                .with_chatgpt_backend_wire();
         } else if matches!(backend_kind, OpenAiBackendKind::AzureOpenAi) {
             client = client.with_azure_openai_wire(azure_openai_wire_config(&connection));
         }
@@ -504,7 +839,10 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                 binding,
                                 persisted.primary_secret.is_some(),
                             )? {
-                                OAuthLoginCredentialAdmission::UseCached => persisted,
+                                OAuthLoginCredentialAdmission::UseCached => {
+                                    managed.release_prelock_lifecycle_guard();
+                                    persisted
+                                }
                                 OAuthLoginCredentialAdmission::BeginRefresh => {
                                     managed.release_prelock_lifecycle_guard();
                                     let persistence = env
@@ -525,8 +863,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     );
                                     let prepare_env = env.clone();
                                     let prepare_binding = binding.clone();
-                                    let prepare: oauth::TokenPrepareFn =
-                                        Box::new(move |locked_baseline, mode| {
+                                    let prepare: oauth::TokenPrepareFn = Box::new(
+                                        move |locked_baseline, mode| {
                                             Box::pin(async move {
                                                 prepare_managed_store_oauth_refresh_under_lock(
                                                     &prepare_env,
@@ -536,13 +874,10 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                                     mode,
                                                 )
                                                 .await
-                                                .map_err(|e| {
-                                                    meerkat_auth_core::RefreshError::Refresh(
-                                                        e.to_string(),
-                                                    )
-                                                })
+                                                .map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                                             })
-                                        });
+                                        },
+                                    );
                                     runtime
                                         .refresh_tokens_with_locked_preparation(
                                             prepare,
@@ -562,51 +897,29 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         .primary_secret
                         .clone()
                         .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
-                    let mut chatgpt_account_id = effective_tokens.account_id.clone();
-                    let mut chatgpt_user_id: Option<String> = None;
-                    let mut chatgpt_email: Option<String> = None;
-                    let mut chatgpt_is_fedramp: Option<bool> = None;
-                    let mut chatgpt_plan_type: Option<String> = None;
-                    if let Some(id_token) = effective_tokens.id_token.as_deref()
-                        && let Ok(claims) =
-                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
-                    {
-                        let lifted = oauth::ChatGptIdClaims::lift_from_claims(&claims.raw);
-                        if chatgpt_account_id.is_none() {
-                            chatgpt_account_id = lifted.account_id;
-                        }
-                        chatgpt_user_id = lifted.user_id;
-                        chatgpt_email = lifted.email;
-                        chatgpt_is_fedramp = lifted.is_fedramp;
-                        chatgpt_plan_type = lifted.plan_type;
-                    }
-                    let mut metadata = AuthMetadata::default();
-                    if chatgpt_account_id.is_some()
-                        || chatgpt_user_id.is_some()
-                        || chatgpt_email.is_some()
-                        || chatgpt_is_fedramp.is_some()
-                        || chatgpt_plan_type.is_some()
-                    {
-                        metadata.account_id = chatgpt_account_id.clone();
-                        metadata.plan = chatgpt_plan_type.clone();
-                        metadata.provider_metadata =
-                            Some(meerkat_core::ProviderAuthMetadata::OpenAi(
-                                meerkat_core::OpenAiAuthMetadata {
-                                    plan_type: chatgpt_plan_type,
-                                    user_id: chatgpt_user_id,
-                                    account_id: chatgpt_account_id,
-                                    is_fedramp: chatgpt_is_fedramp,
-                                    email: chatgpt_email,
-                                },
-                            ));
-                    }
+                    let metadata = chatgpt_metadata_from_tokens(&effective_tokens);
                     let metadata = finalize_auth_metadata(binding, metadata)?;
-                    Arc::new(StaticLease::inline_secret(
-                        access,
-                        metadata,
-                        effective_tokens.expires_at,
-                        source_label.clone(),
-                    ))
+                    if matches!(auth_method, OpenAiAuthMethod::ManagedChatGptOauth) {
+                        let authorizer = ManagedChatGptAuthorizer::new(
+                            env,
+                            binding,
+                            &metadata,
+                            &effective_tokens,
+                        )
+                        .await?;
+                        Arc::new(DynamicLease::from_authorizer(
+                            Arc::new(authorizer),
+                            metadata,
+                            source_label.clone(),
+                        ))
+                    } else {
+                        Arc::new(StaticLease::inline_secret(
+                            access,
+                            metadata,
+                            effective_tokens.expires_at,
+                            source_label.clone(),
+                        ))
+                    }
                 }
                 #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
                 {
@@ -838,7 +1151,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
                     .with_authorizer(authorizer);
             if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
-                client = client.with_chatgpt_backend_wire();
+                client = client
+                    .with_extra_headers(chatgpt_backend_extra_headers(&connection))
+                    .with_chatgpt_backend_wire();
             } else if matches!(backend_kind, OpenAiBackendKind::AzureOpenAi) {
                 client = client.with_azure_openai_wire(azure_openai_wire_config(&connection));
             }
@@ -1620,6 +1935,115 @@ mod tests {
         );
     }
 
+    // The existing static-image positive does not select the authorizer branch.
+    // This fixture signs a real image HTTP request, without claiming managed
+    // refresh or generated-owner coverage from the fixture authorizer itself.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn dynamic_chatgpt_image_executor_preserves_oauth_account_headers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ImageBearerAuthorizer {
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl meerkat_core::HttpAuthorizer for ImageBearerAuthorizer {
+            async fn authorize(
+                &self,
+                request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+            ) -> Result<(), meerkat_core::AuthError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                request
+                    .headers
+                    .push(("Authorization".into(), "Bearer dynamic-image-token".into()));
+                Ok(())
+            }
+
+            fn label(&self) -> &'static str {
+                "image-header-fixture"
+            }
+        }
+
+        let metadata = AuthMetadata {
+            provider_metadata: Some(ProviderAuthMetadata::OpenAi(OpenAiAuthMetadata {
+                account_id: Some("acct_dynamic_image".into()),
+                is_fedramp: Some(true),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let (base_url, seen, handle) = spawn_image_header_stub().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut connection = resolved_chatgpt_connection(metadata.clone(), Some(base_url));
+        connection.auth_lease = Arc::new(DynamicLease::from_authorizer(
+            Arc::new(ImageBearerAuthorizer {
+                calls: Arc::clone(&calls),
+            }),
+            metadata,
+            "openai:dynamic-image",
+        ));
+        // Pin which actual builder branch this regression exercises.
+        let dynamic_shape =
+            connection.resolved_authorizer().is_some() && connection.resolved_secret().is_none();
+        let request = hosted_image_request();
+        let operation_id = request.operation_id;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let executor = OpenAiProviderRuntime
+                .build_image_generation_executor(connection)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "missing ChatGPT image executor".to_string())?;
+            executor
+                .execute_image_generation(request)
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        // Clean up before any result/header assertion, including timeout/error.
+        handle.abort();
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("image stub stops within bound");
+        assert!(joined.is_err_and(|error| error.is_cancelled()));
+        assert!(
+            dynamic_shape,
+            "test must select actual authorizer-backed branch"
+        );
+        let output = result
+            .expect("bounded image HTTP request")
+            .expect("image execution succeeds");
+        assert_eq!(output.operation_id, operation_id);
+        assert!(matches!(
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
+        ));
+        assert_eq!(output.images.len(), 1, "actual streamed image was retained");
+        assert_eq!(output.images[0].base64_data, "aGVsbG8=");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "actual authorizer ran once"
+        );
+        let headers = seen.lock().expect("captured image headers");
+        assert_eq!(headers.len(), 1, "exactly one actual image HTTP request");
+        let actual = &headers[0];
+        assert_eq!(
+            actual.get("authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer dynamic-image-token")
+        );
+        assert_eq!(
+            actual
+                .get(meerkat_core::provider_matrix::openai_auth::CHATGPT_ACCOUNT_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("acct_dynamic_image")
+        );
+        assert_eq!(
+            actual
+                .get(meerkat_core::provider_matrix::openai_auth::FEDRAMP_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+    }
+
     #[tokio::test]
     async fn chatgpt_backend_image_executor_sends_oauth_account_headers()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1666,3 +2090,19 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth"))]
+#[test]
+fn ce_stale_refresh_remains_stale_credential() {
+    let result = openai_oauth_refresh_error(
+        oauth::OpenAiOAuthError::Refresh(meerkat_auth_core::RefreshError::StalePreparation),
+        String::new(),
+    );
+    assert!(matches!(
+        result,
+        ProviderAuthError::Auth(AuthError::StaleCredential)
+    ));
+}
+
+#[cfg(all(test, feature = "oauth", not(target_arch = "wasm32")))]
+mod managed_lifetime_tests;

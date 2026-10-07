@@ -685,7 +685,9 @@ async fn create_isolation_mob_with_definition(
     let runtime_store: Arc<dyn RuntimeStore> = Arc::clone(&store) as Arc<dyn RuntimeStore>;
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
-    let adapter = Arc::new(MeerkatMachine::persistent(runtime_store, blob_store));
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(runtime_store, blob_store).expect("construct runtime authority"),
+    );
     let service = Arc::new(MockSessionService::new());
     service.set_runtime_adapter(Arc::clone(&adapter));
     let handle = MobBuilder::new(definition, MobStorage::in_memory())

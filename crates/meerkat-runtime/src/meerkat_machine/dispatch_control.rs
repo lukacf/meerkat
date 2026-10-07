@@ -260,14 +260,24 @@ impl MeerkatMachine {
         &self,
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
-        if matches!(&command, MeerkatMachineCommand::Ingest { .. }) {
+        if let MeerkatMachineCommand::Ingest { runtime_id, input } = &command {
             let spawner = MachineCleanupTaskSpawner::acquire()
                 .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+            let (session_id, _, _, _) = self.lookup_entry(runtime_id).await?;
+            let credential_custody = self
+                .acquire_prepared_input_credential(&session_id, input, &spawner)
+                .await
+                .map_err(Self::control_plane_error_from_driver_error)?;
+            // Pre-custody cancellation creates no owned transaction. Once held,
+            // move custody into the existing task without an intervening await.
             let machine = self.clone();
             return spawner
                 .spawn(async move {
                     machine
-                        .execute_meerkat_machine_control_command_owned(command)
+                        .execute_meerkat_machine_control_command_owned(
+                            command,
+                            Some(credential_custody),
+                        )
                         .await
                 })
                 .await
@@ -277,13 +287,14 @@ impl MeerkatMachine {
                     ))
                 })?;
         }
-        self.execute_meerkat_machine_control_command_owned(command)
+        self.execute_meerkat_machine_control_command_owned(command, None)
             .await
     }
 
     async fn execute_meerkat_machine_control_command_owned(
         &self,
         command: MeerkatMachineCommand,
+        ingest_custody: Option<super::credential_custody::NativeCredentialCustody>,
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
         // Every arm builds its body as an `async move` block inside its own
         // monomorphized frame and there is ONE await site: at opt-level 0 each
@@ -295,6 +306,12 @@ impl MeerkatMachine {
         > = match command {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
                 crate::stack_relief::box_in_own_frame(|| async move {
+                    let credential_custody = ingest_custody.ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(
+                            "owned direct-ingest transaction requires acquired credential custody"
+                                .into(),
+                        )
+                    })?;
                     let (session_id, driver, completions, _wake_tx) =
                         self.lookup_entry(&runtime_id).await?;
                     let ready_guard = self
@@ -435,6 +452,11 @@ impl MeerkatMachine {
                     // failed because cleanup-runtime initialization came later.
                     let cleanup_spawner = MachineCleanupTaskSpawner::acquire()
                         .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+                    {
+                        let drv = driver.lock().await;
+                        drv.authenticate_work_with_credential(&input, &credential_custody)
+                            .map_err(Self::control_plane_error_from_driver_error)?;
+                    }
                     self.apply_session_dsl_input_with_dispatch_failure(
                         &session_id,
                         ingest_input,
@@ -469,7 +491,7 @@ impl MeerkatMachine {
                                 &input,
                                 active_turn_boundary_available,
                             )
-                            .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?
+                            .map_err(Self::control_plane_error_from_driver_error)?
                         };
                         let flags = resolved.coarse_flags();
                         let stages_run_boundary = resolved.stages_run_boundary();
@@ -477,9 +499,7 @@ impl MeerkatMachine {
                             let drv = driver.lock().await;
                             drv.preview_accept_resolved_input(input.clone(), &resolved)
                                 .await
-                                .map_err(|err| {
-                                    RuntimeControlPlaneError::Internal(err.to_string())
-                                })?
+                                .map_err(Self::control_plane_error_from_driver_error)?
                         };
 
                         let (signal, cancel_plan, accepted_effects, fallback_wake) =
@@ -591,9 +611,14 @@ impl MeerkatMachine {
                         let result = {
                             let mut drv = driver.lock().await;
                             let displaced_input_id = resolved.displaced_queued_input_id().cloned();
-                            let result = drv.accept_resolved_input(input, resolved).await.map_err(
-                                |err| RuntimeControlPlaneError::Internal(err.to_string()),
-                            )?;
+                            let result = drv
+                                .accept_resolved_input_with_credential(
+                                    input,
+                                    resolved,
+                                    &credential_custody,
+                                )
+                                .await
+                                .map_err(Self::control_plane_error_from_driver_error)?;
                             Self::wake_displaced_input_observers(
                                 &completions,
                                 displaced_input_id,
@@ -625,6 +650,8 @@ impl MeerkatMachine {
                             accepted_input_id,
                         )
                     };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    drop(credential_custody);
                     crate::hook_observation::dispatch_runtime_input_outcome(
                         &post_commit_hooks,
                         &hook_input,
@@ -3092,6 +3119,8 @@ mod tests {
         Input::Prompt(crate::input::PromptInput {
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: crate::input::InputOrigin::Operator,

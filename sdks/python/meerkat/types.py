@@ -71,6 +71,7 @@ from .generated.types import (
     MobHardCancelResult as MobHardCancelResult,
     MobStopMemberRunResult as MobStopMemberRunResult,
     StopRunResult as StopRunResult,
+    ToolDispatchSettlementFailure as ToolDispatchSettlementFailure,
     WireRunStopContributor as WireRunStopContributor,
     WireRunStopReceipt as WireRunStopReceipt,
     MobLimitsSpecInput as MobLimitsSpecInput,
@@ -801,6 +802,7 @@ class SessionToolResult:
     tool_use_id: str = ""
     content: SessionContentInput = ""
     is_error: bool = False
+    settlement_failures: list[ToolDispatchSettlementFailure] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

@@ -57,7 +57,7 @@
 //!   The field is `#[serde(default)]` and skipped when empty, so a document
 //!   that owes no handoff is byte-identical to one written before this existed.
 //!   No released `Session` is rewritten, no importer is needed, and
-//!   `SESSION_VERSION` stays 3.
+//!   Model-routing records do not independently advance `SESSION_VERSION`.
 //! * **(b) an exact v3 to v4 importer.** Rejected. Doctrine currently sanctions
 //!   exactly one historical importer (the frozen released-0.8.10 lane), and a
 //!   second one would have to re-derive every `HeadCanonical` head token to

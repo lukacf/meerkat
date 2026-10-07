@@ -391,6 +391,7 @@ async fn prepare_token_commit_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Result<PreparedTokenCommitSnapshot, (StatusCode, String)> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
@@ -398,6 +399,7 @@ async fn prepare_token_commit_unlocked(
         auth_lease,
         auth_binding,
         chrono::Utc::now(),
+        guard,
     )
     .await
     .map_err(|error| {
@@ -426,6 +428,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Result<TokenCommitSnapshot, (StatusCode, String)> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
@@ -434,6 +437,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         auth_lease,
         auth_binding,
         chrono::Utc::now(),
+        guard,
     )
     .await
     .map_err(|error| {
@@ -540,6 +544,7 @@ async fn save_tokens_and_publish_lifecycle(
                         &auth_lease,
                         &auth_binding,
                         &tokens,
+                        &_guard,
                     )
                     .await
                     .map_err(|(_, message)| CredentialMutationError::Operation(message))?;
@@ -675,6 +680,7 @@ async fn save_tokens_and_consume_device_flow_unlocked(
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     poll_lease: OAuthDevicePollLease,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Result<(), (StatusCode, String)> {
     if !poll_lease.terminal_flow_state_is_authmachine_owned() {
         return Err((
@@ -684,7 +690,8 @@ async fn save_tokens_and_consume_device_flow_unlocked(
         ));
     }
     verify_terminal_device_flow(&poll_lease)?;
-    let prepared = prepare_token_commit_unlocked(token_store, auth_lease, auth_binding).await?;
+    let prepared =
+        prepare_token_commit_unlocked(token_store, auth_lease, auth_binding, guard).await?;
     consume_terminal_device_flow(auth_lease, auth_binding, poll_lease)?;
     save_prepared_tokens_after_terminal_consume_unlocked(
         token_store,
@@ -723,6 +730,7 @@ async fn save_tokens_and_consume_device_flow(
                         &auth_binding,
                         &tokens,
                         poll_lease,
+                        &_guard,
                     )
                     .await
                     .map_err(|(_, message)| CredentialMutationError::Operation(message))?;
@@ -773,6 +781,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     flow: BrowserFlowConsume<'_>,
+    guard: &meerkat_core::AuthLoginLifecycleGuard,
 ) -> Result<(), (StatusCode, String)> {
     if !flow.authority.terminal_flow_state_is_authmachine_owned() {
         return Err((
@@ -781,7 +790,8 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
                 .to_string(),
         ));
     }
-    let prepared = prepare_token_commit_unlocked(token_store, auth_lease, auth_binding).await?;
+    let prepared =
+        prepare_token_commit_unlocked(token_store, auth_lease, auth_binding, guard).await?;
     flow.authority
         .consume(
             flow.state,
@@ -838,6 +848,7 @@ async fn save_tokens_and_consume_browser_flow(
                             provider: flow.provider,
                             redirect_uri: &flow.redirect_uri,
                         },
+                        &_guard,
                     )
                     .await
                     .map_err(|(_, message)| CredentialMutationError::Operation(message))?;
@@ -2505,10 +2516,8 @@ mod tests {
     }
 
     fn install_ephemeral_auth_state(state: &mut AppState) {
-        let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
-        state
-            .runtime_adapter
-            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
+        // Retain the installed owner: REST status and session runtimes must
+        // observe the same AuthMachine even with isolated token storage.
         state.auth_lease = state.runtime_adapter.generated_auth_lease_handle();
         state.provider_auth_persistence = ProviderAuthPersistence::new(
             Arc::new(EphemeralTokenStore::new()),
@@ -3929,6 +3938,10 @@ mod tests {
             &auth_lease,
             &auth_binding,
             &failed_tokens,
+            &meerkat_core::acquire_auth_login_lifecycle_guard(
+                &meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding),
+            )
+            .await,
         )
         .await
         .unwrap();
@@ -4017,6 +4030,10 @@ mod tests {
             &auth_lease,
             &auth_binding,
             &failed_tokens,
+            &meerkat_core::acquire_auth_login_lifecycle_guard(
+                &meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding),
+            )
+            .await,
         )
         .await
         .unwrap();

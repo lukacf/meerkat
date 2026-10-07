@@ -279,6 +279,14 @@ When a foreground hook returns `Deny`:
 A priority-1 guardrail that denies will prevent a priority-100 observer from running.
 </Note>
 
+At `PreToolExecution`, a foreground denial refuses only the attempted tool.
+The target is not dispatched; permitted sibling calls continue. The same model
+controller receives `hook_denied` tool feedback with the exact hook ID, point,
+reason code and optional JSON payload, then can choose a permitted next action.
+An absent payload and an explicit JSON null are distinct. The deciding hook
+retains its truthful start, completion and denial events. Other hook points
+retain their current disposition while their local-refusal integration proceeds.
+
 ## Configuration
 
 <Accordion title="Config file example (realm config.toml)">
@@ -364,6 +372,7 @@ For ordinary agent-loop hook points, the session event stream can include:
 | `HookCompleted` | A foreground hook returns without an execution failure; a denial is reported separately |
 | `HookFailed` | A foreground hook fails or times out, including the hard engine-error path |
 | `HookDenied` | A foreground hook returns a `Deny` decision |
+| `HookLaunchRefused` | A prerequisite prevents the hook from entering; the attempted call ID is included when present |
 
 Ordinary background work does not promise a terminal `HookCompleted` or
 `HookFailed` session event. Later failures and capacity skips are observable

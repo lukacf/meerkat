@@ -32,6 +32,7 @@ fi
 REMOTE_NAME="$1"
 REMOTE_URL="$2"
 SOURCE_ROOT="$(git rev-parse --show-toplevel)"
+SOURCE_ROOT="$(cd -- "$SOURCE_ROOT" && pwd -P)"
 DISPATCH_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ZERO_SHA="0000000000000000000000000000000000000000"
 # v2: a full-coverage stamp is written only when no hook was skipped. v1 stamps
@@ -131,6 +132,7 @@ fi
 dispatch_step="resolving the exact-tree evidence cache"
 pushed_tree="$(git -C "$SOURCE_ROOT" rev-parse "${pushed_commit}^{tree}")"
 git_common_dir="$(git -C "$SOURCE_ROOT" rev-parse --path-format=absolute --git-common-dir)"
+git_common_dir="$(cd -- "$git_common_dir" && pwd -P)"
 hook_cache_root="${git_common_dir}/meerkat-hook-cache"
 hook_cache_dir="${hook_cache_root}/exact-tree"
 # This accelerates identical tracked trees only. CI remains authoritative for
@@ -166,11 +168,24 @@ fi
 # same source worktree still serialize on the same lane.
 default_validation_lane="pre-push-$(hash_path "${SOURCE_ROOT}")"
 validation_lane="$(sanitize_cache_key "${RUST_LANE_ID:-${default_validation_lane}}")"
+case "$validation_lane" in
+  .|..)
+    echo "Refusing unsafe validation lane: ${validation_lane}" >&2
+    exit 1
+    ;;
+esac
 dispatcher_lock_dir="${hook_cache_root}/dispatcher-${validation_lane}.lock"
 dispatcher_lock_pid="${dispatcher_lock_dir}/pid"
 validation_tree="${hook_cache_root}/worktrees/${validation_lane}"
 validation_run_root=""
 validation_tree_owned=0
+validation_tree_ready=0
+# The existing retention command owns this namespace. Explicit custom lanes
+# keep their previous cleanup behavior so they cannot accumulate unboundedly.
+retain_validation_tree=0
+if [[ "$validation_lane" =~ ^pre-push-[0-9a-f]{16}$ ]]; then
+  retain_validation_tree=1
+fi
 dispatcher_lock_held=0
 lane_targets_root=""
 export RUST_LANE_ID="${validation_lane}"
@@ -226,7 +241,8 @@ release_dispatcher_lock() {
 
 cleanup() {
   local pending_status=$?
-  if [[ "${validation_tree_owned}" -eq 1 && -n "${validation_tree}" && -d "${validation_tree}" ]]; then
+  if [[ "${validation_tree_owned}" -eq 1 && -n "${validation_tree}" && -d "${validation_tree}" ]] &&
+    [[ "${retain_validation_tree}" -eq 0 || "${validation_tree_ready}" -eq 0 ]]; then
     if ! git -C "$SOURCE_ROOT" worktree remove --force "$validation_tree" >/dev/null 2>&1; then
       echo "note: validation worktree left behind: ${validation_tree}" >&2
       echo "      prune it with: git -C ${SOURCE_ROOT} worktree prune" >&2
@@ -288,6 +304,16 @@ acquire_dispatcher_lock() {
   printf '%s\n' "$$" >"${dispatcher_lock_pid}"
 }
 
+if [[ -L "$hook_cache_root" || -L "${hook_cache_root}/worktrees" ]]; then
+  echo "Refusing a symlink in the validation checkout parent path." >&2
+  exit 1
+fi
+case "${SOURCE_ROOT}/" in
+  "${validation_tree}/"*)
+    echo "Refusing a validation checkout that contains the source checkout." >&2
+    exit 1
+    ;;
+esac
 mkdir -p "$hook_cache_dir" "$(dirname "${validation_tree}")"
 
 # Reuse full evidence for this tree, or reduced-coverage evidence whose skipped
@@ -324,23 +350,42 @@ if reuse_exact_tree_evidence; then
   exit 0
 fi
 
-dispatch_step="creating the stable detached validation worktree"
-git -C "$SOURCE_ROOT" worktree remove --force "$validation_tree" >/dev/null 2>&1 || true
-if [[ -e "${validation_tree}" || -L "${validation_tree}" ]]; then
-  case "${validation_tree}" in
-    "${hook_cache_root}"/worktrees/*)
-      rm -rf -- "${validation_tree}"
-      ;;
-    *)
-      echo "Refusing to remove unexpected validation path: ${validation_tree}" >&2
-      exit 1
-      ;;
-  esac
-fi
-validation_run_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-exact.XXXXXX")"
+validation_checkout_matches_owner() {
+  local actual_common_dir actual_git_dir
+  [[ -d "$validation_tree" && ! -L "$validation_tree" ]] || return 1
+  [[ "$(git -C "$validation_tree" rev-parse --show-toplevel 2>/dev/null)" == "$validation_tree" ]] || return 1
+  actual_common_dir="$(git -C "$validation_tree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  actual_common_dir="$(cd -- "$actual_common_dir" && pwd -P)" || return 1
+  [[ "$actual_common_dir" == "$git_common_dir" ]] || return 1
+  actual_git_dir="$(git -C "$validation_tree" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  actual_git_dir="$(cd -- "$actual_git_dir" && pwd -P)" || return 1
+  [[ "$(dirname -- "$actual_git_dir")" == "${git_common_dir}/worktrees" ]] || return 1
+  [[ "$(cat "$actual_git_dir/gitdir" 2>/dev/null)" == "${validation_tree}/.git" ]] || return 1
+  if git -C "$validation_tree" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+    return 1
+  fi
+  git -C "$validation_tree" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1
+}
 
-validation_tree_owned=1
-git -C "$SOURCE_ROOT" worktree add --detach --quiet "$validation_tree" "$pushed_commit"
+dispatch_step="preparing the stable detached validation worktree"
+if [[ -e "$validation_tree" || -L "$validation_tree" ]]; then
+  if ! validation_checkout_matches_owner; then
+    echo "Refusing to reuse unexpected validation checkout: ${validation_tree}" >&2
+    exit 1
+  fi
+  validation_tree_owned=1
+  # Reset only this verified private checkout. Git preserves timestamps for
+  # unchanged tracked files, while clean removes prior hook residue.
+  git -C "$validation_tree" reset --hard --quiet "$pushed_commit"
+  git -C "$validation_tree" clean -ffdqx
+else
+  # A removed checkout can leave a registration after interrupted cleanup.
+  git -C "$SOURCE_ROOT" worktree remove --force "$validation_tree" >/dev/null 2>&1 || true
+  validation_tree_owned=1
+  git -C "$SOURCE_ROOT" worktree add --detach --quiet "$validation_tree" "$pushed_commit"
+fi
+validation_tree_ready=1
+validation_run_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-exact.XXXXXX")"
 
 dispatch_step="stamping the validation lane as used"
 resolve_lane_targets_root

@@ -213,10 +213,10 @@ async fn setup_generated_image_comms_mob(
     materialize_project_context(root)?;
     let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::default());
     let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
-    let runtime_adapter = Arc::new(MeerkatMachine::persistent(
-        runtime_store.clone(),
-        blob_store.clone(),
-    ));
+    let runtime_adapter = Arc::new(
+        MeerkatMachine::persistent(runtime_store.clone(), blob_store.clone())
+            .expect("construct runtime authority"),
+    );
 
     let factory = AgentFactory::new(root.join("factory-store"))
         .user_config_root(root.join("user-config"))
@@ -264,10 +264,10 @@ async fn setup_image_relay_mob(
     materialize_project_context(root)?;
     let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::default());
     let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
-    let runtime_adapter = Arc::new(MeerkatMachine::persistent(
-        runtime_store.clone(),
-        blob_store.clone(),
-    ));
+    let runtime_adapter = Arc::new(
+        MeerkatMachine::persistent(runtime_store.clone(), blob_store.clone())
+            .expect("construct runtime authority"),
+    );
 
     let factory = AgentFactory::new(root.join("factory-store"))
         .user_config_root(root.join("user-config"))

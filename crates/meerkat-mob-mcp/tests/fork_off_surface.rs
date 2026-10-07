@@ -1041,39 +1041,45 @@ async fn a_failing_detached_council_completes_its_job_as_failed() {
 }
 
 // ===========================================================================
-// Hosts that cannot deliver detached, and owners that are not live
+// Implicit runtime delivery and owners that are not live
 // ===========================================================================
 
-/// A host that declares detached delivery but has no runtime to admit the
-/// completion does not pretend: fork_off and council block for their result
-/// and say why, typed, in the result.
+/// Omitting an explicit adapter uses the persistent service's retained owner.
+/// Both detached tools record their outcome once and preserve it for later turns.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_host_declaring_delivery_without_a_runtime_blocks_and_says_why() {
-    let fixture = CouncilFixture::new_without_runtime_adapter(routed_script(
-        RequestLog::default(),
+async fn an_implicit_service_runtime_delivers_fork_and_council_completions() {
+    let log = RequestLog::default();
+    let fixture = CouncilFixture::new_with_implicit_runtime_adapter(routed_script(
+        log.clone(),
         vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
     ));
-    fixture.seed_source_mob(&["forker", "alice", "bob"]).await;
-    fixture
-        .state
-        .set_detached_completion_delivery(DetachedCompletionDelivery::Available);
-    assert_eq!(
-        fixture.state.detached_delivery_blocked_because(),
-        Some(DetachedDeliveryUnavailable::NoRuntimeAdapter)
+    assert!(
+        fixture.runtime_adapter.is_none(),
+        "no explicit adapter supplied"
     );
+    fixture.seed_source_mob(&["forker", "alice", "bob"]).await;
+    assert_eq!(fixture.state.detached_delivery_blocked_because(), None);
+    let runtime = <PersistentService as meerkat_mob::MobSessionService>::acquire_runtime_adapter(
+        fixture.service.as_ref(),
+        None,
+    )
+    .expect("acquire the service's retained runtime")
+    .expect("persistent service has a runtime owner");
     let mob_id = fixture.source_mob_id().to_string();
     let forker = member_surface(&fixture, "forker").await;
 
-    let forked = call(
-        &forker.surface,
-        "fork_off",
-        fork_args("unroutable-child", CHILD_TASK),
+    let fork_job = start_detached_fork(
+        &forker,
+        "implicit-owner-child",
+        fork_args("implicit-owner-child", CHILD_TASK),
     )
-    .await
-    .expect("fork_off blocks for its result");
-    assert_eq!(forked["bounded_result"]["text"], CHILD_REPLY, "{forked}");
-    assert!(forked.get("job_id").is_none(), "{forked}");
-    assert_eq!(forked["blocked_because"], "no_runtime_adapter", "{forked}");
+    .await;
+    let fork_record = wait_for_completion(&fixture, &forker.session, &fork_job).await;
+    assert_eq!(
+        fork_record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "{fork_record:?}"
+    );
 
     let convener = bind_surface(
         &fixture.state,
@@ -1083,22 +1089,43 @@ async fn a_host_declaring_delivery_without_a_runtime_blocks_and_says_why() {
     let council = call(
         &convener.surface,
         "council",
-        council_args(&fixture, Some("no-runtime")),
+        council_args(&fixture, Some("implicit-owner")),
     )
     .await
-    .expect("council blocks for its result");
-    assert!(council.get("job_id").is_none(), "{council}");
+    .expect("council starts detached");
+    assert_eq!(council["status"], "running", "{council}");
+    assert!(council.get("blocked_because").is_none(), "{council}");
+    let council_job = council["job_id"].as_str().expect("council job id");
+    assert_ne!(fork_job, council_job);
+    let council_record = wait_for_completion(&fixture, &convener.session, council_job).await;
     assert_eq!(
-        council["blocked_because"], "no_runtime_adapter",
-        "{council}"
+        council_record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "{council_record:?}"
     );
+
+    let prompt = "FOLLOW-UP-I what did the fork and council find?";
     assert_eq!(
-        any_completion_records(
-            &persisted_messages(fixture.service.as_ref(), &forker.session).await
-        ),
-        0,
-        "nothing is recorded for results the calls already returned"
+        drive_turn(&fixture, "forker", prompt).await,
+        FOLLOW_UP_REPLY
     );
+    let request = log.request_for(prompt);
+    assert!(
+        request.rendered.contains(&fork_job)
+            && request.rendered.contains(CHILD_REPLY)
+            && request.rendered.contains(council_job)
+            && request.rendered.contains(COUNCIL_SUMMARY),
+        "the implicit owner carries both completions into its next model request: {}",
+        request.rendered
+    );
+    assert!(
+        runtime.contains_session(&forker.session).await,
+        "the service's retained owner runs the member"
+    );
+    let messages = persisted_messages(fixture.service.as_ref(), &forker.session).await;
+    assert_one_completion_record(&messages, "fork_off", &fork_job, CHILD_REPLY);
+    assert_one_completion_record(&messages, "council", council_job, COUNCIL_SUMMARY);
+    assert_eq!(any_completion_records(&messages), 2);
     fixture.teardown().await;
 }
 

@@ -1383,6 +1383,8 @@ fn peer_input_from_delivery_payload(
         .or_else(|| (!is_placed).then_some(stable_uuid))
         .map(crate::identifiers::CorrelationId::from_uuid);
     let header = InputHeader {
+        ingress_context: None,
+        authority_association: None,
         id: meerkat_core::lifecycle::InputId::from_uuid(stable_uuid),
         timestamp: chrono::Utc::now(),
         source: InputOrigin::Peer {
@@ -7668,9 +7670,12 @@ mod tests {
     use uuid::Uuid;
 
     fn durable_direct_member_test_machine() -> Arc<MeerkatMachine> {
-        Arc::new(MeerkatMachine::persistent_without_blobs(Arc::new(
-            crate::store::InMemoryRuntimeStore::new(),
-        )))
+        Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::new(
+                crate::store::InMemoryRuntimeStore::new(),
+            ))
+            .expect("persistent machine"),
+        )
     }
 
     #[test]
@@ -11865,6 +11870,8 @@ mod tests {
             system_prompts: Vec::new(),
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: crate::input::InputOrigin::Peer {
@@ -16095,7 +16102,10 @@ mod tests {
             ..predecessor.clone()
         };
 
-        let first = Arc::new(MeerkatMachine::persistent_without_blobs(Arc::clone(&store)));
+        let first = Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        );
         first
             .register_session(session_id.clone())
             .await
@@ -16110,7 +16120,8 @@ mod tests {
             .expect("durably advance to successor B");
         drop(first);
 
-        let recovered = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+        let recovered =
+            Arc::new(MeerkatMachine::persistent_without_blobs(store).expect("persistent machine"));
         recovered
             .register_session(session_id.clone())
             .await
@@ -16165,9 +16176,12 @@ mod tests {
             Arc::clone(&entered),
             Arc::clone(&release),
         );
-        let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
-            Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>
-        ));
+        let adapter = Arc::new(
+            MeerkatMachine::persistent_without_blobs(
+                Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>
+            )
+            .expect("persistent machine"),
+        );
         let session_id = SessionId::new();
         adapter
             .register_session(session_id.clone())

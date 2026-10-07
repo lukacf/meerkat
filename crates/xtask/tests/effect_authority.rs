@@ -18,6 +18,7 @@ const LIVE_WORKSPACE_RUNFILES: &str = "required";
 
 const CORE_EXECUTOR_TRAIT_FIXTURE: &str = r"
 trait CoreExecutor {
+    fn supports_work_authorization(&self) -> bool { false }
     fn boundary_handle(&self) {}
     fn interrupt_handle(&self) {}
     fn publication_handle(&self) {}
@@ -46,6 +47,7 @@ struct MachineManagedPostStopExecutor {
 }
 
 impl CoreExecutor for MachineManagedPostStopExecutor {
+    fn supports_work_authorization(&self) -> bool { self.inner.supports_work_authorization() }
     fn boundary_handle(&self) { self.inner.boundary_handle() }
     fn interrupt_handle(&self) { self.inner.interrupt_handle() }
     fn publication_handle(&self) { self.inner.publication_handle() }
@@ -214,6 +216,23 @@ fn core_executor_decorator_rejects_non_inner_forward() {
         }),
         "non-inner forwarding must fail the call-shape check, got {findings:#?}"
     );
+}
+
+#[test]
+fn core_executor_decorator_rejects_fabricated_work_authorization_support() {
+    for body in ["false", "true"] {
+        let decorator_source = MACHINE_MANAGED_EXECUTOR_FIXTURE
+            .replace("self.inner.supports_work_authorization()", body);
+        let findings =
+            core_executor_delegation_findings(CORE_EXECUTOR_TRAIT_FIXTURE, &decorator_source);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.contains("pure CoreExecutor decorator method `supports_work_authorization`")
+                    && finding.contains("self.inner.supports_work_authorization")
+            }),
+            "fabricated capability {body} must fail exact inner forwarding, got {findings:#?}"
+        );
+    }
 }
 
 #[test]

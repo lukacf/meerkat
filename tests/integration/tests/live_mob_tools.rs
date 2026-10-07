@@ -135,7 +135,8 @@ async fn make_smoke_rpc_stack(
         store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         blob_store,
-    );
+    )
+    .expect("construct runtime authority");
 
     let runtime = SessionRuntime::new(
         factory,
@@ -153,11 +154,14 @@ async fn make_smoke_rpc_stack(
 
     // Create mob state from the runtime's session service, preserving the
     // runtime adapter so delegate-spawned AutonomousHost helpers can boot.
-    let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
-        runtime.session_service(),
-        Some(runtime.runtime_adapter()),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let mob_state = Arc::new(
+        MobMcpState::new_with_runtime_adapter(
+            runtime.session_service(),
+            Some(runtime.runtime_adapter()),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("construct runtime authority"),
+    );
 
     // Wire mob tools factory into the builder inside the session service.
     // This uses the builder_mob_tools_slot (Arc<RwLock>) to write through

@@ -269,6 +269,12 @@ impl SessionStore for EphemeralSessionStore {
 /// Type-erased agent using trait objects.
 pub type DynAgent = Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
 
+#[derive(Clone, Copy)]
+enum ControllerClientRequirement {
+    NotRequested,
+    Required,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 type CoreAgentFactoryBuildFuture =
     Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>> + Send>>;
@@ -1153,6 +1159,7 @@ impl AgentBuildConfig {
             resume_override_mask: self.resume_override_mask,
             runtime_build_mode: self.runtime_build_mode.clone(),
             initial_turn_metadata: None,
+            initial_work_authorization: None,
             session_comms_runtime_override: self.session_comms_runtime_override.clone(),
             host_prompt_sections: self.host_prompt_sections,
         }
@@ -1232,6 +1239,10 @@ pub enum BuildAgentError {
     /// The selected runtime composition excludes an explicitly requested capability.
     #[error(transparent)]
     RuntimeProfile(#[from] meerkat_capabilities::RuntimeProfileRefusal),
+    /// The actual selected client cannot supply a stable runnable controller
+    /// with matching route facts. This is a setup refusal before work admission.
+    #[error("the selected client cannot provide the required controller")]
+    ControllerUnavailable,
     /// Cannot infer provider from the given model name.
     #[error("Cannot infer provider from model '{model}'")]
     UnknownProvider { model: String },
@@ -2351,6 +2362,10 @@ pub struct AgentFactory {
     pub user_config_root: Option<PathBuf>,
     pub enable_builtins: bool,
     pub enable_shell: bool,
+    /// Native host requirement inherited by every automatically composed shell.
+    /// Session requests and recovered job metadata cannot weaken this policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    shell_confinement: meerkat_tools::builtin::shell::ShellConfinement,
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
     pub enable_memory: bool,
@@ -2435,6 +2450,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_schedule", &self.enable_schedule)
             .field("enable_workgraph", &self.enable_workgraph)
             .field("enable_mob", &self.enable_mob);
+        #[cfg(not(target_arch = "wasm32"))]
+        d.field("shell_confinement", &self.shell_confinement);
         #[cfg(feature = "comms")]
         d.field("enable_comms", &self.enable_comms);
         #[cfg(feature = "skills")]
@@ -3509,6 +3526,8 @@ impl AgentFactory {
             user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            shell_confinement: Default::default(),
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -3650,6 +3669,8 @@ impl AgentFactory {
             user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            shell_confinement: Default::default(),
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -3876,6 +3897,17 @@ impl AgentFactory {
     /// Enable or disable shell tools.
     pub fn shell(mut self, enabled: bool) -> Self {
         self.enable_shell = enabled;
+        self
+    }
+
+    /// Set the native host confinement requirement for automatically composed
+    /// shell tools. Each build compiles it into its own shell dispatcher.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_shell_confinement(
+        mut self,
+        confinement: meerkat_tools::builtin::shell::ShellConfinement,
+    ) -> Self {
+        self.shell_confinement = confinement;
         self
     }
 
@@ -5593,9 +5625,46 @@ impl AgentFactory {
     ///   SessionMetadata.
     pub async fn build_agent(
         &self,
-        mut build_config: AgentBuildConfig,
+        build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
+        self.build_agent_inner(
+            build_config,
+            config,
+            ControllerClientRequirement::NotRequested,
+        )
+        .await
+        .map(|(agent, _)| agent)
+    }
+
+    /// Prepare the actual agent and its immutable selected controller together.
+    ///
+    /// Trusted native setup calls this before accepting governed work, then
+    /// binds this exact process-only pin to its authenticated input association.
+    /// A saved selection or successful build is not admission or permission.
+    /// Both outputs share the same provider resolution, decorators and event
+    /// wiring; the controller is never built again from serialized identity.
+    /// Custom clients/decorators that cannot pin refuse explicitly. The lazy
+    /// SessionAgentBuilder path does not acquire a pre-admission pin merely by
+    /// calling its existing build method.
+    pub async fn build_agent_with_controller(
+        &self,
+        build_config: AgentBuildConfig,
+        config: &Config,
+    ) -> Result<(DynAgent, meerkat_core::ControllerModelClient), BuildAgentError> {
+        let (agent, controller) = self
+            .build_agent_inner(build_config, config, ControllerClientRequirement::Required)
+            .await?;
+        let controller = controller.ok_or(BuildAgentError::ControllerUnavailable)?;
+        Ok((agent, controller))
+    }
+
+    async fn build_agent_inner(
+        &self,
+        mut build_config: AgentBuildConfig,
+        config: &Config,
+        controller_requirement: ControllerClientRequirement,
+    ) -> Result<(DynAgent, Option<meerkat_core::ControllerModelClient>), BuildAgentError> {
         self.validate_runtime_profile(&build_config, config)?;
         let mut effective_config;
         let config = if let Some(fallback) = &build_config.model_fallback {
@@ -6162,6 +6231,16 @@ impl AgentFactory {
             }
         } else {
             llm_adapter
+        };
+        // Capture the final decorated selection once, before tool/comms
+        // construction. The existing fallback owner pins its actual child,
+        // so a later fallback mutation cannot retarget this work's controller.
+        let controller_client = match controller_requirement {
+            ControllerClientRequirement::NotRequested => None,
+            ControllerClientRequirement::Required => Some(Self::pin_selected_controller(
+                &llm_adapter,
+                &resolved_llm_identity,
+            )?),
         };
         #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
         let brain_swap_models =
@@ -7956,7 +8035,27 @@ impl AgentFactory {
             agent.set_mob_authority_handle(handle);
         }
 
-        Ok(agent)
+        Ok((agent, controller_client))
+    }
+
+    fn pin_selected_controller(
+        client: &Arc<dyn AgentLlmClient>,
+        identity: &SessionLlmIdentity,
+    ) -> Result<meerkat_core::ControllerModelClient, BuildAgentError> {
+        let controller = Arc::clone(client)
+            .pin_controller()
+            .ok_or(BuildAgentError::ControllerUnavailable)?;
+        let selection = controller.selection();
+        if selection.model() != identity.model
+            || selection.provider() != identity.provider
+            || selection.self_hosted_server_id() != identity.self_hosted_server_id.as_deref()
+            || selection.auth_binding() != identity.auth_binding.as_ref()
+            || client.controller_model_selection().as_ref() != Some(selection)
+            || controller.client().controller_model_selection().as_ref() != Some(selection)
+        {
+            return Err(BuildAgentError::ControllerUnavailable);
+        }
+        Ok(controller)
     }
 
     /// build_agent phase 3: create the LLM client and the automatic
@@ -11347,7 +11446,8 @@ mod tests {
                 Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
                 Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
                 Arc::clone(&blob_store) as Arc<dyn BlobStore>,
-            );
+            )
+            .expect("construct runtime authority");
             let (service, adapter) =
                 crate::surface::build_runtime_backed_service(builder, 4, persistence);
             let service = Arc::new(service);
@@ -11521,7 +11621,8 @@ mod tests {
             Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
             Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::clone(&blob_store) as Arc<dyn BlobStore>,
-        );
+        )
+        .expect("construct runtime authority");
         let (restart_service, restart_adapter) =
             crate::surface::build_runtime_backed_service(restart_builder, 4, restart_persistence);
         let restart_service = Arc::new(restart_service);
@@ -11698,7 +11799,8 @@ mod tests {
             Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
             Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::clone(&blob_store) as Arc<dyn BlobStore>,
-        );
+        )
+        .expect("construct runtime authority");
         let (service, adapter) =
             crate::surface::build_runtime_backed_service(builder, 4, persistence);
         let service = Arc::new(service);
@@ -17041,6 +17143,10 @@ impl AgentFactory {
         let shell_config = if effective_shell {
             let project_root = self.shell_project_root();
             let mut shell_tool_config = ShellConfig::from_defaults(&config.shell, project_root);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                shell_tool_config.confinement = self.shell_confinement.clone();
+            }
             if let Some(env) = shell_env {
                 shell_tool_config.env_vars = env;
             }

@@ -889,6 +889,7 @@ fn is_definite_refusal(error: &RuntimeDriverError) -> bool {
     matches!(
         error,
         RuntimeDriverError::ValidationFailed { .. }
+            | RuntimeDriverError::InputRefused { .. }
             | RuntimeDriverError::NotReady { .. }
             | RuntimeDriverError::NotFound { .. }
             | RuntimeDriverError::Destroyed
@@ -937,6 +938,8 @@ mod tests {
     fn prompt(text: &str) -> Input {
         Input::Prompt(PromptInput {
             header: InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Operator,
@@ -1752,5 +1755,36 @@ mod tests {
             other => panic!("expected a process-local admission, got {other:?}"),
         }
         assert!(!report.is_durably_queued());
+    }
+}
+
+#[cfg(test)]
+mod admission_projection_classification_tests {
+    use super::*;
+    use meerkat_core::{OperationRefusalKind, OperationRefused};
+
+    #[test]
+    fn closed_refusal_retains_definite_bounded_classification() {
+        for kind in [
+            OperationRefusalKind::Denied,
+            OperationRefusalKind::MalformedFacts,
+        ] {
+            let error = RuntimeDriverError::from(
+                crate::input_authority::NativeAdmissionError::Refused(OperationRefused::new(kind)),
+            );
+            assert!(
+                is_definite_refusal(&error),
+                "lost definite refusal: {error:?}"
+            );
+        }
+        let changed =
+            RuntimeDriverError::from(crate::input_authority::NativeAdmissionError::Refused(
+                OperationRefused::new(OperationRefusalKind::ReprepareRequired),
+            ));
+        assert!(!is_definite_refusal(&changed));
+        let unavailable = RuntimeDriverError::ControllerReadinessUnavailable {
+            reason: crate::traits::ControllerReadinessFailure::PolicyUnavailable,
+        };
+        assert!(!is_definite_refusal(&unavailable));
     }
 }

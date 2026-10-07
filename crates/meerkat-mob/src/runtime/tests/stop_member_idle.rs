@@ -258,7 +258,8 @@ async fn shutdown_cancels_a_member_turn_and_a_second_shutdown_joins_it() {
     tokio::time::timeout(STEP, service.wait_keep_alive_turn_entered(&session))
         .await
         .expect("the kickoff turn starts");
-    let adapter = MobSessionService::runtime_adapter(service.as_ref())
+    let adapter = MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+        .expect("acquire runtime authority")
         .expect("the test mob is runtime-backed");
     let kickoff_run = adapter
         .current_run(&session)
@@ -377,7 +378,8 @@ async fn a_stop_command_parks_on_its_in_flight_interrupt_and_completes_when_it_s
 async fn stop_resolves_once_the_runtime_records_the_run_end_and_resume_follows() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let session = spawn_winding_down_member(&handle, &service, "stop-run-settlement").await;
-    let adapter = MobSessionService::runtime_adapter(service.as_ref())
+    let adapter = MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+        .expect("acquire runtime authority")
         .expect("the test mob is runtime-backed");
 
     let stop = start_stop(&handle);
@@ -428,7 +430,8 @@ async fn shutdown_reports_a_run_that_ended_before_its_cancel_from_the_recorded_t
     tokio::time::timeout(STEP, service.wait_keep_alive_turn_entered(&session))
         .await
         .expect("the kickoff turn starts");
-    let adapter = MobSessionService::runtime_adapter(service.as_ref())
+    let adapter = MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+        .expect("acquire runtime authority")
         .expect("the test mob is runtime-backed");
     let run = adapter
         .current_run(&session)

@@ -135,7 +135,8 @@ fn build_app_inner(
         store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
+    )
+    .expect("construct runtime authority");
     let runtime_adapter = persistence.runtime_adapter();
     let workgraph_store = persistence.workgraph_store();
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));
@@ -152,7 +153,8 @@ fn build_app_inner(
         Some(runtime_adapter.clone()),
         None,
         meerkat_mob::MobControlPrincipal::Owner,
-    );
+    )
+    .expect("wire runtime authority");
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
         config.clone(),
         meerkat_models::canonical(),

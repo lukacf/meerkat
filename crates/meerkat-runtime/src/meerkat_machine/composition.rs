@@ -980,9 +980,10 @@ mod tests {
     #[tokio::test]
     async fn routed_seam_member_authorizes_its_durable_compaction_projection() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let machine = Arc::new(MeerkatMachine::persistent_without_blobs(
-            store as Arc<dyn crate::store::RuntimeStore>,
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent_without_blobs(store as Arc<dyn crate::store::RuntimeStore>)
+                .expect("persistent machine"),
+        );
         let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000043");
         let bindings = machine
@@ -1499,7 +1500,8 @@ mod tests {
     #[tokio::test]
     async fn reload_successor_preserves_delivery_custody_without_inheriting_old_receipts() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let machine = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+        let machine =
+            Arc::new(MeerkatMachine::persistent_without_blobs(store).expect("persistent machine"));
         let session = SessionId::new();
         let signals = Arc::new(RecordingSignalSurface::default());
         let dispatcher = recording_dispatcher(signals.clone());
@@ -2269,10 +2271,13 @@ mod tests {
             "the regression fixture must exercise the current durable lifecycle shape"
         );
 
-        let machine = Arc::new(MeerkatMachine::persistent(
-            runtime_store,
-            Arc::new(meerkat_store::MemoryBlobStore::new()),
-        ));
+        let machine = Arc::new(
+            MeerkatMachine::persistent(
+                runtime_store,
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            )
+            .expect("persistent machine"),
+        );
         let signal_surface = Arc::new(RecordingSignalSurface::default());
         let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
         let table = RouteTable::from_schema(&schema).expect("catalog routes");

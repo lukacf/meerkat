@@ -1,0 +1,44 @@
+[package]
+name = "meerkat-authorization"
+description = "Process-local generated grant authority for Meerkat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+integration-real-tests = []
+
+[dependencies]
+indexmap.workspace = true
+meerkat-core.workspace = true
+meerkat-machine-schema.workspace = true
+meerkat-machine-dsl.workspace = true
+meerkat-authorization-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+meerkat-anthropic = { workspace = true, default-features = false }
+meerkat-auth-core.workspace = true
+meerkat-models.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+meerkat = { path = "../meerkat", default-features = false, features = ["session-store", "memory-store", "local-authorization"] }
+meerkat-llm-core.workspace = true
+meerkat-runtime = { path = "../meerkat-runtime", features = ["local-authorization", "test-support"] }
+meerkat-tools = { workspace = true, default-features = false }
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

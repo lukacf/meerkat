@@ -1101,14 +1101,27 @@ impl ProcessCustody {
         program: &OsStr,
         args: &[OsString],
     ) -> Result<(PreparedCustodySpawn, tokio::process::Command), ProcessCustodyError> {
-        let reservation = self.reserve(spawner, tool_call_id, run_id).await?;
-        let gate = SpawnGate::new(reservation.entry_id())
-            .map_err(|error| ProcessCustodyError::io("create spawn gate", error))?;
-        let mut command = gate
+        let prepared = self
+            .prepare_gated_spawn(spawner, tool_call_id, run_id)
+            .await?;
+        let mut command = prepared
+            .gate
             .command_argv(program, args)
             .map_err(|error| ProcessCustodyError::io("build gated command", error))?;
         command.process_group(0);
-        Ok((PreparedCustodySpawn { reservation, gate }, command))
+        Ok((prepared, command))
+    }
+
+    pub(in crate::builtin::shell) async fn prepare_gated_spawn(
+        self: &Arc<Self>,
+        spawner: ToolProcessSpawner,
+        tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
+    ) -> Result<PreparedCustodySpawn, ProcessCustodyError> {
+        let reservation = self.reserve(spawner, tool_call_id, run_id).await?;
+        let gate = SpawnGate::new(reservation.entry_id())
+            .map_err(|error| ProcessCustodyError::io("create spawn gate", error))?;
+        Ok(PreparedCustodySpawn { reservation, gate })
     }
 
     /// Reserve custody for one tool process before it is spawned.
@@ -1151,6 +1164,17 @@ pub struct PreparedCustodySpawn {
 }
 
 impl PreparedCustodySpawn {
+    #[cfg(target_os = "macos")]
+    pub(in crate::builtin::shell) fn spawn_confined(
+        &self,
+        prepared: meerkat_sandbox::PreparedConfinement,
+    ) -> std::io::Result<meerkat_sandbox::ProcessChild> {
+        let (descriptor, token) = self.gate.launch_parts()?;
+        prepared
+            .spawn_behind_gate(descriptor, token, meerkat_sandbox::SpawnIo::default())
+            .map(Into::into)
+    }
+
     /// Record the spawned leader, then release the gate so the command runs.
     ///
     /// On error the gate stays closed and the command never runs; the caller
@@ -1159,20 +1183,24 @@ impl PreparedCustodySpawn {
         self,
         child: &tokio::process::Child,
     ) -> Result<CustodyGuard, ProcessCustodyError> {
+        self.spawned_pid(child.id()).await
+    }
+
+    pub(in crate::builtin::shell) async fn spawned_pid(
+        self,
+        pid: Option<u32>,
+    ) -> Result<CustodyGuard, ProcessCustodyError> {
         let Self {
             mut reservation,
             mut gate,
         } = self;
         gate.spawned();
-        let pid = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .ok_or_else(|| {
-                ProcessCustodyError::io(
-                    "capture spawned leader pid",
-                    std::io::Error::from(std::io::ErrorKind::NotFound),
-                )
-            })?;
+        let pid = pid.and_then(|pid| i32::try_from(pid).ok()).ok_or_else(|| {
+            ProcessCustodyError::io(
+                "capture spawned leader pid",
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            )
+        })?;
         reservation.record_spawned(pid).await?;
         gate.release()
             .map_err(|error| ProcessCustodyError::io("release spawn gate", error))?;

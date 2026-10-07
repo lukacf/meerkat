@@ -292,8 +292,15 @@ by its own authority; it is not a detached descendant with forgotten ancestors.
 Recurring work stores an independently revocable mandate bound to its creator,
 target, scope and grant generation. Each occurrence rechecks that mandate and
 current policy; a schedule's existence or retained tool ceiling is insufficient.
-Human approval is an attributable, expiring grant for exact operation parameters,
-not a reusable bypass. Approval capture is an ingress-authority operation:
+Human approval is an attributable, expiring decision for exact operation parameters
+or a displayed closed batch. Decision status alone is not spendable authority.
+The [model review and consent amendment](adr-001-model-review-and-consent.md)
+extends the existing approval lifecycle with entry-time validity and conditional
+use consumption. Separately scoped reusable consent can satisfy only a requirement
+that owner policy explicitly makes reusable; it cannot waive R3 fresh human review
+or an unresolved R2 escalation. A scoped temporary change of review tier is a
+distinct authenticated policy-administration action, not an approval bypass.
+Approval capture is an ingress-authority operation:
 verified approver event identity, pending operation ID, displayed canonical
 operation digest, approval generation, expiry and replay protection bind the
 decision. Trusted code renders the challenge from canonical parameters and

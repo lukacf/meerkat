@@ -2842,6 +2842,8 @@ dependencies = [
  "meerkat",
  "meerkat-anthropic",
  "meerkat-atif",
+ "meerkat-authorization",
+ "meerkat-authorization-contracts",
  "meerkat-capabilities",
  "meerkat-client",
  "meerkat-comms",
@@ -2966,6 +2968,45 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webbrowser",
+]
+
+[[package]]
+name = "meerkat-authorization"
+version = "0.8.51"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures",
+ "indexmap",
+ "meerkat",
+ "meerkat-anthropic",
+ "meerkat-auth-core",
+ "meerkat-authorization-contracts",
+ "meerkat-core",
+ "meerkat-llm-core",
+ "meerkat-machine-dsl",
+ "meerkat-machine-schema",
+ "meerkat-models",
+ "meerkat-runtime",
+ "meerkat-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "meerkat-authorization-contracts"
+version = "0.8.51"
+dependencies = [
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]
@@ -3320,6 +3361,7 @@ name = "meerkat-machine-kernels"
 version = "0.8.51"
 dependencies = [
  "indexmap",
+ "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-machine-schema",
  "serde",
@@ -3332,6 +3374,7 @@ name = "meerkat-machine-schema"
 version = "0.8.51"
 dependencies = [
  "indexmap",
+ "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-machine-dsl",
  "serde",
@@ -3551,10 +3594,14 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "fs4 0.13.1",
  "futures",
  "getrandom 0.3.4",
  "indexmap",
+ "meerkat",
  "meerkat-auth-core",
+ "meerkat-authorization",
+ "meerkat-authorization-contracts",
  "meerkat-contracts",
  "meerkat-copilot",
  "meerkat-core",
@@ -3636,6 +3683,9 @@ dependencies = [
  "meerkat",
  "meerkat-anthropic",
  "meerkat-atif",
+ "meerkat-auth-core",
+ "meerkat-authorization",
+ "meerkat-authorization-contracts",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
@@ -3672,6 +3722,8 @@ dependencies = [
  "futures",
  "indexmap",
  "meerkat-auth-core",
+ "meerkat-authorization",
+ "meerkat-authorization-contracts",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
@@ -3695,6 +3747,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "winapi-util",
+]
+
+[[package]]
+name = "meerkat-sandbox"
+version = "0.8.51"
+dependencies = [
+ "meerkat-core",
+ "nix 0.29.0",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -3835,6 +3898,7 @@ dependencies = [
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-runtime",
+ "meerkat-sandbox",
  "meerkat-skills",
  "meerkat-sqlite",
  "meerkat-store",

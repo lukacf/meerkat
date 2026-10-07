@@ -151,7 +151,7 @@ pub fn compose_rpc_mob_state(
     runtime: &Arc<SessionRuntime>,
     config_store: &Arc<dyn ConfigStore>,
     controlling_acceptor: Option<meerkat_mob::ControllingAcceptorConfig>,
-) -> Arc<meerkat_mob_mcp::MobMcpState> {
+) -> Result<Arc<meerkat_mob_mcp::MobMcpState>, meerkat_runtime::RuntimeDriverError> {
     // RPC mob member MCP config needs a member-session surface handle. Until
     // an authority-owned handoff exists, configured MCP fails closed instead
     // of staging facts on a router-local owner.
@@ -183,7 +183,7 @@ pub fn compose_rpc_mob_state(
         // A16: the local stdio/loopback RPC console is the owning operator
         // (explicit mint, DEC-P5E-8; bearer principals are the v2 seam).
         meerkat_mob::MobControlPrincipal::Owner,
-    )
+    )?
     .with_persistent_storage_root(persistent_mob_root)
     // Mobs rescope this service's store to their own realm, so the host
     // service is supplied even when no runtime realm identity is active. A
@@ -209,7 +209,7 @@ pub fn compose_rpc_mob_state(
     }
     let state = Arc::new(state);
     state.start_workgraph_flow_reconciler();
-    state
+    Ok(state)
 }
 
 #[cfg(feature = "comms")]
@@ -1260,6 +1260,8 @@ impl RoutedRpcResponse {
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
 #[derive(Clone)]
 pub struct MethodRouter {
+    #[cfg(feature = "local-authorization")]
+    governed_connection: Option<Arc<crate::governed_jsonl::GovernedConnection>>,
     runtime: Arc<SessionRuntime>,
     /// The callback route owned by this router's connection. `None` falls
     /// back to the runtime's process-default route.
@@ -1318,7 +1320,7 @@ impl MethodRouter {
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
-    ) -> Self {
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         let runtime_adapter = runtime.runtime_adapter();
         // Reuse the runtime's existing mob state if one was pre-configured
         // (e.g., by a kennel that created a hive mob before serving TCP
@@ -1328,7 +1330,7 @@ impl MethodRouter {
         let mob_state = if let Some(existing) = runtime.mob_state() {
             existing
         } else {
-            let mob_state = compose_rpc_mob_state(&runtime, &config_store, None);
+            let mob_state = compose_rpc_mob_state(&runtime, &config_store, None)?;
             runtime.set_mob_state(mob_state.clone());
             mob_state
         };
@@ -1352,7 +1354,9 @@ impl MethodRouter {
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
         runtime.arm_runtime_delivery_owner();
-        Self {
+        Ok(Self {
+            #[cfg(feature = "local-authorization")]
+            governed_connection: None,
             runtime,
             config_store,
             notification_sink,
@@ -1393,7 +1397,27 @@ impl MethodRouter {
             #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
             experimental_live_context_mirror_host: Arc::new(StdRwLock::new(None)),
             live_session_factory: None,
-        }
+        })
+    }
+
+    #[cfg(feature = "local-authorization")]
+    pub(crate) fn with_governed_connection(
+        mut self,
+        connection: Arc<crate::governed_jsonl::GovernedConnection>,
+        tools: Vec<meerkat_core::ToolDef>,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        let route = self
+            .callback_route
+            .as_ref()
+            .filter(|route| !route.is_closed())
+            .ok_or_else(crate::governed_jsonl::unsupported)?;
+        // Commission only this connection's catalog, once before serving.
+        route
+            .registry()
+            .replace_or_add(tools)
+            .map_err(|()| crate::governed_jsonl::unsupported())?;
+        self.governed_connection = Some(connection);
+        Ok(self)
     }
 
     fn attach_live_host(&mut self, host: Arc<meerkat_live::LiveAdapterHost>) {
@@ -1872,6 +1896,8 @@ impl MethodRouter {
         // executors created lazily read the current sink at apply time.
         runtime.set_notification_sink(notification_sink.clone());
         Self {
+            #[cfg(feature = "local-authorization")]
+            governed_connection: None,
             runtime,
             config_store,
             notification_sink,
@@ -2118,6 +2144,38 @@ impl MethodRouter {
 
         let id = request.id.clone();
         let params = request.params.as_deref();
+
+        #[cfg(feature = "local-authorization")]
+        if let Some(connection) = &self.governed_connection {
+            return Some(RoutedRpcResponse::new(
+                crate::governed_jsonl::dispatch(
+                    connection,
+                    &request.method,
+                    id,
+                    params,
+                    &self.runtime,
+                    &self.notification_sink,
+                    self.callback_route.clone(),
+                    request_context,
+                )
+                .await,
+            ));
+        }
+        // A legacy constructor is not a process-authenticated governed entry.
+        // Refuse before any setup/cold/tool/config handler sees the request.
+        if request.method != "initialize"
+            && self.runtime_adapter.has_native_work_authorization_host()
+        {
+            return Some(RoutedRpcResponse::new(RpcResponse::from_error(
+                id,
+                crate::session_runtime::runtime_driver_error_to_rpc(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason:
+                            meerkat_runtime::traits::ControllerReadinessFailure::UnsupportedScope,
+                    },
+                ),
+            )));
+        }
 
         let response = match request.method.as_str() {
             "initialize" => handlers::initialize::handle_initialize(
@@ -5527,6 +5585,7 @@ mod tests {
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         meerkat::PersistenceBundle::new(store, runtime_store, memory_blob_store())
+            .expect("construct runtime authority")
     }
 
     /// Config store whose `get()` always returns a typed fault, used to prove
@@ -5583,7 +5642,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -5616,7 +5676,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -6414,7 +6475,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -6451,7 +6513,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(notification_capacity);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -6473,7 +6536,8 @@ mod tests {
             memory_blob_store(),
             Arc::new(meerkat::MemoryScheduleStore::default()),
             Arc::new(meerkat::MemoryWorkGraphStore::new()),
-        );
+        )
+        .expect("construct runtime authority");
         let runtime = SessionRuntime::new(
             factory,
             config.clone(),
@@ -6493,7 +6557,8 @@ mod tests {
             runtime.workgraph_service().is_err(),
             "this runtime has no realm identity"
         );
-        let state = compose_rpc_mob_state(&runtime, &config_store, None);
+        let state = compose_rpc_mob_state(&runtime, &config_store, None)
+            .expect("construct runtime authority");
         let host = state.workgraph_service().expect("host WorkGraph service");
         let mob_id = state
             .mob_create_definition(meerkat_mob::MobDefinition::implicit(
@@ -6547,7 +6612,8 @@ mod tests {
             temp.path().join("config_state.json"),
         )));
         let runtime = Arc::new(runtime);
-        let state = compose_rpc_mob_state(&runtime, &config_store, None);
+        let state = compose_rpc_mob_state(&runtime, &config_store, None)
+            .expect("construct runtime authority");
         assert!(
             state.workgraph_service().is_none(),
             "a disabled backend supplies no host WorkGraph service"
@@ -6752,7 +6818,8 @@ mod tests {
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
-        let router = MethodRouter::new(runtime, config_store, sink);
+        let router =
+            MethodRouter::new(runtime, config_store, sink).expect("construct runtime authority");
         (router, notif_rx)
     }
 
@@ -7938,6 +8005,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::Peer {
@@ -7992,6 +8061,8 @@ mod tests {
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
+                ingress_context: None,
+                authority_association: None,
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: meerkat_runtime::InputOrigin::Peer {

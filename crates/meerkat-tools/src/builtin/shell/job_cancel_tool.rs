@@ -83,7 +83,7 @@ impl BuiltinTool for ShellJobCancelTool {
             .job_manager
             .cancel_job(&job_id)
             .await
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
+            .map_err(BuiltinToolError::from)?;
 
         Ok(ToolOutput::Json(json!({
             "job_id": input.job_id,

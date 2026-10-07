@@ -65,6 +65,8 @@ tokio_with_wasm = { workspace = true }
 meerkat-providers = { workspace = true, default-features = false }
 
 [dev-dependencies]
+meerkat-authorization = { workspace = true }
+meerkat-authorization-contracts = { workspace = true }
 tempfile = { workspace = true }
 mcp-test-server = { path = "../../tests/fixtures/mcp-test-server" } # test-only fixture binary resolver; never a published runtime dependency
 # Local public GPT Live wire fixture (HTTP create + WebSocket attach) for the
@@ -108,6 +110,7 @@ indexmap = { workspace = true }
 # Rule 9. `integration-real-tests` and the live/realtime features stay out:
 # those need real resources and belong to the e2e lanes.
 meerkat = { path = ".", features = [
+    "local-authorization",
     "session-store",
     # Enabling `session-store` alone makes the cold-restart compaction batteries
     # RUN without the feature they need, so all four fail in setup with
@@ -133,6 +136,8 @@ nix = { workspace = true }
 [features]
 default = ["anthropic", "openai", "gemini", "copilot"]
 integration-real-tests = []
+# Opt-in local governed authorization on the actual runtime owner.
+local-authorization = ["meerkat-runtime/local-authorization"]
 
 # LLM providers
 anthropic = ["meerkat-client/anthropic", "dep:meerkat-anthropic", "meerkat-providers/anthropic"]

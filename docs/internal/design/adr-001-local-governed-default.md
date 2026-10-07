@@ -14,6 +14,12 @@ and the [acceptance plan](adr-001-implementation/acceptance-plan.md). Earlier
 frozen reviews and source remain historical evidence for their exact scope.
 This is a design candidate, not implementation or performance acceptance.
 
+The 2026-10-05 [model review and consent amendment](adr-001-model-review-and-consent.md)
+defines the accepted 0.9 extension to review policy and the existing consent
+owner. It preserves cheap local enforcement, operation-local feedback and full
+surface coverage. The corresponding changes below do not establish implemented
+consent, recovery or measured performance.
+
 ### Supersession of r4-r6
 
 | Earlier requirement | Disposition in this candidate |
@@ -207,6 +213,45 @@ Hosts provide information-handling instructions appropriate to the agent's role
 and connected sources. Prompts and model decisions cannot widen a mechanical
 permission. Instructions can guide discretion but are not a security proof.
 
+Native owner policy distinguishes R1, with no added review; R2, requiring a
+bound reviewer decision; and R3, requiring fresh qualified-human judgment for
+the exact candidate or displayed closed batch. Every tier retains requester,
+executor, delegation, account, resource, confinement and independently mandatory
+route checks. R1 does not mean unrestricted execution. The detailed outcomes and
+ownership follow the [model review and consent contract](adr-001-model-review-and-consent.md).
+
+An eligible owner may declare scoped R1 defaults for an autonomous deployment,
+including its host tools. Missing policy is never an implicit R1. Validate tier
+coverage, including dynamic registration, before activating the affected
+configuration. Require a human route only when that configuration genuinely
+requires human delivery. An unattended R2 deployment can settle escalation or
+reviewer unavailability as typed local unsatisfied-review/unavailable feedback,
+without a human pending request or a stopped run. An invalid configuration
+update leaves existing admitted work intact.
+
+R2 review considers a host-bound candidate and authenticated request context;
+model claims do not supply requester, account or authority facts. The reviewer's
+model, provider, processor, tool and source access use the same governed
+boundaries. Review one exact candidate or host-frozen closed batch once under a
+finite owner deadline, initially with one attempt. Expiry retires that review
+reference; a late allow cannot replace it. Deny returns local feedback. Escalate
+leaves review unresolved and requires fresh qualified-human judgment before
+entry, or local unsatisfied-review feedback where no human route is selected.
+An unavailable reviewer is a distinct infrastructure outcome, not a denial.
+HomeCore selects an explicit exact-candidate/closed-batch human alternative;
+autonomous hosts may instead refuse only the affected action. Standing consent
+cannot replace that review. Unresolved review settles the attempted call so
+permitted siblings and queued work continue.
+
+Standing consent may satisfy a separate, explicitly reusable consent requirement
+after review is satisfied. It does not waive R3 or an R2 escalation. An eligible
+owner can instead make a separate audited review-policy edit, including an
+explicit scope and TTL with automatic reversion. Such edits bind the actor,
+action and typed argument scope, never broaden underlying permission, and are
+available through authenticated native administration from a console or channel.
+Active scoped policy edits and consent mandates are authenticated reviewer
+context. A no-expiry consent preference never silently changes the tier to R1.
+
 A host may require a gate for selected sends, publications or tool actions.
 Prefer ordinary permission topology: only the designated gate agent may reach
 the declared external destination or publishing tool. Other agents can submit
@@ -214,10 +259,12 @@ candidates to it but cannot publish directly, rewire their own permissions, or
 delegate to an unguarded publisher. Its identity and permission to inspect a
 candidate are explicit. If a separate executor consumes a gate decision, bind
 that decision to the exact candidate action and recipient; changing either
-requires a new decision. A missing, refusing or unavailable required gate refuses
-only that action and returns normal feedback to the originating agent. Optional
-means the deployment chooses whether to install it; once required for an action,
-it cannot be skipped.
+requires a new decision. A missing or refusing required gate prevents only that
+action and returns typed feedback; infrastructure unavailability keeps its own
+class. Optional means the deployment chooses whether to install the route; once
+independently required, it cannot be skipped. An explicitly declared human
+alternative can satisfy R2 review, but cannot bypass this separate route
+requirement or any permission ceiling.
 
 Declared gate topology also covers indirect routes through shared stores. An
 ungated agent cannot write a memory, task, blackboard or WorkGraph resource that
@@ -251,8 +298,11 @@ substituted for G's own authority on the declared gated route.
 
 The gate's decision and observed action are auditable. No gate reply grants new
 tool/source/peer permissions or overrides the policy owner. Gate review may add
-model calls, latency and cost; report that separately as the explicitly selected
-application workflow, never hide it inside the cheap default authorization cost.
+model calls, latency and cost, including fresh controller/model turns after
+deferred review. Report these separately as the explicitly selected application
+workflow, never hide them inside the cheap default authorization cost. Feedback
+uses native audience-safe outcomes; reviewer rationale is not automatically
+forwarded to a requesting model or every console viewer.
 
 ## Elephant and existing applications
 
@@ -281,8 +331,24 @@ already exists. Its callback approval path and native tools need the same shared
 checks, including topology mutation and selected-account binding. A human
 approval, when an application requests one, must derive from the approver's
 authenticated input rather than an agent's claim that the person approved.
-The existing approval owner binds it to the exact action/recipient, with expiry
-and single-use consumption; an edited or replayed action needs new approval.
+The existing approval owner must bind exact-action or closed-batch consent to
+current candidate, party, account and policy facts. Host-configured expiry and
+conditional entry consumption apply as specified in the
+[consent workflow](adr-001-confinement-and-consent.md#human-consent). Argument
+validation and preparation failure before entry do not consume consent. Standing
+mandates are a separate explicit owner choice, not a replayable approval ID.
+
+An authenticated decision reliably notifies and wakes its owning session through
+normal admission; it never executes the action itself. A fresh explicit attempt
+rechecks authority. Host-visible typed outcomes let autonomous schedulers count
+requested, unresolved and completed work without parsing model feedback. These
+events and counters are projections, not an additional approval authority.
+
+HomeCore's bounded retry policy for ordinary conversational Telegram replies is
+outside consent-governed effects. It does not apply to approval-required actions
+and does not create a native exception for an unknown physical outcome. The
+ordinary reply's permission checks, explicit reply budget, evidence and incident
+handling remain with its application owner.
 
 ## Refusals, configuration and audit
 
@@ -315,6 +381,10 @@ Refusals consume existing tool-call, turn, token and time budgets. Identical
 runtime-denied bindings are not automatically retried without a relevant change.
 Uncertain mutations retain their ordinary idempotency/reconciliation contract;
 no blind repeat of effects or separate security retry machine is introduced.
+Memory-only restart makes old approval references unusable, but does not freeze
+independently admitted new work. Retrying prior logical work still requires its
+owner's disposition, reconciliation or applicable idempotency guarantee; lost
+memory cannot prove that an effect did not occur.
 
 Audit records observable authentication, requester/actor/executor, work and
 operation, resolved resource/recipient, policy version, decision, start and
@@ -339,9 +409,10 @@ separately selected future assurance work, not default dependencies.
 
 No added network round trips or fsyncs on ordinary admission, model, tool or
 publication hot paths. Existing authentication handshakes, requested source/tool
-calls and ordinary storage commits remain. Optional gate-agent calls are explicit
-application work, measured separately. Host time with bounded declared leeway is
-sufficient; no authenticated clock or witness service is required.
+calls and ordinary storage commits remain. Selected reviewer calls, human
+interaction and additional controller/model turns are explicit application work,
+measured separately. Host time with bounded declared leeway is sufficient; no
+authenticated clock or witness service is required.
 
 Added authorization cost must be below 1 ms p99 per tool/model operation and at
 most 10 percent per representative turn. Count evaluation, attribute resolution,

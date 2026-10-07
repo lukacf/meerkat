@@ -61,11 +61,15 @@ them.
   stops). Any redirect the policy does not follow is a typed refusal by
   status. A server or source that relied on a cross-origin redirect needs
   its final URL configured. The `rkat doctor` self-hosted probe follows no
-  redirect. A redirected MCP tool call that then fails is reported as
-  `outcome_uncertain` (`McpError::RedirectedOutcomeUncertain`): a followed
-  redirect means more than one physical request, and whether a server
-  routes before or after acting is a deployment property, not something
-  HTTP or MCP guarantees.
+  redirect. An MCP tool call whose own returned response shows a redirect
+  (a changed final URL, or a `3xx` the policy did not follow) and that then
+  fails is reported as `outcome_uncertain`
+  (`McpError::RedirectedOutcomeUncertain`): a followed redirect means more
+  than one physical request, and whether a server routes before or after
+  acting is a deployment property, not something HTTP or MCP guarantees.
+  A transport failure with no response after a followed redirect cannot
+  show the redirect and remains an ordinary failure; that neither proves
+  the call had no effect nor makes a retry safe.
 
 - The credential routes listed under Fixed (token, refresh and
   device-code exchanges; the Claude, ChatGPT and Code Assist OAuth runtimes;
@@ -318,8 +322,9 @@ them.
   session expiry the transport re-initialized and re-sent the in-flight
   request (rmcp's default), so a server or proxy that ran the call before
   answering `404` ran it again under the same JSON-RPC id, and the caller
-  saw one result. The transport now never re-sends: the call is sent
-  exactly once, its outcome is the typed `ToolError::OutcomeUncertain`
+  saw one result. The transport now never re-sends a request or
+  re-initializes the session after the `404`: the call's outcome is the
+  typed `ToolError::OutcomeUncertain`
   (neither success nor denial, and the dispatch gate settles it as
   `Unknown`), and the dead connection refuses later calls unsent until an
   explicit reconnect. Each call's outcome comes from what the transport did

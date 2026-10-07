@@ -2861,8 +2861,10 @@ impl Default for McpRouter {
 fn tool_call_error(tool: &str, error: McpError) -> ToolError {
     match error {
         McpError::ToolNotFound(name) => ToolError::NotFound { name },
-        // Sent once, never re-sent, result lost with the session: neither
-        // success nor denial.
+        // Its own session 404, or a redirect shown by its own response, then
+        // a failure: neither success nor denial. Nothing is re-sent and the
+        // session is not re-initialized; a redirected call can have been
+        // more than one physical request.
         error @ (McpError::SessionExpired { .. } | McpError::RedirectedOutcomeUncertain { .. }) => {
             ToolError::outcome_uncertain(tool, error.to_string())
         }

@@ -739,9 +739,15 @@ impl McpConnection {
 /// call carries its own [`RequestDispatch`] witness through the transport,
 /// and a failure is typed from that witness alone: sent and then answered
 /// `404` for its session is uncertain ([`McpError::SessionExpired`]);
-/// refused at transport entry is affirmatively unsent
+/// redirected, as shown by the request's own returned response, and then
+/// failed is uncertain ([`McpError::RedirectedOutcomeUncertain`]); refused
+/// at transport entry is affirmatively unsent
 /// ([`McpError::ServerUnavailable`]); anything else, including no recorded
-/// disposition, keeps the ordinary [`McpError::ToolCallFailed`].
+/// disposition or a transport failure with no response (which can hide a
+/// followed redirect), keeps the ordinary [`McpError::ToolCallFailed`].
+/// That ordinary failure does not prove the call had no effect. The session
+/// is never re-initialized and nothing is re-sent; a followed same-origin
+/// redirect is itself more than one physical request.
 pub(crate) async fn call_tool_on(
     service: &rmcp::service::Peer<rmcp::RoleClient>,
     server: &str,
@@ -793,7 +799,8 @@ fn tool_call_failure(
     error: &dyn std::fmt::Display,
 ) -> McpError {
     match disposition {
-        // Sent once, never re-sent, result lost with the session.
+        // Answered 404 for its own session; not re-sent, and the session is
+        // not re-initialized.
         Some(RequestDisposition::SentSessionExpired) => McpError::SessionExpired {
             server: server.to_owned(),
             tool: tool.to_owned(),

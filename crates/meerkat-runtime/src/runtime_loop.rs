@@ -7000,6 +7000,15 @@ async fn process_queue(
                 match result {
                     Ok(output) => {
                         drop(d);
+                        // INFO timing of the run's finalization, from the
+                        // executor's return to the terminal receipt.
+                        // Diagnostics only; nothing decides on it.
+                        let finalization_started = crate::run_progress::Instant::now();
+                        let finalization_elapsed_ms = || {
+                            u64::try_from(finalization_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX)
+                        };
+                        tracing::info!(%run_id, "runtime run finalization started");
                         let terminal_authority_guard = match authority_binding
                             .lock_current_driver_authority(driver, "runtime loop terminal commit")
                             .await
@@ -7251,6 +7260,11 @@ async fn process_queue(
                             }
                         };
 
+                        tracing::info!(
+                            %run_id,
+                            elapsed_ms = finalization_elapsed_ms(),
+                            "runtime run commit persisted"
+                        );
                         // The run's inputs can no longer be replayed: the
                         // host may drop its completed-tool markers for it.
                         authority_binding.release_ended_run_tool_markers(&run_id);
@@ -7420,7 +7434,12 @@ async fn process_queue(
                                 }
                             };
 
-                        if let Err(err) = finalize_publish_and_resolve_runtime_terminals(
+                        tracing::info!(
+                            %run_id,
+                            elapsed_ms = finalization_elapsed_ms(),
+                            "runtime run finalization ended; publishing its terminal receipt"
+                        );
+                        let terminal_publication = finalize_publish_and_resolve_runtime_terminals(
                             driver,
                             &post_commit_hooks,
                             completions,
@@ -7435,8 +7454,15 @@ async fn process_queue(
                             crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
                             machine_terminal_error,
                         )
-                        .await
-                        {
+                        .await;
+                        if terminal_publication.is_ok() {
+                            tracing::info!(
+                                %run_id,
+                                elapsed_ms = finalization_elapsed_ms(),
+                                "runtime run terminal receipt persisted"
+                            );
+                        }
+                        if let Err(err) = terminal_publication {
                             tracing::error!(
                                 %run_id,
                                 error = %err,

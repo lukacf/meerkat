@@ -143,6 +143,15 @@ them.
 
 ### Added
 
+- INFO timing lines on the way from a live delegation worker's terminal to the
+  provider's result acknowledgement (#1820). Each carries the delegation's
+  `operation_id` and `elapsed_since_terminal_ms`: terminal observed, terminal
+  classified against its WorkGraph item, terminal realized, result release
+  and delivery authorized, pending peer-request read started and finished
+  (with `rows`), result dispatched, and result acknowledged. The runtime loop
+  also logs a run's finalization at INFO with `run_id` and `elapsed_ms`:
+  finalization started, commit persisted, finalization ended, and terminal
+  receipt persisted. No behaviour changes.
 - Library-owned durable job delivery (#1497). `RuntimeDeliveryOwner` claims a
   runtime delivery inbox's exclusive delivery ownership
   (`RuntimeDeliveryInbox::claim_delivery_ownership`; a second owner is

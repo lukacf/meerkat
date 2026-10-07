@@ -10718,8 +10718,12 @@ mod tests {
         let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
             ["parent_shell".to_string()].into_iter().collect(),
         );
-        let (ceiling, _) =
+        let (ceiling, expected_witnesses) =
             inherited_visibility_authority(inherited_filter.clone(), &["parent_shell"]);
+        let expected_witness = expected_witnesses
+            .get("parent_shell")
+            .cloned()
+            .expect("the ceiling's identity witness");
         let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
         build.provider = Some(Provider::Anthropic);
         build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
@@ -10745,11 +10749,9 @@ mod tests {
             .expect("parse visibility")
             .expect("a committed visibility record");
         assert_eq!(state.inherited_base_filter, inherited_filter);
-        assert!(
-            state
-                .filter_witnesses
-                .get("parent_shell")
-                .is_some_and(meerkat_core::ToolVisibilityWitness::has_identity_witness),
+        assert_eq!(
+            state.filter_witnesses.get("parent_shell"),
+            Some(&expected_witness),
             "the model-call boundary kept the inherited ceiling's witness: {:?}",
             state.filter_witnesses
         );
@@ -10764,13 +10766,31 @@ mod tests {
         resume.provider = Some(Provider::Anthropic);
         resume.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
         resume.resume_session = Some(resumed_session);
-        resume.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        resume.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
         resume.override_builtins = ToolCategoryOverride::Disable;
-        let resumed = factory.build_agent(resume, &Config::default()).await;
-        assert!(
-            resumed.is_ok(),
-            "a session that ran a turn resumes with its inherited ceiling: {:?}",
-            resumed.err()
+        let resumed = factory
+            .build_agent(resume, &Config::default())
+            .await
+            .expect("a session that ran a turn resumes with its inherited ceiling");
+        let resumed_state = resumed
+            .session()
+            .try_tool_visibility_state()
+            .expect("parse resumed visibility")
+            .expect("a resumed visibility record");
+        assert_eq!(resumed_state.inherited_base_filter, inherited_filter);
+        assert_eq!(
+            resumed_state.filter_witnesses.get("parent_shell"),
+            Some(&expected_witness)
+        );
+        let owner_state = bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("resumed owner visibility");
+        assert_eq!(owner_state.inherited_base_filter, inherited_filter);
+        assert_eq!(
+            owner_state.filter_witnesses.get("parent_shell"),
+            Some(&expected_witness),
+            "the resumed owner holds the original identity"
         );
     }
 
@@ -14881,51 +14901,56 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn factory_resume_refuses_a_retained_ceiling_without_its_witness() {
-        let temp = tempfile::tempdir().unwrap();
-        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
-        let incomplete = SessionToolVisibilityState {
-            inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
-                ["old_parent".to_string()].into_iter().collect(),
-            ),
-            ..Default::default()
-        };
-        let session = session_with_raw_metadata(
-            Session::new(),
-            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
-            serde_json::to_value(incomplete).expect("visibility state"),
-        );
-        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
-        let bindings = runtime
-            .prepare_bindings(session.id().clone())
-            .await
-            .expect("session runtime bindings");
-        let (inherited_authority, _) = inherited_visibility_authority(
-            meerkat_core::tool_scope::ToolFilter::Deny(
-                ["parent_shell".to_string()].into_iter().collect(),
-            ),
-            &["parent_shell"],
-        );
-        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
-        build.provider = Some(Provider::Anthropic);
-        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
-        build.resume_session = Some(session);
-        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
-        build.override_builtins = ToolCategoryOverride::Disable;
-        build.initial_tool_visibility_state = Some(inherited_authority);
-        let Err(error) = factory.build_agent(build, &Config::default()).await else {
-            panic!("a retained ceiling without its witness is refused");
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("inherited tool visibility without witnesses"),
-            "the typed missing-witness refusal: {error}"
-        );
-        assert_eq!(
-            bindings.tool_visibility_owner().visibility_state().unwrap(),
-            SessionToolVisibilityState::default(),
-            "the refused build left the owner untouched"
-        );
+        // A handoff naming another tool, and one naming the same tool: its
+        // own valid witness never stands in for the retained identity.
+        for incoming_name in ["parent_shell", "old_parent"] {
+            let temp = tempfile::tempdir().unwrap();
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let incomplete = SessionToolVisibilityState {
+                inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
+                    ["old_parent".to_string()].into_iter().collect(),
+                ),
+                ..Default::default()
+            };
+            let session = session_with_raw_metadata(
+                Session::new(),
+                meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
+                serde_json::to_value(incomplete).expect("visibility state"),
+            );
+            let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("session runtime bindings");
+            let (inherited_authority, _) = inherited_visibility_authority(
+                meerkat_core::tool_scope::ToolFilter::Deny(
+                    [incoming_name.to_string()].into_iter().collect(),
+                ),
+                &[incoming_name],
+            );
+            let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+            build.provider = Some(Provider::Anthropic);
+            build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+            build.resume_session = Some(session);
+            build.runtime_build_mode =
+                meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.initial_tool_visibility_state = Some(inherited_authority);
+            let Err(error) = factory.build_agent(build, &Config::default()).await else {
+                panic!("a retained ceiling without its witness is refused ({incoming_name})");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("inherited tool visibility without witnesses"),
+                "the missing-witness refusal ({incoming_name}): {error}"
+            );
+            assert_eq!(
+                bindings.tool_visibility_owner().visibility_state().unwrap(),
+                SessionToolVisibilityState::default(),
+                "the refused build left the owner untouched ({incoming_name})"
+            );
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

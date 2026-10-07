@@ -865,6 +865,22 @@ impl AgentBuilder {
             }
         }
 
+        // The retained ceiling must prove its own identities before any
+        // handoff is composed with it: an incoming witness proves the new
+        // parent's tool, never the lost identity of a same-named retained one.
+        if runtime_tool_visibility_owner_required
+            && let Err(err) = validate_inherited_filter_witnesses(
+                &visibility_state.inherited_base_filter,
+                &visibility_state.filter_witnesses,
+            )
+        {
+            tracing::error!(
+                error = %err,
+                "runtime-backed agent build rejected a retained inherited tool ceiling without witnesses"
+            );
+            return Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses);
+        }
+
         let has_initial_visibility_state = initial_visibility_authority.is_some();
         if let Some(incoming) = initial_visibility_authority {
             let mut incoming = incoming.into_initial_visibility_state();

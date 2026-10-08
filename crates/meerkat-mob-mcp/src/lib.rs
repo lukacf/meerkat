@@ -12354,9 +12354,10 @@ mod tests {
     }
 
     /// The in-memory service shared by every mob of one state reports each
-    /// live session as belonging only to the mob it was built for, so one
-    /// mob's ownership checks (resume reconciliation, owner routing) never
-    /// claim another mob's member.
+    /// live session as belonging only to the mob it was built for, so the
+    /// aggregate owner check (owner routing, archive classification) never
+    /// reports another mob's member, or a live session no mob built, as
+    /// mob-owned on that mob's account.
     #[tokio::test]
     async fn in_memory_sessions_belong_only_to_their_own_mob() {
         let state = MobMcpState::new_in_memory();
@@ -12414,6 +12415,41 @@ mod tests {
                 .session_belongs_to_mob(&SessionId::new(), &first)
                 .await,
             "an unknown session is no mob's"
+        );
+        assert!(
+            state
+                .owns_service_reported_bridge_session(&first_session)
+                .await
+        );
+
+        // A live session no mob built is not mob-owned, although mobs exist.
+        let unbound = Session::new();
+        let unbound_id = unbound.id().clone();
+        service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-opus-5".into(),
+                prompt: "unbound".into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    resume_session: Some(unbound),
+                    ..Default::default()
+                }),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                labels: None,
+            })
+            .await
+            .expect("create a live session no mob built");
+        assert!(service.has_live_session(&unbound_id).await.expect("live"));
+        assert!(!service.session_belongs_to_mob(&unbound_id, &first).await);
+        assert!(
+            !state
+                .owns_service_reported_bridge_session(&unbound_id)
+                .await,
+            "a live session no mob built is not reported as mob-owned"
         );
     }
 

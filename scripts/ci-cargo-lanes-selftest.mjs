@@ -390,6 +390,17 @@ for (const path of [
   assert.equal(lines.unit_shard_count, "1");
   assert.equal(lines.unit_deferred, "");
   assert.ok(Number(lines.main_unit_shard_count) >= 2);
+  const integrationRows = JSON.parse(lines.integration_matrix).include;
+  assert.deepEqual(integrationRows.find((row) => row.name === "standalone-turn-lifecycle"), {
+    name: "standalone-turn-lifecycle",
+    packages: "-p meerkat",
+    tests: "--test standalone_turn_lifecycle",
+  });
+  assert.deepEqual(integrationRows.find((row) => row.name === "rpc-configured-turn-limit"), {
+    name: "rpc-configured-turn-limit",
+    packages: "-p meerkat-rpc",
+    tests: "--test configured_turn_limit",
+  });
 }
 {
   const result = run(["--format", "github", "--", "crates/meerkat-mob/src/lib.rs"]);
@@ -519,9 +530,31 @@ for (const path of [
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
   assert.deepEqual(
     names(planFor(["Cargo.toml"])),
-    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat-integration-tests", "meerkat-authorization"],
+    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat", "meerkat-rpc", "meerkat-integration-tests", "meerkat-authorization"],
     "workspace mode runs every suite",
   );
+  // Config layering, core construction and facade changes must execute both
+  // regressions; an RPC-only change selects its own test binary.
+  const limitNames = (plan) => plan.integration_suites
+    .map((suite) => suite.name)
+    .filter((name) => ["standalone-turn-lifecycle", "rpc-configured-turn-limit"].includes(name));
+  for (const path of [
+    "crates/meerkat-core/src/config.rs",
+    "crates/meerkat-core/src/agent/builder.rs",
+    "crates/meerkat/src/factory.rs",
+    "crates/meerkat/tests/standalone_turn_lifecycle.rs",
+  ]) {
+    assert.deepEqual(limitNames(planFor([path])), ["standalone-turn-lifecycle", "rpc-configured-turn-limit"], `${path} runs both limit regressions`);
+  }
+  for (const path of [
+    "crates/meerkat-rpc/src/session_runtime.rs",
+    "crates/meerkat-rpc/tests/configured_turn_limit.rs",
+  ]) {
+    assert.deepEqual(limitNames(planFor([path])), ["rpc-configured-turn-limit"], `${path} runs the RPC limit regression`);
+  }
+  for (const path of ["crates/meerkat-openai/src/lib.rs", "docs/index.mdx"]) {
+    assert.deepEqual(limitNames(planFor([path])), [], `${path} does not add limit regression lanes`);
+  }
   // The gpt-live replays: a public Live path package or a fixture change
   // runs exactly the replay target with its feature.
   const replay = planFor(["crates/meerkat-openai/src/public_live.rs"]);

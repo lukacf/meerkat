@@ -339,6 +339,9 @@ impl Config {
         if other.agent.max_tokens_per_turn.is_some() {
             self.agent.max_tokens_per_turn = other.agent.max_tokens_per_turn;
         }
+        if other.agent.max_turns.is_some() {
+            self.agent.max_turns = other.agent.max_turns;
+        }
         if other.agent.extraction_prompt.is_some() {
             self.agent.extraction_prompt = other.agent.extraction_prompt;
         }
@@ -3418,6 +3421,50 @@ max_sessions = 7
         // CLI should win over defaults
         assert_eq!(config.agent.model, "cli-model");
         assert_eq!(config.budget.max_tokens, Some(50000));
+    }
+
+    #[test]
+    fn test_agent_max_turns_survives_config_layering() {
+        let parent_id = crate::connection::RealmId::parse("parent").unwrap();
+        let child_id = crate::connection::RealmId::parse("child").unwrap();
+        for (parent_limit, child_limit, expected) in [
+            (None, None, None),
+            (Some(7), None, Some(7)),
+            (Some(7), Some(0), Some(0)),
+            (Some(7), Some(DEFAULT_MAX_TURNS), Some(DEFAULT_MAX_TURNS)),
+            (Some(7), Some(2), Some(2)),
+        ] {
+            let mut parent = Config::default();
+            parent.agent.max_turns = parent_limit;
+            parent.realm.insert(
+                parent_id.to_string(),
+                crate::connection::RealmConfigSection::default(),
+            );
+            let mut child = Config::default();
+            child.agent.max_turns = child_limit;
+            child.realm.insert(
+                child_id.to_string(),
+                crate::connection::RealmConfigSection {
+                    parent: Some(parent_id.clone()),
+                    ..Default::default()
+                },
+            );
+            let docs = std::collections::BTreeMap::from([
+                (parent_id.clone(), parent.clone()),
+                (child_id.clone(), child),
+            ]);
+            let effective =
+                compose_effective_config(&docs, &std::collections::BTreeMap::new(), &child_id)
+                    .unwrap();
+            assert_eq!(effective.agent.max_turns, expected);
+
+            let child_toml = child_limit.map_or_else(
+                || "[agent]\n".to_owned(),
+                |limit| format!("[agent]\nmax_turns = {limit}\n"),
+            );
+            parent.merge_toml_str(&child_toml).unwrap();
+            assert_eq!(parent.agent.max_turns, expected);
+        }
     }
 
     #[test]

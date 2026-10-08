@@ -169,6 +169,20 @@ export const INTEGRATION_SUITES = [
     ],
     triggers: ["meerkat", "meerkat-core", "meerkat-store", "meerkat-session", "meerkat-runtime", "meerkat-sqlite"],
   },
+  // These no-provider regressions exercise configured limits through the
+  // factory and the RPC realm path. Select only their named test binaries.
+  {
+    package: "meerkat",
+    name: "standalone-turn-lifecycle",
+    tests: ["standalone_turn_lifecycle"],
+    triggers: ["meerkat", "meerkat-core"],
+  },
+  {
+    package: "meerkat-rpc",
+    name: "rpc-configured-turn-limit",
+    tests: ["configured_turn_limit"],
+    triggers: ["meerkat-rpc", "meerkat", "meerkat-core"],
+  },
   // Deterministic replays of recorded Turbo S gpt-live-1 provider streams
   // (tests/integration/fixtures/gpt_live_replay): the S104/S106 voice
   // contracts without a provider or a key. `tests` names the one target, so

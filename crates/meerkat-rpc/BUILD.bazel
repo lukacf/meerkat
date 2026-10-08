@@ -476,6 +476,94 @@ rust_test(
 )
 
 rust_test(
+    name = "configured_turn_limit_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-rpc",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "configured_turn_limit",
+    crate_root = "tests/configured_turn_limit.rs",
+    crate_features = [
+        "comms",
+        "live-webrtc",
+        "mcp",
+        "mob",
+        "openai-live",
+        "openai-realtime",
+        "schedule",
+        "workgraph",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//:live_smoke_support",
+    ],
+    srcs = [
+        "tests/configured_turn_limit.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.51",
+        "CARGO_BIN_NAME": "configured_turn_limit",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-rpc",
+        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
+        "//crates/meerkat-rpc:rkat_rpc_bin",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+        "MEERKAT_MCP_TEST_SERVER": "$(rootpath //tests/fixtures/mcp-test-server:mcp_test_server_bin)",
+        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-rpc",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-rpc:meerkat_rpc_with_runtime_test_support",
+        "//crates/meerkat:meerkat_anthropic_agent_factory_build",
+        "//crates/meerkat:meerkat_atif_agent_factory_build",
+        "//crates/meerkat:meerkat_auth_core_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_comms_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_mcp_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_providers_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+        "//tests/fixtures/mcp-test-server:mcp_test_server",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-rpc",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "integration_server_test",
     aliases = aliases(
         package_name = "crates/meerkat-rpc",
@@ -1582,6 +1670,7 @@ test_suite(
     tests = [
         ":atif_export_contract_test",
         ":binary_fatal_error_display_test",
+        ":configured_turn_limit_test",
         ":lazy_resume_uncommitted_terminal_test",
         ":live_dependency_guards_test",
         ":meerkat_rpc_unit_test",

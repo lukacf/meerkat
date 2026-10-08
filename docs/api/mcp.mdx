@@ -237,6 +237,23 @@ Environment variables in config use `${VAR_NAME}` syntax.
 </Note>
 
 <Note>
+A streamable HTTP request is never re-sent after the server drops its
+session (`404`). A tool call whose own request is answered `404` for its
+session fails with the typed `outcome_uncertain` tool error (it may have
+taken effect). So does a call that fails after a redirect shown by its own
+returned response (a changed final URL, or a `3xx` the policy did not
+follow). A transport failure with no response after a followed redirect
+cannot show that redirect and remains an ordinary failure; that neither
+proves the call had no effect nor makes a retry safe. Once the session
+is known expired, later calls on that connection are refused unsent until
+the host reconnects the server. A `404` on the session's background SSE GET
+also marks the session expired; it does not change the outcome of a call
+already in flight, which can still succeed. A server that answers an
+unsupported GET with `404` instead of the specified `405` will see its
+sessions treated as expired and must be fixed to answer `405`.
+</Note>
+
+<Note>
 For OAuth-protected streamable HTTP servers, keep config simple. Add the URL
 with `rkat mcp add`, set `oauth_account` to the account the login must prove,
 then run `rkat mcp login <name>` for an explicit browser login, or

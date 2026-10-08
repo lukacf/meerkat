@@ -3,7 +3,9 @@ use super::*;
 use crate::transport::sse::{
     ReqwestSseClient, SseClient, SseClientConfig, SseClientTransport, SseTransportError,
 };
-use crate::transport::streamable_http::ReqwestStreamableHttpClient;
+use crate::transport::streamable_http::{
+    RequestDispatch, RequestDisposition, ReqwestStreamableHttpClient, SessionExpiryRecorder,
+};
 use rmcp::model::{CallToolRequest, CallToolRequestParams, NumberOrString};
 use rmcp::transport::streamable_http_client::{StreamableHttpClient, StreamableHttpError};
 use serde_json::json;
@@ -450,46 +452,223 @@ async fn sse_preserves_messages_across_comments_heartbeats_and_empty_event_types
 }
 
 #[tokio::test]
-async fn protected_connection_session_expiry_never_enters_rmcp_replay_branch() {
+async fn session_expiry_is_typed_and_recorded_for_ordinary_and_protected_posts() {
+    // The only transport is built with `reinit_on_expired_session(false)`, so
+    // no 404 is ever re-initialized and re-sent. Each case uses a fresh
+    // recorder, so each one really reaches the server and gets its own 404.
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
     let server = HttpFixture::start(axum::Router::new().route(
         "/mcp",
-        axum::routing::post(|| async { axum::http::StatusCode::NOT_FOUND }),
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }),
     ))
     .await;
-    let state = ProtectedMetadataState::default();
-    let client =
-        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
-            .with_protected_metadata(state.clone());
-    let ordinary = client
-        .post_message(
-            server.url.clone().into(),
-            message(false),
-            Some("session".into()),
-            None,
-            Default::default(),
-        )
-        .await;
-    assert!(matches!(ordinary, Err(StreamableHttpError::SessionExpired)));
-    state.register(&metadata()).unwrap();
-    for selected in [true, false] {
-        let error = client
+    for (case, protected) in [(0, false), (1, true), (2, false)] {
+        let state = ProtectedMetadataState::default();
+        if case > 0 {
+            // Protected calls registered on this connection (case 2: an
+            // unselected post on a connection that carries protected calls).
+            state.register(&metadata()).unwrap();
+        }
+        let expiry = SessionExpiryRecorder::default();
+        let client =
+            ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
+                .with_protected_metadata(state)
+                .with_session_expiry(expiry.clone());
+        let (message, dispatch) = dispatched(protected);
+        let result = client
             .post_message(
                 server.url.clone().into(),
-                message(selected),
+                message,
                 Some("session".into()),
                 None,
                 Default::default(),
             )
             .await;
-        assert!(matches!(
-            error,
-            Err(StreamableHttpError::UnexpectedServerResponse(_))
-        ));
+        assert!(matches!(result, Err(StreamableHttpError::SessionExpired)));
+        assert!(expiry.expired(), "case {case}");
+        assert_eq!(
+            dispatch.disposition(),
+            Some(RequestDisposition::SentSessionExpired),
+            "case {case}"
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), case + 1, "exactly one POST");
     }
 }
 
+/// A call carrying its request-local disposition witness.
+fn dispatched(protected: bool) -> (ClientJsonRpcMessage, RequestDispatch) {
+    let dispatch = RequestDispatch::default();
+    let mut message = message(protected);
+    let ClientJsonRpcMessage::Request(request) = &mut message else {
+        panic!("expected request")
+    };
+    let ClientRequest::CallToolRequest(call) = &mut request.request else {
+        panic!("expected tool call")
+    };
+    call.extensions.insert(dispatch.clone());
+    (message, dispatch)
+}
+
+/// A request queued before the expiry was recorded still never enters the
+/// dead session: it is refused at transport entry, unsent.
 #[tokio::test]
-async fn protected_posts_do_not_follow_redirects_for_http_or_legacy_sse() {
+async fn known_expiry_refuses_a_queued_request_at_transport_entry() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }),
+    ))
+    .await;
+    let expiry = SessionExpiryRecorder::default();
+    let client =
+        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
+            .with_session_expiry(expiry.clone());
+    let (first, first_dispatch) = dispatched(false);
+    let (queued, queued_dispatch) = dispatched(false);
+    let _ = client
+        .post_message(
+            server.url.clone().into(),
+            first,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert_eq!(
+        first_dispatch.disposition(),
+        Some(RequestDisposition::SentSessionExpired)
+    );
+    let refused = client
+        .post_message(
+            server.url.clone().into(),
+            queued,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(refused, Err(StreamableHttpError::SessionExpired)));
+    assert_eq!(
+        queued_dispatch.disposition(),
+        Some(RequestDisposition::RefusedExpired)
+    );
+    assert_eq!(
+        posts.load(Ordering::SeqCst),
+        1,
+        "the queued request was never sent"
+    );
+}
+
+/// The attached-session GET stream expiring kills the session the same way:
+/// a later call is refused unsent.
+#[tokio::test]
+async fn attached_get_404_records_expiry_and_later_calls_are_refused_unsent() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }).post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::ACCEPTED
+            }
+        }),
+    ))
+    .await;
+    let expiry = SessionExpiryRecorder::default();
+    let client =
+        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default())
+            .with_session_expiry(expiry.clone());
+    let stream = client
+        .get_stream(
+            server.url.clone().into(),
+            "session".into(),
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(stream, Err(StreamableHttpError::SessionExpired)));
+    assert!(expiry.expired());
+    let (call, dispatch) = dispatched(false);
+    let refused = client
+        .post_message(
+            server.url.clone().into(),
+            call,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(refused, Err(StreamableHttpError::SessionExpired)));
+    assert_eq!(
+        dispatch.disposition(),
+        Some(RequestDisposition::RefusedExpired)
+    );
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
+}
+
+/// A frame refused by the bound before sending leaves no disposition (never
+/// sent), so its failure stays ordinary, never uncertain.
+#[tokio::test]
+async fn a_pre_send_failure_records_no_send() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    let server = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }),
+    ))
+    .await;
+    let client =
+        ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
+    let (mut message, dispatch) = dispatched(false);
+    let ClientJsonRpcMessage::Request(request) = &mut message else {
+        panic!("expected request")
+    };
+    let ClientRequest::CallToolRequest(call) = &mut request.request else {
+        panic!("expected tool call")
+    };
+    call.params.arguments = Some(Map::from_iter([(
+        "payload".into(),
+        Value::String("\\".repeat(MAX_FRAME_BYTES / 2)),
+    )]));
+    let result = client
+        .post_message(
+            server.url.clone().into(),
+            message,
+            Some("session".into()),
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(dispatch.disposition(), None);
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn posts_do_not_follow_cross_origin_redirects_for_http_or_legacy_sse() {
     let forwarded = Arc::new(AtomicUsize::new(0));
     let count = forwarded.clone();
     let destination = HttpFixture::start(axum::Router::new().route(
@@ -517,38 +696,32 @@ async fn protected_posts_do_not_follow_redirects_for_http_or_legacy_sse() {
         }),
     ))
     .await;
-    let http = ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
-    let sse = ReqwestSseClient::new(Default::default());
-    assert!(
-        http.post_message(
-            source.url.clone().into(),
-            message(true),
-            None,
-            None,
-            Default::default()
-        )
-        .await
-        .is_err()
+    let http = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
     );
-    assert!(
-        sse.post_message(source.url.parse().unwrap(), message(true), None)
+    let sse = ReqwestSseClient::new(Default::default());
+    // Protected and ordinary posts alike: a redirect to another origin is
+    // refused, and nothing reaches the destination.
+    for protected in [true, false] {
+        assert!(
+            http.post_message(
+                source.url.clone().into(),
+                message(protected),
+                None,
+                None,
+                Default::default()
+            )
             .await
             .is_err()
-    );
+        );
+        assert!(
+            sse.post_message(source.url.parse().unwrap(), message(protected), None)
+                .await
+                .is_err()
+        );
+    }
     assert_eq!(forwarded.load(Ordering::SeqCst), 0);
-    http.post_message(
-        source.url.clone().into(),
-        message(false),
-        None,
-        None,
-        Default::default(),
-    )
-    .await
-    .unwrap();
-    sse.post_message(source.url.parse().unwrap(), message(false), None)
-        .await
-        .unwrap();
-    assert_eq!(forwarded.load(Ordering::SeqCst), 2);
 }
 
 #[derive(Clone)]
@@ -742,4 +915,260 @@ async fn real_rmcp_stdio_trace_keeps_live_metadata_and_malformed_input_private()
     assert!(logs.contains("MCP input refused: invalid JSON-RPC frame"));
     assert!(!logs.contains(SECRET));
     println!("{CHILD_COMPLETE}");
+}
+
+/// A target that counts the requests reaching it, and an origin that
+/// answers every request with a redirect to it.
+async fn cross_origin_redirect_fixture() -> (HttpFixture, HttpFixture, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let target = HttpFixture::start(axum::Router::new().fallback(move || {
+        let count = count.clone();
+        async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            axum::http::StatusCode::ACCEPTED
+        }
+    }))
+    .await;
+    let location = format!("{}?leak=redirect-location-canary", target.url);
+    let origin = HttpFixture::start(axum::Router::new().fallback(move || {
+        let location = location.clone();
+        async move {
+            (
+                axum::http::StatusCode::TEMPORARY_REDIRECT,
+                [("location", location)],
+                "redirect-body-canary",
+            )
+        }
+    }))
+    .await;
+    (origin, target, hits)
+}
+
+/// The production Streamable HTTP client refuses a redirect to another
+/// origin (the configured headers would follow it) without reaching the
+/// target or rendering the `Location`.
+#[tokio::test]
+async fn streamable_http_refuses_a_cross_origin_redirect() {
+    let (origin, _target, hits) = cross_origin_redirect_fixture().await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-api-key", "configured-header-canary".parse().unwrap());
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(headers, Default::default());
+    let error = client
+        .post_message(
+            origin.url.clone().into(),
+            message(false),
+            None,
+            None,
+            Default::default(),
+        )
+        .await
+        .expect_err("a cross-origin redirect is refused");
+    let rendered = format!("{error} {error:?}");
+    assert!(rendered.contains("redirect"), "{rendered}");
+    assert!(!rendered.contains("redirect-location-canary"), "{rendered}");
+    assert!(!rendered.contains("redirect-body-canary"), "{rendered}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+/// The production legacy SSE client refuses the same way.
+#[tokio::test]
+async fn sse_refuses_a_cross_origin_redirect() {
+    let (origin, _target, hits) = cross_origin_redirect_fixture().await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-api-key", "configured-header-canary".parse().unwrap());
+    let client = ReqwestSseClient::new(headers);
+    let error = client
+        .post_message(origin.url.parse().unwrap(), message(false), None)
+        .await
+        .expect_err("a cross-origin redirect is refused");
+    let rendered = format!("{error} {error:?}");
+    assert!(rendered.contains("redirect"), "{rendered}");
+    assert!(!rendered.contains("redirect-location-canary"), "{rendered}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+/// A same-origin `307` (the Starlette `/mcp` to `/mcp/` case) is followed
+/// with its method and body, by the production client.
+#[tokio::test]
+async fn streamable_http_follows_a_same_origin_trailing_slash_redirect() {
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = bodies.clone();
+    let server = HttpFixture::start(
+        axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(|| async {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [("location", "/mcp/")],
+                    )
+                }),
+            )
+            .route(
+                "/mcp/",
+                axum::routing::post(move |body: String| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(body);
+                        axum::http::StatusCode::ACCEPTED
+                    }
+                }),
+            ),
+    )
+    .await;
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
+    );
+    let accepted = client
+        .post_message(
+            server.url.clone().into(),
+            message(false),
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            accepted,
+            Ok(rmcp::transport::streamable_http_client::StreamableHttpPostResponse::Accepted)
+        ),
+        "{accepted:?}"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "the redirect target received the request once"
+    );
+    assert!(bodies[0].contains("tools/call"), "{}", bodies[0]);
+}
+
+/// A same-origin route: `/mcp` answers 307 to `/mcp/`, which answers with
+/// `final_status`. Counts the physical POSTs on each path separately.
+async fn same_origin_redirect_fixture(
+    final_status: axum::http::StatusCode,
+) -> (HttpFixture, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let routed = Arc::new(AtomicUsize::new(0));
+    let handled = Arc::new(AtomicUsize::new(0));
+    let (routed_count, handled_count) = (routed.clone(), handled.clone());
+    let server = HttpFixture::start(
+        axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(move || {
+                    let routed = routed_count.clone();
+                    async move {
+                        routed.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::TEMPORARY_REDIRECT,
+                            [("location", "/mcp/")],
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/mcp/",
+                axum::routing::post(move || {
+                    let handled = handled_count.clone();
+                    async move {
+                        handled.fetch_add(1, Ordering::SeqCst);
+                        final_status
+                    }
+                }),
+            ),
+    )
+    .await;
+    (server, routed, handled)
+}
+
+/// One routed call is two physical POSTs; when it then fails, its own
+/// disposition says it was redirected (typed uncertainty), and nothing is
+/// re-sent.
+#[tokio::test]
+async fn a_redirected_call_that_fails_records_its_redirect() {
+    let (server, routed, handled) =
+        same_origin_redirect_fixture(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
+    );
+    let (call, dispatch) = dispatched(false);
+    let result = client
+        .post_message(
+            server.url.clone().into(),
+            call,
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        dispatch.disposition(),
+        Some(RequestDisposition::SentRedirected)
+    );
+    assert_eq!(
+        routed.load(Ordering::SeqCst),
+        1,
+        "one physical POST to the route"
+    );
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        1,
+        "one physical POST to the handler"
+    );
+}
+
+/// Controls: a protected call is never redirected (stopped at the first
+/// 3xx, still recorded as redirected, the handler never reached); an
+/// independent call that fails without a redirect stays plainly `Sent`.
+#[tokio::test]
+async fn redirect_disposition_controls() {
+    let (server, routed, handled) =
+        same_origin_redirect_fixture(axum::http::StatusCode::ACCEPTED).await;
+    let state = ProtectedMetadataState::default();
+    state.register(&metadata()).unwrap();
+    let client = ReqwestStreamableHttpClient::new_with_auth_challenge(
+        reqwest::header::HeaderMap::new(),
+        Default::default(),
+    )
+    .with_protected_metadata(state);
+    let (call, dispatch) = dispatched(true);
+    let refused = client
+        .post_message(
+            server.url.clone().into(),
+            call,
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(
+        dispatch.disposition(),
+        Some(RequestDisposition::SentRedirected)
+    );
+    assert_eq!(routed.load(Ordering::SeqCst), 1);
+    assert_eq!(handled.load(Ordering::SeqCst), 0);
+
+    let failing = HttpFixture::start(axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+    ))
+    .await;
+    let (call, dispatch) = dispatched(false);
+    let failed = client
+        .post_message(
+            failing.url.clone().into(),
+            call,
+            None,
+            None,
+            Default::default(),
+        )
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(dispatch.disposition(), Some(RequestDisposition::Sent));
 }

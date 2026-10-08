@@ -225,6 +225,7 @@ async fn enumerate(
                 protected_metadata: Default::default(),
                 service: service.into(),
                 stdio_child: None,
+                session_expiry: Default::default(),
                 oauth_target: None,
             };
             let result = tokio::time::timeout(

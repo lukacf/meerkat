@@ -32,7 +32,7 @@ import warnings
 import zipfile
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, NotRequired, TypedDict, cast, get_args
+from typing import Any, Callable, Literal, NotRequired, TypedDict, cast, get_args, get_origin
 from urllib.error import URLError
 
 from .errors import CapabilityUnavailableError, MeerkatError
@@ -563,6 +563,23 @@ def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | N
         for key in keys
     ]
 
+
+
+def _literal_values(literal_type: Any) -> frozenset[Any]:
+    """Every value a generated literal domain admits.
+
+    A generated domain may be a single ``Literal`` or a union of ``Literal``
+    members (a schema ``oneOf`` of enums and constants). ``get_args`` on a
+    union yields the member types, not their values, so members are
+    flattened recursively. Non-literal members (such as ``None``) add no
+    values.
+    """
+    if get_origin(literal_type) is Literal:
+        return frozenset(get_args(literal_type))
+    values: set[Any] = set()
+    for member in get_args(literal_type):
+        values |= _literal_values(member)
+    return frozenset(values)
 
 class MeerkatClient:
     """Async client that manages a Meerkat agent runtime via rkat-rpc.
@@ -6494,7 +6511,7 @@ class MeerkatClient:
                 )
             for name, literal_type in field_domains.items():
                 value = MeerkatClient._require_string_field(record, name, item_context)
-                if value not in get_args(literal_type):
+                if value not in _literal_values(literal_type):
                     raise MeerkatError(
                         "INVALID_RESPONSE",
                         f"{item_context}: unsupported {name}",

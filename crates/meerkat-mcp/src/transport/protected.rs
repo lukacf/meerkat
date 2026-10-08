@@ -249,8 +249,9 @@ pub(crate) fn has_protected_metadata(message: &ClientJsonRpcMessage) -> bool {
             if call.extensions.get::<ProtectedMetadata>().is_some()))
 }
 
-/// A protected body may only reach the exact configured destination. Ordinary
-/// calls retain their existing redirect and environment-proxy behavior.
+/// A protected body may only reach the exact configured destination: no
+/// redirect at all, and no environment proxy. Ordinary calls follow only
+/// same-origin redirects and keep the environment-proxy behavior.
 pub(crate) fn protected_http_client() -> io::Result<&'static reqwest::Client> {
     static CLIENT: std::sync::LazyLock<Result<reqwest::Client, reqwest::Error>> =
         std::sync::LazyLock::new(|| {

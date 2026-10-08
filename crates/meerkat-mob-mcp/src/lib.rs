@@ -4724,6 +4724,8 @@ impl CoreCommsRuntime for LocalCommsRuntime {
 
 struct LocalSessionActor {
     comms: Arc<LocalCommsRuntime>,
+    /// The mob the session was built for, from its typed member binding.
+    mob: Option<MobId>,
     witness: meerkat_session::LiveSessionActorWitness,
     // The lock covers sequence allocation and broadcast send together, so
     // concurrent publishers cannot send allocated sequences out of order.
@@ -4824,6 +4826,10 @@ impl LocalSessionService {
             .and_then(|build| build.resume_session.as_ref())
             .map(|session| session.id().clone())
             .unwrap_or_default();
+        let mob = build
+            .as_ref()
+            .and_then(|build| build.mob_member_binding.as_ref())
+            .map(|binding| MobId::from(binding.mob_id.as_str()));
         let n = self
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4893,6 +4899,7 @@ impl LocalSessionService {
                 sid.clone(),
                 LocalSessionActor {
                     comms,
+                    mob,
                     witness: witness.clone(),
                     next_event_seq: std::sync::Mutex::new(1),
                 },
@@ -5596,8 +5603,17 @@ impl MobSessionService for LocalSessionService {
         )
     }
 
-    async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
-        true
+    /// A live session belongs to the mob its typed member binding named when
+    /// it was built. Several mobs share this service: a session is never
+    /// reported as another mob's, and one built without a member binding is
+    /// no mob's.
+    async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|actor| actor.mob.as_ref())
+            .is_some_and(|owner| owner == mob_id)
     }
 }
 
@@ -12335,6 +12351,106 @@ mod tests {
         ] {
             assert!(reason.contains(needle), "{needle} missing from: {reason}");
         }
+    }
+
+    /// The in-memory service shared by every mob of one state reports each
+    /// live session as belonging only to the mob it was built for, so the
+    /// aggregate owner check (owner routing, archive classification) never
+    /// reports another mob's member, or a live session no mob built, as
+    /// mob-owned on that mob's account.
+    #[tokio::test]
+    async fn in_memory_sessions_belong_only_to_their_own_mob() {
+        let state = MobMcpState::new_in_memory();
+        let first = state
+            .mob_create_definition(explicit_definition("ownership-first"))
+            .await
+            .expect("create first mob");
+        let second = state
+            .mob_create_definition(explicit_definition("ownership-second"))
+            .await
+            .expect("create second mob");
+        let worker = AgentIdentity::from("worker-1");
+        for mob_id in [&first, &second] {
+            state
+                .mob_spawn(
+                    mob_id,
+                    ProfileName::from("worker"),
+                    worker.clone(),
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("spawn worker");
+        }
+        let first_session = state
+            .mob_resolve_bridge_session_id(&first, &worker)
+            .await
+            .expect("resolve first session")
+            .expect("first worker session");
+        let second_session = state
+            .mob_resolve_bridge_session_id(&second, &worker)
+            .await
+            .expect("resolve second session")
+            .expect("second worker session");
+        let service = state.session_service();
+        assert!(service.session_belongs_to_mob(&first_session, &first).await);
+        assert!(
+            !service
+                .session_belongs_to_mob(&first_session, &second)
+                .await
+        );
+        assert!(
+            service
+                .session_belongs_to_mob(&second_session, &second)
+                .await
+        );
+        assert!(
+            !service
+                .session_belongs_to_mob(&second_session, &first)
+                .await
+        );
+        assert!(
+            !service
+                .session_belongs_to_mob(&SessionId::new(), &first)
+                .await,
+            "an unknown session is no mob's"
+        );
+        assert!(
+            state
+                .owns_service_reported_bridge_session(&first_session)
+                .await
+        );
+
+        // A live session no mob built is not mob-owned, although mobs exist.
+        let unbound = Session::new();
+        let unbound_id = unbound.id().clone();
+        service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-opus-5".into(),
+                prompt: "unbound".into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    resume_session: Some(unbound),
+                    ..Default::default()
+                }),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                labels: None,
+            })
+            .await
+            .expect("create a live session no mob built");
+        assert!(service.has_live_session(&unbound_id).await.expect("live"));
+        assert!(!service.session_belongs_to_mob(&unbound_id, &first).await);
+        assert!(
+            !state
+                .owns_service_reported_bridge_session(&unbound_id)
+                .await,
+            "a live session no mob built is not reported as mob-owned"
+        );
     }
 
     /// #1701 control: the managed host without a child policy that refuses a

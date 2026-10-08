@@ -15649,6 +15649,349 @@ mod tests {
         runtime.try_shutdown().await.unwrap();
     }
 
+    /// One reply whose reported usage exceeds any small token budget.
+    struct OverBudgetLlmClient;
+
+    #[async_trait]
+    impl LlmClient for OverBudgetLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            Box::pin(stream::iter(vec![
+                Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "reply past the budget".to_string(),
+                    meta: None,
+                }),
+                Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        provider_for_successful_rpc_test_model(&request.model),
+                        &request.model,
+                        meerkat_core::Usage {
+                            input_tokens: 1_000,
+                            output_tokens: 1_000,
+                            ..meerkat_core::Usage::default()
+                        },
+                    ),
+                }),
+                Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A run that exhausts its token budget is a coherent budget terminal:
+    /// through native persistent admission and completion, the waiter gets
+    /// the typed budget-exhausted result (not an error), the run is committed
+    /// (no uncommitted input remains), the reply is durable, and the session
+    /// serves the next turn.
+    #[tokio::test]
+    async fn token_budget_exhaustion_commits_a_typed_budget_terminal() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let mut build = mock_build_config();
+        build.llm_client_override = Some(Arc::new(OverBudgetLlmClient));
+        build.budget_limits = Some(meerkat_core::BudgetLimits {
+            max_tokens: Some(100),
+            ..Default::default()
+        });
+        let id = runtime
+            .create_or_resume_session_without_turn(build, None, None, Default::default())
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let result = runtime
+            .start_turn_via_runtime(
+                &id,
+                "exceed the budget".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => panic!(
+                "a budget-exhausted run must reach its waiter as a typed result, got {error:?}"
+            ),
+        };
+        assert_eq!(
+            result.terminal_cause_kind,
+            Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted)
+        );
+        assert!(
+            !runtime
+                .runtime_adapter
+                .session_has_uncommitted_run_input(&id)
+                .await
+                .expect("committed run inputs are readable"),
+            "the budget-exhausted run is committed, not left uncommitted"
+        );
+        let session = runtime.load_persisted_session(&id).await.unwrap().unwrap();
+        let messages = serde_json::to_string(session.messages()).unwrap();
+        // The prompt is durable. The reply whose usage crossed the budget is
+        // not appended: the agent loop stops at the budget observation
+        // before recording that response's blocks.
+        assert!(
+            messages.contains("exceed the budget"),
+            "the prompt is durable: {messages}"
+        );
+        assert!(
+            !messages.contains("reply past the budget"),
+            "the rejected reply is not committed: {messages}"
+        );
+        assert!(
+            result.text.is_empty(),
+            "a fresh session has no committed assistant text: {:?}",
+            result.text
+        );
+        // The request that crossed the budget is still charged.
+        assert_eq!(result.usage.input_tokens, 1_000);
+        assert_eq!(result.usage.output_tokens, 1_000);
+        // The run's input is durably consumed, not left for recovery.
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        let rows = runtime
+            .service
+            .runtime_store()
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("durable input rows are readable");
+        assert!(!rows.is_empty(), "the turn's input is durable");
+        for row in &rows {
+            assert_eq!(
+                row.seed.phase,
+                meerkat_runtime::input_state::InputLifecycleState::Consumed
+            );
+            assert_eq!(
+                row.seed.terminal_outcome,
+                Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed)
+            );
+        }
+
+        // The session serves the next turn, which reaches its waiter as a
+        // typed result as well.
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let next = runtime
+            .start_turn_via_runtime(
+                &id,
+                "and again".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let next = match next {
+            Ok(result) => result,
+            Err(error) => panic!("the next turn must run after a budget terminal, got {error:?}"),
+        };
+        assert_eq!(
+            next.terminal_cause_kind,
+            Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted)
+        );
+        assert!(
+            !runtime
+                .runtime_adapter
+                .session_has_uncommitted_run_input(&id)
+                .await
+                .expect("committed run inputs are readable"),
+            "the next run is committed too"
+        );
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    /// Each call answers in turn and reports 60 tokens, so a 100-token
+    /// session budget lets the first turn complete and the second exhaust it.
+    struct SecondTurnExhaustsBudgetClient {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for SecondTurnExhaustsBudgetClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let reply = if call == 0 {
+                "first turn reply"
+            } else {
+                "second turn reply past the budget"
+            };
+            Box::pin(stream::iter(vec![
+                Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: reply.to_string(),
+                    meta: None,
+                }),
+                Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        provider_for_successful_rpc_test_model(&request.model),
+                        &request.model,
+                        meerkat_core::Usage {
+                            input_tokens: 30,
+                            output_tokens: 30,
+                            ..meerkat_core::Usage::default()
+                        },
+                    ),
+                }),
+                Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A first input completes normally; a second input in the same session
+    /// pushes the session's cumulative token budget over its limit. The
+    /// second waiter gets the typed budget result (not an error), the second
+    /// input is consumed (not abandoned), the first turn's messages stay,
+    /// and the second turn's reply is not committed.
+    #[tokio::test]
+    async fn a_second_turn_that_exhausts_the_session_budget_commits_a_typed_result() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let mut build = mock_build_config();
+        build.llm_client_override = Some(Arc::new(SecondTurnExhaustsBudgetClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        build.budget_limits = Some(meerkat_core::BudgetLimits {
+            max_tokens: Some(100),
+            ..Default::default()
+        });
+        let id = runtime
+            .create_or_resume_session_without_turn(build, None, None, Default::default())
+            .await
+            .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let first = runtime
+            .start_turn_via_runtime(
+                &id,
+                "first question".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the first turn stays within the budget");
+        assert_eq!(first.terminal_cause_kind, None);
+        assert_eq!(first.text, "first turn reply");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let second = runtime
+            .start_turn_via_runtime(
+                &id,
+                "a clarification".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let second = match second {
+            Ok(result) => result,
+            Err(error) => panic!(
+                "a budget-exhausting second turn must reach its waiter as a typed result, got {error:?}"
+            ),
+        };
+        assert_eq!(
+            second.terminal_cause_kind,
+            Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted)
+        );
+        assert_ne!(second.text, "second turn reply past the budget");
+
+        assert!(
+            !runtime
+                .runtime_adapter
+                .session_has_uncommitted_run_input(&id)
+                .await
+                .expect("committed run inputs are readable"),
+            "both inputs are committed"
+        );
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
+        let rows = runtime
+            .service
+            .runtime_store()
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("durable input rows are readable");
+        assert_eq!(rows.len(), 2, "both inputs are durable");
+        for row in &rows {
+            assert_eq!(
+                row.seed.phase,
+                meerkat_runtime::input_state::InputLifecycleState::Consumed
+            );
+            assert_eq!(
+                row.seed.terminal_outcome,
+                Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed),
+                "consumed, not abandoned"
+            );
+        }
+
+        let session = runtime.load_persisted_session(&id).await.unwrap().unwrap();
+        let messages = serde_json::to_string(session.messages()).unwrap();
+        assert!(
+            messages.contains("first question")
+                && messages.contains("first turn reply")
+                && messages.contains("a clarification"),
+            "the first turn and the second prompt are retained: {messages}"
+        );
+        assert!(
+            !messages.contains("second turn reply past the budget"),
+            "the second turn's rejected reply is not committed: {messages}"
+        );
+        runtime.try_shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn no_turn_cold_resume_inherits_complete_build_state_and_rejects_forbidden_override() {
         let temp = tempfile::tempdir_in(".").unwrap();

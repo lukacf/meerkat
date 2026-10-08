@@ -532,6 +532,18 @@ them.
 
 ### Fixed
 
+- A run that exhausted its token budget no longer fails at its own
+  commit. The generated machine ends such a turn as `Failed /
+  BudgetExhausted` (an orderly stop whose surface class is success), but
+  the runtime-loop commit accepted only `Completed` and refused it with an
+  internal error, so the caller got "runtime loop commit failed" instead of
+  the result. The commit now also accepts the coherent budget terminal
+  (phase `Failed`, outcome and cause `BudgetExhausted`) when it already
+  belongs to exactly this run, checked before the completion is applied.
+  The run's inputs are consumed with their receipt as usual, and the
+  caller receives the ordinary completed delivery with the typed
+  `BudgetExhausted` cause in its `RunResult`. Every other non-completed
+  terminal is still refused.
 - Mob destruction no longer overflows normal 2 MiB worker stacks in debug builds when retiring session-backed children.
 - An MCP `tools/call` over Streamable HTTP could run twice. On a `404`
   session expiry the transport re-initialized and re-sent the in-flight

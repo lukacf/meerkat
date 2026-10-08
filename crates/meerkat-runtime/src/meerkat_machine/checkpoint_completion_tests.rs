@@ -475,6 +475,233 @@ async fn checkpoint_apply_with_run_result_uses_run_authority_live_and_after_rest
     }
 }
 
+/// Stage `input_id` for the fixture run, end the turn with the generated
+/// budget terminal, and commit it through the real runtime-loop commit
+/// carrying `terminal`.
+async fn commit_budget_terminal_batch(
+    fixture: &Fixture,
+    input_id: &InputId,
+    terminal: &meerkat_core::lifecycle::core_executor::CoreApplyTerminal,
+) {
+    let mut entry = fixture.driver.lock().await;
+    let input = checkpoint_peer_input(input_id.clone());
+    let admission = entry
+        .resolve_admission_with_active_turn_boundary(&input, true)
+        .unwrap();
+    entry.accept_resolved_input(input, admission).await.unwrap();
+    let stage = machine_authorize_stage_for_run(
+        &entry,
+        &fixture.run_id,
+        std::slice::from_ref(input_id),
+        RuntimeLoopBatchSource::Steer,
+    )
+    .expect("the batch authorizes for the run");
+    if let DriverEntry::Persistent(driver) = &mut *entry {
+        driver
+            .machine_realize_authorized_stage_batch(stage)
+            .unwrap();
+    }
+    {
+        let shared = entry.shared_dsl_authority();
+        let mut machine = shared.lock().unwrap();
+        mm::MeerkatMachineMutator::apply(
+            &mut *machine,
+            mm::MeerkatMachineInput::BudgetExhausted {
+                run_id: mm::RunId::from_domain(&fixture.run_id),
+            },
+        )
+        .expect("the generated budget terminal applies to the run");
+    }
+    if let DriverEntry::Persistent(driver) = &mut *entry {
+        driver
+            .inner_mut()
+            .sync_control_projection_from_dsl_authority();
+    }
+    drop(entry);
+    commit_runtime_loop_run(
+        &fixture.driver,
+        fixture.run_id.clone(),
+        vec![input_id.clone()],
+        meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+            run_id: fixture.run_id.clone(),
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+            contributing_input_ids: vec![input_id.clone()],
+            conversation_digest: None,
+            message_count: 0,
+        },
+        None,
+        Vec::new(),
+        Some(terminal),
+    )
+    .await
+    .expect("a coherent budget terminal commits through the real run commit");
+}
+
+fn budget_run_result(session_id: &SessionId) -> meerkat_core::types::RunResult {
+    meerkat_core::types::RunResult {
+        text: String::new(),
+        session_id: session_id.clone(),
+        usage: Default::default(),
+        turns: 1,
+        tool_calls: 0,
+        terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted),
+        structured_output: None,
+        extraction_error: None,
+        schema_warnings: None,
+        skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn budget_run_result_recovers_after_a_completion_receipt_write_fault() {
+    use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+
+    for cold in [false, true] {
+        let fixture = Fixture::with_initial_input(false).await;
+        let input_id = old_input_id();
+        let expected = budget_run_result(&fixture.session_id);
+        let terminal = CoreApplyTerminal::RunResult(Box::new(expected.clone()));
+        commit_budget_terminal_batch(&fixture, &input_id, &terminal).await;
+
+        // The committed boundary: the exact run, input and budget candidate.
+        let receipts = fixture
+            .store
+            .load_committed_boundary_receipts(&fixture.runtime_id(), &fixture.run_id)
+            .await
+            .unwrap();
+        assert_eq!(receipts.len(), 1, "one boundary receipt for the run");
+        assert_eq!(receipts[0].run_id, fixture.run_id);
+        assert_eq!(receipts[0].contributing_input_ids, vec![input_id.clone()]);
+        let pending = fixture
+            .store
+            .load_input_state(&fixture.runtime_id(), &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.seed.phase, InputLifecycleState::Consumed);
+        let completion = pending.state.terminal_completion.as_ref().unwrap();
+        assert_eq!(completion.owner_input_id, input_id);
+        assert_eq!(completion.batch_key.run_id(), Some(&fixture.run_id));
+        assert!(matches!(
+            completion.phase,
+            InputTerminalCompletionPhase::Pending
+        ));
+        let Some(InteractionTerminalCandidate::RunResult { result }) =
+            completion.candidate.as_ref()
+        else {
+            panic!("the budget run retains its typed result as the candidate");
+        };
+        assert_eq!(
+            serde_json::to_value(result.as_ref()).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let committed = fixture.raw_row(&input_id);
+
+        // A transient fault refuses the completion-receipt write.
+        rusqlite::Connection::open(fixture.store.path())
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_budget_completion_receipt BEFORE UPDATE ON runtime_input_states
+             WHEN NEW.runtime_id = '{}' AND NEW.input_id = '{}'
+             BEGIN SELECT RAISE(ABORT, 'synthetic completion receipt fault'); END;",
+                fixture.runtime_id(),
+                input_id,
+            ))
+            .unwrap();
+        let driver = if cold {
+            fixture.fresh_driver_from_durable().await.unwrap()
+        } else {
+            fixture.driver.clone()
+        };
+        crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+            &driver,
+            &mut NoExecution,
+        )
+        .await
+        .expect_err("the faulted completion-receipt write is refused");
+        assert_eq!(
+            committed,
+            fixture.raw_row(&input_id),
+            "the committed candidate survives the fault unchanged"
+        );
+
+        // A real non-directed recovery finalizes the same budget result.
+        rusqlite::Connection::open(fixture.store.path())
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_budget_completion_receipt;")
+            .unwrap();
+        let driver = if cold {
+            fixture.fresh_driver_from_durable().await.unwrap()
+        } else {
+            driver
+        };
+        crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+            &driver,
+            &mut NoExecution,
+        )
+        .await
+        .expect("non-directed recovery finalizes the retained budget result");
+        let row = fixture
+            .store
+            .load_input_state(&fixture.runtime_id(), &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.seed.terminal_outcome,
+            Some(InputTerminalOutcome::Consumed)
+        );
+        assert_eq!(
+            row.state
+                .history
+                .iter()
+                .filter(|event| event.to == InputLifecycleState::Consumed)
+                .count(),
+            1,
+            "the input is consumed exactly once"
+        );
+        let completion = row.state.terminal_completion.unwrap();
+        assert_eq!(completion.batch_key.run_id(), Some(&fixture.run_id));
+        assert!(matches!(
+            completion.phase,
+            InputTerminalCompletionPhase::Finalized { .. }
+        ));
+        let Some(crate::completion::CompletionOutcome::Completed(result)) = completion.outcome
+        else {
+            panic!("the budget run completes with its typed result");
+        };
+        assert_eq!(
+            serde_json::to_value(result.as_ref()).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(
+            result.terminal_cause_kind,
+            Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted)
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_committed_boundary_receipts(&fixture.runtime_id(), &fixture.run_id)
+                .await
+                .unwrap(),
+            receipts,
+            "the boundary receipt keeps its identity and sequence"
+        );
+
+        // A repeat drain is stable.
+        let finalized = fixture.raw_row(&input_id);
+        crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+            &driver,
+            &mut NoExecution,
+        )
+        .await
+        .unwrap();
+        assert_eq!(finalized, fixture.raw_row(&input_id));
+    }
+}
+
 #[tokio::test]
 async fn multi_recipient_checkpoint_finalizes_exact_cohort_once_live_and_after_restart() {
     for cold in [false, true] {

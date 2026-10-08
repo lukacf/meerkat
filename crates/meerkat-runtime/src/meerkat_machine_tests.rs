@@ -33735,6 +33735,183 @@ async fn persistent_commit_atomic_apply_failure_publishes_no_durable_terminal_st
     );
 }
 
+/// Apply a generated budget terminal to the staged run.
+async fn mark_staged_run_budget_terminal(driver: &SharedDriver, run_id: &RunId, time_budget: bool) {
+    let authority = driver.lock().await.shared_dsl_authority();
+    let mut auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dsl_run_id = mm_dsl::RunId::from_domain(run_id);
+    let input = if time_budget {
+        mm_dsl::MeerkatMachineInput::TimeBudgetExceeded { run_id: dsl_run_id }
+    } else {
+        mm_dsl::MeerkatMachineInput::BudgetExhausted { run_id: dsl_run_id }
+    };
+    mm_dsl::MeerkatMachineMutator::apply(&mut *auth, input).expect("budget terminal applies");
+}
+
+async fn assert_budget_terminal_retained(driver: &SharedDriver) {
+    let authority = driver.lock().await.shared_dsl_authority();
+    let auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(auth.state().turn_phase, mm_dsl::TurnPhase::Failed);
+    assert_eq!(
+        auth.state().terminal_outcome,
+        Some(mm_dsl::TurnTerminalOutcome::BudgetExhausted)
+    );
+    assert_eq!(
+        auth.state().terminal_cause_kind,
+        Some(mm_dsl::TurnTerminalCauseKind::BudgetExhausted)
+    );
+}
+
+async fn commit_staged_run(
+    driver: &SharedDriver,
+    runtime_id: &LogicalRuntimeId,
+    run_id: &RunId,
+    input_id: &InputId,
+) -> Result<(), String> {
+    let session =
+        meerkat_core::Session::with_id(SessionId::parse(&runtime_id.to_string()).unwrap());
+    commit_runtime_loop_run(
+        driver,
+        run_id.clone(),
+        vec![input_id.clone()],
+        machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
+        Some(BoundSessionCommit::sealed(Arc::new(session)).expect("seal session")),
+        Vec::new(),
+        None,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+async fn assert_consumed_once_with_receipt(
+    driver: &SharedDriver,
+    store: &crate::store::InMemoryRuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    run_id: &RunId,
+    input_id: &InputId,
+) {
+    assert!(
+        store
+            .load_boundary_receipt(runtime_id, run_id, 1)
+            .await
+            .unwrap()
+            .is_some(),
+        "the budget run's terminal receipt is durable"
+    );
+    let entry = driver.lock().await;
+    assert_eq!(entry.runtime_state(), RuntimeState::Idle);
+    assert_eq!(entry.current_run_id(), None);
+    assert_eq!(
+        entry.input_terminal_outcome(input_id),
+        Some(crate::input_state::InputTerminalOutcome::Consumed)
+    );
+    let consumed = entry
+        .as_driver()
+        .input_state(input_id)
+        .expect("committed input state")
+        .history
+        .iter()
+        .filter(|event| event.to == crate::input_state::InputLifecycleState::Consumed)
+        .count();
+    assert_eq!(consumed, 1, "the input is consumed exactly once");
+}
+
+#[tokio::test]
+async fn budget_terminal_run_commits_its_input_with_a_receipt() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let (driver, runtime_id, run_id, input_id) =
+        persistent_staged_run_driver(inner.clone() as Arc<dyn RuntimeStore>).await;
+    mark_staged_run_budget_terminal(&driver, &run_id, false).await;
+
+    commit_staged_run(&driver, &runtime_id, &run_id, &input_id)
+        .await
+        .expect("a coherent budget terminal commits");
+
+    assert_consumed_once_with_receipt(&driver, &inner, &runtime_id, &run_id, &input_id).await;
+    assert_budget_terminal_retained(&driver).await;
+}
+
+#[tokio::test]
+async fn time_budget_terminal_run_commit_is_refused_before_mutation() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let (driver, runtime_id, run_id, input_id) =
+        persistent_staged_run_driver(inner.clone() as Arc<dyn RuntimeStore>).await;
+    mark_staged_run_budget_terminal(&driver, &run_id, true).await;
+
+    let error = commit_staged_run(&driver, &runtime_id, &run_id, &input_id)
+        .await
+        .expect_err("only the budget terminal joins the successful commit path");
+    assert!(
+        error.contains("unexpected terminal outcome Some(TimeBudgetExceeded)"),
+        "unexpected refusal: {error}"
+    );
+    assert_commit_rejection_preserved_staged_batch(&driver, &run_id, &[input_id]).await;
+    assert!(
+        inner
+            .load_boundary_receipt(&runtime_id, &run_id, 1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn budget_terminal_failed_atomic_terminal_boundary_commit_publishes_nothing() {
+    // A failed atomic terminal-boundary commit of a budget run, before any
+    // durable publication: nothing durable is published, the accepted
+    // durable input row keeps its pre-failure state, and the budget terminal
+    // is not rewritten. This is not a failure after a successful commit.
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
+    );
+    let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
+    mark_staged_run_budget_terminal(&driver, &run_id, false).await;
+    let before = inner
+        .load_input_state(&runtime_id, &input_id)
+        .await
+        .unwrap()
+        .expect("the accepted input is durable before the commit");
+
+    let error = commit_staged_run(&driver, &runtime_id, &run_id, &input_id)
+        .await
+        .expect_err("the injected atomic apply failure refuses the commit");
+    assert!(
+        error.contains("synthetic atomic_apply failure"),
+        "the durable failure keeps its own cause: {error}"
+    );
+    assert!(
+        inner
+            .load_boundary_receipt(&runtime_id, &run_id, 1)
+            .await
+            .unwrap()
+            .is_none(),
+        "the failed commit publishes no receipt"
+    );
+    let after = inner
+        .load_input_state(&runtime_id, &input_id)
+        .await
+        .unwrap()
+        .expect("the accepted durable input row survives the failed commit");
+    assert_eq!(after.seed.phase, before.seed.phase);
+    assert_eq!(after.seed.terminal_outcome, before.seed.terminal_outcome);
+    assert_eq!(
+        format!("{after:?}"),
+        format!("{before:?}"),
+        "the durable row and state are unchanged"
+    );
+    assert_ne!(
+        after.seed.phase,
+        crate::input_state::InputLifecycleState::Consumed
+    );
+    assert_budget_terminal_retained(&driver).await;
+}
+
 #[tokio::test]
 async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());

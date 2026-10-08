@@ -18,6 +18,8 @@ categories.workspace = true
 exclude = [
     "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
     "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
+    # Its integration test embeds the two files above, so it is excluded too.
+    "tests/v0_8_10_ob3_recovery_migration.rs",
 ]
 
 [dependencies]

@@ -3,7 +3,7 @@
   "fixture": "v0_8_10_ob3_recovery_migration_session.json",
   "synthetic": true,
   "bytes": 51999,
-  "sha256": "7a3c2d45901a77f6fc9fca222ae0dc11a5a7a8163cc058e472c1626edfafb831",
+  "sha256": "3a1ba2e6ff8889c913dc0801c540c81a38bae7b54269259d8e370d1275a12c8a",
   "producer": {
     "product": "meerkat",
     "version": "0.8.10",

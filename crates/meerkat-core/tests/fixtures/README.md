@@ -47,15 +47,21 @@ boundary. The vectors contain:
 The historical filenames remain because they describe where the known-answer
 bytes came from. They do not declare that release supported.
 
-## OB3 0.8.10 recovery-migration stamp
+## 0.8.10 recovery-migration stamp
 
-`v0_8_10_ob3_recovery_migration_session.json` is an exact, immutable
-52,693-byte session document minted by Meerkat 0.8.10 and explicitly
-authorized by OB3 for this corpus. It contains system content only. Its
-SHA-256 is
-`43e49a7b216cf61f6ba8f289824c9d6e24a64a81d873f9eb4a09c5b3f6f0cd98`;
-the adjacent `.provenance.json` binds the producer, classification, session
-identity, and expected checkpoint facts.
+`v0_8_10_ob3_recovery_migration_session.json` is a SYNTHETIC derivative of
+a downstream deployment's 0.8.10 recovery-migration session document. It
+keeps the released envelope shape (version 2, exactly one system message,
+no transcript-history key, the seven released metadata keys, the retired
+`RecoveryMigration` + legacy stamp, and the usage keys) and the legacy
+session and checkpoint ids as intentional structural data. Its system
+prompt, build state, tool catalogue (with each tool's required/optional
+property semantics kept) and every application identifier are synthetic.
+It is 51,999 bytes with SHA-256
+`3a1ba2e6ff8889c913dc0801c540c81a38bae7b54269259d8e370d1275a12c8a`;
+the adjacent `.provenance.json` marks it synthetic and binds the producer
+version, classification, session identity, and expected checkpoint facts.
+The `meerkat-core` package excludes both files.
 
 This artifact pins the production-relevant
 `RecoveryMigration` + `authority_base.kind = legacy` stamp shape. It carries

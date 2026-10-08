@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 const FIXTURE: &[u8] = include_bytes!("fixtures/v0_8_10_ob3_recovery_migration_session.json");
 const PROVENANCE: &[u8] =
     include_bytes!("fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json");
-const FIXTURE_SHA256: &str = "7a3c2d45901a77f6fc9fca222ae0dc11a5a7a8163cc058e472c1626edfafb831";
+const FIXTURE_SHA256: &str = "3a1ba2e6ff8889c913dc0801c540c81a38bae7b54269259d8e370d1275a12c8a";
 const RELEASED_RUNTIME_CHECKPOINT_PROVENANCE_KEY: &str = "session_runtime_checkpoint_provenance_v1";
 
 fn hex_encode(bytes: &[u8]) -> String {

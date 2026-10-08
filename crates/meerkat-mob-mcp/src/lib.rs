@@ -8898,8 +8898,30 @@ mod tests {
             Ok(())
         }
 
-        async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
-            true
+        /// A session belongs to the mob its persisted typed member binding
+        /// names, as a real store reports it. Several mobs can share this
+        /// service, and resume reconciliation archives live sessions it is
+        /// told belong to the resuming mob: claiming every session for every
+        /// mob made one mob's restore archive another mob's member. A session
+        /// without a persisted binding keeps the earlier answer.
+        async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
+            let Some(session) = self
+                .persisted_sessions
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
+            else {
+                return true;
+            };
+            match meerkat_core::PersistedSessionMetadataView::try_from_session(&session)
+                .ok()
+                .as_ref()
+                .and_then(super::persisted_mob_binding)
+            {
+                Some(owner) => &owner == mob_id,
+                None => true,
+            }
         }
 
         async fn load_persisted_session(

@@ -15562,11 +15562,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// RuntimeStore is the singular session authority. Store-only rows are not
     /// exposed as runtime truth and runtime bodies are never merged with
     /// SessionStore metadata.
+    ///
+    /// Authority observation and HeadCanonical materialization are two store
+    /// reads. A writer that commits between them (a turn's
+    /// checkpoint-to-boundary commit, or a notice appended outside a turn)
+    /// makes the observed head unmaterializable, and the store reports the
+    /// typed `TranscriptRevisionConflict`. The read then re-observes the
+    /// now-current authority within the same counted budget as every other
+    /// observation racing a head-canonical writer, rereading the full
+    /// authoritative base each time. It never waits for a turn or a lock, so a
+    /// caller that holds the turn-finalization boundary may use it, and it
+    /// never serves any head other than the one the store issued for that
+    /// attempt. A conflict on every attempt surfaces unchanged: stale or
+    /// contradictory authority still fails closed.
     pub async fn load_authoritative_session(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        self.load_authoritative_session_base(id).await
+        let mut result = self.load_authoritative_session_base(id).await;
+        for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
+            if !Self::is_transcript_revision_conflict(&result) {
+                break;
+            }
+            result = self.load_authoritative_session_base(id).await;
+        }
+        result
     }
 
     /// Resolve a crash-window HeadCanonical provisional tail before a host
@@ -42522,6 +42542,68 @@ mod tests {
             OBSERVATION_LOAD_ATTEMPTS,
             "the read must stop at the counted budget"
         );
+    }
+
+    /// A plain authoritative load whose authority read was superseded by a
+    /// writer's commit re-observes the current authority and converges within
+    /// the counted budget instead of surfacing the conflict.
+    #[tokio::test]
+    async fn authoritative_load_converges_after_head_advances_within_budget() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        let conflicts = OBSERVATION_LOAD_ATTEMPTS - 1;
+        runtime_store.serve_stale_authority(superseded, conflicts);
+        let session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("the load converges once the writer's head is observed")
+            .expect("session");
+        let rendered = serde_json::to_string(session.messages()).expect("render");
+        assert!(
+            rendered.contains("second turn"),
+            "the converged load observes the advanced head: {rendered}"
+        );
+        assert_eq!(runtime_store.stale_reads_served(), conflicts);
+    }
+
+    /// Stale authority on every attempt still fails closed with the typed
+    /// conflict once the counted budget is spent.
+    #[tokio::test]
+    async fn authoritative_load_surfaces_conflict_once_budget_is_spent() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        runtime_store.serve_stale_authority(superseded, OBSERVATION_LOAD_ATTEMPTS + 4);
+        let result = service.load_authoritative_session(&session_id).await;
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result),
+            "{result:?}"
+        );
+        assert_eq!(
+            runtime_store.stale_reads_served(),
+            OBSERVATION_LOAD_ATTEMPTS
+        );
+    }
+
+    /// A caller that holds the turn-finalization boundary can use the load: it
+    /// never waits on the boundary, so it converges without waiting on itself.
+    #[tokio::test]
+    async fn boundary_owned_authoritative_load_does_not_wait_on_its_boundary() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        let _boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        runtime_store.serve_stale_authority(superseded, 2);
+        let session = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            service.load_authoritative_session(&session_id),
+        )
+        .await
+        .expect("a boundary-owned load must not wait on itself")
+        .expect("the load converges")
+        .expect("session");
+        assert_eq!(session.id(), &session_id);
+        assert_eq!(runtime_store.stale_reads_served(), 2);
     }
 
     /// Test runner seam for one exact durable boundary of the runtime turn the

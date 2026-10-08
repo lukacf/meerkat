@@ -3522,6 +3522,11 @@ impl SessionState {
             self.window_finished_user_turns.push(row.clone());
             self.last_user_turn = Some(FinishedUserTurn { rows: vec![row] });
         }
+        tracing::info!(
+            turn = %open.provider_ref,
+            role = ?open.role,
+            "public Live provider turn finished; queued for the transcript projection"
+        );
         self.queued_observations
             .push_back(GptLiveBrokerObservation::TurnFinished {
                 turn: GptLiveTurnRef(open.provider_ref),

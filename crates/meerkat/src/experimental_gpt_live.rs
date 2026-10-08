@@ -7445,10 +7445,16 @@ async fn release_unmeasured_segment(
     }
     if !seal.applied {
         let release = seal.release_observation(handle.interaction_id());
-        let settled = match activation
-            .live_adapter_host
-            .apply_observation(binding.channel_id(), &release)
-            .await
+        let settled = match meerkat_core::slow_await::warn_if_slow(
+            binding.channel_id(),
+            "pump: apply unmeasured segment release",
+            Box::pin(
+                activation
+                    .live_adapter_host
+                    .apply_observation(binding.channel_id(), &release),
+            ),
+        )
+        .await
         {
             Ok(settled) => settled,
             // The close released this channel's projections from the member
@@ -7484,18 +7490,31 @@ async fn release_unmeasured_segment(
         }
     }
     // The lease is taken only after the boundary wait, for the consume.
-    let reservation = runtime
-        .reserve_live_assistant_output_handle(
+    let reservation = meerkat_core::slow_await::warn_if_slow(
+        binding.channel_id(),
+        "pump: reserve assistant output (lifecycle lease)",
+        Box::pin(runtime.reserve_live_assistant_output_handle(
             binding.session_id(),
             binding.channel_id(),
             handle.output_id(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        )),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     runtime
         .commit_live_assistant_output_terminal(reservation)
         .map_err(|error| error.to_string())?;
-    request_first_output_media_health(activation, binding, seal).await;
+    tracing::info!(
+        channel = %binding.channel_id(),
+        item_id = %seal.item_id,
+        "live assistant segment committed to the transcript"
+    );
+    meerkat_core::slow_await::warn_if_slow(
+        binding.channel_id(),
+        "pump: first-output media health request",
+        Box::pin(request_first_output_media_health(activation, binding, seal)),
+    )
+    .await;
     Ok(UnmeasuredSegmentRelease::Committed)
 }
 
@@ -7885,7 +7904,13 @@ fn spawn_sideband_actors(
                         if let Some(recorder) =
                             observation_adapter.context_observation_recorder.get()
                         {
-                            match recorder.admit().await {
+                            match meerkat_core::slow_await::warn_if_slow(
+                                observation_binding.channel_id(),
+                                "reader: source-observation admission",
+                                Box::pin(recorder.admit()),
+                            )
+                            .await
+                            {
                                 Ok(observation_id) => Some(observation_id),
                                 Err(error) => {
                                     tracing::warn!(
@@ -7910,10 +7935,16 @@ fn spawn_sideband_actors(
                     // leaving a call that refuses every turn.
                     observation_adapter.track_user_turn(observation.kind());
                     if lifecycle_observation {
-                        match activation
-                            .activator
-                            .observe_provider_lifecycle(&observation)
-                            .await
+                        match meerkat_core::slow_await::warn_if_slow(
+                            observation_binding.channel_id(),
+                            "reader: provider lifecycle observation",
+                            Box::pin(
+                                activation
+                                    .activator
+                                    .observe_provider_lifecycle(&observation),
+                            ),
+                        )
+                        .await
                         {
                             Ok(()) => {}
                             Err(ExperimentalLiveLifecycleObservationError::Refused(reason)) => {
@@ -8156,8 +8187,16 @@ fn spawn_sideband_actors(
                 // Every seal queued while lowering precedes the observation
                 // the pull returned, so it is released first.
                 let retry_sequence = pump_drain.projection_retry.load(Ordering::Acquire);
-                if let Err(error) =
-                    release_unmeasured_segments(&activation, &pump_binding, &pump_adapter).await
+                if let Err(error) = meerkat_core::slow_await::warn_if_slow(
+                    pump_binding.channel_id(),
+                    "pump: release sealed unmeasured segments",
+                    Box::pin(release_unmeasured_segments(
+                        &activation,
+                        &pump_binding,
+                        &pump_adapter,
+                    )),
+                )
+                .await
                     && !pump_drain
                         .retain_projection_for_retry(
                             &activation.live_adapter_host,
@@ -8184,19 +8223,25 @@ fn spawn_sideband_actors(
                 let outcome = if let Some(outcome) = applied.as_ref() {
                     outcome.clone()
                 } else {
-                    let outcome = activation
-                        .live_adapter_host
-                        .apply_observation(pump_binding.channel_id(), observation)
-                        .await
-                        .map_err(|error| {
-                            boundary_busy = matches!(
-                                &error,
-                                meerkat_live::LiveAdapterHostError::ProjectionError(
-                                    meerkat_live::LiveProjectionError::SessionBusy(_)
-                                )
-                            );
-                            error.to_string()
-                        })?;
+                    let outcome = meerkat_core::slow_await::warn_if_slow(
+                        pump_binding.channel_id(),
+                        "pump: apply observation",
+                        Box::pin(
+                            activation
+                                .live_adapter_host
+                                .apply_observation(pump_binding.channel_id(), observation),
+                        ),
+                    )
+                    .await
+                    .map_err(|error| {
+                        boundary_busy = matches!(
+                            &error,
+                            meerkat_live::LiveAdapterHostError::ProjectionError(
+                                meerkat_live::LiveProjectionError::SessionBusy(_)
+                            )
+                        );
+                        error.to_string()
+                    })?;
                     *applied = Some(outcome.clone());
                     outcome
                 };
@@ -8214,6 +8259,11 @@ fn spawn_sideband_actors(
                     meerkat_live::ObservationOutcome::TranscriptAppended,
                 ) = (&*observation, &outcome)
                 {
+                    tracing::info!(
+                        channel = %pump_binding.channel_id(),
+                        item_id = %item_id,
+                        "live user turn applied to the transcript"
+                    );
                     pump_adapter.settle_continuation_commit(
                         item_id,
                         ExperimentalGptLiveContinuationCommit::Committed { text: text.clone() },
@@ -8262,11 +8312,13 @@ fn spawn_sideband_actors(
                         pump_binding.clone(),
                         output.clone(),
                     );
-                    activation
-                        .public_observation_publisher
-                        .publish(public)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    meerkat_core::slow_await::warn_if_slow(
+                        pump_binding.channel_id(),
+                        "pump: publish assistant output",
+                        Box::pin(activation.public_observation_publisher.publish(public)),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
                 }
                 if matches!(outcome, meerkat_live::ObservationOutcome::Terminal { .. }) {
                     return Err("experimental live adapter reached a terminal outcome".to_string());
@@ -16900,6 +16952,71 @@ mod tests {
             !test_deferred_adapter().snapshot_cuts,
             "legacy/private adapters do not acquire public snapshot semantics by default"
         );
+    }
+
+    /// #1821 diagnostics: a watched live await that stays pending is reported
+    /// at WARN after 2 s and again every 5 s, naming its step and scope; a
+    /// quick one logs nothing at WARN.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_live_await_is_reported_while_it_stays_pending() {
+        #[derive(Clone)]
+        struct SharedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = SharedLog(Arc::clone(&log));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let channel = meerkat_live::LiveChannelId::new("stalled-pump-channel");
+
+        meerkat_core::slow_await::warn_if_slow(
+            &channel,
+            "pump: apply observation",
+            Box::pin(tokio::time::sleep(std::time::Duration::from_secs(1))),
+        )
+        .await;
+        let quick = String::from_utf8(
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("utf-8 log");
+        assert!(quick.is_empty(), "a quick await is not reported: {quick:?}");
+
+        meerkat_core::slow_await::warn_if_slow(
+            &channel,
+            "pump: apply observation",
+            Box::pin(tokio::time::sleep(std::time::Duration::from_secs(8))),
+        )
+        .await;
+        let text = String::from_utf8(
+            log.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("utf-8 log");
+        assert_eq!(
+            text.matches("watched await is still pending").count(),
+            2,
+            "reported at 2 s and again at 7 s: {text:?}"
+        );
+        assert!(text.contains("slow watched await finished"), "{text:?}");
+        assert!(text.contains("pump: apply observation"), "{text:?}");
+        assert!(text.contains("stalled-pump-channel"), "{text:?}");
     }
 
     #[tokio::test(start_paused = true)]

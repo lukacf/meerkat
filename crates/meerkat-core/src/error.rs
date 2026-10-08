@@ -202,6 +202,13 @@ pub enum ToolError {
     #[error("Tool '{name}' is not allowed by policy")]
     AccessDenied { name: String },
 
+    /// The call was sent, but whether it took effect is unknown (for
+    /// example its transport session expired before the result arrived).
+    /// It is neither success nor denial and was not retried; a new attempt
+    /// needs fresh admission.
+    #[error("Outcome of tool '{name}' is uncertain: {reason}")]
+    OutcomeUncertain { name: String, reason: String },
+
     /// The affected operation was refused by its governed authorization owner.
     /// This is an ordinary tool result, never a run or session disposition.
     #[error("{refusal}")]
@@ -348,6 +355,7 @@ impl ToolError {
             Self::Timeout { .. } => "timeout",
             Self::InactivityTimeout { .. } => "inactivity_timeout",
             Self::AccessDenied { .. } => "access_denied",
+            Self::OutcomeUncertain { .. } => "outcome_uncertain",
             Self::AuthorizationRefused { .. } => "operation_refused",
             Self::ConfinementRefused { .. } => "confinement_refused",
             Self::HookDenied { .. } => "hook_denied",
@@ -435,6 +443,12 @@ impl ToolError {
             Self::PolicyDenied { denial } => serde_json::to_value(denial).ok(),
             Self::PolicyIndeterminate { failure } => serde_json::to_value(failure).ok(),
             _ => None,
+        }
+    }
+    pub fn outcome_uncertain(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::OutcomeUncertain {
+            name: name.into(),
+            reason: reason.into(),
         }
     }
     pub fn timeout(name: impl Into<String>, timeout_ms: u64) -> Self {

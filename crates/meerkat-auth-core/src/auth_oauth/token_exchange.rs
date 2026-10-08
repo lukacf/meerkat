@@ -201,4 +201,31 @@ mod tests {
             "no grant, refresh token or device code reached the redirect target"
         );
     }
+
+    #[test]
+    fn same_origin_compares_scheme_host_and_port() {
+        use crate::auth_oauth::same_origin;
+        let url = |raw: &str| reqwest::Url::parse(raw).unwrap();
+        assert!(same_origin(
+            &url("https://h.example/mcp"),
+            &url("https://h.example/mcp/")
+        ));
+        assert!(same_origin(
+            &url("https://h.example/a"),
+            &url("https://h.example:443/b")
+        ));
+        // A downgrade on the same host and port is another origin.
+        assert!(!same_origin(
+            &url("https://h.example:8443/mcp"),
+            &url("http://h.example:8443/mcp")
+        ));
+        assert!(!same_origin(
+            &url("https://h.example/mcp"),
+            &url("https://cdn.example/mcp")
+        ));
+        assert!(!same_origin(
+            &url("https://h.example/mcp"),
+            &url("https://h.example:444/mcp")
+        ));
+    }
 }

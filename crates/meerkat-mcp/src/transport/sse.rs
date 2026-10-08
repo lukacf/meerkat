@@ -208,7 +208,9 @@ fn message_endpoint<E: std::error::Error + Send + Sync + 'static>(
 /// A default client is created via `new()`, or pass an existing client via `with_client()`.
 #[derive(Clone)]
 pub(crate) struct ReqwestSseClient {
-    client: reqwest::Client,
+    /// Follows only same-origin redirects. A build failure is kept, and every
+    /// request fails with it; nothing falls back to a default client.
+    client: Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
     headers: HeaderMap,
     protected_metadata: ProtectedMetadataState,
 }
@@ -221,9 +223,26 @@ impl std::fmt::Debug for ReqwestSseClient {
     }
 }
 
-/// Lazy-initialized shared reqwest client for SSE transports
-static DEFAULT_SSE_CLIENT: std::sync::LazyLock<reqwest::Client> =
-    std::sync::LazyLock::new(reqwest::Client::new);
+/// Lazy-initialized shared client for SSE transports. Requests carry the
+/// configured headers and any bearer, so it follows only same-origin
+/// redirects.
+static DEFAULT_SSE_CLIENT: std::sync::LazyLock<
+    Result<reqwest::Client, meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable>,
+> = std::sync::LazyLock::new(meerkat_auth_core::auth_oauth::same_origin_credential_http_client);
+
+/// A redirect answer the client's configured redirect policy did not follow
+/// (for example another origin, the hop limit, a protected call, or a
+/// missing or invalid `Location`), refused by its status before any header
+/// or body is read.
+fn refuse_redirect(status: reqwest::StatusCode) -> Result<(), SseTransportError<reqwest::Error>> {
+    if status.is_redirection() {
+        return Err(SseTransportError::Io(std::io::Error::other(format!(
+            "MCP server answered with a redirect (status {}) that the configured redirect policy does not follow; refused",
+            status.as_u16()
+        ))));
+    }
+    Ok(())
+}
 
 impl ReqwestSseClient {
     /// Create a new SSE client using the shared default reqwest::Client
@@ -239,10 +258,16 @@ impl ReqwestSseClient {
     #[allow(dead_code)]
     pub(crate) fn with_client(client: reqwest::Client, headers: HeaderMap) -> Self {
         Self {
-            client,
+            client: Ok(client),
             headers,
             protected_metadata: Default::default(),
         }
+    }
+
+    fn client(&self) -> Result<&reqwest::Client, SseTransportError<reqwest::Error>> {
+        self.client.as_ref().map_err(|_| {
+            SseTransportError::Io(std::io::Error::other("MCP HTTP client unavailable"))
+        })
     }
 
     pub(crate) fn with_protected_metadata(mut self, state: ProtectedMetadataState) -> Self {
@@ -277,7 +302,7 @@ impl SseClient for ReqwestSseClient {
         let client = if protected {
             protected_http_client()?
         } else {
-            &self.client
+            self.client()?
         };
         let bytes = serialize_bounded_message(&mut message)?;
         let mut request_builder = client
@@ -289,11 +314,8 @@ impl SseClient for ReqwestSseClient {
             request_builder = request_builder.bearer_auth(auth_header);
         }
         let response = request_builder.send().await?;
-        if protected && response.status().is_redirection() {
-            return Err(SseTransportError::Io(std::io::Error::other(
-                "protected MCP redirect refused",
-            )));
-        }
+        // Every unfollowed redirect, protected or not, is refused here.
+        refuse_redirect(response.status())?;
         response
             .error_for_status()
             .map_err(SseTransportError::from)
@@ -307,7 +329,7 @@ impl SseClient for ReqwestSseClient {
         auth_token: Option<String>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, SseTransportError<Self::Error>> {
         let mut request_builder = self
-            .client
+            .client()?
             .get(uri.to_string())
             .header(ACCEPT, EVENT_STREAM_MIME_TYPE);
         request_builder = self.apply_headers(request_builder);
@@ -318,6 +340,7 @@ impl SseClient for ReqwestSseClient {
             request_builder = request_builder.header(HEADER_LAST_EVENT_ID, last_event_id);
         }
         let response = request_builder.send().await?;
+        refuse_redirect(response.status())?;
         let response = response.error_for_status()?;
         match response.headers().get(reqwest::header::CONTENT_TYPE) {
             Some(ct) => {

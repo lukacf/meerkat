@@ -176,6 +176,7 @@ pub(crate) enum UpcallToolErrorClass {
     Timeout,
     InactivityTimeout,
     AccessDenied,
+    OutcomeUncertain,
     AuthorizationRefused,
     OperationObservationUnavailable,
     OperationAuthorizationUnavailable,
@@ -341,6 +342,15 @@ impl UpcallToolOutcome {
                 data: None,
                 settlement_failures: Vec::new(),
             },
+            ToolError::OutcomeUncertain { name, reason } => UpcallToolError {
+                class: UpcallToolErrorClass::OutcomeUncertain,
+                message: reason.clone(),
+                name: Some(name.clone()),
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: None,
+                settlement_failures: Vec::new(),
+            },
             ToolError::PolicyDenied { denial } => UpcallToolError {
                 class: UpcallToolErrorClass::PolicyDenied,
                 message: error.to_string(),
@@ -471,6 +481,9 @@ impl UpcallToolError {
                 ToolError::inactivity_timeout(name, self.timeout_ms.unwrap_or_default())
             }
             UpcallToolErrorClass::AccessDenied => ToolError::access_denied(name),
+            UpcallToolErrorClass::OutcomeUncertain => {
+                ToolError::outcome_uncertain(name, self.message)
+            }
             UpcallToolErrorClass::ConfinementRefused => self
                 .data
                 .and_then(|data| serde_json::from_value(data).ok())
@@ -1505,6 +1518,7 @@ mod tests {
             ToolError::timeout("mob_run_flow", 90_000),
             ToolError::inactivity_timeout("stream_scan", 30_000),
             ToolError::access_denied("retire_member"),
+            ToolError::outcome_uncertain("mob_run_flow", "transport session expired"),
             ToolError::other("misc"),
         ];
         for error in errors {
@@ -1545,6 +1559,9 @@ mod tests {
                 }
                 (ToolError::AccessDenied { name }, ToolError::AccessDenied { name: rname }) => {
                     assert_eq!(name, rname);
+                }
+                (ToolError::OutcomeUncertain { .. }, _) => {
+                    assert_eq!(&reconstructed, &error, "exact name and reason");
                 }
                 (
                     ToolError::Unavailable { name, reason },

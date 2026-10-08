@@ -4687,7 +4687,8 @@
           "other",
           "callback_pending",
           "confinement_refused",
-          "hook_denied"
+          "hook_denied",
+          "outcome_uncertain"
         ],
         "type": "string"
       },
@@ -13002,7 +13003,8 @@
           "other",
           "callback_pending",
           "confinement_refused",
-          "hook_denied"
+          "hook_denied",
+          "outcome_uncertain"
         ],
         "type": "string"
       },

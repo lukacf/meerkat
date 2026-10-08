@@ -235,6 +235,47 @@ pub fn credential_http_client() -> Result<reqwest::Client, CredentialHttpClientU
         .map_err(|_| CredentialHttpClientUnavailable)
 }
 
+/// Same-origin redirects a same-origin credential client follows at most.
+pub const MAX_SAME_ORIGIN_REDIRECTS: usize = 3;
+
+/// Whether two URLs share an origin: scheme, host and port (explicit or the
+/// scheme's default) all equal. A scheme change (for example https to http
+/// on the same host and port) is a different origin.
+pub fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// HTTP client for credential-bearing requests to a configured service that
+/// may legitimately redirect within itself (for example a trailing-slash
+/// `307`). It follows at most [`MAX_SAME_ORIGIN_REDIRECTS`] redirects, each
+/// to the same origin as the hop before; anything else stops, and the
+/// caller refuses the `3xx` answer by its status. Configured headers and
+/// credentials therefore never leave the origin and never downgrade. A
+/// build failure is returned, never replaced by a default client.
+pub fn same_origin_credential_http_client()
+-> Result<reqwest::Client, CredentialHttpClientUnavailable> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            // A revisited URL stops at once, so the final answer is the 3xx
+            // and the caller sees that the call was redirected.
+            let follow = attempt.previous().len() <= MAX_SAME_ORIGIN_REDIRECTS
+                && !attempt.previous().contains(attempt.url())
+                && attempt
+                    .previous()
+                    .last()
+                    .is_some_and(|previous| same_origin(previous, attempt.url()));
+            if follow {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .map_err(|_| CredentialHttpClientUnavailable)
+}
+
 /// Refuse a redirect answer from a credential endpoint by its status alone,
 /// before any header or body is read.
 pub fn refuse_credential_redirect(status: reqwest::StatusCode) -> Result<(), OAuthError> {

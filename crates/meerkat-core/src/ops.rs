@@ -122,6 +122,9 @@ pub enum ToolDispatchTerminalErrorKind {
     CallbackPending,
     ConfinementRefused,
     HookDenied,
+    // Appended so released ordinals stay stable. A plain comment, not a doc
+    // comment: a documented unit variant would split this schema enum.
+    OutcomeUncertain,
 }
 
 impl From<&ToolError> for ToolDispatchTerminalErrorKind {
@@ -135,6 +138,7 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             }
             ToolError::Timeout { .. } | ToolError::InactivityTimeout { .. } => Self::Timeout,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
+            ToolError::OutcomeUncertain { .. } => Self::OutcomeUncertain,
             ToolError::AuthorizationRefused { .. } => Self::AuthorizationRefused,
             ToolError::ConfinementRefused { .. } => Self::ConfinementRefused,
             ToolError::HookDenied { .. } => Self::HookDenied,

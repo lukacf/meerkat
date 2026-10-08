@@ -2691,19 +2691,15 @@ async fn acquire_admission_lock(binding_slug: String) -> tokio::sync::OwnedMutex
     lock.lock_owned().await
 }
 
-/// The redirect-free HTTP client for credential endpoints could not be
-/// built. Nothing falls back to a client that follows redirects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("the redirect-free credential HTTP client could not be built")]
-pub struct CredentialHttpClientUnavailable;
+/// The one owner of this error is [`crate::auth_oauth`]; it stays nameable
+/// here for existing paths.
+pub use crate::auth_oauth::CredentialHttpClientUnavailable;
 
-/// HTTP client for MCP and connector OAuth endpoints: follows no redirects.
-/// A build failure is returned, never replaced by a default client.
+/// HTTP client for MCP and connector OAuth endpoints: the shared
+/// redirect-free credential client. A build failure is returned, never
+/// replaced by a default client.
 pub(crate) fn no_redirect_client() -> Result<Client, CredentialHttpClientUnavailable> {
-    Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| CredentialHttpClientUnavailable)
+    crate::auth_oauth::credential_http_client()
 }
 
 pub(crate) trait RefuseRedirect {

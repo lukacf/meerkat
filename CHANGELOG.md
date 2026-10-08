@@ -37,6 +37,51 @@ them.
 
 ### Breaking
 
+- MCP Streamable HTTP no longer re-sends a request after a session expiry
+  (see Fixed), which changes these Rust types:
+  - `ToolError` gains `OutcomeUncertain { name, reason }` (error code
+    `outcome_uncertain`), and `ToolDispatchTerminalErrorKind` gains
+    `OutcomeUncertain`;
+  - `McpError` gains `SessionExpired { server, tool }` and
+    `RedirectedOutcomeUncertain { server, tool, reason }`.
+  Behaviour-only (not measured by the gate): a `tools/call` whose session
+  the server drops (`404`) is reported as `outcome_uncertain` instead of
+  being re-sent in a new session, and later calls on that connection are
+  refused unsent until the server is reconnected. The mob member upcall
+  envelope gains an `outcome_uncertain` class; a member on an older
+  version cannot decode it and fails that upcall with a decode error
+  rather than misreporting it. A `404` on the session's background SSE GET
+  expires the session too: a server that answers an unsupported GET with
+  `404` instead of the specified `405` will see its sessions treated as
+  expired and must be fixed to answer `405`.
+  `ToolDispatchTerminalErrorKind::OutcomeUncertain` is appended after every
+  released variant, so existing ordinals are unchanged. It serializes as
+  `outcome_uncertain` in tool-dispatch diagnostics and settlement
+  companions; the event, parameter, OpenAPI and wire schemas and the
+  generated TypeScript, Web and Python types now expose it, and the
+  TypeScript client accepts it as a settlement failure kind. Update
+  exhaustive handling and closed client validators, and upgrade SDK and
+  runtime pins together: existing named values still decode with the
+  updated contract, but older closed readers can reject the new value.
+  `WireToolErrorClass` is unchanged. An uncertain outcome does not
+  establish that the call never ran, and does not authorize a replay.
+
+- Behaviour-only (not measured by the gate): MCP Streamable HTTP and
+  legacy SSE connections and HTTP skills sources follow only same-origin
+  redirects (same scheme, host and port; at most 3 hops; a revisited URL
+  stops). Any redirect the policy does not follow is a typed refusal by
+  status. A server or source that relied on a cross-origin redirect needs
+  its final URL configured. The `rkat doctor` self-hosted probe follows no
+  redirect. An MCP tool call whose own returned response shows a redirect
+  (a changed final URL, or a `3xx` the policy did not follow) and that then
+  fails is reported as `outcome_uncertain`
+  (`McpError::RedirectedOutcomeUncertain`): a followed redirect means more
+  than one physical request, and whether a server routes before or after
+  acting is a deployment property, not something HTTP or MCP guarantees.
+  A transport failure with no response after a followed redirect cannot
+  show the redirect and remains an ordinary failure; that neither proves
+  the call had no effect nor makes a retry safe.
+
 - `SpawnMemberSpec::application_tool_policy` is now
   `Option<ApplicationToolPolicyBinding>`. `None` (the default) is no host
   choice: a fresh member gets the default (Unmanaged) and a resumed member
@@ -256,6 +301,21 @@ them.
   `run_id`, `commit_ms`, `receipt_ms` and `total_ms`; its steps (finalization
   started, commit persisted, terminal receipt persisted) are at DEBUG. No
   behaviour changes.
+- Stall diagnostics on the live voice projection path (#1821). A watched
+  await logs at DEBUG on entry and exit and at WARN once it has been pending
+  for 2 s (then every 5 s), naming its step and channel or session
+  (`meerkat_core::slow_await::warn_if_slow`). Watched awaits:
+  - projection pump: applying an observation, releasing sealed unmeasured
+    segments and applying a segment release, reserving the assistant output
+    (lifecycle lease), the first-output media-health request, and publishing
+    assistant output;
+  - provider reader: source-observation admission and provider lifecycle
+    observation;
+  - session: the realtime write guard and the full-session save.
+  The public Live broker logs at INFO when it queues a finished provider
+  turn, and the pump when a user turn or an assistant segment reaches the
+  transcript. These lines carry the turn or item reference, never the text.
+  No behaviour changes.
 - The loopback OAuth callback can be cancelled during an active wait with a
   joined cleanup receipt. `LoopbackHandle::wait_until(&mut self, Instant)` is
   cancel-safe: dropping it loses neither the receiver, a callback already
@@ -466,6 +526,35 @@ them.
   explicit choice from none.
 
 - Mob destruction no longer overflows normal 2 MiB worker stacks in debug builds when retiring session-backed children.
+- An MCP `tools/call` over Streamable HTTP could run twice. On a `404`
+  session expiry the transport re-initialized and re-sent the in-flight
+  request (rmcp's default), so a server or proxy that ran the call before
+  answering `404` ran it again under the same JSON-RPC id, and the caller
+  saw one result. The transport now never re-sends a request or
+  re-initializes the session after the `404`: the call's outcome is the
+  typed `ToolError::OutcomeUncertain`
+  (neither success nor denial, and the dispatch gate settles it as
+  `Unknown`), and the dead connection refuses later calls unsent until an
+  explicit reconnect. Each call's outcome comes from what the transport did
+  with that call: a call queued behind the expiring one is refused at the
+  transport, unsent, and a call that failed before it was sent stays an
+  ordinary failure. A `404` on the session's GET stream expires the
+  session the same way. `McpConnection::into_protocol` keeps this, so
+  `McpProtocol::call_tool` reports the same outcomes.
+- Credential-bearing MCP HTTP, skills and doctor requests could follow a
+  redirect to another host with their credentials. The pinned reqwest
+  strips `Authorization`, `Cookie` and `Proxy-Authorization` on a
+  cross-host redirect, but never configured custom headers (an MCP
+  `headers` entry or a skills auth header), and it compares only host and
+  port, so `https://h:8443` to `http://h:8443` kept `Authorization` over
+  cleartext. MCP Streamable HTTP and SSE connections now follow only
+  same-origin redirects through
+  `auth_oauth::same_origin_credential_http_client`, and HTTP skills
+  sources apply the same policy through a local equivalent (the skills
+  crate does not depend on auth-core). A trailing-slash `307` keeps
+  working; anything the policy does not follow is refused by its status
+  before reading any header or body. The doctor's self-hosted probe follows none. A
+  client that fails to build is a typed error, never a default client.
 - These credential routes no longer follow redirects: the token and
   refresh exchange, device-code requests, the Claude, ChatGPT and Code Assist OAuth
   runtimes (including Claude API-key provisioning), the Google and Azure

@@ -187,7 +187,7 @@ LiveBridgeEffectOutcome = Literal['committed', 'failed', 'unknown']
 ToolDispatchAdmissionSource = Literal['configured_gate', 'context_gate', 'authorization_audit']
 
 # Tool result companion contract for ToolDispatchTerminalErrorKind.
-ToolDispatchTerminalErrorKind = Literal['not_found', 'unavailable', 'invalid_arguments', 'execution_failed', 'timeout', 'access_denied', 'authorization_refused', 'operation_observation_unavailable', 'operation_authorization_unavailable', 'policy_denied', 'policy_indeterminate', 'other', 'callback_pending', 'confinement_refused', 'hook_denied']
+ToolDispatchTerminalErrorKind = Literal['not_found', 'unavailable', 'invalid_arguments', 'execution_failed', 'timeout', 'access_denied', 'authorization_refused', 'operation_observation_unavailable', 'operation_authorization_unavailable', 'policy_denied', 'policy_indeterminate', 'other', 'callback_pending', 'confinement_refused', 'hook_denied', 'outcome_uncertain']
 
 @dataclass
 class ToolDispatchSettlementFailure:

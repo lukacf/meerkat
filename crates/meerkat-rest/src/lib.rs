@@ -380,6 +380,17 @@ impl Drop for RestRuntimePreAdmissionRegistration {
     }
 }
 
+/// A persisted credential backend under a test's own root: tests keep restart
+/// and persistence coverage without touching the user's credentials.
+#[cfg(test)]
+fn test_credential_store(
+    root: &std::path::Path,
+) -> meerkat_providers::auth_store::TokenStoreBackend {
+    meerkat_providers::auth_store::TokenStoreBackend::File {
+        root: root.join("credentials"),
+    }
+}
+
 impl AppState {
     pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
         Self::load_with_bootstrap_and_options(RuntimeBootstrap::default(), false).await
@@ -391,7 +402,8 @@ impl AppState {
         bootstrap.realm.state_root = Some(instance_root.join("realms"));
         bootstrap.context.context_root = Some(instance_root.clone());
         bootstrap.context.user_config_root = Some(instance_root.join("user"));
-        Self::load_from_with_bootstrap(instance_root, bootstrap, false).await
+        let credentials = test_credential_store(&instance_root);
+        Self::load_from_with_bootstrap(instance_root, bootstrap, false, credentials).await
     }
 
     pub async fn load_with_bootstrap(
@@ -404,13 +416,23 @@ impl AppState {
         bootstrap: RuntimeBootstrap,
         expose_paths: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load_from_with_bootstrap(rest_instance_root(), bootstrap, expose_paths).await
+        Self::load_from_with_bootstrap(
+            rest_instance_root(),
+            bootstrap,
+            expose_paths,
+            meerkat_providers::auth_store::TokenStoreBackend::default_auto()?,
+        )
+        .await
     }
 
+    /// `credentials` is the persisted credential backend: the user's default
+    /// for a served instance, and one under the instance root for a test, so
+    /// a test never reads or writes the user's real credentials.
     async fn load_from_with_bootstrap(
         instance_root: PathBuf,
         bootstrap: RuntimeBootstrap,
         expose_paths: bool,
+        credentials: meerkat_providers::auth_store::TokenStoreBackend,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (event_tx, _) = broadcast::channel(256);
         // Realm-id-first dual-root resolution through the storage layout
@@ -579,9 +601,7 @@ impl AppState {
         // signal to silently run ephemeral: that would launder a real auth
         // backend failure into apparent "no credentials". Propagate the typed
         // TokenStoreError and fail REST startup.
-        let provider_auth_persistence =
-            meerkat_providers::auth_store::TokenStoreBackend::default_auto()?
-                .open_with_refresh_authority()?;
+        let provider_auth_persistence = credentials.open_with_refresh_authority()?;
         let mut factory = AgentFactory::new(store_path.clone())
             .with_provider_auth_persistence(provider_auth_persistence.clone())
             .session_store(session_store.clone())
@@ -9637,6 +9657,7 @@ mod tests {
                 temp.path().to_path_buf(),
                 bootstrap.clone(),
                 false,
+                test_credential_store(temp.path()),
             )
             .await
             .unwrap();
@@ -9651,10 +9672,14 @@ mod tests {
                 .expect("persistent REST authority admits OAuth flow")
         };
 
-        let reopened =
-            AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
-                .await
-                .unwrap();
+        let reopened = AppState::load_from_with_bootstrap(
+            temp.path().to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(temp.path()),
+        )
+        .await
+        .unwrap();
         let flow = reopened
             .oauth_flow_authority()
             .consume(
@@ -10098,9 +10123,14 @@ mod tests {
         };
         bootstrap.context.context_root = Some(temp.path().to_path_buf());
         bootstrap.context.user_config_root = Some(temp.path().join("user"));
-        AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
-            .await
-            .expect("load rest app state with capacity")
+        AppState::load_from_with_bootstrap(
+            temp.path().to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(temp.path()),
+        )
+        .await
+        .expect("load rest app state with capacity")
     }
 
     async fn create_completed_rest_runtime_session(state: &AppState) -> SessionId {
@@ -11636,9 +11666,14 @@ mod tests {
         bootstrap.context.context_root = Some(temp.path().to_path_buf());
         bootstrap.context.user_config_root = Some(user_root);
 
-        let state = AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
-            .await
-            .expect("legacy fallback default must not refuse startup");
+        let state = AppState::load_from_with_bootstrap(
+            temp.path().to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(temp.path()),
+        )
+        .await
+        .expect("legacy fallback default must not refuse startup");
         assert!(
             !effective_config_for_state(&state)
                 .await
@@ -11688,9 +11723,14 @@ mod tests {
         bootstrap.realm.state_root = Some(temp.path().join("realms"));
         bootstrap.context.context_root = Some(temp.path().to_path_buf());
         bootstrap.context.user_config_root = Some(user_root);
-        let state = AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
-            .await
-            .expect("legacy fallback default must not refuse startup");
+        let state = AppState::load_from_with_bootstrap(
+            temp.path().to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(temp.path()),
+        )
+        .await
+        .expect("legacy fallback default must not refuse startup");
 
         let Json(after_patch) = patch_config(
             State(state),

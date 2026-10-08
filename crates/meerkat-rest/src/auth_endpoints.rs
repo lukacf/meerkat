@@ -2062,6 +2062,33 @@ mod tests {
         api_key_tokens_with_secret("sk-test")
     }
 
+    /// Test state persists credentials under its own root: a fresh file store
+    /// opened there reads back what the state saved, so no test reads or
+    /// writes the user's credential store.
+    #[tokio::test]
+    async fn test_app_state_persists_credentials_under_its_own_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let key = TokenKey::from_auth_binding(&openai_auth_binding());
+        let tokens = api_key_tokens_with_secret("sk-isolated");
+        state.token_store().save(&key, &tokens).await.unwrap();
+
+        let under_root = meerkat_providers::auth_store::TokenStoreBackend::File {
+            root: temp.path().join("credentials"),
+        }
+        .open_with_refresh_authority()
+        .unwrap();
+        let reread = under_root
+            .token_store()
+            .load(&key)
+            .await
+            .unwrap()
+            .expect("the credential lives under the test root");
+        assert_eq!(reread.primary_secret.as_deref(), Some("sk-isolated"));
+    }
+
     fn api_key_tokens_with_secret(secret: &str) -> PersistedTokens {
         PersistedTokens {
             auth_mode: PersistedAuthMode::ApiKey,

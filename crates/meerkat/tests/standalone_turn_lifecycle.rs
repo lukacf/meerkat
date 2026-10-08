@@ -322,6 +322,85 @@ async fn standalone_turn_budget_failure_allows_a_new_turn_with_a_fresh_budget() 
 }
 
 #[tokio::test]
+async fn standalone_configured_turn_limits_reach_the_agent_loop() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for limit in [0, 2, 4] {
+            let mut config = Config::default();
+            config.agent.max_turns = Some(limit);
+            let (_directory, client, service) =
+                fixture_with_config([Reply::Tool, Reply::Tool, Reply::Answer], config);
+            let session_id = service
+                .create_session(create(InitialTurnPolicy::Defer))
+                .await
+                .unwrap()
+                .session_id;
+            let result = service.start_turn(&session_id, turn()).await;
+            if limit < 3 {
+                assert!(
+                    matches!(
+                        result,
+                        Err(meerkat_core::service::SessionError::Agent(
+                            meerkat_core::AgentError::TerminalFailure {
+                                cause_kind: meerkat_core::TurnTerminalCauseKind::TurnLimitReached,
+                                ..
+                            }
+                        ))
+                    ),
+                    "limit {limit}: {result:?}"
+                );
+                assert_eq!(client.calls.load(Ordering::SeqCst), limit as usize);
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result.text, "SYNTHETIC_OK");
+                assert_eq!(result.turns, 3);
+                assert_eq!(result.tool_calls, 2);
+                assert_eq!(result.request_usage.len(), 3);
+                assert_eq!(result.usage.input_tokens, 3);
+                assert_eq!(result.usage.output_tokens, 3);
+                assert_eq!(result.run_usage, Some(result.usage));
+                assert_eq!(client.calls.load(Ordering::SeqCst), 3);
+            }
+            service.archive(&session_id).await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn standalone_configured_turn_limit_can_exceed_the_default() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let tool_turns = meerkat_core::config::DEFAULT_MAX_TURNS;
+        let mut config = Config::default();
+        config.agent.max_turns = Some(tool_turns + 2);
+        let (_directory, client, service) = fixture_with_config(
+            std::iter::repeat_with(|| Reply::Tool)
+                .take(tool_turns as usize)
+                .chain([Reply::Answer]),
+            config,
+        );
+        let session_id = service
+            .create_session(create(InitialTurnPolicy::Defer))
+            .await
+            .unwrap()
+            .session_id;
+        let result = service.start_turn(&session_id, turn()).await.unwrap();
+        let requests = tool_turns + 1;
+        assert_eq!(result.text, "SYNTHETIC_OK");
+        assert_eq!(result.turns, requests);
+        assert_eq!(result.tool_calls, tool_turns);
+        assert_eq!(result.request_usage.len(), requests as usize);
+        assert_eq!(result.usage.input_tokens, u64::from(requests));
+        assert_eq!(result.usage.output_tokens, u64::from(requests));
+        assert_eq!(result.run_usage, Some(result.usage));
+        assert_eq!(client.calls.load(Ordering::SeqCst), requests as usize);
+        service.archive(&session_id).await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn standalone_turn_limit_terminal_allows_the_next_turn() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let limit = meerkat_core::config::DEFAULT_MAX_TURNS as usize;

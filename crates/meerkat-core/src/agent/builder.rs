@@ -320,6 +320,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the maximum number of agent-loop turns in each run.
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.config.max_turns = Some(turns);
+        self
+    }
+
     /// Set temperature
     pub fn temperature(mut self, temp: f32) -> Self {
         self.config.temperature = Some(temp);

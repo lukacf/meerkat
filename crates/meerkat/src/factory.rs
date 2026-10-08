@@ -7625,6 +7625,10 @@ impl AgentFactory {
             .provider_native_tool_policy(provider_native_tool_policy)
             .with_call_timeout_override(effective_call_timeout_override);
 
+        if let Some(max_turns) = config.agent.max_turns {
+            builder = builder.max_turns(max_turns);
+        }
+
         if let Some(defaults) = provider_request_defaults_for(
             provider,
             &model,
